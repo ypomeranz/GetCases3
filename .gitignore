@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# English Reports index build scratch (raw toc HTML + intermediates + builders).
+# The shipped product, eng_rep_index.tsv.gz, lives in the repo root.
+_engr_build/
+
+# Opinion database: opinions.jsonl IS committed (the source of truth that syncs
+# via GitHub), but the local SQLite search index is derived from it and rebuilt
+# on demand, so it is never tracked.
+*.index.db
+
+# US Reports bound-volume / preliminary-print PDFs (vols 584+): big binaries
+# that us_reports_pdf.py downloads from supremecourt.gov on demand (and
+# carves per-opinion PDFs out of), so never tracked.
+US Reports/

@@ -1,0 +1,33 @@
+# GetCases runtime dependencies.
+#
+# Core (case search, opinion text, statute/regulation viewer):
+requests
+beautifulsoup4
+
+# Modern UI: the spotlight and the pop-up windows (opinion reader, statute and
+# citing-opinions viewers, PDF/brief viewers, and the dialogs) use CustomTkinter
+# for rounded, themed chrome.  Optional — without it those windows fall back to
+# plain Tk widgets and the app still runs.  The main window uses classic Tk/ttk.
+customtkinter
+
+# In-app PDF viewer (View PDF button in the opinion window) and PDF-brief text
+# extraction ("Open Brief…" reads a PDF's text layer via pypdfium2).  Optional —
+# without these the app still runs; the opinion viewer offers the browser and
+# PDF briefs report that the text layer can't be read.
+pypdfium2
+Pillow
+
+# "Open Brief…" reads .docx and .rtf with the standard library (no extra
+# package needed).  Legacy .doc files are read via an external converter when
+# one is installed — any of `antiword`, `catdoc`, or LibreOffice (`soffice`) —
+# otherwise a built-in best-effort text scan is used.  These are system tools,
+# not pip packages.
+
+# English Reports citations ("156 Eng. Rep. 145") link to the free CommonLII
+# scan.  Detection + the shipped index (eng_rep_index.tsv.gz) are offline and
+# need nothing extra.  Viewing the PDF *inside* the app is optional: CommonLII
+# is behind CloudFlare, so the app reads Firefox's clearance cookie and fetches
+# with a browser-matching TLS fingerprint.  Without these (or without Firefox),
+# E.R. citations simply open in the user's browser instead.
+curl_cffi
+browser_cookie3
