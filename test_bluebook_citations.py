@@ -30,13 +30,11 @@ from citation_overrides import (
 from court_catalog import bluebook_federal_trial_court
 from courtlistener_gui import (
     CourtListenerGUI,
-    _CaseTabPage,
     _CasePdfTextSource,
     _PdfWindow,
     _ScholarTextWindow,
     _CaseLawPageOpinion,
     _CaseLawTextRecord,
-    _CaseTabsWindow,
     _case_law_text_for_pdf_url,
     _case_law_text_record,
     _case_law_pdf_choices_for_cites,
@@ -1220,6 +1218,9 @@ class NominativeCitationSearchTests(unittest.TestCase):
         )
         win._app = Mock()
         win._app._get_scholar.return_value = None
+        # The scan-first lookup declines, leaving the text path to follow it.
+        win._app.open_cited_case_pdf.return_value = False
+        win._following_as_text = False
         win._follow_cite_via_cl = Mock()
         win._status_var = Mock()
 
@@ -2001,95 +2002,13 @@ class CaseLawPdfTextTests(unittest.TestCase):
             )
 
         self.assertEqual(source.kind, "case_law")
-        self.assertEqual(source.button_label, "static.case.law Text")
+        # The button says just "Text"; source_label still names the origin.
+        self.assertEqual(source.button_label, "Text")
+        self.assertEqual(source.source_label, "static.case.law")
         self.assertIn("410 U.S. 113", source.text)
 
 
-class CaseWindowModeTests(unittest.TestCase):
-    class _View:
-        def __init__(self):
-            self.destroyed = False
-
-        def winfo_exists(self):
-            return not self.destroyed
-
-        def destroy(self):
-            self.destroyed = True
-
-    def test_mode_switch_migrates_each_live_case(self):
-        app = object.__new__(CourtListenerGUI)
-        app._case_tabs_enabled = False
-        app._case_tabs_var = Mock()
-        app._case_tabs_window = None
-        opened = []
-        one, two = self._View(), self._View()
-        app._open_case_views = {
-            1: {"view": one, "label": "One", "reopen": lambda: opened.append(1)},
-            2: {"view": two, "label": "Two", "reopen": lambda: opened.append(2)},
-        }
-
-        with (
-            patch("courtlistener_gui._load_config", return_value={}),
-            patch("courtlistener_gui._save_config") as save,
-        ):
-            app.set_case_tabs_enabled(True)
-
-        self.assertTrue(app._case_tabs_enabled)
-        self.assertTrue(one.destroyed)
-        self.assertTrue(two.destroyed)
-        self.assertEqual(opened, [1, 2])
-        save.assert_called_once_with({"case_tabs_enabled": True})
-
-    def test_tab_titles_are_compact(self):
-        short = "Marbury v. Madison, 5 U.S. 137 (1803)"
-        self.assertEqual(_CaseTabsWindow._tab_label(short), short)
-        self.assertEqual(len(_CaseTabsWindow._tab_label("x" * 80)), 52)
-        self.assertTrue(_CaseTabsWindow._tab_label("x" * 80).endswith("..."))
-
-    def test_ctrl_tab_cycle_wraps_both_directions(self):
-        class Notebook:
-            def __init__(self):
-                self.items = ("one", "two", "three")
-                self.current = "one"
-
-            def tabs(self):
-                return self.items
-
-            def select(self, value=None):
-                if value is None:
-                    return self.current
-                self.current = value
-
-            def index(self, value):
-                return self.items.index(value)
-
-        manager = object.__new__(_CaseTabsWindow)
-        manager.notebook = Notebook()
-
-        self.assertEqual(manager._cycle_tab(-1), "break")
-        self.assertEqual(manager.notebook.current, "three")
-        manager._cycle_tab(1)
-        self.assertEqual(manager.notebook.current, "one")
-
-    def test_tab_close_target_is_confined_to_the_far_right(self):
-        bbox = (10, 5, 120, 30)
-
-        self.assertFalse(
-            _CaseTabsWindow._point_in_tab_close_box(bbox, 93, 20)
-        )
-        self.assertTrue(
-            _CaseTabsWindow._point_in_tab_close_box(bbox, 94, 20)
-        )
-        self.assertTrue(
-            _CaseTabsWindow._point_in_tab_close_box(bbox, 129, 20)
-        )
-        self.assertFalse(
-            _CaseTabsWindow._point_in_tab_close_box(bbox, 130, 20)
-        )
-        self.assertFalse(
-            _CaseTabsWindow._point_in_tab_close_box(bbox, 110, 35)
-        )
-
+class CaseWindowTests(unittest.TestCase):
     def test_main_window_bookmarks_menu_lists_saved_documents(self):
         # The root window is not a document view, so its Bookmarks cascade
         # lists the saved documents with no "Bookmark This …" toggle first.
@@ -2129,107 +2048,7 @@ class CaseWindowModeTests(unittest.TestCase):
         app.populate_bookmarks_menu(menu, app.root)
         self.assertEqual(menu.items, ["No bookmarks yet"])
 
-    def test_tab_close_target_is_measured_from_the_notebook_hit_test(self):
-        # ttk::notebook has no bbox subcommand, so notebook.bbox() reaches
-        # tkinter's grid geometry and reports (0, 0, 0, 0) — the close box has
-        # to come from Tk's own "@x,y" tab hit test instead.
-        class Notebook:
-            spans = ((0, 99), (100, 199))  # tab index -> inclusive x range
-
-            def __init__(self):
-                self.pages = ("first", "second")
-
-            def winfo_width(self):
-                return 400
-
-            def bbox(self, *_args):
-                return (0, 0, 0, 0)
-
-            def tabs(self):
-                return self.pages
-
-            def index(self, value):
-                text = str(value)
-                if text.startswith("@"):
-                    x, y = (int(n) for n in text[1:].split(","))
-                    if not 0 <= y < 24:  # the tab strip's height
-                        raise tk.TclError(text)
-                    for i, (lo, hi) in enumerate(self.spans):
-                        if lo <= x <= hi:
-                            return i
-                    raise tk.TclError(text)
-                return self.pages.index(text)
-
-        manager = object.__new__(_CaseTabsWindow)
-        manager.notebook = Notebook()
-        manager._pages = list(manager.notebook.pages)
-
-        self.assertEqual(manager._tab_bounds(0, 50, 10), (0, 99))
-        self.assertEqual(manager._tab_bounds(1, 150, 10), (100, 199))
-
-        # The rightmost _TAB_CLOSE_HIT_WIDTH px of a tab close it; the label
-        # side selects it, and the page body below the strip is not a tab.
-        self.assertEqual(manager._tab_close_page_at(98, 10), "first")
-        self.assertEqual(manager._tab_close_page_at(198, 10), "second")
-        self.assertIsNone(manager._tab_close_page_at(5, 10))
-        self.assertIsNone(manager._tab_close_page_at(120, 10))
-        self.assertIsNone(manager._tab_close_page_at(98, 200))
-
-    def test_clicking_tab_close_target_destroys_only_that_page(self):
-        manager = object.__new__(_CaseTabsWindow)
-        page = Mock()
-        manager._tab_close_page_at = Mock(return_value=page)
-        manager._cancel_tab_long_press = Mock()
-        manager._set_tab_close_hover = Mock()
-        event = SimpleNamespace(x=125, y=12)
-
-        self.assertEqual(manager._close_tab_from_click(event), "break")
-        page.destroy.assert_called_once_with()
-        manager._cancel_tab_long_press.assert_called_once_with()
-        manager._set_tab_close_hover.assert_called_once_with(None)
-
-    def test_pop_out_reopens_one_tab_in_a_new_tab_group(self):
-        app = object.__new__(CourtListenerGUI)
-        app.root = object()
-        app._case_tabs_window = None
-        app._detached_tab_windows = set()
-        page = object.__new__(_CaseTabPage)
-        page.destroy = Mock()
-        manager = Mock()
-        manager.win = object()
-        seen = []
-
-        def reopen(parent=None):
-            seen.append(parent)
-
-        app._open_case_views = {
-            1: {"view": page, "label": "A tab", "reopen": reopen},
-        }
-
-        with patch("courtlistener_gui._CaseTabsWindow",
-                   return_value=manager) as make_manager:
-            app.pop_out_view(page)
-
-        page.destroy.assert_called_once()
-        make_manager.assert_called_once_with(app, app.root)
-        self.assertEqual(seen, [manager.win])
-        self.assertIn(manager, app._detached_tab_windows)
-
-    def test_tab_group_is_inherited_from_page_or_detached_window(self):
-        app = object.__new__(CourtListenerGUI)
-        main = SimpleNamespace(win=object())
-        detached = Mock()
-        detached.win = object()
-        app._case_tabs_window = main
-        app._detached_tab_windows = {detached}
-        page = object.__new__(_CaseTabPage)
-        page._manager = detached
-
-        self.assertIs(app._tab_manager_for_parent(page), detached)
-        self.assertIs(app._tab_manager_for_parent(detached.win), detached)
-        self.assertIsNone(app._tab_manager_for_parent(object()))
-
-    def test_citation_result_uses_launching_tab_group_parent(self):
+    def test_citation_result_uses_launching_view_parent(self):
         app = object.__new__(CourtListenerGUI)
         app.root = object()
         app._status_var = Mock()

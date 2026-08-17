@@ -703,13 +703,6 @@ class ScrollAndFindTests(unittest.TestCase):
         self.assertFalse(viewer._page_key(+1))
         self.assertEqual(viewer._pane.turned, [])
 
-    def test_but_a_scan_the_opinion_itself_switched_to_does(self):
-        viewer = _in_text_mode()
-        viewer._reader.pdf_showing = True
-        self.assertTrue(viewer._page_key(+1))
-        self.assertEqual(viewer._reader.turned, [+1])
-        self.assertEqual(viewer._pane.turned, [])
-
     def test_no_scan_yet_leaves_the_key_alone(self):
         viewer = _Viewer()
         viewer._pane = None
@@ -1400,13 +1393,6 @@ class PartRailTests(unittest.TestCase):
         reader._draw_part_map()
         self.assertEqual(reader._partmap.width_set, 0)
 
-    def test_so_does_the_pdf_view(self):
-        reader = _rail()
-        reader._mode = "pdf"
-        reader._draw_part_map()
-        self.assertEqual(reader._partmap.width_set, 0)
-
-
 # ---------------------------------------------------------------------------
 # Resting on a part names it
 # ---------------------------------------------------------------------------
@@ -1727,10 +1713,6 @@ class KeepsThePlaceTests(unittest.TestCase):
         backward = _source_of("_ScholarTextWindow", "_text_target_for_viewport")
         self.assertIn("pdf_location(", forward)
         self.assertIn("text_location(", backward)
-
-    def test_the_case_window_s_own_return_uses_the_same_helper(self):
-        self.assertIn("self._text_target_for_viewport(",
-                      _source_of("_ScholarTextWindow", "_back_from_pdf"))
 
 
 VIEWPORT_NS = _load(

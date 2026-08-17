@@ -383,13 +383,6 @@ class SidePanelWidthTests(unittest.TestCase):
         self.assertFalse(reader._pin_text_width())
         self.assertIsNotNone(reader._details_frame.packed is None or True)
 
-    def test_the_pdf_view_s_own_panel_is_untouched_by_any_of_this(self):
-        reader = _Reader(mode="pdf")
-        reader._toggle_details()
-        self.assertEqual(reader._win.applied, [])
-        self.assertTrue(reader._pdf_parts_on)
-        self.assertEqual(reader.order, ["pdf-strip"])
-
 
 class _JustifyReader:
     """Just what _on_text_configure touches."""
@@ -681,12 +674,6 @@ class PartMapTailTests(unittest.TestCase):
         reader._draw_part_map()
         self.assertEqual(reader._partmap.width_set, 0)
         self.assertEqual(reader._partmap_rows, [])
-
-    def test_the_map_stays_out_of_the_pdf_view(self):
-        reader = _reader_with_short_tail()
-        reader._mode = "pdf"
-        reader._draw_part_map()
-        self.assertEqual(reader._partmap.width_set, 0)
 
 
 class PartMapLabelTests(unittest.TestCase):

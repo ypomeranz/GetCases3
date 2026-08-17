@@ -42,6 +42,11 @@ from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 from typing import Optional
 
+try:
+    import winreg
+except ImportError:          # not Windows
+    winreg = None
+
 
 def _ensure_dependencies() -> None:
     """
@@ -286,31 +291,6 @@ def _fit_toplevel_geometry(
     return f"{w}x{h}+{x}+{y}"
 
 
-def _clamp_toplevel_to_work_area(
-    win: tk.Misc,
-    *,
-    min_width: int,
-    min_height: int,
-    bottom_gap: int = 64,
-) -> None:
-    """Keep an existing top-level from extending into the taskbar/work-area edge."""
-    try:
-        win.update_idletasks()
-        left, top, work_w, work_h = _work_area(win)
-        max_w = max(min_width, work_w - 32)
-        max_h = max(min_height, work_h - bottom_gap - 32)
-        w = max(min_width, min(win.winfo_width() or min_width, max_w))
-        h = max(min_height, min(win.winfo_height() or min_height, max_h))
-        x = win.winfo_x()
-        y = win.winfo_y()
-        x = max(left + 16, min(x, left + work_w - w - 16))
-        y = max(top + 16, min(y, top + work_h - bottom_gap - h))
-        win.geometry(f"{w}x{h}+{x}+{y}")
-        win.update_idletasks()
-    except tk.TclError:
-        pass
-
-
 def _set_ui_button_width(button, width: int) -> None:
     """Apply a pixel-ish width hint across CTk and ttk buttons."""
     try:
@@ -483,20 +463,20 @@ def _build_copy_menu(master: tk.Misc, reader) -> "Optional[tk.Menu]":
     return copy_menu
 
 
-def _add_interface_cascade(menubar: tk.Menu, app, win: tk.Misc) -> None:
-    """Append the Interface menu — the three ways the app can be worn."""
+def _add_window_cascade(menubar: tk.Menu, app, win: tk.Misc) -> None:
+    """Append the Window menu — the actions about the window itself."""
     if app is None or not hasattr(app, "populate_window_menu"):
         return
-    interface_menu = tk.Menu(menubar, tearoff=0)
+    window_menu = tk.Menu(menubar, tearoff=0)
     try:
-        interface_menu.configure(
-            postcommand=lambda m=interface_menu, w=win:
+        window_menu.configure(
+            postcommand=lambda m=window_menu, w=win:
                 app.populate_window_menu(m, w)
         )
     except tk.TclError:
         pass
-    app.populate_window_menu(interface_menu, win)
-    menubar.add_cascade(label="Interface", menu=interface_menu)
+    app.populate_window_menu(window_menu, win)
+    menubar.add_cascade(label="Window", menu=window_menu)
 
 
 def _add_copy_cascade(menubar: tk.Menu, reader) -> None:
@@ -523,10 +503,10 @@ def _install_history_menubar(app, win: tk.Misc, reader=None):
     menubar.add_cascade(label="History", menu=history_menu)
     _add_bookmarks_cascade(menubar, app, win)
     _add_copy_cascade(menubar, reader)
-    # Interface last, at the far right: it is the one menu that is about the
-    # app rather than about the document, and it sits in the same place on
+    # Window last, at the far right: it is the one menu that is about the
+    # window rather than about the document, and it sits in the same place on
     # every window so it can be found without looking.
-    _add_interface_cascade(menubar, app, win)
+    _add_window_cascade(menubar, app, win)
     try:
         win.config(menu=menubar)
     except tk.TclError:
@@ -565,16 +545,7 @@ def _install_window_menubar(app, win: tk.Misc):
     if app is None or not hasattr(app, "populate_window_menu"):
         return None
     menubar = tk.Menu(win)
-    window_menu = tk.Menu(menubar, tearoff=0)
-    try:
-        window_menu.configure(
-            postcommand=lambda m=window_menu, w=win:
-                app.populate_window_menu(m, w)
-        )
-    except tk.TclError:
-        pass
-    app.populate_window_menu(window_menu, win)
-    menubar.add_cascade(label="Window", menu=window_menu)
+    _add_window_cascade(menubar, app, win)
     _add_bookmarks_cascade(menubar, app, win)
     try:
         win.config(menu=menubar)
@@ -583,110 +554,14 @@ def _install_window_menubar(app, win: tk.Misc):
     return menubar
 
 
-class _CaseTabPage(ttk.Frame):
-    """A notebook page that supplies the small Toplevel API case viewers use.
-
-    Opinion viewers build the same widget tree regardless of whether their
-    host is a real OS window or one page in the app-wide tabbed case window.
-    Geometry, title, menu, and window-level key bindings are delegated to the
-    notebook's Toplevel; ordinary widget operations remain local to the page.
-    """
-
-    def __init__(self, manager: "_CaseTabsWindow") -> None:
-        super().__init__(manager.notebook)
-        self._manager = manager
-        self._case_title = "Opinion"
-        self._case_menu = None
-        manager.add_page(self)
-
-    def title(self, value=None):
-        if value is None:
-            return self._case_title
-        self._case_title = str(value)
-        self._manager.refresh_page(self)
-        return None
-
-    def geometry(self, spec=None):
-        if spec is None:
-            return self._manager.win.geometry()
-        self._manager.apply_geometry(str(spec))
-        return None
-
-    def minsize(self, width=None, height=None):
-        if width is None or height is None:
-            return self._manager.win.minsize()
-        self._manager.win.minsize(width, height)
-        return None
-
-    def config(self, cnf=None, **kw):
-        opts = {}
-        if isinstance(cnf, dict):
-            opts.update(cnf)
-        elif cnf is not None:
-            return super().config(cnf, **kw)
-        opts.update(kw)
-        if "menu" in opts:
-            self._case_menu = opts.pop("menu")
-            self._manager.refresh_page(self)
-        if opts:
-            return super().config(**opts)
-        return None
-
-    configure = config
-
-    def bind(self, sequence=None, func=None, add=None):
-        # Toplevel bindings are present in every descendant's bindtags.  A
-        # Frame is not, so route keyboard shortcuts through the shared window
-        # and dispatch them only while this page is selected.
-        if sequence and (
-            str(sequence).startswith("<Control-")
-            or str(sequence).startswith("<Command-")
-            or str(sequence).startswith("<KeyPress")  # bare-key accelerators
-            or str(sequence) in ("<F3>", "<Shift-F3>", "<Escape>")
-        ):
-            def active_only(event, page=self, callback=func):
-                if page._manager.active_page() is page and callback is not None:
-                    return callback(event)
-                return None
-            return self._manager.win.bind(sequence, active_only, add="+")
-        return super().bind(sequence, func, add)
-
-    def protocol(self, name=None, func=None):
-        if name == "WM_DELETE_WINDOW" and func is not None:
-            # The shared OS window owns its own close-all protocol.  Individual
-            # pages keep this only as metadata; their cleanup belongs on a
-            # <Destroy> binding so Close Tab and Pop Out run it too.
-            self._wm_delete_callback = func
-            return None
-        return self._manager.win.protocol(name, func)
-
-    def transient(self, master=None):
-        return self._manager.win.transient(master)
-
-    def winfo_x(self):
-        return self._manager.win.winfo_x()
-
-    def winfo_y(self):
-        return self._manager.win.winfo_y()
-
-    def destroy(self) -> None:
-        manager = getattr(self, "_manager", None)
-        if manager is not None:
-            manager.remove_page(self)
-        try:
-            super().destroy()
-        except tk.TclError:
-            pass
-
-
 class _EmbeddedCaseHost(ttk.Frame):
     """A frame that can host an opinion reader inside another window.
 
-    The same small Toplevel API :class:`_CaseTabPage` supplies, for a reader
-    built into the floating PDF viewer's body: its geometry requests are the
-    viewer's to ignore, its menubar is dropped (the viewer has none), and its
-    keyboard shortcuts are bound on the viewer's toplevel where the keys
-    actually arrive.
+    Supplies the small Toplevel API opinion viewers expect of their host, for
+    a reader built into the floating PDF viewer's body: its geometry requests
+    are the viewer's to ignore, its menubar is dropped (the viewer has none),
+    and its keyboard shortcuts are bound on the viewer's toplevel where the
+    keys actually arrive.
 
     ``retitles`` says whether the reader's own title should reach the window.
     Beside a scan it should not — the viewer names itself after the case as
@@ -758,7 +633,7 @@ class _EmbeddedCaseHost(ttk.Frame):
 
     def bind(self, sequence=None, func=None, add=None):
         # A frame is not in its descendants' bindtags, so window-level
-        # accelerators go to the toplevel, exactly as a tab page routes them.
+        # accelerators go to the toplevel, where the keys actually arrive.
         if sequence and (
             str(sequence).startswith("<Control-")
             or str(sequence).startswith("<Command-")
@@ -772,472 +647,16 @@ class _EmbeddedCaseHost(ttk.Frame):
         return super().bind(sequence, func, add)
 
 
-class _CaseTabsWindow:
-    """One OS window containing all opinion views as notebook pages."""
-
-    _TAB_CLOSE_HIT_WIDTH = 36
-
-    def __init__(self, app, parent: tk.Misc) -> None:
-        self.app = app
-        self.win = _ui_toplevel(parent)
-        self.win.title("Cases")
-        self.win.geometry(
-            _fit_toplevel_geometry(
-                self.win, 980, 780, min_width=560, min_height=360
-            )
-        )
-        self.win.minsize(560, 360)
-        self.notebook = ttk.Notebook(
-            self.win, style=_ensure_case_tab_style(self.win),
-        )
-        self.notebook.pack(fill="both", expand=True, padx=1, pady=(0, 1))
-        (
-            self._tab_close_image,
-            self._tab_close_hover_image,
-        ) = _case_tab_close_images(self.win)
-        self._close_hover_page: Optional[_CaseTabPage] = None
-        self._pages: list[_CaseTabPage] = []
-        self._geometry_set = False
-        self._closing = False
-        self._long_press_after = None
-        self._long_press_xy = (0, 0)
-        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-        self.notebook.bind("<Button-3>", self._show_tab_context_menu)
-        self.notebook.bind("<Button-2>", self._show_tab_context_menu)
-        self.notebook.bind("<Control-Button-1>", self._show_tab_context_menu)
-        self.notebook.bind(
-            "<Button-1>", self._close_tab_from_click, add="+",
-        )
-        self.notebook.bind(
-            "<Motion>", self._track_tab_close_hover, add="+",
-        )
-        self.notebook.bind(
-            "<Leave>", lambda _e: self._set_tab_close_hover(None), add="+",
-        )
-        self.notebook.bind("<ButtonPress-1>", self._start_tab_long_press, add="+")
-        self.notebook.bind(
-            "<ButtonRelease-1>", self._cancel_tab_long_press, add="+"
-        )
-        self.notebook.bind("<B1-Motion>", self._track_tab_long_press, add="+")
-        self.win.bind("<Control-Tab>", lambda _e: self._cycle_tab(1))
-        self.win.bind(
-            "<Control-Shift-Tab>", lambda _e: self._cycle_tab(-1)
-        )
-        try:
-            self.win.bind(
-                "<Control-ISO_Left_Tab>", lambda _e: self._cycle_tab(-1)
-            )
-        except tk.TclError:
-            pass  # Windows Tk has no ISO_Left_Tab keysym.
-        self.win.protocol("WM_DELETE_WINDOW", self.close)
-        self.win.bind("<Destroy>", self._on_destroy, add="+")
-
-    def add_page(self, page: _CaseTabPage) -> None:
-        # A case opened from another one sits next to the tab it came from,
-        # the way browser tabs do: following a citation out of an opinion and
-        # landing at the far end of a long strip loses the thread.  The opener
-        # is whichever tab is active — the new page is selected below, so a
-        # chain of citations reads left to right.
-        end = len(self._pages)
-        at = end
-        opener = self.active_page()
-        if opener is not None:
-            try:
-                at = min(self.notebook.index(opener) + 1, end)
-            except tk.TclError:
-                pass
-        try:
-            self.notebook.insert(
-                at if at < end else "end", page, text="Opinion",
-                image=self._tab_close_image, compound="right",
-            )
-        except tk.TclError:
-            # A stale index (a tab closed underneath us) is never worth losing
-            # the page over — fall back to the end of the strip.
-            self.notebook.add(
-                page, text="Opinion", image=self._tab_close_image,
-                compound="right",
-            )
-            at = end
-        self._pages.insert(at, page)
-        self.notebook.select(page)
-        self.refresh_page(page)
-        # A tab opened from Spotlight (or any citation followed while this
-        # window sat behind others or minimized) has to be seen: surface the
-        # window.  When it is already the front window this is a no-op.
-        self.surface()
-
-    def surface(self) -> None:
-        """Bring this tab window to the front, un-minimizing if need be."""
-        try:
-            self.win.deiconify()   # no-op unless the window was minimized
-            self.win.lift()
-            if sys.platform == "win32":
-                self.app._win_force_foreground(self.win)
-            self.win.focus_force()
-        except tk.TclError:
-            pass
-
-    def remove_page(self, page: _CaseTabPage) -> None:
-        if page not in self._pages:
-            return
-        if self._close_hover_page is page:
-            self._set_tab_close_hover(None)
-        self._pages.remove(page)
-        try:
-            self.notebook.forget(page)
-        except tk.TclError:
-            pass
-        if not self._pages and not self._closing:
-            self.close()
-        else:
-            self._sync_active()
-
-    def active_page(self) -> "Optional[_CaseTabPage]":
-        try:
-            selected = self.notebook.select()
-        except tk.TclError:
-            return None
-        for page in self._pages:
-            if str(page) == selected:
-                return page
-        return None
-
-    def _page_at(self, x: int, y: int) -> "Optional[_CaseTabPage]":
-        try:
-            index = self.notebook.index(f"@{x},{y}")
-            tab_id = self.notebook.tabs()[index]
-        except (tk.TclError, IndexError):
-            return None
-        return next((page for page in self._pages if str(page) == tab_id), None)
-
-    def _cycle_tab(self, delta: int) -> str:
-        tabs = self.notebook.tabs()
-        if len(tabs) < 2:
-            return "break"
-        try:
-            current = self.notebook.index(self.notebook.select())
-            self.notebook.select(tabs[(current + delta) % len(tabs)])
-        except tk.TclError:
-            pass
-        return "break"
-
-    @classmethod
-    def _point_in_tab_close_box(
-        cls, bbox: tuple[int, int, int, int], x: int, y: int,
-    ) -> bool:
-        """Whether *(x, y)* is in the compact close target at a tab's right."""
-        left, top, width, height = bbox
-        return (
-            left + max(0, width - cls._TAB_CLOSE_HIT_WIDTH) <= x
-            < left + width
-            and top <= y < top + height
-        )
-
-    def _tab_bounds(
-        self, index: int, x: int, y: int,
-    ) -> "Optional[tuple[int, int]]":
-        """The leftmost and rightmost pixel columns of tab *index* on row *y*.
-
-        ``ttk::notebook`` has no bbox subcommand: ``notebook.bbox(i)`` reaches
-        tkinter's ``Misc.bbox``, which is grid geometry, ignores *i*, and
-        reports (0, 0, 0, 0) for a notebook that has no grid slaves.  Tk's own
-        ``@x,y`` tab hit test is authoritative, so the edges are found by
-        binary searching it outward from a point known to be on the tab.
-        """
-        notebook = self.notebook
-
-        def on_tab(probe: int) -> bool:
-            try:
-                return notebook.index(f"@{probe},{y}") == index
-            except tk.TclError:
-                return False
-
-        if not on_tab(x):
-            return None
-        lo, hi = 0, x
-        while lo < hi:  # leftmost column still on this tab
-            mid = (lo + hi) // 2
-            if on_tab(mid):
-                hi = mid
-            else:
-                lo = mid + 1
-        left = lo
-        lo, hi = x, max(x, notebook.winfo_width() - 1)
-        while lo < hi:  # rightmost column still on this tab
-            mid = (lo + hi + 1) // 2
-            if on_tab(mid):
-                lo = mid
-            else:
-                hi = mid - 1
-        return left, lo
-
-    def _tab_close_page_at(
-        self, x: int, y: int,
-    ) -> "Optional[_CaseTabPage]":
-        page = self._page_at(x, y)
-        if page is None:
-            return None
-        try:
-            index = self.notebook.index(page)
-        except (tk.TclError, ValueError):
-            return None
-        bounds = self._tab_bounds(index, x, y)
-        if bounds is None:
-            return None
-        left, right = bounds
-        # _page_at already proved the point is on this tab, so only the
-        # horizontal range is in question; the box is anchored to the row
-        # actually probed.
-        return page if self._point_in_tab_close_box(
-            (left, y, right - left + 1, 1), x, y,
-        ) else None
-
-    def _set_tab_close_hover(
-        self, page: "Optional[_CaseTabPage]",
-    ) -> None:
-        if page is self._close_hover_page:
-            return
-        old = self._close_hover_page
-        self._close_hover_page = page
-        try:
-            if old in self._pages:
-                self.notebook.tab(old, image=self._tab_close_image)
-            if page in self._pages:
-                self.notebook.tab(page, image=self._tab_close_hover_image)
-            self.notebook.configure(cursor="hand2" if page is not None else "")
-        except tk.TclError:
-            self._close_hover_page = None
-
-    def _track_tab_close_hover(self, event) -> None:
-        self._set_tab_close_hover(
-            self._tab_close_page_at(event.x, event.y)
-        )
-
-    def _close_tab_from_click(self, event):
-        page = self._tab_close_page_at(event.x, event.y)
-        if page is None:
-            return None
-        self._cancel_tab_long_press()
-        self._set_tab_close_hover(None)
-        page.destroy()
-        return "break"
-
-    def _show_tab_context_menu(self, event=None, page=None):
-        self._cancel_tab_long_press()
-        if page is None and event is not None:
-            page = self._page_at(event.x, event.y)
-        if page is None:
-            return None
-        try:
-            self.notebook.select(page)
-        except tk.TclError:
-            return None
-        menu = tk.Menu(self.win, tearoff=0)
-        menu.add_command(label="Close Tab", command=page.destroy)
-        can_pop = bool(
-            hasattr(self.app, "can_pop_out_view")
-            and self.app.can_pop_out_view(page)
-        )
-        menu.add_command(
-            label="Pop Out into New Window",
-            state="normal" if can_pop else "disabled",
-            command=lambda p=page: self.app.pop_out_view(p),
-        )
-        self._add_bookmark_item(menu, page)
-        try:
-            if event is not None:
-                x_root, y_root = event.x_root, event.y_root
-            else:
-                x_root = page.winfo_rootx() + 24
-                y_root = self.notebook.winfo_rooty() + 24
-            menu.tk_popup(x_root, y_root)
-        finally:
-            try:
-                menu.grab_release()
-            except tk.TclError:
-                pass
-        return "break"
-
-    def _add_bookmark_item(self, menu: tk.Menu, page) -> None:
-        """Add a Bookmark / Remove Bookmark entry for *page*'s document to the
-        tab's right-click menu (beside Close Tab / Pop Out)."""
-        app = self.app
-        if not hasattr(app, "_viewer_for_host") or not hasattr(
-            app, "is_bookmarked"
-        ):
-            return
-        viewer = app._viewer_for_host(page)
-        if viewer is None or not hasattr(viewer, "_bookmark_descriptor"):
-            return
-        try:
-            desc = viewer._bookmark_descriptor()
-        except Exception:
-            desc = None
-        if not desc:
-            return
-        menu.add_separator()
-        noun = str(desc.get("noun") or "case").title()
-        if app.is_bookmarked(desc.get("key")):
-            menu.add_command(label=f"Remove Bookmark for This {noun}",
-                             command=viewer._toggle_bookmark)
-        else:
-            menu.add_command(label=f"Bookmark This {noun}",
-                             command=viewer._toggle_bookmark)
-
-    def _start_tab_long_press(self, event) -> None:
-        self._cancel_tab_long_press()
-        page = self._page_at(event.x, event.y)
-        if page is None:
-            return
-        self._long_press_xy = (event.x_root, event.y_root)
-
-        def show(page=page) -> None:
-            self._long_press_after = None
-            event_like = type("_TabMenuEvent", (), {
-                "x_root": self._long_press_xy[0],
-                "y_root": self._long_press_xy[1],
-            })()
-            self._show_tab_context_menu(event_like, page)
-
-        self._long_press_after = self.notebook.after(650, show)
-
-    def _track_tab_long_press(self, event) -> None:
-        x0, y0 = self._long_press_xy
-        if abs(event.x_root - x0) > 8 or abs(event.y_root - y0) > 8:
-            self._cancel_tab_long_press()
-
-    def _cancel_tab_long_press(self, _event=None) -> None:
-        if self._long_press_after is None:
-            return
-        try:
-            self.notebook.after_cancel(self._long_press_after)
-        except tk.TclError:
-            pass
-        self._long_press_after = None
-
-    @staticmethod
-    def _tab_label(title: str) -> str:
-        label = re.sub(r"\s+", " ", title or "").strip() or "Opinion"
-        return label if len(label) <= 52 else label[:49] + "..."
-
-    def refresh_page(self, page: _CaseTabPage) -> None:
-        if page not in self._pages:
-            return
-        try:
-            self.notebook.tab(page, text=self._tab_label(page._case_title))
-        except tk.TclError:
-            return
-        if self.active_page() is page:
-            self._sync_active()
-
-    def apply_geometry(self, spec: str) -> None:
-        # Each viewer chooses a good initial size.  Honor the first page's
-        # request; later tabs should not resize the shared window underneath
-        # the reader as they are opened in the background.
-        if self._geometry_set:
-            return
-        self._geometry_set = True
-        try:
-            self.win.geometry(spec)
-        except tk.TclError:
-            pass
-
-    def _on_tab_changed(self, _event=None) -> None:
-        self._sync_active()
-
-    def _sync_active(self) -> None:
-        page = self.active_page()
-        if page is None:
-            return
-        try:
-            self.win.title(page._case_title)
-            if page._case_menu is not None:
-                self.win.config(menu=page._case_menu)
-            else:
-                self.win.config(menu="")
-        except tk.TclError:
-            pass
-
-    def close(self) -> None:
-        if self._closing:
-            return
-        self._closing = True
-        for page in list(self._pages):
-            try:
-                page.destroy()
-            except tk.TclError:
-                pass
-        self._pages.clear()
-        try:
-            self.win.destroy()
-        except tk.TclError:
-            pass
-
-    def _on_destroy(self, event) -> None:
-        if event.widget is self.win and hasattr(
-            self.app, "_case_tabs_window_destroyed"
-        ):
-            self.app._case_tabs_window_destroyed(self)
-
-
-#: The three interfaces, in the order the Interface menu offers them.
-#:
-#:   windows   every document in a window of its own — the original app.
-#:   tabs      one OS window, each document a page in its notebook.
-#:   reporter  the reports themselves: a document opens as the scan, in the
-#:             small floating viewer, and T turns it into the text.  Anything
-#:             with no scan to show still opens *there*, in the same window at
-#:             the same size, on the text side; anything with no text at all —
-#:             a statute, a regulation — opens in a window of its own, because
-#:             there is nothing about it a reporter view would improve.
-_INTERFACE_MODES = ("windows", "tabs", "reporter")
-_INTERFACE_LABELS = (
-    ("windows", "Individual Windows"),
-    ("tabs", "Tabbed View"),
-    ("reporter", "Reporter View"),
-)
-_DEFAULT_INTERFACE_MODE = "windows"
-
-
-def _read_interface_mode(config: dict) -> str:
-    """The saved interface, honouring the older two-checkbox settings.
-
-    The mode used to be two independent booleans — tabs on or off, PDFs
-    floating or not.  A reader who had turned both on was already asking for
-    the reporter interface; tabs alone still means tabs."""
-    mode = str(config.get("interface_mode") or "").strip().lower()
-    if mode in _INTERFACE_MODES:
-        return mode
-    if config.get("pdf_separate_window"):
-        return "reporter"
-    if config.get("case_tabs_enabled"):
-        return "tabs"
-    return _DEFAULT_INTERFACE_MODE
-
-
 def _case_view_host(parent: tk.Misc, app):
-    """Return a standalone Toplevel or a page in the shared case notebook."""
+    """Where a new opinion's text goes: the text side of a floating reporter
+    viewer, or a plain Toplevel when there is no app to ask."""
     if app is not None and hasattr(app, "new_case_view_host"):
         return app.new_case_view_host(parent)
     return _ui_toplevel(parent)
 
 
-def _mark_reporter_window(win, app, origin) -> None:
-    """Flag a floating viewer as a reporter window when whatever opened it was
-    one.  Everything reached from it — a citation clicked on a page, a link on
-    its text side — then opens the way Reporter View opens things, whatever
-    the app as a whole is set to.  This is what carries a scan popped out of
-    the tabbed window, and the chain of windows opened from it, along."""
-    try:
-        if app is not None and app.pdf_opens_in_separate_window(origin):
-            win._reporter_window = True
-    except Exception:
-        pass
-
-
 def _secondary_view_host(parent: tk.Misc, app):
-    """Host any non-modal document/tool view in the shared notebook mode."""
+    """Host any non-modal document/tool view in a window of its own."""
     if app is not None and hasattr(app, "new_secondary_view_host"):
         return app.new_secondary_view_host(parent)
     return _ui_toplevel(parent)
@@ -1445,143 +864,6 @@ def _ensure_modern_ttk_styles(widget: tk.Misc) -> None:
     _MODERN_TTK_READY = True
 
 
-def _ensure_case_tab_style(widget: tk.Misc) -> str:
-    """Install the high-contrast notebook style used by tabbed document views.
-
-    Native notebook tabs can lose their edges under some Windows themes.  A
-    small stretchable image element gives every tab a reliable outline while
-    the style map makes the selected and hovered states unmistakable.
-    """
-    interpreter = id(widget.tk)
-    if interpreter in _CASE_TAB_STYLED_INTERPRETERS:
-        return _CASE_TAB_STYLE
-
-    style = ttk.Style(widget)
-    tab_style = f"{_CASE_TAB_STYLE}.Tab"
-
-    def tab_image(fill: str, border: str, indicator: str = ""):
-        size = 16
-        image = tk.PhotoImage(master=widget, width=size, height=size)
-        image.put(fill, to=(0, 0, size, size))
-        image.put(border, to=(0, 0, size, 1))
-        image.put(border, to=(0, size - 1, size, size))
-        image.put(border, to=(0, 0, 1, size))
-        image.put(border, to=(size - 1, 0, size, size))
-        if indicator:
-            image.put(indicator, to=(1, 1, size - 1, 4))
-        return image
-
-    normal = tab_image("#eef0f4", "#b9c0cb")
-    hover = tab_image("#e4ebf7", "#7f9dcc")
-    selected = tab_image("#ffffff", _UI["accent"], _UI["accent"])
-    disabled = tab_image("#f5f6f8", "#d5d8de")
-    images = (normal, hover, selected, disabled)
-
-    try:
-        style.element_create(
-            "CaseTabs.tab",
-            "image",
-            normal,
-            ("selected", selected),
-            ("active", hover),
-            ("disabled", disabled),
-            border=(5, 5, 5, 5),
-            sticky="nswe",
-        )
-
-        def replace_tab_element(layout):
-            replaced = []
-            for element, options in layout:
-                options = dict(options)
-                children = options.get("children")
-                if children:
-                    options["children"] = replace_tab_element(children)
-                if element == "Notebook.tab":
-                    element = "CaseTabs.tab"
-                replaced.append((element, options))
-            return replaced
-
-        style.layout(
-            tab_style,
-            replace_tab_element(style.layout("TNotebook.Tab")),
-        )
-        _CASE_TAB_IMAGES.extend(images)
-    except tk.TclError:
-        # The named style below still improves contrast on themes that do not
-        # allow a custom element to be added.
-        pass
-
-    style.configure(
-        _CASE_TAB_STYLE,
-        background="#dfe3ea",
-        bordercolor="#b9c0cb",
-        lightcolor="#dfe3ea",
-        darkcolor="#dfe3ea",
-        borderwidth=1,
-        tabmargins=(10, 8, 10, 0),
-        # Anchor tabs to the top-left on every platform.  Windows themes
-        # already default to "nw", but the macOS aqua theme defaults to a
-        # centred tab row ("n"); forcing "nw" makes the tabs fill left to
-        # right there too without changing the Windows appearance.
-        tabposition="nw",
-    )
-    style.configure(
-        tab_style,
-        background="#eef0f4",
-        foreground="#4d5563",
-        bordercolor="#b9c0cb",
-        lightcolor="#b9c0cb",
-        darkcolor="#b9c0cb",
-        padding=(16, 9, 8, 9),
-        font=("TkDefaultFont", 10),
-        focuscolor=_UI["accent"],
-    )
-    style.map(
-        tab_style,
-        background=[
-            ("selected", "#ffffff"),
-            ("active", "#e4ebf7"),
-        ],
-        foreground=[
-            ("selected", "#173d7a"),
-            ("active", "#244f91"),
-            ("disabled", _UI["muted"]),
-        ],
-        font=[
-            ("selected", ("TkDefaultFont", 10, "bold")),
-            ("!selected", ("TkDefaultFont", 10)),
-        ],
-        expand=[("selected", (0, 2, 0, 0))],
-    )
-    _CASE_TAB_STYLED_INTERPRETERS.add(interpreter)
-    return _CASE_TAB_STYLE
-
-
-def _case_tab_close_images(
-    widget: tk.Misc,
-) -> tuple[tk.PhotoImage, tk.PhotoImage]:
-    """Create the normal and hover artwork for a tab's compact close box."""
-
-    def image(*, hover: bool) -> tk.PhotoImage:
-        close = tk.PhotoImage(master=widget, width=18, height=14)
-        if hover:
-            close.put("#fbe9e7", to=(4, 1, 17, 14))
-            outline, mark = "#c96b63", _UI["danger"]
-        else:
-            outline, mark = "#c3c8d0", "#68717e"
-        close.put(outline, to=(4, 1, 17, 2))
-        close.put(outline, to=(4, 13, 17, 14))
-        close.put(outline, to=(4, 1, 5, 14))
-        close.put(outline, to=(16, 1, 17, 14))
-        for offset in range(4):
-            close.put(mark, to=(8 + offset, 5 + offset, 10 + offset, 7 + offset))
-            close.put(mark, to=(11 - offset, 5 + offset,
-                                13 - offset, 7 + offset))
-        return close
-
-    return image(hover=False), image(hover=True)
-
-
 _STRIP_ICON_W, _STRIP_ICON_H = 16, 14
 
 
@@ -1647,7 +929,6 @@ from bluebook_names import (
     abbreviate_case_name,
     caption_case_reference_tokens,
     collapse_personal_all_caps_run,
-    courtlistener_case_name,
     cut_companion_cases,
     is_recognized_given_name,
     normal_case_caption,
@@ -1861,15 +1142,6 @@ def _as_float(value) -> float:
 # ---------------------------------------------------------------------------
 
 _BOOKMARK_CACHE_DIR = Path.home() / ".config" / "courtlistener" / "bookmark_cache"
-
-# The one live CourtListenerGUI, so reader views opened deep in the call tree
-# can reach the bookmark store without threading the app through every call.
-_ACTIVE_APP = None
-
-
-def _active_app():
-    return _ACTIVE_APP
-
 
 def _bookmark_pdf_path(url: str) -> Path:
     import hashlib
@@ -5988,9 +5260,7 @@ def _combined_parts_cover_typed(opinions: list[dict], parts: list) -> bool:
     return all(actual[kind] >= count for kind, count in expected.items())
 
 
-def _assemble_case_parts(
-    client, item: dict
-) -> "tuple[list[OpinionPart], list[Block], str, dict]":
+def _assemble_case_parts(client, item: dict) -> tuple:
     """Fetch a case from CourtListener and build structured OpinionParts.
 
     Returns (parts, all_blocks, plain_text, cluster_metadata).
@@ -6503,8 +5773,6 @@ def _mac_activate_app(allow_osascript: bool = True) -> bool:
 class CourtListenerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        global _ACTIVE_APP
-        _ACTIVE_APP = self
         self.root.title("CourtListener Case Law Search")
         self.root.geometry("1300x720")
         self.root.minsize(900, 500)
@@ -6537,17 +5805,8 @@ class CourtListenerGUI:
         self._spotlight_hotkey = _load_saved_spotlight_hotkey()
         self._root_hidden = False
 
-        # Which of the three interfaces the app is wearing — see the Interface
-        # menu (:data:`_INTERFACE_MODES`).  Viewers register no-refetch reopen
-        # callbacks so switching between windows and tabs can migrate every
-        # case already on screen.
-        config = _load_config()
-        self._interface_mode = _read_interface_mode(config)
-        self._interface_var = tk.StringVar(
-            master=self.root, value=self._interface_mode
-        )
-        self._case_tabs_window: Optional[_CaseTabsWindow] = None
-        self._detached_tab_windows: set[_CaseTabsWindow] = set()
+        # Open document views, so the Bookmarks menu can find the reader
+        # behind a window (see _viewer_for_host).
         self._open_case_views: dict[int, dict] = {}
         # Viewers opened by following a citation inside a PDF; they belong to
         # no reader, so the app holds them until they are closed.
@@ -7011,21 +6270,16 @@ class CourtListenerGUI:
             menu.add_command(label=label, command=opener)
 
     # ------------------------------------------------------------------
-    # The interface: windows, tabs, or the reports themselves
+    # Windows: every document opens in the reporter interface
     # ------------------------------------------------------------------
 
     def populate_window_menu(self, menu: tk.Menu, view=None) -> None:
-        """Fill the Interface menu every window carries at its right-hand end."""
+        """Fill the Window menu a document window carries at its right-hand
+        end."""
         try:
             menu.delete(0, "end")
         except tk.TclError:
             return
-        for mode, label in _INTERFACE_LABELS:
-            menu.add_radiobutton(
-                label=label, value=mode, variable=self._interface_var,
-                command=lambda m=mode: self.set_interface_mode(m),
-            )
-        menu.add_separator()
         # Opinion viewers expose their (default-hidden) source bar here.
         source_owner = getattr(view, "_source_bar_control", None)
         if source_owner is not None and hasattr(source_owner, "_source_bar_var"):
@@ -7035,77 +6289,16 @@ class CourtListenerGUI:
                 command=source_owner._toggle_source_bar_from_menu,
             )
         if view is not None and view is not getattr(self, "root", None):
-            menu.add_command(
-                label="Close Current Tab" if isinstance(view, _CaseTabPage)
-                else "Close Window",
-                command=view.destroy,
-            )
-
-    def interface_mode(self) -> str:
-        """Which of :data:`_INTERFACE_MODES` the app is wearing."""
-        mode = getattr(self, "_interface_mode", _DEFAULT_INTERFACE_MODE)
-        return mode if mode in _INTERFACE_MODES else _DEFAULT_INTERFACE_MODE
-
-    @property
-    def _case_tabs_enabled(self) -> bool:
-        """Whether documents share one tabbed window."""
-        return self.interface_mode() == "tabs"
-
-    def pdf_opens_in_separate_window(self, view=None) -> bool:
-        """Whether a scan floats in its own viewer rather than taking the
-        reader's place.
-
-        Only the reporter interface does that: in the other two, "View PDF"
-        turns the window it is in over to the scan, which is what those two are
-        for.  A PDF popped out of the tabbed window is the exception — it *is*
-        a reporter window, so what it opens behaves like one."""
-        if self.interface_mode() == "reporter":
-            return True
-        if getattr(view, "_reporter_window", False):
-            return True
-        try:                    # a tab page carries the flag on its window
-            return bool(getattr(view.winfo_toplevel(), "_reporter_window",
-                                False))
-        except (AttributeError, tk.TclError):
-            return False
-
-    def set_interface_mode(self, mode: str) -> None:
-        """Switch interfaces, and remember it.
-
-        Windows and tabs are two ways of holding the same views, so switching
-        between them migrates everything on screen (each view knows how to
-        reopen itself with no refetch).  The reporter interface is not: putting
-        a case into it means finding a scan of it, which is a fetch that can
-        fail, so it applies to what is opened next rather than rearranging what
-        is already there."""
-        mode = str(mode or "").lower()
-        if mode not in _INTERFACE_MODES:
-            return
-        self._interface_var.set(mode)
-        previous = self.interface_mode()
-        if mode == previous:
-            return
-        self._interface_mode = mode
-        config = _load_config()
-        config["interface_mode"] = mode
-        config.pop("case_tabs_enabled", None)
-        config.pop("pdf_separate_window", None)
-        _save_config(config)
-        if "reporter" in (mode, previous):
-            return          # applies from the next document opened
-        self._migrate_open_views(tabs=(mode == "tabs"))
+            menu.add_command(label="Close Window", command=view.destroy)
 
     def new_case_view_host(self, parent: tk.Misc):
-        """Where a new opinion's text goes.
-
-        In the reporter interface it goes into a floating viewer of its own,
-        on the text side — the same window, in the same place and at the same
+        """Where a new opinion's text goes: a floating viewer of its own, on
+        the text side — the same window, in the same place and at the same
         size, that the case would have opened in had a scan of it been found.
         A case with no PDF should not look like a different kind of thing."""
-        if self.pdf_opens_in_separate_window(parent):
-            host = self._reporter_text_host(parent)
-            if host is not None:
-                return host
+        host = self._reporter_text_host(parent)
+        if host is not None:
+            return host
         return self.new_secondary_view_host(parent)
 
     def _reporter_text_host(self, parent: tk.Misc):
@@ -7125,15 +6318,13 @@ class CourtListenerGUI:
         """What a new window's lifetime hangs on.
 
         Tk destroys a top-level along with its master, so a window opened out
-        of another is closed with it.  In the reporter interface that is
-        wrong: every window there stands on its own — close the scan you came
-        from and the case, the statute and the second scan you opened out of
-        it all stay exactly where they are.  So the application's own root
-        owns them instead, and only quitting the app closes them.
+        of another would be closed with it.  Here every window stands on its
+        own — close the scan you came from and the case, the statute and the
+        second scan you opened out of it all stay exactly where they are.  So
+        the application's own root owns them instead, and only quitting the
+        app closes them.
         """
         try:
-            if not self.pdf_opens_in_separate_window(parent):
-                return parent
             root = self.root
             if root is not None and root.winfo_exists():
                 return root
@@ -7142,43 +6333,13 @@ class CourtListenerGUI:
         return parent
 
     def new_secondary_view_host(self, parent: tk.Misc):
-        """Host a new non-modal view according to the current Window mode."""
-        if not self._case_tabs_enabled:
-            return _ui_toplevel(self.window_master(parent))
-        manager = self._tab_manager_for_parent(parent)
-        if manager is not None:
-            return _CaseTabPage(manager)
-        manager = self._case_tabs_window
-        if manager is None:
-            manager = _CaseTabsWindow(self, self.root)
-            self._case_tabs_window = manager
-        return _CaseTabPage(manager)
-
-    def _tab_manager_for_parent(
-        self, parent: tk.Misc,
-    ) -> "Optional[_CaseTabsWindow]":
-        """Return the tab group containing *parent*, if it belongs to one."""
-        if isinstance(parent, _CaseTabPage):
-            return parent._manager
-        managers = []
-        main = getattr(self, "_case_tabs_window", None)
-        if main is not None:
-            managers.append(main)
-        managers.extend(getattr(self, "_detached_tab_windows", ()))
-        return next(
-            (manager for manager in managers if parent is manager.win), None
-        )
-
-    def register_case_window(
-        self, owner, view, key: str, label: str, reopen,
-    ) -> None:
-        """Compatibility name for registered opinion views."""
-        self.register_secondary_window(owner, view, key, label, reopen)
+        """Host a new non-modal view: a window of its own, owned by the app."""
+        return _ui_toplevel(self.window_master(parent))
 
     def register_secondary_window(
         self, owner, view, key: str, label: str, reopen,
     ) -> None:
-        """Track a view so mode changes and Pop Out can reconstruct it."""
+        """Track a view so an already-open case can be surfaced by key."""
         ident = id(view)
         self._open_case_views[ident] = {
             "owner": owner, "view": view, "key": key,
@@ -7193,120 +6354,12 @@ class CourtListenerGUI:
             view.bind("<Destroy>", gone, add="+")
         except tk.TclError:
             pass
-        if isinstance(view, _CaseTabPage):
-            view._secondary_reopen = reopen
-            view._secondary_owner = owner
-
-    def surface_case_view(self, key: str) -> bool:
-        """Bring an already-open view of *key* forward, if there is one.
-
-        What the case name on a floating PDF viewer's strip asks before
-        reopening anything: the reader may have been closed and reopened since,
-        or the reader may never have gone away."""
-        if not key:
-            return False
-        for entry in list(self._open_case_views.values()):
-            if entry.get("key") != key:
-                continue
-            owner = entry.get("owner")
-            surfacer = getattr(owner, "_surface_text_view", None)
-            alive = getattr(owner, "_text_view_alive", None)
-            # Only a view that is genuinely still on screen: asking a closed
-            # one to surface itself would send it back here.
-            if surfacer is None or alive is None or not alive():
-                continue
-            try:
-                surfacer()
-            except tk.TclError:
-                continue
-            return True
-        return False
 
     def _secondary_entry_for_view(self, view):
         return next((
             entry for entry in self._open_case_views.values()
             if entry.get("view") is view
         ), None)
-
-    def can_pop_out_view(self, view) -> bool:
-        return (
-            isinstance(view, _CaseTabPage)
-            and self._secondary_entry_for_view(view) is not None
-        )
-
-    @staticmethod
-    def _view_is_showing_pdf(view) -> bool:
-        owner = getattr(view, "_secondary_owner", None)
-        return bool(getattr(owner, "_mode", "") == "pdf")
-
-    def pop_out_view(self, view) -> None:
-        """Move one tab into a new independent tabbed OS window.
-
-        A tab showing a *scan* pops out as a reporter window: the reader asked
-        for the report on its own, which is the reporter interface in
-        miniature, so what that window opens from then on behaves that way
-        whatever the app as a whole is set to."""
-        entry = self._secondary_entry_for_view(view)
-        if entry is None or not isinstance(view, _CaseTabPage):
-            return
-        reporter = self._view_is_showing_pdf(view)
-        try:
-            view.destroy()
-        except tk.TclError:
-            pass
-        manager = _CaseTabsWindow(self, self.root)
-        if reporter:
-            manager.win._reporter_window = True
-        self._detached_tab_windows.add(manager)
-        try:
-            entry["reopen"](manager.win)
-        except Exception as exc:
-            manager.close()
-            print(f"[windows] could not pop out {entry['label']!r}: {exc}")
-
-    @staticmethod
-    def _case_view_is_live(view) -> bool:
-        try:
-            return bool(view.winfo_exists())
-        except (AttributeError, tk.TclError):
-            return False
-
-    def set_case_tabs_enabled(self, enabled: bool) -> None:
-        """Compatibility name: the tabbed interface on or off."""
-        self.set_interface_mode("tabs" if enabled else "windows")
-
-    def _migrate_open_views(self, tabs: bool) -> None:
-        """Reopen every view on screen in the interface just chosen."""
-        snapshots = [
-            entry for entry in self._open_case_views.values()
-            if self._case_view_is_live(entry.get("view"))
-        ]
-        # The mode is already set, so each snapshot's reopen callback chooses
-        # the destination host by itself.
-        for entry in snapshots:
-            try:
-                entry["view"].destroy()
-            except tk.TclError:
-                pass
-        self._open_case_views.clear()
-        if not tabs:
-            managers = list(self._detached_tab_windows)
-            if self._case_tabs_window is not None:
-                managers.append(self._case_tabs_window)
-            for manager in managers:
-                manager.close()
-            self._case_tabs_window = None
-            self._detached_tab_windows.clear()
-        for entry in snapshots:
-            try:
-                entry["reopen"]()
-            except Exception as exc:
-                print(f"[windows] could not migrate {entry['label']!r}: {exc}")
-
-    def _case_tabs_window_destroyed(self, manager: _CaseTabsWindow) -> None:
-        if self._case_tabs_window is manager:
-            self._case_tabs_window = None
-        self._detached_tab_windows.discard(manager)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -7395,9 +6448,6 @@ class CourtListenerGUI:
         # document view, so this one lists the saved bookmarks without the
         # "Bookmark This …" toggle the readers show first.
         _add_bookmarks_cascade(menubar, self, self.root)
-        # …and the Interface menu at the far right, in the same place it sits
-        # on every document window.
-        _add_interface_cascade(menubar, self, self.root)
         # The Mac modifier is Cmd, and Tk keeps the two apart — the same
         # reason Ctrl-F alone never opened the find bar there (_bind_find_keys).
         for key, command in (("l", self._show_statute_lookup),
@@ -9347,7 +8397,7 @@ class CourtListenerGUI:
                 item.get("caseName") or item.get("case_name") or "")
         if not str(cite or "").strip():
             return False
-        return self.open_case_pdf_first(
+        return self.open_cited_case_pdf(
             parent if parent is not None else self.root, ("cite", cite),
             name, self._safe_root_status, fallback=fallback)
 
@@ -9356,25 +8406,6 @@ class CourtListenerGUI:
             self._status_var.set(text)
         except (AttributeError, tk.TclError):
             pass
-
-    def open_case_pdf_first(self, parent: tk.Misc, action: tuple,
-                            snippet: str = "",
-                            status=lambda _s: None, fallback=None) -> bool:
-        """In the reporter interface, a case opens as its scan.
-
-        The same lookup a citation clicked inside a PDF gets — the reports are
-        what that interface is for, so a citation followed from the *text*
-        side should land in the same place as one followed from the pages.
-        ``fallback`` runs when no scan can be found anywhere, and in the
-        reporter interface that fallback opens the text in a window of the
-        same shape (see :meth:`new_case_view_host`).
-
-        Returns whether the reporter lookup took the click; False means the
-        caller should open the citation however it normally would."""
-        if not self.pdf_opens_in_separate_window(parent):
-            return False
-        return self.open_cited_case_pdf(parent, action, snippet, status,
-                                        fallback=fallback)
 
     def _cited_case_pdf_item(self, client, cite: str, name: str) -> dict:
         """A search-result-shaped record for a cited case, good enough for the
@@ -9476,8 +8507,6 @@ class CourtListenerGUI:
                 on_print=lambda pane: self._print_cited_pdf(named, pane, status),
                 on_cite=cite_clicked,
                 on_cite_browser=_open_citation_in_browser,
-                on_open_text=lambda: _follow_brief_action(
-                    self, onward(), action, status, snippet=snippet),
                 on_build_text=lambda body: self._embed_cited_case_text(
                     body, named),
                 on_close=self._cited_pdf_window_closed,
@@ -11278,10 +10307,6 @@ class CourtListenerGUI:
             )
         elif done:
             self._status_var.set("No results found.")
-
-    def _on_results(self, data: dict) -> None:
-        """Compatibility wrapper for a complete, single search response."""
-        self._on_results_page(data, True)
 
     def _set_preview(self, text: str) -> None:
         self._preview_text.config(state="normal")
@@ -18330,31 +17355,6 @@ class _PdfPane(ttk.Frame):
                 except Exception:
                     pass
 
-    def has_selectable_text(self) -> bool:
-        """Whether the document carries selectable text *anywhere* — a
-        born-digital file, or a scan with an OCR layer over it.
-
-        Wider than :meth:`has_text_layer`, which asks the narrower question of
-        whether the file is born-digital.  This one decides whether a copy of
-        the document can be handed on with its text intact, which is what
-        keeps a PDF reader from running its own OCR over it."""
-        try:
-            with _PDFIUM_LOCK:
-                for i in range(len(self._doc)):
-                    page = self._doc[i]
-                    try:
-                        tp = page.get_textpage()
-                        try:
-                            if tp.count_chars() > 0:
-                                return True
-                        finally:
-                            tp.close()
-                    finally:
-                        page.close()
-        except Exception:
-            return False
-        return False
-
     def has_text_layer(self) -> bool:
         """True when the PDF carries a real selectable text layer (born-digital,
         not a bare scan) — the case where a lossless, text-preserving crop is
@@ -18537,7 +17537,7 @@ class _FloatingPdfWindow:
     def __init__(self, parent: tk.Misc, data: bytes, url: str, title: str,
                  *, margin: Optional[int] = None, app=None,
                  on_save=None, on_print=None, on_close=None,
-                 on_cite=None, on_cite_browser=None, on_open_text=None,
+                 on_cite=None, on_cite_browser=None,
                  on_build_text=None, bookmarks=None,
                  anchor: "Optional[tk.Misc]" = None) -> None:
         self._app = app
@@ -18550,10 +17550,6 @@ class _FloatingPdfWindow:
         self._on_close = on_close
         self._on_cite = on_cite
         self._on_cite_browser = on_cite_browser
-        # Clicking the case name on the strip opens this case's *text*: the
-        # reader the PDF was opened from, or — for a case reached by following
-        # a citation — the opinion text fetched the way the app always does.
-        self._on_open_text = on_open_text
         # Builds the opinion *inside* this window, in place of the scan: the T
         # button.  Given the frame to fill, it returns a chromeless reader, or
         # None while the text is still being fetched in the background.
@@ -18588,8 +17584,6 @@ class _FloatingPdfWindow:
         # given the application's own root instead.  ``anchor`` is only where to
         # put it on screen.
         self._win = _ui_toplevel(parent)
-        _mark_reporter_window(self._win, app,
-                              anchor if anchor is not None else parent)
         _ensure_modern_ttk_styles(self._win)
         self._win.title(title or "PDF")
         self._place_beside(anchor if anchor is not None else parent)
@@ -18731,41 +17725,19 @@ class _FloatingPdfWindow:
             rule = tk.Frame(self._win, bg=_UI["border"], height=1)
         rule.pack(side="top", fill="x")
         # The strip's own actions, also on a right-click.  This window carries
-        # no menu bar, so what a document window keeps up there — History,
-        # Bookmarks, and the Interface the app is worn in — is here instead.
+        # no menu bar, so what a document window keeps up there — History and
+        # Bookmarks — is here instead.
         menu = tk.Menu(self._win, tearoff=0)
         menu.add_command(label=f"Save As…\t{_ACCEL}+S", command=self._save)
         menu.add_command(label=f"Print…\t{_ACCEL}+P", command=self._print)
         self._bar_menu = menu
-        # Everything past here is rebuilt each time the menu is posted; the two
-        # submenus are made once and re-attached, since deleting a cascade
+        # Everything past here is rebuilt each time the menu is posted; the
+        # submenu is made once and re-attached, since deleting a cascade
         # entry leaves the menu it points at alone.
         self._bar_menu_fixed = menu.index("end")
         self._recent_menu = self._bar_submenu("populate_history_menu")
-        self._interface_menu = self._bar_submenu("populate_window_menu",
-                                                 self._win)
         for seq in ("<Button-3>", "<Button-2>"):  # Button-2 is the Mac right-click
             _bind_recursive(bar, seq, self._post_bar_menu)
-
-    #: A click lands on the strip's name once, but arrives more than once: a
-    #: CustomTkinter label forwards a binding to the canvas and label it is
-    #: drawn from, and the click is bound over that whole subtree so no part of
-    #: the name is dead to it.  Openings this close together are the same click
-    #: (or a double-click), and must not open the opinion twice.
-    _OPEN_TEXT_DEBOUNCE = 0.4    # seconds
-
-    def _open_text(self) -> None:
-        """Show this case's opinion text (the clicked name on the strip)."""
-        if self._on_open_text is None:
-            return
-        now = time.monotonic()
-        if now - getattr(self, "_opened_text_at", 0.0) < self._OPEN_TEXT_DEBOUNCE:
-            return
-        self._opened_text_at = now
-        try:
-            self._on_open_text()
-        except Exception as exc:
-            print(f"[pdf-window] opening the case text failed: {exc}")
 
     def _bar_submenu(self, filler: str, *args):
         """A submenu of the strip's menu that the app fills when it opens, or
@@ -18797,10 +17769,9 @@ class _FloatingPdfWindow:
     def _sync_bar_menu(self) -> None:
         """Rebuild the strip menu below Save and Print.
 
-        This window has no menu bar, so bookmarking, History and the Interface
-        the app is worn in live here.  All three are rebuilt on every posting:
-        which document is showing, whether it is already bookmarked, and what
-        the interface is are all answers that change."""
+        This window has no menu bar, so bookmarking and History live here.
+        Both are rebuilt on every posting: which document is showing and
+        whether it is already bookmarked are answers that change."""
         menu = self._bar_menu
         try:
             last = menu.index("end")
@@ -18819,13 +17790,11 @@ class _FloatingPdfWindow:
                 )
             except tk.TclError:
                 pass
-        for label, sub in (("Recent", self._recent_menu),
-                           ("Interface", self._interface_menu)):
-            if sub is not None:
-                try:
-                    menu.add_cascade(label=label, menu=sub)
-                except tk.TclError:
-                    pass
+        if self._recent_menu is not None:
+            try:
+                menu.add_cascade(label="Recent", menu=self._recent_menu)
+            except tk.TclError:
+                pass
         try:
             menu.add_separator()
             menu.add_command(label=f"Close\t{_ACCEL}+W", command=self.close)
@@ -19487,16 +18456,15 @@ class _FloatingPdfWindow:
             return False
 
     def _page_key(self, direction: int):
-        """Left and Right turn the pages of whichever scan is showing — this
-        window's own, or one the embedded opinion has itself switched to.  On
-        the opinion text they are nobody's but the reader's."""
-        surface = self._reader if self.showing_text() else self._pane
-        if surface is None:
+        """Left and Right turn the pages of the scan.  On the opinion text
+        they are nobody's but the reader's."""
+        if self.showing_text():
+            return False
+        pane = self._pane
+        if pane is None:
             return False
         try:
-            if self.showing_text():
-                return surface._turn_pdf_page(direction)
-            return surface.turn_page(direction)
+            return pane.turn_page(direction)
         except (AttributeError, tk.TclError):
             return False
 
@@ -19830,13 +18798,6 @@ def _fed_court_abbr(line: str) -> "Optional[str]":
     if "supreme court" in low and "united states" in low:
         return ""
     return None
-
-
-def _titlecase_caps(s: str) -> str:
-    """Title-case the ALL-CAPS words of a reporter caption ("BOARD OF ZONING
-    APPEALS" → "Board of Zoning Appeals"), leaving mixed-case words and
-    initialisms (LLC, U.S.) alone."""
-    return normal_case_caption(s)
 
 
 def _caption_fields(text: str) -> tuple:
@@ -20306,14 +19267,9 @@ class _ScholarTextWindow:
                             page = int(m.group(0))
         self._cl_text: Optional[str] = cl_text
         self._mode = "courtlistener" if self._cl_primary else "scholar"
-        self._pdf_pane: Optional[_PdfPane] = None  # set while viewing the PDF
-        self._pdf_holder: Optional[ttk.Frame] = None  # pane + parts strip
-        # The minimal floating viewer this window's PDFs go to under
-        # Window ▸ "View PDF in Separate Window"; reused for every scan.
+        # The minimal floating viewer this window's PDFs go to; reused for
+        # every scan.
         self._pdf_float_win: "Optional[_FloatingPdfWindow]" = None
-        # The separate-opinions strip inside that holder, once the text layer
-        # has revealed the parts; toggled by the "Side panel" checkbox.
-        self._pdf_parts_nav: Optional[ttk.Frame] = None
         # Footnote extents are bracketed by Tk marks (see _fn_region_mark);
         # this keeps their names unique across re-renders.
         self._fn_mark_seq = 0
@@ -20345,7 +19301,6 @@ class _ScholarTextWindow:
             self._pdf_url = self._history_pdf_url
             self._pdf_located = True
         self._prefetch_ok = prefetch_pdf
-        self._pre_pdf_mode = "scholar"  # text view to return to from the PDF
         # PDF text extraction and opinion-to-PDF alignment are shared.  A
         # prefetched PDF is analysed once in the background, then the same
         # result powers PDF selection/search, location-preserving switches, and
@@ -20627,8 +19582,8 @@ class _ScholarTextWindow:
         # text back — the same replay History uses, with no refetch.
         self._history_reopen = reopen
         app.record_case_view(key, label, reopen, payload=payload)
-        if hasattr(app, "register_case_window"):
-            app.register_case_window(self, self._win, key, label, reopen)
+        if hasattr(app, "register_secondary_window"):
+            app.register_secondary_window(self, self._win, key, label, reopen)
 
     def _bookmark_descriptor(self) -> Optional[dict]:
         """This case's bookmark record, with a local copy that reopens offline:
@@ -20839,8 +19794,6 @@ class _ScholarTextWindow:
                             lambda: self._find_step(-1))
         _bind_text_scroll_keys(win, txt, self._scroll_reader,
                                window_keys=not self._chromeless)
-        if not self._chromeless:
-            _bind_reader_page_keys(win, self._turn_pdf_page)
 
         btn_frame = _ui_frame(win)
         if not self._chromeless:
@@ -20853,11 +19806,6 @@ class _ScholarTextWindow:
             btn_frame, "Export ▾", command=self._post_export_menu, width=104
         )
         self._export_btn.pack(side="right", padx=(6, 0))
-        # Print: only meaningful in the PDF view, so it's packed there and
-        # hidden again in the text view.
-        self._print_btn = _ui_button(
-            btn_frame, "Print…", command=self._print_pdf, width=86
-        )
         self._toggle_btn = _ui_button(
             btn_frame, "CourtListener", command=self._toggle_source,
             primary=True, width=118,
@@ -20908,7 +19856,6 @@ class _ScholarTextWindow:
         # cases, whose Oyez panel the window was widened to fit.
         self._details_var = tk.BooleanVar(value=self._is_scotus)
         self._details_on = self._is_scotus
-        self._pdf_parts_on = True
         _ui_checkbox(
             btn_frame, "Side panel", self._details_var, self._toggle_details,
         ).pack(side="left", padx=(0, 10))
@@ -21112,7 +20059,6 @@ class _ScholarTextWindow:
         export_normal, export_small = self._export_widths()
         widths = (
             (self._export_btn, export_normal, export_small),
-            (self._print_btn, 86, 64),
             (self._toggle_btn, toggle_normal, toggle_small),
             (self._pdf_btn, pdf_normal, pdf_small),
             (self._cl_btn, *self._source_or_pdf_widths(self._cl_btn)),
@@ -21128,60 +20074,23 @@ class _ScholarTextWindow:
                 except tk.TclError:
                     pass
 
-    def _find_pane(self) -> Optional["_PdfPane"]:
-        """The PDF pane, when the PDF is what's on screen and it has a text
-        layer to search — otherwise None, meaning find belongs to the text
-        view."""
-        p = self._pdf_pane
-        if self._mode != "pdf" or p is None:
-            return None
-        try:
-            if not (p.winfo_exists() and p.has_find()):
-                return None
-        except tk.TclError:
-            return None
-        return p
-
     def _find_open(self) -> None:
-        """Ctrl-F / Cmd-F: search whichever view the reader is looking at —
-        and, pressed again on an open find bar, put it away."""
-        pane = self._find_pane()
-        if pane is not None:
-            self._finder.close()
-            pane._toggle_find()
-        else:
-            self._finder.toggle()
+        """Ctrl-F / Cmd-F: search the text — and, pressed again on an open
+        find bar, put it away."""
+        self._finder.toggle()
 
     def _find_step(self, delta: int) -> None:
-        pane = self._find_pane()
-        if pane is not None:
-            pane._find_step(delta)
-        else:
-            self._finder.step(delta)
+        self._finder.step(delta)
 
     def _scroll_reader(self, direction: int) -> bool:
-        """Arrow-key scroll whichever opinion surface is currently visible."""
-        if self._mode == "pdf" and self._pdf_pane is not None:
-            return self._pdf_pane.scroll_key(direction)
+        """Arrow-key scroll the opinion text."""
         self._text.yview_scroll(direction, "units")
         return True
 
-    def _turn_pdf_page(self, direction: int) -> bool:
-        """Left and Right turn the pages while the PDF is the surface showing.
-        The text has no pages to turn, so there they stay the reader's own."""
-        if self._mode == "pdf" and self._pdf_pane is not None:
-            return self._pdf_pane.turn_page(direction)
-        return False
-
     def _zoom(self, delta: int) -> None:
-        """In the reader, grow/shrink every font (delta 0 resets to default);
-        Tk re-renders widgets when a named Font object is reconfigured, so
-        resizing the shared Font instances restyles all existing text.  In the
-        PDF view the same controls zoom the rendered page instead."""
-        if self._mode == "pdf" and self._pdf_pane is not None:
-            self._pdf_pane.zoom(delta)
-            self._status_var.set(f"PDF zoom: {self._pdf_pane.zoom_percent()}%")
-            return
+        """Grow/shrink every font (delta 0 resets to default); Tk re-renders
+        widgets when a named Font object is reconfigured, so resizing the
+        shared Font instances restyles all existing text."""
         global _OPINION_FONT_PT
         new = 11 if delta == 0 else max(
             _OPINION_FONT_MIN, min(_OPINION_FONT_MAX, self._base_size + delta)
@@ -22409,7 +21318,6 @@ class _ScholarTextWindow:
         self._hide_pdf_button()  # Scholar view uses the toggle for the PDF
         self._show_cl_button()   # …and offers a switch to the CourtListener text
         self._export_btn.configure(text="Export ▾", command=self._post_export_menu)
-        self._print_btn.pack_forget()  # text view: no Print button
         self._zoom_out_btn.configure(text="A−")
         self._zoom_in_btn.configure(text="A+")
         extra = f" | {self._note}" if self._note else ""
@@ -22958,7 +21866,7 @@ class _ScholarTextWindow:
             return
         page_pos = getattr(self, "_page_pos", None) or {}
         us_page_pos = getattr(self, "_mapped_us_page_pos", None) or {}
-        if self._mode == "pdf" or not (page_pos or us_page_pos):
+        if not (page_pos or us_page_pos):
             canvas.delete("all")
             canvas.config(width=1)
             return
@@ -23031,7 +21939,7 @@ class _ScholarTextWindow:
         canvas.delete("all")
         parts = getattr(self, "_rendered_parts", None)
         regions = self._part_region_indices()
-        if (self._mode == "pdf" or getattr(self, "_current_part", None) is not None
+        if (getattr(self, "_current_part", None) is not None
                 or not parts or not regions):
             canvas.config(width=0)
             return
@@ -23119,7 +22027,7 @@ class _ScholarTextWindow:
         canvas.delete("all")
         parts = getattr(self, "_rendered_parts", None)
         regions = self._part_region_indices()
-        if (self._mode == "pdf" or getattr(self, "_current_part", None) is not None
+        if (getattr(self, "_current_part", None) is not None
                 or not parts or not regions):
             canvas.config(width=0)
             return
@@ -23297,7 +22205,6 @@ class _ScholarTextWindow:
             state="normal" if self._scholar_url else "disabled",
         )
         self._export_btn.configure(text="Export ▾", command=self._post_export_menu)
-        self._print_btn.pack_forget()
         self._zoom_out_btn.configure(text="A−")
         self._zoom_in_btn.configure(text="A+")
         char_count = len(self._cl_text or self._scholar_text or "")
@@ -23345,7 +22252,6 @@ class _ScholarTextWindow:
             state="normal" if self._scholar_url else "disabled",
         )
         self._export_btn.configure(text="Export ▾", command=self._post_export_menu)
-        self._print_btn.pack_forget()
         self._zoom_out_btn.configure(text="A−")
         self._zoom_in_btn.configure(text="A+")
         self._hide_cl_button()
@@ -25193,15 +24099,8 @@ class _ScholarTextWindow:
         """Apply the "Side panel" checkbox to the current view's right-hand
         panel, and remember the setting for that view.
 
-        The PDF view's panel is the separate-opinions strip, the text views' is
-        the details panel; they keep separate settings so switching views
-        restores what the reader last chose *there* rather than carrying one
-        view's preference into the other."""
+        The text views' panel is the details panel."""
         on = self._details_var.get()
-        if self._mode == "pdf":
-            self._pdf_parts_on = on
-            self._apply_pdf_parts_visibility()
-            return
         self._details_on = on
         if not self._pin_text_width():
             # Nowhere to grow — a maximized window, or a tab in the shared one.
@@ -25309,7 +24208,7 @@ class _ScholarTextWindow:
 
     def _can_resize_for_details(self) -> bool:
         """Whether this window has room to widen for the panel at all."""
-        return not (isinstance(self._win, (_CaseTabPage, _EmbeddedCaseHost))
+        return not (isinstance(self._win, _EmbeddedCaseHost)
                     or self._window_is_maximized())
 
     def _window_is_maximized(self) -> bool:
@@ -25375,29 +24274,9 @@ class _ScholarTextWindow:
         showing, without firing the toggle (nothing needs re-packing — the
         view's own render put its panel in the right state)."""
         try:
-            self._details_var.set(
-                self._pdf_parts_on if self._mode == "pdf" else self._details_on
-            )
+            self._details_var.set(self._details_on)
         except tk.TclError:
             pass
-
-    def _apply_pdf_parts_visibility(self) -> None:
-        """Show or hide the PDF view's separate-opinions strip to match the
-        remembered setting.  A no-op until the strip exists — the text layer
-        has to be read before the opinions in it are known."""
-        nav = getattr(self, "_pdf_parts_nav", None)
-        if nav is None:
-            return
-        try:
-            if not nav.winfo_exists():
-                self._pdf_parts_nav = None
-                return
-            if self._pdf_parts_on:
-                nav.pack(side="right", fill="y", padx=(4, 0))
-            else:
-                nav.pack_forget()
-        except tk.TclError:
-            self._pdf_parts_nav = None
 
     def _details_mode(self) -> str:
         """The selected side-panel view."""
@@ -26295,7 +25174,7 @@ class _ScholarTextWindow:
                     self._following_as_text = False
 
             try:
-                if self._app.open_case_pdf_first(
+                if self._app.open_cited_case_pdf(
                     self._live_parent(),
                     ("cite", f"{cite}@{pin}" if pin else cite),
                     snippet or name, self._safe_status, fallback=as_text,
@@ -27315,60 +26194,6 @@ class _ScholarTextWindow:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _apply_pdf_analysis(self, pane: _PdfPane, result: dict) -> None:
-        """Attach cached text/search/link/parts data to the current pane."""
-        try:
-            if not pane.winfo_exists() or self._pdf_pane is not pane:
-                return
-        except tk.TclError:
-            return
-        pages = result.get("pages", [])
-        if not any(pages or []):
-            return  # scan-only PDF: switching remains the old top-to-top path
-        links = result.get("links", {})
-        quiet = result.get("quiet", set())
-        sections = result.get("sections", [])
-        if links:
-            pane.set_citation_links(
-                links,
-                self._open_pdf_cite,
-                self._open_pdf_cite_browser,
-                quiet_pages=quiet,
-            )
-        pane.enable_find(pages, bind_keys=False)
-        if len(sections) > 1 and self._pdf_holder is not None:
-            self._pdf_parts_nav = _build_pdf_parts_nav(
-                self._pdf_holder, sections, pane.scroll_to_page
-            )
-            self._apply_pdf_parts_visibility()
-        bits = []
-        n_links = sum(len(value) for value in links.values())
-        n_quiet = sum(
-            len(value) for page, value in links.items() if page in quiet
-        )
-        if n_links:
-            bits.append(
-                f"{n_links} citation link{'s' if n_links != 1 else ''} "
-                + (
-                    "clickable (not colored on scanned pages)"
-                    if n_quiet else "shown in blue"
-                )
-            )
-        if len(sections) > 1:
-            bits.append(
-                f"{len(sections)} opinion parts "
-                + (
-                    "listed on the right"
-                    if self._pdf_parts_on
-                    else "— tick Side panel to list them"
-                )
-            )
-        bits.append(
-            f"{_ACCEL}-F searches the page; drag to select text "
-            f"({_ACCEL}+C copies)"
-        )
-        self._status_var.set("; ".join(bits) + ".")
-
     @staticmethod
     def _location_map_navigation_ready(location_map) -> bool:
         """Reject coincidental low-coverage fuzzy matches for view switching."""
@@ -27718,8 +26543,6 @@ class _ScholarTextWindow:
                 webbrowser.open(choice.url)
             return
         self._begin_pdf_switch(choice.url)
-        if self._mode in ("scholar", "courtlistener"):
-            self._pre_pdf_mode = self._mode
         if self._pdf_prefetch is not None and self._pdf_prefetch[1] == choice.url:
             data, url = self._pdf_prefetch
             self._show_pdf(data, url)
@@ -27951,13 +26774,6 @@ class _ScholarTextWindow:
         except Exception as exc:
             print(f"[reporter] attaching the text layer failed: {exc}")
 
-    def _render_courtlistener_view(self) -> None:
-        """Re-show whichever CourtListener text rendering this window uses."""
-        if self._cl_parts or self._cl_blocks:
-            self._render_cl_blocks()
-        else:
-            self._show_courtlistener()
-
     def _prefetch_pdf(self) -> None:
         """Resolve and fetch the official PDF in the background right after the
         Scholar view opens, caching the bytes so a later 'View PDF' is instant.
@@ -28015,9 +26831,6 @@ class _ScholarTextWindow:
             else (self._pdf_url or "")
         )
         self._begin_pdf_switch(switch_url)
-        # Remember which text view to return to when leaving the PDF.
-        if self._mode in ("scholar", "courtlistener"):
-            self._pre_pdf_mode = self._mode
         if self._pdf_prefetch is not None:  # warmed in the background already
             data, url = self._pdf_prefetch
             self._pdf_url = url
@@ -28028,8 +26841,7 @@ class _ScholarTextWindow:
         self._pdf_url = known_url
         # Disable the control that was clicked while we look (the CL view uses
         # its own View PDF button; the Scholar view reuses the toggle).
-        busy = (self._pdf_btn if self._pre_pdf_mode == "courtlistener"
-                else self._toggle_btn)
+        busy = self._active_pdf_button()
         try:
             busy.configure(state="disabled")
         except tk.TclError:
@@ -28062,25 +26874,6 @@ class _ScholarTextWindow:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _pdf_opens_in_separate_window(self) -> bool:
-        """Whether this reader's scan floats in its own minimal viewer.
-
-        The reporter interface says yes for everything; the other two say yes
-        only for a window that was popped out of the tabbed one holding a
-        PDF — that window is a reporter window, whatever the app is set to."""
-        getter = getattr(self._app, "pdf_opens_in_separate_window", None)
-        if getter is None:
-            return False
-        try:
-            return bool(getter(self._win))
-        except TypeError:       # an older app object, before the argument
-            try:
-                return bool(getter())
-            except Exception:
-                return False
-        except Exception:
-            return False
-
     def _show_pdf_floating(self, data: bytes, url: str) -> None:
         """Open the scan in the minimal floating viewer, leaving this window on
         the opinion text.  The reader keeps both: the text where it was and the
@@ -28109,7 +26902,6 @@ class _ScholarTextWindow:
                     on_close=self._floating_pdf_closed,
                     on_cite=self._open_pdf_cite,
                     on_cite_browser=self._open_pdf_cite_browser,
-                    on_open_text=self._surface_text_view,
                     on_build_text=self._embed_text_reader,
                 )
                 self._pdf_float_win = win
@@ -28208,51 +27000,6 @@ class _ScholarTextWindow:
         except (AttributeError, tk.TclError):
             return False
 
-    def _surface_text_view(self) -> None:
-        """Show this case's text — what the case name on the floating viewer's
-        strip does when the scan was opened from the reader.
-
-        Usually the reader is still on screen and is simply brought forward.
-        When it has since been closed — the viewer outlives it — the text is
-        opened again from the ingredients the History entry keeps, so it comes
-        back without being refetched."""
-        if self._text_view_alive():
-            win = self._win
-            if isinstance(win, _EmbeddedCaseHost):
-                win.surface()       # the floating window holding this text
-                return
-            if isinstance(win, _CaseTabPage):
-                try:
-                    win._manager.notebook.select(win)
-                    win._manager.surface()
-                except (AttributeError, tk.TclError):
-                    pass
-                return
-            try:
-                win.deiconify()
-                win.lift()
-                win.focus_force()
-            except (AttributeError, tk.TclError):
-                pass
-            return
-        app = self._app
-        if app is None:
-            return
-        # Another window may already be showing this case (the reader was
-        # reopened from History, or this is a second click).
-        try:
-            if app.surface_case_view(self._history_key()):
-                return
-        except Exception as exc:
-            print(f"[pdf-window] looking for the open text failed: {exc}")
-        reopen = getattr(self, "_history_reopen", None)
-        if reopen is None:
-            return
-        try:
-            reopen()
-        except Exception as exc:
-            print(f"[pdf-window] reopening the case text failed: {exc}")
-
     def _floating_pdf_closed(self, win) -> None:
         if self._pdf_float_win is win:
             self._pdf_float_win = None
@@ -28261,87 +27008,7 @@ class _ScholarTextWindow:
             holder.discard(win)
 
     def _show_pdf(self, data: bytes, url: str) -> None:
-        if self._pdf_opens_in_separate_window():
-            self._show_pdf_floating(data, url)
-            return
-        switch_target = self._consume_pdf_switch_target(url)
-        _clamp_toplevel_to_work_area(
-            self._win, min_width=430, min_height=300, bottom_gap=72
-        )
-        width = max(self._text.winfo_width() - 24, 520)
-        # US Reports scans get a roughly 3× margin (see _is_us_reports_pdf).
-        margin = _PdfPane._MARGIN * 3 if _is_us_reports_pdf(url) else None
-        # The pane lives in a holder frame so a parts strip (built once the
-        # text layer reveals the separate opinions) can sit to its right.
-        if getattr(self, "_pdf_holder", None) is not None:
-            self._pdf_holder.destroy()  # a previous PDF view left behind
-            self._pdf_holder = None
-            self._pdf_parts_nav = None
-            self._pdf_pane = None
-        holder = ttk.Frame(self._win)
-        try:
-            pane = _PdfPane(
-                holder, data, width=width, margin=margin,
-                link_style="recolor", uniform_crop=True,
-            )
-        except Exception as exc:  # pragma: no cover - render/lib failure
-            holder.destroy()
-            self._on_pdf_error(str(exc))
-            return
-        # Swap the text view for the PDF pane (kept above the button row).
-        self._finder.close()   # its bar anchors to the frame about to go away
-        self._text_frame.pack_forget()
-        holder.pack(fill="both", expand=True, padx=8, pady=4,
-                    before=self._btn_frame)
-        pane.pack(side="left", fill="both", expand=True)
-        self._pdf_holder = holder
-        self._pdf_pane = pane
-        self._pdf_url = url
-        self._pdf_bytes = data
-        self._mode = "pdf"
-        # The checkbox now speaks for the PDF view's own panel.
-        self._sync_details_checkbox()
-
-        # Search, citation linking, part detection, and location matching all
-        # consume the same cached extraction instead of opening the PDF again.
-        self._active_pdf_analysis_key = self._request_pdf_analysis(
-            data, url,
-            lambda result, p=pane: self._apply_pdf_analysis(p, result),
-        )
-        if switch_target is not None:
-            page, y_pt = switch_target
-            self._win.after_idle(
-                lambda p=pane, i=page, y=y_pt: (
-                    p.scroll_to_page(i, y)
-                    if self._pdf_pane is p else None
-                )
-            )
-        self._hide_pdf_button()  # the toggle below is the way back from the PDF
-        self._source_var.set(url)
-        # Returning from the PDF goes back to whichever text view we came from:
-        # the Scholar text, or — for a CourtListener-primary window — the CL text.
-        if self._pre_pdf_mode == "courtlistener":
-            back_label, back_state = "Text", "normal"
-        else:
-            # The "Text" toggle is disabled only for a Federal
-            # Appendix case whose Scholar page has no opinion text (a scan-only
-            # case); every other case keeps it active.
-            back_label = "Text"
-            back_state = ("disabled"
-                          if self._fed_appx and not self._scholar_has_text
-                          else "normal")
-        _style_ui_button(self._toggle_btn, primary=True)
-        self._toggle_btn.configure(
-            text=back_label, command=self._back_from_pdf, state=back_state)
-        self._hide_cl_button()
-        # In PDF view, the RTF export becomes a "Download PDF" action, a Print
-        # button appears, and the text-size buttons zoom the page.
-        self._export_btn.configure(text="Download PDF", command=self._download_pdf)
-        self._print_btn.pack(side="right", padx=4)
-        self._zoom_out_btn.configure(text="−")
-        self._zoom_in_btn.configure(text="+")
-        self._apply_button_bar_compact()
-        self._status_var.set("Showing the official PDF of the opinion.")
+        self._show_pdf_floating(data, url)
 
     def _live_parent(self):
         """A window to hang a dialog on.  This reader's own while it is open —
@@ -28400,9 +27067,7 @@ class _ScholarTextWindow:
             return
         whiten, header = self._pdf_print_header(data)
         try:
-            _write_output_pdf(
-                path, data, pane if pane is not None else self._pdf_pane,
-                whiten=whiten, header=header)
+            _write_output_pdf(path, data, pane, whiten=whiten, header=header)
         except Exception as exc:
             messagebox.showerror("Download PDF", str(exc), parent=parent)
             return
@@ -28420,7 +27085,6 @@ class _ScholarTextWindow:
         data = getattr(self, "_pdf_bytes", None)
         if not data:
             return
-        pane = pane if pane is not None else self._pdf_pane
         whiten, header = self._pdf_print_header(data)
         # Name the print file the same as "Download PDF" would, so a Save-As
         # from the viewer already carries the Bluebook citation.
@@ -28450,40 +27114,8 @@ class _ScholarTextWindow:
     def _open_pdf_cite_browser(self, action: tuple, snippet: str) -> None:
         _open_citation_in_browser(action, snippet)
 
-    def _back_from_pdf(self) -> None:
-        """Return from the PDF to the text view it was opened from — the Google
-        Scholar text, or the CourtListener text for a CL-primary window."""
-        self._pending_text_target = None
-        pane = self._pdf_pane
-        address = self._text_target_for_viewport(
-            pane.viewport_anchor() if pane is not None else None,
-            mode=self._pre_pdf_mode,
-        )
-        if address is not None:
-            self._pending_text_target = address
-            part_index = getattr(address, "part_index", None)
-            if (self._current_part is not None
-                    and part_index != self._current_part):
-                # The PDF can be scrolled into another writing. Show the
-                # full opinion so that target exists in the rendering.
-                self._current_part = None
-        holder = getattr(self, "_pdf_holder", None)
-        if holder is not None:
-            holder.destroy()  # takes the pane and its parts strip with it
-            self._pdf_holder = None
-            self._pdf_parts_nav = None
-        elif self._pdf_pane is not None:
-            self._pdf_pane.destroy()
-        self._pdf_pane = None
-        self._text_frame.pack(fill="both", expand=True, padx=8, pady=4,
-                              before=self._btn_frame)
-        if self._pre_pdf_mode == "courtlistener":
-            self._render_courtlistener_view()
-        else:
-            self._render_scholar()  # restores the buttons and "PDF"
-
     def _on_pdf_error(self, msg: str) -> None:
-        if self._pre_pdf_mode == "courtlistener" and self._mode != "pdf":
+        if self._mode == "courtlistener":
             # Failure came from the CL view's View PDF button — restore it
             # rather than turning the Scholar toggle into a "PDF".
             self._refresh_pdf_button()
@@ -28888,27 +27520,19 @@ class _PdfWindow:
         )
         self._text_lookup_empty = False
 
-        # The reporter interface shows a scan in the small floating viewer, not
-        # in a window of chrome.  Everything about *getting* the PDF stays
-        # here — the fetch, the CloudFlare hand-off, the error and link-out
-        # panels — so this window simply keeps out of sight until one of those
-        # needs it, and hands the pages over when they arrive.
-        self._reporter = bool(
-            app is not None
-            and hasattr(app, "pdf_opens_in_separate_window")
-            and app.pdf_opens_in_separate_window(parent)
-        )
+        # A scan is shown in the small floating viewer, not in a window of
+        # chrome.  Everything about *getting* the PDF stays here — the fetch,
+        # the CloudFlare hand-off, the error and link-out panels — so this
+        # window simply keeps out of sight until one of those needs it, and
+        # hands the pages over when they arrive.
+        self._reporter = app is not None
         self._reporter_anchor = parent
         self._float = None
 
-        self._win = (
-            # Owned by the application, like the viewer it hands the pages to:
-            # closing the window this scan was opened from must not take the
-            # scan with it.
-            _ui_toplevel(getattr(app, "root", parent)) if self._reporter
-            else _case_view_host(parent, app) if self._is_case
-            else _secondary_view_host(parent, app)
-        )
+        # Owned by the application, like the viewer it hands the pages to:
+        # closing the window this scan was opened from must not take the
+        # scan with it.
+        self._win = _ui_toplevel(getattr(app, "root", parent))
         self._win.title(title)
         if self._reporter:
             try:
@@ -28976,29 +27600,13 @@ class _PdfWindow:
             ),
         )
 
+        # This window is only a courier: the floating viewer is what the
+        # reader sees, and floating viewers are not in the window registry.
+        # The History entry still is.
         entry = self._history_entry()
         if entry is not None and self._app is not None and hasattr(
                 self._app, "record_case_view"):
             self._app.record_case_view(*entry)
-            # In the reporter interface this window is only a courier: the
-            # floating viewer is what the reader sees, and floating viewers are
-            # not in the window registry.  The History entry above still is.
-            if hasattr(self._app, "register_case_window") and not self._reporter:
-                self._app.register_case_window(
-                    self, self._win, entry[0], entry[1], entry[2]
-                )
-        elif (self._app is not None and not self._reporter and hasattr(
-            self._app, "register_secondary_window"
-        )):
-            def reopen(parent=None, app=self._app, source=self) -> None:
-                _PdfWindow(
-                    app.root if parent is None else parent,
-                    source._url, source._title,
-                    app=app, is_case=False,
-                )
-            self._app.register_secondary_window(
-                self, self._win, f"pdf-view:{id(self)}", title, reopen,
-            )
 
         self._fetch()
         if self._can_discover_text:
@@ -29418,13 +28026,6 @@ class _PdfWindow:
             return False
         self._bytes = data
         self._float = viewer
-        # This window was already reporter-bound (that is why it is hiding), so
-        # the viewer taking its place is too, even when the app as a whole is
-        # not — a scan popped out of the tabbed window carries the chain.
-        try:
-            viewer._win._reporter_window = True
-        except (AttributeError, tk.TclError):
-            pass
         if app is not None and hasattr(app, "_cited_pdf_windows"):
             app._cited_pdf_windows.add(viewer)
         viewer.surface()
@@ -29851,9 +28452,7 @@ def _windows_program_path(exe: str) -> str:
     found = shutil.which(exe)
     if found:
         return found
-    try:
-        import winreg
-    except ImportError:
+    if winreg is None:
         return ""
     for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
         try:
@@ -30553,8 +29152,9 @@ class _SlipOpinionWindow:
                 )
             key, label = f"slip:{url}", f"{title} (slip op.)"
             app.record_case_view(key, label, reopen)
-            if hasattr(app, "register_case_window"):
-                app.register_case_window(self, self._win, key, label, reopen)
+            if hasattr(app, "register_secondary_window"):
+                app.register_secondary_window(self, self._win, key, label,
+                                              reopen)
 
         self._fetch()
 
@@ -31196,11 +29796,11 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
         status("Don't know how to open that citation.")
         return
 
-    # The reporter interface follows a citation to the *report*: the same
-    # lookup a citation clicked inside a scan gets, so a case reached from the
-    # text side lands where one reached from the pages would.  Falls through to
-    # the ordinary path below when no scan exists anywhere.
-    opener = getattr(app, "open_case_pdf_first", None)
+    # A citation is followed to the *report*: the same lookup a citation
+    # clicked inside a scan gets, so a case reached from the text side lands
+    # where one reached from the pages would.  Falls through to the ordinary
+    # path below when no scan exists anywhere.
+    opener = getattr(app, "open_cited_case_pdf", None)
     if opener is not None and not getattr(app, "_following_as_text", False):
         def as_text() -> None:
             app._following_as_text = True
@@ -32812,9 +31412,6 @@ class _CitingOpinionsWindow:
             return
         self._history_idx -= 1
         self._load_page()
-
-    def _current_cursor(self) -> Optional[str]:
-        return self._cursor_history[self._history_idx]
 
     # ------------------------------------------------------------------
     # Data loading  (Phase 1 – search results)

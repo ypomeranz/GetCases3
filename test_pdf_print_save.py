@@ -44,6 +44,7 @@ def _load_functions(names, extra=None) -> dict:
     ns = {"tk": _Tk, "re": re, "sys": sys, "os": _FakeOS,
           "subprocess": _FakeSubprocess, "shutil": _FakeShutil,
           "webbrowser": _FakeBrowser, "json": __import__("json"),
+          "winreg": None,   # registry lookups answer "not installed"
           "Optional": typing.Optional}
     ns.update(extra or {})
     for name in names:

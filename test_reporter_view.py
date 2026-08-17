@@ -1,13 +1,13 @@
-"""Reporter View: the interface that answers with the report itself.
+"""Reporter View: the app answers with the report itself.
 
-Interface ▸ *Reporter View* changes what opening a document means.  A case
-opens as its scan, in the small floating viewer, with T turning it into the
-opinion text; a case with no scan anywhere opens in that same window at that
-same size, on the text side, rather than as a different kind of window.  A
-source printed only as pages — Statutes at Large, the English Reports — opens
-there too, without the switch, because there is nothing to switch to.  And a
-citation followed out of a search result, a brief or the text side is looked
-up as a scan first, exactly as one clicked on a page already was.
+Opening a document means: a case opens as its scan, in the small floating
+viewer, with T turning it into the opinion text; a case with no scan anywhere
+opens in that same window at that same size, on the text side, rather than as
+a different kind of window.  A source printed only as pages — Statutes at
+Large, the English Reports — opens there too, without the switch, because
+there is nothing to switch to.  And a citation followed out of a search
+result, a brief or the text side is looked up as a scan first, exactly as one
+clicked on a page already was.
 
 As elsewhere in this suite the methods are lifted out of
 ``courtlistener_gui`` with ``ast`` (importing it needs tkinter, absent on a
@@ -33,10 +33,7 @@ class _Tk:
 
 def _base_ns(extra=None) -> dict:
     ns = {"tk": _Tk, "sys": sys, "re": re, "Optional": typing.Optional,
-          "threading": _Threading, "print": lambda *a, **k: None,
-          "_INTERFACE_MODES": _module_value("_INTERFACE_MODES"),
-          "_DEFAULT_INTERFACE_MODE": _module_value(
-              "_DEFAULT_INTERFACE_MODE")}
+          "threading": _Threading, "print": lambda *a, **k: None}
     ns.update(extra or {})
     return ns
 
@@ -159,9 +156,7 @@ class _Var:
 # PDF-first: a citation is looked up as a scan before it is looked up as text
 # ---------------------------------------------------------------------------
 
-APP_NAMES = ["open_case_pdf_first", "reporter_open_case",
-             "pdf_opens_in_separate_window", "interface_mode",
-             "_safe_root_status"]
+APP_NAMES = ["reporter_open_case", "_safe_root_status"]
 
 APP_NS = _load(
     "CourtListenerGUI", APP_NAMES,
@@ -170,8 +165,7 @@ APP_NS = _load(
 
 
 class _App:
-    def __init__(self, mode="reporter", opens=True):
-        self._interface_mode = mode
+    def __init__(self, opens=True):
         self.root = _Widget()
         self.asked: list = []
         self.opens = opens
@@ -183,41 +177,6 @@ class _App:
                             status=lambda _s: None, fallback=None):
         self.asked.append((parent, action, snippet, fallback))
         return self.opens
-
-
-class PdfFirstTests(unittest.TestCase):
-    def test_the_reporter_interface_looks_for_the_scan(self):
-        app = _App()
-        self.assertTrue(
-            app.open_case_pdf_first(app.root, ("cite", "410 U.S. 113")))
-        self.assertEqual(app.asked[0][1], ("cite", "410 U.S. 113"))
-
-    def test_the_other_two_do_not(self):
-        for mode in ("windows", "tabs"):
-            app = _App(mode=mode)
-            self.assertFalse(
-                app.open_case_pdf_first(app.root, ("cite", "410 U.S. 113")))
-            self.assertEqual(app.asked, [])
-
-    def test_a_window_popped_out_of_a_scan_does_though(self):
-        app = _App(mode="tabs")
-        popped = _Widget()
-        popped._reporter_window = True
-        self.assertTrue(
-            app.open_case_pdf_first(popped, ("cite", "410 U.S. 113")))
-
-    def test_the_caller_s_own_way_of_opening_it_is_the_fallback(self):
-        app = _App()
-        marker = []
-        app.open_case_pdf_first(app.root, ("cite", "1 U.S. 1"),
-                                fallback=lambda: marker.append(1))
-        app.asked[0][3]()
-        self.assertEqual(marker, [1])
-
-    def test_a_lookup_that_cannot_start_leaves_the_caller_to_it(self):
-        app = _App(opens=False)
-        self.assertFalse(
-            app.open_case_pdf_first(app.root, ("cite", "1 U.S. 1")))
 
 
 class ReporterOpenCaseTests(unittest.TestCase):
@@ -247,9 +206,17 @@ class ReporterOpenCaseTests(unittest.TestCase):
         app.reporter_open_case(None, cite="410 U.S. 113")
         self.assertIs(app.asked[0][0], app.root)
 
-    def test_the_other_interfaces_open_a_result_as_they_always_did(self):
-        app = _App(mode="windows")
-        self.assertFalse(app.reporter_open_case(app.root, cite="410 U.S. 113"))
+    def test_the_caller_s_own_way_of_opening_it_is_the_fallback(self):
+        app = _App()
+        marker = []
+        app.reporter_open_case(app.root, cite="1 U.S. 1",
+                               fallback=lambda: marker.append(1))
+        app.asked[0][3]()
+        self.assertEqual(marker, [1])
+
+    def test_a_lookup_that_cannot_start_leaves_the_caller_to_it(self):
+        app = _App(opens=False)
+        self.assertFalse(app.reporter_open_case(app.root, cite="1 U.S. 1"))
 
 
 class WhereItIsAskedTests(unittest.TestCase):
@@ -264,12 +231,12 @@ class WhereItIsAskedTests(unittest.TestCase):
         src = next(ast.get_source_segment(SRC, n) for n in TREE.body
                    if isinstance(n, ast.FunctionDef)
                    and n.name == "_follow_brief_action")
-        self.assertIn("open_case_pdf_first", src)
+        self.assertIn("open_cited_case_pdf", src)
         self.assertIn("_following_as_text", src)
 
     def test_and_a_link_clicked_in_the_opinion_text(self):
         src = _source_of("_ScholarTextWindow", "_follow_link")
-        self.assertIn("self._app.open_case_pdf_first(", src)
+        self.assertIn("self._app.open_cited_case_pdf(", src)
         self.assertIn("fallback=as_text", src)
 
     def test_but_federal_appendix_keeps_its_own_scan_route(self):
@@ -306,16 +273,12 @@ class _StubViewer:
 
 
 class _HostApp:
-    def __init__(self, mode="reporter"):
-        self._interface_mode = mode
+    def __init__(self):
         self.root = _Widget()
         self._cited_pdf_windows: set = set()
         self.secondary: list = []
         for name in ("new_case_view_host", "_reporter_text_host"):
             setattr(self, name, HOST_NS[name].__get__(self))
-        self.pdf_opens_in_separate_window = APP_NS[
-            "pdf_opens_in_separate_window"].__get__(self)
-        self.interface_mode = APP_NS["interface_mode"].__get__(self)
 
     def new_secondary_view_host(self, parent):
         self.secondary.append(parent)
@@ -367,12 +330,6 @@ class TextOnlyCaseTests(unittest.TestCase):
         app = _HostApp()
         app.new_case_view_host(app.root)
         self.assertTrue(_StubViewer.made[0].standalone)
-
-    def test_the_other_interfaces_open_the_text_as_they_always_did(self):
-        for mode in ("windows", "tabs"):
-            app = _HostApp(mode=mode)
-            self.assertEqual(app.new_case_view_host(app.root), "ordinary host")
-            self.assertEqual(_StubViewer.made, [])
 
     def test_a_viewer_that_will_not_open_is_not_fatal(self):
         ns = _load(
@@ -888,51 +845,6 @@ class ScanWindowChromeTests(unittest.TestCase):
         self.assertFalse(win._win.shown)
 
 
-class ReporterChainTests(unittest.TestCase):
-    """A scan popped out of the tabbed window carries its interface with it —
-    and so does everything opened from it, text side included."""
-
-    def setUp(self):
-        _HandoffViewer.made.clear()
-        self.mark = _load_functions(["_mark_reporter_window"])[
-            "_mark_reporter_window"]
-
-    def test_a_viewer_opened_from_a_reporter_window_is_one(self):
-        app, win = _App(mode="tabs"), _Widget()
-        origin = _Widget()
-        origin._reporter_window = True
-        self.mark(win, app, origin)
-        self.assertTrue(getattr(win, "_reporter_window", False))
-
-    def test_and_so_is_every_viewer_in_reporter_view(self):
-        app, win = _App(mode="reporter"), _Widget()
-        self.mark(win, app, _Widget())
-        self.assertTrue(getattr(win, "_reporter_window", False))
-
-    def test_but_not_one_opened_from_an_ordinary_window(self):
-        app, win = _App(mode="windows"), _Widget()
-        self.mark(win, app, _Widget())
-        self.assertFalse(getattr(win, "_reporter_window", False))
-
-    def test_an_app_that_cannot_answer_is_not_fatal(self):
-        win = _Widget()
-        self.mark(win, None, _Widget())
-        self.assertFalse(getattr(win, "_reporter_window", False))
-
-    def test_the_viewer_marks_itself_where_it_was_opened_from(self):
-        src = _source_of("_FloatingPdfWindow", "__init__")
-        self.assertIn(
-            "_mark_reporter_window(self._win, app,\n"
-            "                              anchor if anchor is not None "
-            "else parent)", src)
-
-    def test_a_scan_handed_over_by_its_courier_is_one_too(self):
-        win = _ScanWindow()
-        win._show(b"%PDF-1.4")
-        self.assertTrue(
-            getattr(_HandoffViewer.made[0]._win, "_reporter_window", False))
-
-
 class WindowIndependenceTests(unittest.TestCase):
     """No window in Reporter View closes another.  Tk destroys a top-level
     with its master, so every one of them hangs on the application root."""
@@ -943,27 +855,15 @@ class WindowIndependenceTests(unittest.TestCase):
             {"_ui_toplevel": lambda master: ("window on", master)},
         )
 
-    def _app(self, mode="reporter"):
-        app = _App(mode=mode)
-        app._case_tabs_enabled = mode == "tabs"
+    def _app(self):
+        app = _App()
         for name in ("window_master", "new_secondary_view_host"):
             setattr(app, name, self.ns[name].__get__(app))
         return app
 
-    def test_a_window_opened_in_reporter_view_hangs_on_the_app(self):
+    def test_a_new_window_hangs_on_the_app(self):
         app = self._app()
         self.assertIs(app.window_master(_Widget()), app.root)
-
-    def test_and_so_does_one_opened_from_a_popped_out_scan(self):
-        app = self._app(mode="tabs")
-        origin = _Widget()
-        origin._reporter_window = True
-        self.assertIs(app.window_master(origin), app.root)
-
-    def test_individual_windows_keeps_its_own_arrangement(self):
-        app = self._app(mode="windows")
-        origin = _Widget()
-        self.assertIs(app.window_master(origin), origin)
 
     def test_the_root_going_away_is_not_fatal(self):
         app = self._app()
@@ -991,13 +891,11 @@ class WindowIndependenceTests(unittest.TestCase):
             src)
         self.assertIn(
             "_follow_brief_action(self, onward(), a, status, snippet=s)", src)
-        self.assertIn("on_open_text=lambda: _follow_brief_action(\n"
-                      "                    self, onward()", src)
 
     def test_the_hidden_courier_is_owned_by_the_app_too(self):
         src = _source_of("_PdfWindow", "__init__")
-        self.assertIn('_ui_toplevel(getattr(app, "root", parent)) '
-                      'if self._reporter', src)
+        self.assertIn('_ui_toplevel(getattr(app, "root", parent))', src)
+
 
 class _StripMenu:
     def __init__(self):
@@ -1056,13 +954,12 @@ class _StripViewer:
     """Just the strip's menu and what decides what goes on it."""
 
     def __init__(self, owner=None, app=None, reader=None, mode="pdf",
-                 recent=None, interface=None):
+                 recent=None):
         self._bookmarks = owner
         self._app = app
         self._reader = reader
         self._mode = mode
         self._recent_menu = recent
-        self._interface_menu = interface
         # What has_text_side/details_showing read: a viewer with an opinion
         # behind it offers the case's details on the menu; one showing only
         # pages has none to offer.
@@ -1087,8 +984,8 @@ class _StripViewer:
 
 
 class StripMenuTests(unittest.TestCase):
-    """A window with no menu bar keeps History, Bookmarks, the Interface and
-    Close on the strip's own menu."""
+    """A window with no menu bar keeps History, Bookmarks and Close on the
+    strip's own menu."""
 
     def test_save_and_print_lead_and_close_ends_it(self):
         viewer = _StripViewer()
@@ -1102,20 +999,18 @@ class StripMenuTests(unittest.TestCase):
         viewer._bar_menu.items[-1][2]()
         self.assertEqual(viewer.closed, 1)
 
-    def test_history_and_the_interface_are_on_it(self):
-        viewer = _StripViewer(recent=object(), interface=object())
+    def test_history_is_on_it(self):
+        viewer = _StripViewer(recent=object())
         viewer._sync_bar_menu()
-        self.assertEqual(viewer._bar_menu.labels()[2:4],
-                         ["Recent", "Interface"])
+        self.assertEqual(viewer._bar_menu.labels()[2], "Recent")
 
-    def test_an_app_that_cannot_fill_them_gets_neither(self):
+    def test_an_app_that_cannot_fill_it_gets_no_recent(self):
         viewer = _StripViewer()
         viewer._sync_bar_menu()
         self.assertNotIn("Recent", viewer._bar_menu.labels())
-        self.assertNotIn("Interface", viewer._bar_menu.labels())
 
     def test_posting_it_twice_does_not_stack_the_menu_up(self):
-        viewer = _StripViewer(recent=object(), interface=object())
+        viewer = _StripViewer(recent=object())
         viewer._sync_bar_menu()
         first = viewer._bar_menu.labels()
         viewer._sync_bar_menu()
@@ -1125,11 +1020,10 @@ class StripMenuTests(unittest.TestCase):
         src = _source_of("_FloatingPdfWindow", "_post_bar_menu")
         self.assertIn("self._sync_bar_menu()", src)
 
-    def test_the_submenus_are_made_once_and_re_attached(self):
+    def test_the_submenu_is_made_once_and_re_attached(self):
         src = _source_of("_FloatingPdfWindow", "_build_bar")
         self.assertIn('self._recent_menu = self._bar_submenu('
                       '"populate_history_menu")', src)
-        self.assertIn('self._interface_menu = self._bar_submenu(', src)
         sub = _source_of("_FloatingPdfWindow", "_bar_submenu")
         self.assertIn("postcommand=lambda m=sub: fill(m, *args)", sub)
 
@@ -1205,8 +1099,8 @@ class ScanWindowSourceTests(unittest.TestCase):
 
     def test_the_hidden_courier_is_not_in_the_window_registry(self):
         src = _source_of("_PdfWindow", "__init__")
-        self.assertIn("not self._reporter", src)
         self.assertIn("self._win.withdraw()", src)
+        self.assertNotIn("register_secondary_window", src)
 
     def test_saving_and_printing_use_the_rendering_on_screen(self):
         src = _source_of("_PdfWindow", "_hand_to_viewer")

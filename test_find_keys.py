@@ -384,20 +384,6 @@ class ReaderPageKeyTests(unittest.TestCase):
                     self._event(_ScrollWidget(cls_name))))
         self.assertEqual(calls, [])
 
-    def test_the_case_reader_turns_pages_only_while_its_scan_is_showing(self):
-        ns = _load("_turn_pdf_page", cls="_ScholarTextWindow")
-        Reader = type("Reader", (), {"_turn_pdf_page": ns["_turn_pdf_page"]})
-        turned: list = []
-        reader = Reader()
-        reader._pdf_pane = type("Pane", (), {
-            "turn_page": lambda _self, d: turned.append(d) or True})()
-
-        reader._mode = "pdf"
-        self.assertTrue(reader._turn_pdf_page(+1))
-        reader._mode = "text"
-        self.assertFalse(reader._turn_pdf_page(+1))
-        self.assertEqual(turned, [+1])
-
     def test_the_page_canvas_binds_them_and_panning_moves_to_shift(self):
         src = _source_of("_PdfPane", "__init__")
         self.assertIn('canvas.bind("<KeyPress-Left>",', src)
@@ -484,81 +470,36 @@ class _FakeFinder:
 
 
 class ReaderRoutingTests(unittest.TestCase):
-    """The reader shows either its text view or a PDF pane; find follows."""
+    """The reader's find keys belong to its text; the scan floats in its own
+    viewer and searches itself there."""
 
     @classmethod
     def setUpClass(cls):
-        ns = _load("_find_pane", "_find_open", "_find_step",
-                   cls="_ScholarTextWindow")
+        ns = _load("_find_open", "_find_step", cls="_ScholarTextWindow")
         cls.Reader = type("Reader", (), {k: ns[k] for k in
-                                         ("_find_pane", "_find_open",
-                                          "_find_step")})
+                                         ("_find_open", "_find_step")})
 
-    def _reader(self, mode, pane):
+    def _reader(self):
         r = self.Reader()
-        r._mode, r._pdf_pane = mode, pane
         r._finder = _FakeFinder()
         return r
 
-    def test_pdf_view_searches_the_pdf(self):
-        pane = _FakePane()
-        r = self._reader("pdf", pane)
-        r._find_open()
-        self.assertEqual((pane.opened, r._finder.opened), (1, 0))
-
-    def test_text_view_searches_the_text(self):
-        pane = _FakePane()
-        r = self._reader("scholar", pane)
-        r._find_open()
-        self.assertEqual((pane.opened, r._finder.opened), (0, 1))
-
-    def test_a_scan_with_no_text_layer_falls_back_to_the_text_view(self):
-        pane = _FakePane(has_find=False)
-        r = self._reader("pdf", pane)
-        r._find_open()
-        self.assertEqual((pane.opened, r._finder.opened), (0, 1))
-
-    def test_a_destroyed_pane_falls_back_to_the_text_view(self):
-        pane = _FakePane(exists=False)
-        r = self._reader("pdf", pane)
-        r._find_open()
-        self.assertEqual((pane.opened, r._finder.opened), (0, 1))
-
-    def test_no_pane_at_all_falls_back_to_the_text_view(self):
-        r = self._reader("pdf", None)
+    def test_the_find_key_searches_the_text(self):
+        r = self._reader()
         r._find_open()
         self.assertEqual(r._finder.opened, 1)
 
-    def test_opening_the_pdf_finder_closes_the_text_one(self):
-        # Its bar anchors to a frame that is not on screen in PDF view.
-        r = self._reader("pdf", _FakePane())
-        r._find_open()
-        self.assertEqual(r._finder.closed, 1)
-
-    def test_the_find_key_pressed_again_puts_the_bar_away(self):
-        pane = _FakePane()
-        r = self._reader("pdf", pane)
-        r._find_open()
-        r._find_open()
-        self.assertEqual((pane.opened, pane.closed), (1, 1))
-
-    def test_and_the_same_on_the_text_view(self):
-        r = self._reader("scholar", _FakePane())
+    def test_pressed_again_it_puts_the_bar_away(self):
+        r = self._reader()
         r._find_open()
         r._find_open()
         self.assertEqual((r._finder.opened, r._finder.closed), (1, 1))
 
-    def test_find_again_follows_the_same_view(self):
-        pane = _FakePane()
-        r = self._reader("pdf", pane)
+    def test_find_again_steps_the_text_finder(self):
+        r = self._reader()
         r._find_step(+1)
         r._find_step(-1)
-        self.assertEqual((pane.steps, r._finder.steps), ([1, -1], []))
-
-        pane = _FakePane()
-        r = self._reader("courtlistener", pane)
-        r._find_step(+1)
-        self.assertEqual((pane.steps, r._finder.steps), ([], [1]))
+        self.assertEqual(r._finder.steps, [1, -1])
 
 
 class FindKeyTogglesTests(unittest.TestCase):
@@ -604,7 +545,6 @@ class FindKeyTogglesTests(unittest.TestCase):
 
     def test_and_so_does_the_reader(self):
         src = _source_of("_ScholarTextWindow", "_find_open")
-        self.assertIn("pane._toggle_find()", src)
         self.assertIn("self._finder.toggle()", src)
 
 

@@ -533,7 +533,8 @@ class DocketFetchAndPanelTests(unittest.TestCase):
         source = Path("courtlistener_gui.py").read_text(encoding="utf-8")
 
         self.assertIn(
-            "self._text_frame, width=self._details_panel_w",
+            "else self._text_frame,\n"
+            "                width=self._details_panel_w,",
             source,
         )
         self.assertIn("f.pack_propagate(False)", source)

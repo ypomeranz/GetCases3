@@ -37,7 +37,7 @@ class _Tk:
 
 def _base_ns(extra=None) -> dict:
     ns = {"tk": _Tk, "sys": sys, "re": re, "Optional": typing.Optional,
-          "_CaseTabPage": type("_CaseTabPage", (), {}), "_ACCEL": "Ctrl"}
+          "_ACCEL": "Ctrl"}
     ns.update(extra or {})
     return ns
 
@@ -233,122 +233,23 @@ class _FakeFloatingWindow:
         self._alive = False
 
 
-class _InWindow(Exception):
-    """Raised by a stub only the in-window PDF path reaches."""
-
-
 # ---------------------------------------------------------------------------
-# The Interface menu
+# The Window menu
 # ---------------------------------------------------------------------------
 
-INTERFACE_LABELS = _module_value("_INTERFACE_LABELS")
-INTERFACE_MODES = _module_value("_INTERFACE_MODES")
-
-APP_NS = _load(
-    "CourtListenerGUI",
-    ["populate_window_menu", "pdf_opens_in_separate_window",
-     "interface_mode", "set_interface_mode", "set_case_tabs_enabled",
-     "surface_case_view"],
-    {"_load_config": lambda: dict(APP_CONFIG),
-     "_save_config": lambda data: (APP_CONFIG.clear(),
-                                  APP_CONFIG.update(data)),
-     "_INTERFACE_LABELS": INTERFACE_LABELS,
-     "_INTERFACE_MODES": INTERFACE_MODES,
-     "_DEFAULT_INTERFACE_MODE": _module_value("_DEFAULT_INTERFACE_MODE")},
-)
-APP_CONFIG: dict = {}
+APP_NS = _load("CourtListenerGUI", ["populate_window_menu"])
 
 
 class _App:
-    def __init__(self, separate=False, mode=None):
-        self._interface_mode = mode or ("reporter" if separate else "windows")
-        self._interface_var = _Var(self._interface_mode)
+    def __init__(self):
         self.root = _FakeHost()
         self._cited_pdf_windows: set = set()
-        self.migrated: list = []
         self._open_case_views: dict = {}
-        for name in ("populate_window_menu", "pdf_opens_in_separate_window",
-                     "interface_mode", "set_interface_mode",
-                     "set_case_tabs_enabled", "surface_case_view"):
+        for name in ("populate_window_menu",):
             setattr(self, name, APP_NS[name].__get__(self))
 
-    def _migrate_open_views(self, tabs):
-        self.migrated.append(tabs)
 
-
-class InterfaceMenuTests(unittest.TestCase):
-    def setUp(self):
-        APP_CONFIG.clear()
-
-    def test_the_three_interfaces_are_what_it_offers(self):
-        app, menu = _App(), _FakeMenu()
-        app.populate_window_menu(menu, None)
-        self.assertEqual(menu.labels()[:3],
-                         ["Individual Windows", "Tabbed View",
-                          "Reporter View"])
-
-    def test_they_are_one_choice_not_three_switches(self):
-        app, menu = _App(), _FakeMenu()
-        app.populate_window_menu(menu, None)
-        kinds = [kind for kind, _kw in menu.items][:3]
-        self.assertEqual(kinds, ["radiobutton"] * 3)
-        for _kind, kw in menu.items[:3]:
-            self.assertIs(kw["variable"], app._interface_var)
-
-    def test_they_lead_the_menu(self):
-        app, menu = _App(), _FakeMenu()
-        app.populate_window_menu(menu, None)
-        self.assertLess(menu.labels().index("Reporter View"),
-                        menu.labels().index(None))   # the separator
-
-    def test_the_radio_marks_the_interface_in_force(self):
-        app, menu = _App(mode="tabs"), _FakeMenu()
-        app.populate_window_menu(menu, None)
-        self.assertEqual(menu.entry("Tabbed View")["variable"].get(), "tabs")
-
-    def test_choosing_one_switches_and_saves_it(self):
-        app, menu = _App(), _FakeMenu()
-        app.populate_window_menu(menu, None)
-        menu.entry("Reporter View")["command"]()
-        self.assertEqual(app.interface_mode(), "reporter")
-        self.assertEqual(APP_CONFIG["interface_mode"], "reporter")
-
-    def test_choosing_the_one_already_in_force_writes_nothing(self):
-        app = _App(mode="tabs")
-        app.set_interface_mode("tabs")
-        self.assertEqual(APP_CONFIG, {})
-
-    def test_an_interface_nobody_offers_is_ignored(self):
-        app = _App()
-        app.set_interface_mode("kaleidoscope")
-        self.assertEqual(app.interface_mode(), "windows")
-        self.assertEqual(APP_CONFIG, {})
-
-    def test_the_old_two_settings_are_not_written_any_more(self):
-        app = _App()
-        APP_CONFIG.update({"case_tabs_enabled": True,
-                           "pdf_separate_window": True})
-        app.set_interface_mode("reporter")
-        self.assertNotIn("case_tabs_enabled", APP_CONFIG)
-        self.assertNotIn("pdf_separate_window", APP_CONFIG)
-
-    def test_windows_and_tabs_migrate_what_is_on_screen(self):
-        # Two ways of holding the same views, so everything moves across.
-        app = _App(mode="windows")
-        app.set_interface_mode("tabs")
-        self.assertEqual(app.migrated, [True])
-        app.set_interface_mode("windows")
-        self.assertEqual(app.migrated, [True, False])
-
-    def test_reporter_view_leaves_what_is_open_alone(self):
-        # Putting a case into it means finding a scan of it, which is a fetch
-        # that can fail; it applies to what is opened next.
-        app = _App(mode="tabs")
-        app.set_interface_mode("reporter")
-        self.assertEqual(app.migrated, [])
-        app.set_interface_mode("windows")
-        self.assertEqual(app.migrated, [])
-
+class WindowMenuTests(unittest.TestCase):
     def test_the_close_item_names_what_it_closes(self):
         app, menu = _App(), _FakeMenu()
         app.populate_window_menu(menu, _FakeHost())
@@ -358,102 +259,6 @@ class InterfaceMenuTests(unittest.TestCase):
         app, menu = _App(), _FakeMenu()
         app.populate_window_menu(menu, app.root)
         self.assertNotIn("Close Window", menu.labels())
-
-
-class InterfaceMenuPlacementTests(unittest.TestCase):
-    """It sits at the far right of every menu bar, the same place each time."""
-
-    def test_the_document_windows_put_it_last(self):
-        src = next(ast.get_source_segment(SRC, n) for n in TREE.body
-                   if isinstance(n, ast.FunctionDef)
-                   and n.name == "_install_history_menubar")
-        self.assertLess(src.index("_add_bookmarks_cascade"),
-                        src.index("_add_interface_cascade"))
-        self.assertLess(src.index("_add_copy_cascade"),
-                        src.index("_add_interface_cascade"))
-
-    def test_and_so_does_the_main_window(self):
-        src = _source_of("CourtListenerGUI", "_build_ui")
-        self.assertIn("_add_interface_cascade(menubar, self, self.root)", src)
-        self.assertLess(src.index("_add_bookmarks_cascade"),
-                        src.index("_add_interface_cascade"))
-
-    def test_it_is_called_Interface(self):
-        src = next(ast.get_source_segment(SRC, n) for n in TREE.body
-                   if isinstance(n, ast.FunctionDef)
-                   and n.name == "_add_interface_cascade")
-        self.assertIn('label="Interface"', src)
-
-
-class WhereAPdfOpensTests(unittest.TestCase):
-    """Only the reporter interface floats a scan in its own viewer."""
-
-    def test_individual_windows_turn_the_window_over_to_the_scan(self):
-        self.assertFalse(_App(mode="windows").pdf_opens_in_separate_window())
-
-    def test_so_does_the_tabbed_one(self):
-        self.assertFalse(_App(mode="tabs").pdf_opens_in_separate_window())
-
-    def test_reporter_view_floats_it(self):
-        self.assertTrue(_App(mode="reporter").pdf_opens_in_separate_window())
-
-    def test_a_window_popped_out_holding_a_scan_is_a_reporter_window(self):
-        app = _App(mode="tabs")
-        popped = _FakeHost()
-        popped._reporter_window = True
-        self.assertTrue(app.pdf_opens_in_separate_window(popped))
-
-    def test_and_so_is_anything_it_opens(self):
-        # A tab in that window carries the flag on the window, not on itself.
-        app = _App(mode="tabs")
-        window = _FakeHost()
-        window._reporter_window = True
-        self.assertTrue(
-            app.pdf_opens_in_separate_window(_FakeHost(top=window)))
-
-    def test_an_ordinary_popped_out_window_is_not(self):
-        app = _App(mode="tabs")
-        self.assertFalse(app.pdf_opens_in_separate_window(_FakeHost()))
-
-    def test_only_a_tab_showing_a_scan_pops_out_as_one(self):
-        src = _source_of("CourtListenerGUI", "pop_out_view")
-        self.assertIn("reporter = self._view_is_showing_pdf(view)", src)
-        self.assertIn("manager.win._reporter_window = True", src)
-        showing = _source_of("CourtListenerGUI", "_view_is_showing_pdf")
-        self.assertIn('_mode', showing)
-        self.assertIn('"pdf"', showing)
-
-
-class SavedInterfaceTests(unittest.TestCase):
-    """What the app wears on startup, including for an older config file."""
-
-    def setUp(self):
-        self.read = _load_functions(
-            ["_read_interface_mode"],
-            {"_INTERFACE_MODES": INTERFACE_MODES,
-             "_DEFAULT_INTERFACE_MODE": _module_value(
-                 "_DEFAULT_INTERFACE_MODE")},
-        )["_read_interface_mode"]
-
-    def test_a_saved_interface_is_worn_again(self):
-        self.assertEqual(self.read({"interface_mode": "reporter"}), "reporter")
-
-    def test_an_empty_config_gets_individual_windows(self):
-        self.assertEqual(self.read({}), "windows")
-
-    def test_so_does_a_config_naming_an_interface_that_is_gone(self):
-        self.assertEqual(self.read({"interface_mode": "kaleidoscope"}),
-                         "windows")
-
-    def test_the_old_tabbed_checkbox_still_means_tabs(self):
-        self.assertEqual(self.read({"case_tabs_enabled": True}), "tabs")
-
-    def test_the_old_floating_pdf_checkbox_means_reporter_view(self):
-        # Someone who had turned that on was already asking for this.
-        self.assertEqual(self.read({"pdf_separate_window": True}), "reporter")
-        self.assertEqual(
-            self.read({"pdf_separate_window": True, "case_tabs_enabled": True}),
-            "reporter")
 
 
 # ---------------------------------------------------------------------------
@@ -472,8 +277,8 @@ class _FakeEmbeddedReader:
 
 
 READER_NAMES = [
-    "_pdf_opens_in_separate_window", "_show_pdf_floating", "_show_pdf",
-    "_floating_pdf_closed", "_surface_text_view", "_text_view_alive",
+    "_show_pdf_floating", "_show_pdf",
+    "_floating_pdf_closed", "_text_view_alive",
     "_float_pdf_master", "_float_pdf_anchor", "_scan_window_title",
     "_embed_text_reader",
 ]
@@ -485,8 +290,6 @@ READER_NS = _load(
      "_ScholarTextWindow": _FakeEmbeddedReader,
      "_EmbeddedCaseHost": type("_EmbeddedCaseHost", (), {}),
      "_is_us_reports_pdf": lambda url: "usrep" in (url or "").lower(),
-     "_clamp_toplevel_to_work_area": lambda *a, **kw: (_ for _ in ()).throw(
-         _InWindow()),
      "_scan_citation_item": lambda item, url, printed="": dict(
          item, **({"_us_reports_cite": printed} if printed else {})),
      "_bluebook_display_name": lambda item: item.get("bluebook", ""),
@@ -525,8 +328,8 @@ class _FakeHost:
 
 
 class _Reader:
-    def __init__(self, separate=True, switch_target=None):
-        self._app = _App(separate=separate)
+    def __init__(self, switch_target=None):
+        self._app = _App()
         self._win = _FakeHost()
         self._pdf_url = None
         self._pdf_bytes = None
@@ -606,24 +409,12 @@ class RoutingTests(unittest.TestCase):
     def setUp(self):
         _FakeFloatingWindow.opened = []
 
-    def test_the_setting_sends_the_pdf_to_its_own_window(self):
-        reader = _Reader(separate=True)
+    def test_the_pdf_goes_to_its_own_window(self):
+        reader = _Reader()
         reader._show_pdf(b"%PDF-1", "https://example.test/a.pdf")
         self.assertEqual(len(_FakeFloatingWindow.opened), 1)
         self.assertEqual(_FakeFloatingWindow.opened[0].url,
                          "https://example.test/a.pdf")
-
-    def test_without_it_the_pdf_still_takes_over_the_reader(self):
-        reader = _Reader(separate=False)
-        # _clamp_toplevel_to_work_area is only reached by the in-window path.
-        with self.assertRaises(_InWindow):
-            reader._show_pdf(b"%PDF-1", "https://example.test/a.pdf")
-        self.assertEqual(_FakeFloatingWindow.opened, [])
-
-    def test_an_app_without_the_setting_keeps_the_old_behaviour(self):
-        reader = _Reader(separate=False)
-        reader._app = object()      # no pdf_opens_in_separate_window at all
-        self.assertFalse(reader._pdf_opens_in_separate_window())
 
 
 class FloatingHandoffTests(unittest.TestCase):
@@ -638,9 +429,7 @@ class FloatingHandoffTests(unittest.TestCase):
         self.assertEqual(kw["on_print"], reader._print_pdf)
         self.assertEqual(kw["on_cite"], reader._open_pdf_cite)
         self.assertEqual(kw["on_close"], reader._floating_pdf_closed)
-        # The case name on the strip goes back to the text this PDF came from.
-        self.assertEqual(kw["on_open_text"], reader._surface_text_view)
-        # …and the viewer's own "T" renders that same text inside itself.
+        # The viewer's own "T" renders this reader's text inside itself.
         self.assertEqual(kw["on_build_text"], reader._embed_text_reader)
 
     def test_the_window_is_named_for_the_case(self):
@@ -728,41 +517,6 @@ class FloatingHandoffTests(unittest.TestCase):
         live = reader._pdf_float_win
         reader._floating_pdf_closed(object())
         self.assertIs(reader._pdf_float_win, live)
-
-    def test_the_name_on_the_strip_surfaces_the_reader_while_it_is_open(self):
-        reader = _Reader()
-        reader._show_pdf_floating(b"%PDF-1", "https://example.test/a.pdf")
-        reader._surface_text_view()
-        self.assertEqual(reader._win.surfaced, 1)
-        self.assertEqual(reader.reopened, 0)
-
-    def test_and_reopens_the_text_once_the_reader_has_been_closed(self):
-        # The viewer outlives the reader, so the name has to bring the text
-        # back rather than doing nothing.
-        reader = _Reader()
-        reader._show_pdf_floating(b"%PDF-1", "https://example.test/a.pdf")
-        reader._win._alive = False
-        reader._surface_text_view()
-        self.assertEqual(reader.reopened, 1)
-
-    def test_it_prefers_a_window_already_showing_that_case(self):
-        # Reopened from History, or a second click on the name.
-        reader = _Reader()
-        reader._win._alive = False
-        live = _Reader()
-        live._app = reader._app
-        reader._app._open_case_views[id(live)] = {
-            "owner": live, "view": live._win, "key": "case-key",
-        }
-        reader._surface_text_view()
-        self.assertEqual(live._win.surfaced, 1)
-        self.assertEqual(reader.reopened, 0)
-
-    def test_a_reader_with_nothing_recorded_reopens_nothing(self):
-        reader = _Reader()
-        reader._win._alive = False
-        reader._history_reopen = None
-        reader._surface_text_view()      # must not raise
 
     def test_the_citation_and_search_analysis_is_routed_to_the_viewer(self):
         reader = _Reader()
@@ -994,44 +748,6 @@ class ViewerTests(unittest.TestCase):
         viewer = _Viewer()
         viewer._save()
         self.assertEqual(viewer.saved, 1)
-
-
-class SurfaceCaseViewTests(unittest.TestCase):
-    """Finding a window already showing a case, before reopening one."""
-
-    def setUp(self):
-        self.app = _App()
-
-    def _register(self, reader, key="case-key"):
-        self.app._open_case_views[id(reader)] = {
-            "owner": reader, "view": reader._win, "key": key,
-        }
-        return reader
-
-    def test_it_surfaces_the_view_registered_under_that_key(self):
-        reader = self._register(_Reader())
-        self.assertTrue(self.app.surface_case_view("case-key"))
-        self.assertEqual(reader._win.surfaced, 1)
-
-    def test_a_key_nothing_is_showing_finds_nothing(self):
-        self._register(_Reader())
-        self.assertFalse(self.app.surface_case_view("another-case"))
-
-    def test_no_key_finds_nothing(self):
-        self.assertFalse(self.app.surface_case_view(""))
-
-    def test_a_view_that_has_been_closed_is_passed_over(self):
-        # Asking a closed reader to surface itself would send it straight back
-        # here looking for one — so it is never asked.
-        reader = self._register(_Reader())
-        reader._win._alive = False
-        self.assertFalse(self.app.surface_case_view("case-key"))
-        self.assertEqual(reader._win.surfaced, 0)
-
-    def test_something_that_is_not_a_reader_is_passed_over(self):
-        self.app._open_case_views[1] = {"owner": object(), "view": object(),
-                                        "key": "case-key"}
-        self.assertFalse(self.app.surface_case_view("case-key"))
 
 
 class StripIconTests(unittest.TestCase):

@@ -21,6 +21,7 @@ import ast
 import pathlib
 import re
 import sys
+import tempfile
 import types
 import typing
 import unittest
@@ -201,7 +202,8 @@ APP_NS = _load(
      "_cluster_citations_to_strings": lambda cites: [str(c) for c in cites],
      "_is_redacted_case_pdf": lambda url: "case.law" in (url or ""),
      "_build_default_filename": lambda item: FILENAMES.append(item) or "NAME",
-     "_named_temp_pdf_path": lambda stem: f"/tmp/{stem}.pdf",
+     "_named_temp_pdf_path": lambda stem: str(
+         pathlib.Path(tempfile.gettempdir()) / f"{stem}.pdf"),
      "_write_output_pdf": WRITE_OUTPUT_PDF,
      "_print_pdf_file": lambda parent, path, status: PRINTED.append(path),
      "_case_law_print_citation": lambda *a, **kw: "HEADER",
@@ -378,11 +380,6 @@ class CitedCasePdfTests(unittest.TestCase):
         self._click()
         self.assertEqual(self.app.scholar_calls, ["410 U.S. 113"])
 
-    def test_the_case_name_on_the_strip_opens_that_text(self):
-        self._click()
-        _FakeViewer.opened[0].kw["on_open_text"]()
-        self.assertEqual(len(TEXT_OPENS), 1)
-
     def test_a_citation_inside_that_scan_opens_its_case_too(self):
         # Following citations from scan to scan, not just the first hop.
         RESOLVED["381 U.S. 479"] = "https://loc.test/usrep381479.pdf"
@@ -519,7 +516,9 @@ class CitedCaseFilenameTests(unittest.TestCase):
 
     def test_printing_names_it_the_same_way(self):
         self.app._print_cited_pdf(self.named, pane=None)
-        self.assertEqual(PRINTED, ["/tmp/NAME.pdf"])
+        self.assertEqual(
+            PRINTED,
+            [str(pathlib.Path(tempfile.gettempdir()) / "NAME.pdf")])
 
     def test_printing_uses_the_rendering_on_screen(self):
         pane = mock.Mock()
@@ -539,7 +538,9 @@ class CitedCaseFilenameTests(unittest.TestCase):
         pane.export_cropped_pdf.side_effect = RuntimeError("no")
         pane.export_pdf.side_effect = RuntimeError("no")
         self.app._print_cited_pdf(self.named, pane=pane)
-        self.assertEqual(PRINTED, ["/tmp/NAME.pdf"])
+        self.assertEqual(
+            PRINTED,
+            [str(pathlib.Path(tempfile.gettempdir()) / "NAME.pdf")])
 
     def test_nothing_is_saved_before_there_is_a_scan(self):
         self.app._save_cited_pdf({"data": None})
@@ -666,72 +667,6 @@ class PdfClickRoutingTests(unittest.TestCase):
 
 
 BROWSER: list = []
-
-
-# ---------------------------------------------------------------------------
-# 1. The case name on the strip
-# ---------------------------------------------------------------------------
-
-VIEWER_NS = _load(
-    "_FloatingPdfWindow",
-    ["_open_text"],
-    {"_CTK_AVAILABLE": False, "_UI": {"accent": "#2f6bd8"},
-     "time": __import__("time")},
-)
-DEBOUNCE = next(
-    eval(ast.get_source_segment(SRC, node.value))       # noqa: S307
-    for cls in TREE.body
-    if isinstance(cls, ast.ClassDef) and cls.name == "_FloatingPdfWindow"
-    for node in cls.body
-    if isinstance(node, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id == "_OPEN_TEXT_DEBOUNCE"
-        for t in node.targets)
-)
-
-
-class _Viewer:
-    _OPEN_TEXT_DEBOUNCE = DEBOUNCE
-
-    def __init__(self, on_open_text=None):
-        self._on_open_text = on_open_text
-        for name in ("_open_text",):
-            setattr(self, name, VIEWER_NS[name].__get__(self))
-
-
-class OpenTheTextTests(unittest.TestCase):
-    def test_clicking_the_name_opens_the_text(self):
-        opened = []
-        _Viewer(on_open_text=lambda: opened.append(True))._open_text()
-        self.assertEqual(opened, [True])
-
-    def test_a_viewer_with_no_text_to_offer_does_nothing(self):
-        _Viewer()._open_text()      # must not raise
-
-    def test_a_failure_opening_the_text_does_not_take_the_viewer_down(self):
-        viewer = _Viewer(on_open_text=mock.Mock(side_effect=RuntimeError("no")))
-        viewer._open_text()         # must not raise
-
-    def test_one_click_opens_the_opinion_once(self):
-        # A CustomTkinter label forwards a binding to the canvas and label it
-        # is drawn from, so the handler is reached more than once per click.
-        opened = []
-        viewer = _Viewer(on_open_text=lambda: opened.append(True))
-        viewer._open_text()
-        viewer._open_text()
-        viewer._open_text()
-        self.assertEqual(opened, [True])
-
-    def test_a_later_click_opens_it_again(self):
-        opened = []
-        viewer = _Viewer(on_open_text=lambda: opened.append(True))
-        viewer._open_text()
-        viewer._opened_text_at -= DEBOUNCE + 0.1     # a click a moment later
-        viewer._open_text()
-        self.assertEqual(opened, [True, True])
-
-    def test_a_pdf_opened_from_the_reader_goes_back_to_that_reader(self):
-        body = _source_of("_ScholarTextWindow", "_show_pdf_floating")
-        self.assertIn("on_open_text=self._surface_text_view", body)
 
 
 # ---------------------------------------------------------------------------

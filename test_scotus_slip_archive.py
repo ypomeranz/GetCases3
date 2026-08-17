@@ -204,6 +204,7 @@ class SlipArchiveResolverTests(unittest.TestCase):
         }
         window._is_scotus = True
         window._header_cites = []
+        window._us_reports_cite = ""
         window._blocks = [
             Block(
                 kind="center",

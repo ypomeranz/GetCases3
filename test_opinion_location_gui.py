@@ -305,11 +305,14 @@ class RestoreTargetTests(unittest.TestCase):
 
 
 class ReverseSwitchTests(unittest.TestCase):
+    """A viewport in the scan turned back into a place in the opinion — what
+    the floating viewer's T button asks for."""
+
     @classmethod
     def setUpClass(cls):
         names = (
             "_location_address", "_location_map_navigation_ready",
-            "_text_target_for_viewport", "_back_from_pdf",
+            "_text_target_for_viewport",
         )
         ns = _load_methods("_ScholarTextWindow", names)
         cls.Reader = type("Reader", (), {
@@ -323,7 +326,7 @@ class ReverseSwitchTests(unittest.TestCase):
             for name in names
         })
 
-    def test_ready_pdf_viewport_returns_to_matching_text_and_reveals_part(self):
+    def test_ready_pdf_viewport_matches_the_text(self):
         reader = self.Reader()
         address = types.SimpleNamespace(part_index=2)
         location_map = types.SimpleNamespace(
@@ -337,24 +340,11 @@ class ReverseSwitchTests(unittest.TestCase):
                 address=address
             ),
         )
-        reader._pre_pdf_mode = "scholar"
         reader._location_map_for = lambda *_args: location_map
-        reader._pdf_pane = types.SimpleNamespace(
-            viewport_anchor=lambda: (1, 420.0),
-            destroy=lambda: None,
-        )
-        reader._pdf_holder = None
-        reader._current_part = 0
-        reader._pdf_parts_nav = object()
-        reader._text_frame = types.SimpleNamespace(pack=lambda **_kwargs: None)
-        reader._btn_frame = object()
-        reader._render_scholar = lambda: None
 
-        reader._back_from_pdf()
-
-        self.assertIs(reader._pending_text_target, address)
-        self.assertIsNone(reader._current_part)
-        self.assertIsNone(reader._pdf_pane)
+        self.assertIs(
+            reader._text_target_for_viewport((1, 420.0), mode="scholar"),
+            address)
 
     def test_low_confidence_map_preserves_old_top_of_text_fallback(self):
         reader = self.Reader()
@@ -368,22 +358,10 @@ class ReverseSwitchTests(unittest.TestCase):
             ],
             confidence=0.1,
         )
-        reader._pre_pdf_mode = "scholar"
         reader._location_map_for = lambda *_args: location_map
-        reader._pdf_pane = types.SimpleNamespace(
-            viewport_anchor=lambda: (2, 420.0),
-            destroy=lambda: None,
-        )
-        reader._pdf_holder = None
-        reader._current_part = None
-        reader._pdf_parts_nav = object()
-        reader._text_frame = types.SimpleNamespace(pack=lambda **_kwargs: None)
-        reader._btn_frame = object()
-        reader._render_scholar = lambda: None
 
-        reader._back_from_pdf()
-
-        self.assertIsNone(reader._pending_text_target)
+        self.assertIsNone(
+            reader._text_target_for_viewport((2, 420.0), mode="scholar"))
 
 
 class MappedPinTests(unittest.TestCase):

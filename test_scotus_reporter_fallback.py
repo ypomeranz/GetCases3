@@ -353,6 +353,7 @@ class RecoveredCitationPersistenceTests(unittest.TestCase):
                 window._scholar_url = self._record()["url"]
                 window._is_scotus = True
                 window._blocks = []
+                window._us_reports_cite = ""
                 window._header_cites = ["140 S. Ct. 1390"]
                 window._bb = {
                     "name": "Ramos v. Louisiana",
@@ -362,9 +363,11 @@ class RecoveredCitationPersistenceTests(unittest.TestCase):
                 item = window._pdf_item()
 
                 self.assertEqual(item["scholar_id"], "123456")
+                # The saved U.S. Reports cite leads: it is the first thing
+                # the PDF lookup tries.
                 self.assertEqual(
                     item["citation"],
-                    ["140 S. Ct. 1390", "590 U.S. 83"],
+                    ["590 U.S. 83", "140 S. Ct. 1390"],
                 )
             finally:
                 db.close()
