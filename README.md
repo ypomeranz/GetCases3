@@ -101,7 +101,7 @@ The text runs the full width of the window: instead of the labelled parts strip 
 
 A PDF viewer is a window in its own right: **closing the opinion text leaves it open**, and Save, Print, **T** and the citations on its pages keep working.
 
-**Ctrl/Cmd+S saves whatever case is in front of you**, and means by that what the window is showing: the scan written out as a PDF where the pages are up, the opinion written out as Rich Text where the text is – the same two things the strip's save icon does, and the first entry on a case window's **Export** menu.
+**Ctrl/Cmd+S saves whatever case is in front of you**, and means by that what the window is showing: the scan written out as a PDF where the pages are up, the opinion written out as Rich Text where the text is – the same two things the strip's save icon does, and the first entry on a case window's **Export** menu. The Cmd half of every such accelerator is bound on macOS only: Tk treats `Command` as `Mod1`, and its Windows port sets `Mod1` from the **Num Lock** toggle, so a `<Command-s>` binding on Windows matched a *bare* "s" – beating the window's own **s** and saving the case instead of opening the panel beside it (and a bare "w" closed the window).
 
 **Print asks which printer.** On macOS the system’s own print dialog comes up. Everywhere else the app lists the machine’s printers in a small dialog of its own, with a way straight into the chosen printer’s **own settings** – where duplex, paper size and quality live, since those belong to the printer and not to us – and, where it can honour the request itself (CUPS), a **Print on both sides** box so the common case needs no detour. If neither can be done, the document opens in the system’s PDF viewer to print from there, as it always did.
 

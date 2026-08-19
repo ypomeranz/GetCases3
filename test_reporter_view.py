@@ -1281,8 +1281,15 @@ DETAILS_NS = _load(
          {"_DETAILS_PANEL_W": 300,
           "_SCAN_DETAILS_VIEWS": _class_value(
               "_ScholarTextWindow", "_SCAN_DETAILS_VIEWS")}),
+     # The real one, so the panel's close keys are the platform's own.
+     "_accel_sequences": _load_functions(
+         ["_accel_sequences"])["_accel_sequences"],
      },
 )
+
+#: What ``_accel_sequences`` yields here — Ctrl alone off macOS, since
+#: ``<Command-…>`` is Mod1 and Tk's Windows port sets Mod1 from Num Lock.
+ACCEL = _load_functions(["_accel_sequences"])["_accel_sequences"]
 
 
 class _DetailsViewer:
@@ -1394,7 +1401,7 @@ class DetailsPanelTests(unittest.TestCase):
         viewer = _DetailsViewer()
         viewer.press_s()
         panel_win = _DetailsPanelWindow.made[0]
-        for seq in ("<KeyPress-s>", "<Escape>", "<Control-w>", "<Command-w>"):
+        for seq in ("<KeyPress-s>", "<Escape>") + ACCEL("w"):
             with self.subTest(seq=seq):
                 panel_win.mapped = True
                 self.assertEqual(panel_win.bindings[seq](None), "break")

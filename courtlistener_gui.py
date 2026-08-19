@@ -6526,9 +6526,8 @@ class CourtListenerGUI:
         # reason Ctrl-F alone never opened the find bar there (_bind_find_keys).
         for key, command in (("l", self._show_statute_lookup),
                              ("b", self._open_brief)):
-            self.root.bind(f"<Control-{key}>", lambda _e, c=command: c())
-            if sys.platform == "darwin":
-                self.root.bind(f"<Command-{key}>", lambda _e, c=command: c())
+            for seq in _accel_sequences(key):
+                self.root.bind(seq, lambda _e, c=command: c())
 
         # --- Search frame ---
         search_frame = ttk.LabelFrame(self.root, text="Search", padding=6)
@@ -14477,6 +14476,25 @@ def _bind_text_scroll_keys(win: tk.Misc, txt: tk.Text, scroll_cb=None,
         _bind_reader_scroll_keys(win, scroll_cb or scroll_text)
 
 
+def _accel_sequences(*keys: str) -> tuple:
+    """The event patterns for Ctrl+*key* — and, on macOS only, Cmd+*key*.
+
+    ``<Command-…>`` must never be bound off macOS.  Tk aliases ``Command`` to
+    ``Mod1``, and Tk's Windows port sets Mod1 from the **Num Lock** toggle
+    (``TkWinGetModifierState`` in tkWinX.c), so on a Windows keyboard with Num
+    Lock on — the usual state — *every* plain keypress arrives carrying Mod1.
+    A ``<Command-s>`` binding then matches a bare "s" and, being the more
+    specific pattern, out-scores the window's own ``<KeyPress-s>``: the case
+    saved itself instead of opening the panel beside it, and a bare "w" closed
+    the window.  Binding the Mac patterns only where Cmd exists is the fix, and
+    costs a Mac keyboard nothing.
+    """
+    seqs = [f"<Control-{key}>" for key in keys]
+    if sys.platform == "darwin":
+        seqs.extend(f"<Command-{key}>" for key in keys)
+    return tuple(seqs)
+
+
 def _bind_find_keys(win: tk.Misc, open_cb, next_cb, prev_cb) -> None:
     """Bind the find accelerators a reader would actually press.
 
@@ -17291,8 +17309,8 @@ class _PdfPane(ttk.Frame):
         c = self._canvas
         c.bind("<Button-1>", self._on_sel_press, add="+")
         c.bind("<B1-Motion>", self._on_sel_drag, add="+")
-        c.bind("<Control-c>", self._copy_selection, add="+")
-        c.bind("<Command-c>", self._copy_selection, add="+")   # macOS
+        for seq in _accel_sequences("c"):
+            c.bind(seq, self._copy_selection, add="+")
 
     def _on_sel_press(self, event) -> None:
         # Take keyboard focus so Ctrl-C reaches the canvas binding.
@@ -17753,22 +17771,22 @@ class _FloatingPdfWindow:
         self._body.pack(side="top", fill="both", expand=True)
 
         # Cmd and Control are separate modifiers in Tk, so a Mac keyboard needs
-        # its own bindings for the same accelerators.
+        # its own bindings for the same accelerators — and only a Mac keyboard
+        # may have them: off macOS a Cmd pattern would swallow the bare "s"
+        # bound further down (see _accel_sequences).
         # The same keys serve both surfaces: on the scan they zoom the page, on
         # the opinion they size the type, exactly as the −/+ buttons do.
-        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>",
-                    "<Command-plus>", "<Command-equal>"):
+        for seq in _accel_sequences("plus", "equal", "KP_Add"):
             self._win.bind(seq, lambda _e: self._bigger())
-        for seq in ("<Control-minus>", "<Control-KP_Subtract>",
-                    "<Command-minus>"):
+        for seq in _accel_sequences("minus", "KP_Subtract"):
             self._win.bind(seq, lambda _e: self._smaller())
-        for seq in ("<Control-0>", "<Command-0>"):
+        for seq in _accel_sequences("0"):
             self._win.bind(seq, lambda _e: self._reset_scale())
-        for seq in ("<Control-w>", "<Command-w>"):
+        for seq in _accel_sequences("w"):
             self._win.bind(seq, lambda _e: self.close())
-        for seq in ("<Control-s>", "<Command-s>"):
+        for seq in _accel_sequences("s"):
             self._win.bind(seq, lambda _e: self._save())
-        for seq in ("<Control-p>", "<Command-p>"):
+        for seq in _accel_sequences("p"):
             self._win.bind(seq, lambda _e: self._print())
         _bind_reader_scroll_keys(self._win, self._scroll_key)
         _bind_reader_page_keys(self._win, self._page_key)
@@ -18441,7 +18459,7 @@ class _FloatingPdfWindow:
         except (AttributeError, tk.TclError):
             pass
         reader._refresh_details_view()
-        for seq in ("<KeyPress-s>", "<Escape>", "<Control-w>", "<Command-w>"):
+        for seq in ("<KeyPress-s>", "<Escape>") + _accel_sequences("w"):
             try:
                 win.bind(seq, lambda _e: self._hide_details() or "break")
             except tk.TclError:
@@ -20042,7 +20060,7 @@ class _ScholarTextWindow:
             # the opinion written out as Rich Text, the first thing the Export
             # menu offers.  Chromeless, the key is the viewer's, whose own save
             # already comes here (see _FloatingPdfWindow._save).
-            for seq in ("<Control-s>", "<Command-s>"):
+            for seq in _accel_sequences("s"):
                 try:
                     win.bind(seq, lambda _e: self._export_rtf() or "break")
                 except tk.TclError:
@@ -20067,7 +20085,7 @@ class _ScholarTextWindow:
         # citation" box is checked, else the selection alone (the plain default
         # copy is suppressed either way); the find bar's entry keeps native
         # copy since this is bound to the text widget only.
-        for seq in ("<Control-c>", "<Command-c>"):
+        for seq in _accel_sequences("c"):
             try:
                 txt.bind(seq, lambda _e: self._copy_formatted() or "break")
             except tk.TclError:
@@ -27765,7 +27783,7 @@ class _PdfWindow:
         # Ctrl/Cmd+S saves the scan, as it does in the floating viewer —
         # this window shows the pages itself whenever it is not handing
         # them over.
-        for seq in ("<Control-s>", "<Command-s>"):
+        for seq in _accel_sequences("s"):
             try:
                 self._win.bind(seq, lambda _e: self._download() or "break")
             except tk.TclError:
@@ -31060,7 +31078,7 @@ class _StatuteWindow:
         # the selection's subdivision (the plain default copy is
         # suppressed); the find bar's entry keeps native copy since this
         # is bound to the text widget only.
-        for seq in ("<Control-c>", "<Command-c>"):
+        for seq in _accel_sequences("c"):
             try:
                 txt.bind(seq, lambda _e: self._copy_cite() or "break")
             except tk.TclError:
