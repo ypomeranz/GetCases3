@@ -13,11 +13,16 @@
    or the opinion's own header — is what the PDF resolver tries first, before
    it goes looking for one on CourtListener or Google Scholar.
 
+4. Google Scholar has no copy of every case.  Where the scan was found through
+   CourtListener, its text is what the viewer's T button shows instead, and
+   what names the window — the same job the Scholar page would have done.
+
 Lifted out of ``courtlistener_gui`` with ``ast`` (importing it needs tkinter,
 absent on a headless run) and driven against stubs.
 """
 
 import ast
+import dataclasses
 import pathlib
 import re
 import sys
@@ -78,6 +83,25 @@ def _source_of(cls: str, name: str) -> str:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return ast.get_source_segment(SRC, node)
     raise AssertionError(f"{cls} has no {name}")
+
+
+def _load_dataclass(name: str, extra=None):
+    """Exec one module-level dataclass into a stub namespace.
+
+    ``get_source_segment`` starts a class at its ``class`` keyword, so the
+    decorator that makes it a dataclass has to be picked up separately — read
+    without it, the class would have no ``__init__`` at all.
+    """
+    node = next((n for n in TREE.body
+                 if isinstance(n, ast.ClassDef) and n.name == name), None)
+    if node is None:
+        raise AssertionError(f"module-level class not found: {name}")
+    lines = SRC.splitlines(keepends=True)
+    first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+    ns = {"dataclass": dataclasses.dataclass, "Optional": typing.Optional}
+    ns.update(extra or {})
+    exec("".join(lines[first - 1:node.end_lineno]), ns)
+    return ns[name]
 
 
 def _load_function(name: str, extra=None):
@@ -166,7 +190,53 @@ def _fetch_pdf_bytes(url, client=None, timeout=30):
 
 
 def _cl_item_for_citation(client, cite, name=""):
+    CL_LOOKUPS.append((cite, name))
     return CL_ITEMS.get(cite)
+
+
+CL_LOOKUPS: list = []        # (cite, name) the fallback resolved a cluster by
+CL_PARTS: dict = {}          # cluster id -> (parts, blocks, plain text, meta)
+CL_CAPTIONS: dict = {}       # tuple(blocks) -> the caption they read as
+
+
+def _assemble_case_parts(client, item):
+    return CL_PARTS.get(item.get("cluster_id"), ([], [], "", {}))
+
+
+#: The real fallback, and the real reading of the Bluebook pieces off what it
+#: returns — so a test exercises the rules rather than a restatement of them.
+CASE_PDF_TEXT_SOURCE = _load_dataclass("_CasePdfTextSource")
+COURTLISTENER_TEXT_SOURCE = _load_function(
+    "_courtlistener_text_source",
+    {"_CasePdfTextSource": CASE_PDF_TEXT_SOURCE,
+     "_cl_item_for_citation": _cl_item_for_citation,
+     "_assemble_case_parts": _assemble_case_parts,
+     "_assemble_case_text": lambda client, item: ""})
+CL_TEXT_RECORD = _load_function(
+    "_cl_text_record",
+    {"_scholar_caption_name": lambda blocks: CL_CAPTIONS.get(tuple(blocks), ""),
+     "_cluster_citations_to_strings": lambda cites: [str(c) for c in cites]})
+
+
+class _FakeReader:
+    """A ``_ScholarTextWindow`` built inside the viewer by its T button."""
+
+    built: list = []
+
+    def __init__(self, host, app, url, html, **kw):
+        self.host, self.app, self.url, self.html, self.kw = (
+            host, app, url, html, kw)
+        _FakeReader.built.append(self)
+
+
+def _bluebook_display_name(item):
+    TITLED.append(item)
+    name = item.get("caseName") or ""
+    cites = item.get("citation") or []
+    return f"{name}, {cites[0]}" if name and cites else name
+
+
+TITLED: list = []            # every item a window title was built from
 
 
 APP_NS = _load(
@@ -174,7 +244,8 @@ APP_NS = _load(
     ["open_cited_case_pdf", "_cited_case_pdf_item", "_show_cited_case_pdf",
      "_cited_pdf_window_closed", "_warm_case_text",
      "_request_cited_pdf_analysis", "_cited_filename_item",
-     "_jump_to_pin", "_scan_cite_for",
+     "_jump_to_pin", "_scan_cite_for", "_retitle_cited_pdf",
+     "_embed_cited_case_text",
      "_describe_warmed_case", "_save_cited_pdf", "_print_cited_pdf"],
     {"_citation_link_name": lambda snippet, cite="": snippet.strip(),
      "_cl_item_for_citation": _cl_item_for_citation,
@@ -189,6 +260,10 @@ APP_NS = _load(
      "_open_citation_in_browser": lambda *a: None,
      "_SCHOLAR_AVAILABLE": True,
      "_citation_search_variants": lambda cite: (cite,),
+     "_courtlistener_text_source": COURTLISTENER_TEXT_SOURCE,
+     "_cl_text_record": CL_TEXT_RECORD,
+     "_ScholarTextWindow": _FakeReader,
+     "_bluebook_display_name": _bluebook_display_name,
      "_extract_pdf_text_and_style": lambda data: ([[("c", (0, 0, 1, 1))]], []),
      "_citation_links_from_visible_pdf_text": lambda d, p, i: ({0: ["x"]}, set()),
      "slip_opinion": mock.Mock(detect_sections=lambda pages: []),
@@ -235,6 +310,9 @@ class _FakeViewer:
     def surface(self):
         self.surfaced += 1
 
+    def set_title(self, title):
+        self.title = title
+
     def apply_analysis(self, result):
         self.analyses.append(result)
 
@@ -255,20 +333,22 @@ class _FakeHost:
 
 
 class _App:
-    def __init__(self, token="tok", resolves=True):
+    def __init__(self, token="tok", resolves=True, scholar=True):
         self.root = _FakeHost()
         self._token_var = mock.Mock()
         self._token_var.get.return_value = token
         self._cited_pdf_windows = set()
         self.resolved_items = []
         self._resolves = resolves
+        self._scholar_has_it = scholar   # whether Scholar carries the case
         self.scholar_calls = []
         self._describe_warmed_case = APP_NS["_describe_warmed_case"]
         for name in ("open_cited_case_pdf", "_cited_case_pdf_item",
                      "_show_cited_case_pdf", "_cited_pdf_window_closed",
                      "_warm_case_text", "_request_cited_pdf_analysis",
                      "_cited_filename_item", "_save_cited_pdf",
-                     "_print_cited_pdf", "_jump_to_pin", "_scan_cite_for"):
+                     "_print_cited_pdf", "_jump_to_pin", "_scan_cite_for",
+                     "_retitle_cited_pdf", "_embed_cited_case_text"):
             setattr(self, name, APP_NS[name].__get__(self))
 
     # --- collaborators ---
@@ -288,8 +368,13 @@ class _App:
         fn()
 
     def _get_scholar(self):
-        return mock.Mock(
-            fetch_by_citation=lambda c: self.scholar_calls.append(c) or True)
+        def fetch(cite):
+            self.scholar_calls.append(cite)
+            if not self._scholar_has_it:
+                return None
+            return (f"https://scholar.test/{cite}", "<html>")
+
+        return mock.Mock(fetch_by_citation=fetch)
 
 
 class CitedCasePdfTests(unittest.TestCase):
@@ -573,6 +658,169 @@ class WarmedCaseRecordTests(unittest.TestCase):
     def test_a_page_with_no_record_reports_nothing(self):
         self._describe(None)
         self.assertEqual(self.got, [])
+
+
+class CourtListenerFallbackTests(unittest.TestCase):
+    """Google Scholar has no copy: the scan's T button shows CourtListener's
+    text instead, and CourtListener names the window."""
+
+    CLUSTER = {
+        "cluster_id": 99,
+        "caseName": "Roe v. Wade, Illinois",   # the docket caption
+        "citation": ["410 U.S. 113", "93 S. Ct. 705"],
+        "dateFiled": "1973-01-22",
+        "court_id": "scotus",
+        "absolute_url": "/opinion/99/roe-v-wade/",
+    }
+
+    def setUp(self):
+        RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
+        CL_LOOKUPS.clear(); CL_PARTS.clear(); CL_CAPTIONS.clear()
+        TITLED.clear(); TEXT_OPENS.clear()
+        _FakeViewer.opened.clear(); _FakeReader.built.clear()
+        _Thread.started.clear()
+        RESOLVED["410 U.S. 113"] = "https://loc.test/usrep410113.pdf"
+        FETCHED["https://loc.test/usrep410113.pdf"] = (
+            b"%PDF-1", "https://loc.test/usrep410113.pdf")
+        CL_ITEMS["410 U.S. 113"] = dict(self.CLUSTER)
+        CL_PARTS[99] = (["part"], ["ROE v. WADE"], "The CourtListener text", {})
+        CL_CAPTIONS[("ROE v. WADE",)] = "Roe v. Wade"
+        self.app = _App(scholar=False)
+        self.status = []
+
+    def _click(self, snippet="Roe v. Wade"):
+        self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", "410 U.S. 113"), snippet,
+            self.status.append)
+        return _FakeViewer.opened[0]
+
+    def _press_t(self, viewer):
+        """What the viewer's T button does: build the text beside the pages."""
+        return viewer.kw["on_build_text"]("body")
+
+    # --- the text behind the button ---------------------------------
+    def test_scholar_is_still_asked_first(self):
+        self._click()
+        self.assertEqual(self.app.scholar_calls, ["410 U.S. 113"])
+
+    def test_the_t_button_shows_the_courtlistener_text(self):
+        reader = self._press_t(self._click())
+        self.assertIsNotNone(reader)
+        self.assertEqual(reader.kw["cl_text"], "The CourtListener text")
+        self.assertEqual(reader.kw["cl_parts"], ["part"])
+        self.assertEqual(reader.kw["cl_blocks"], ["ROE v. WADE"])
+
+    def test_it_opens_as_a_courtlistener_window_would(self):
+        # No Scholar page, so no html: the reader is CourtListener-primary,
+        # and says where the text came from.
+        reader = self._press_t(self._click())
+        self.assertEqual((reader.url, reader.html), ("", ""))
+        self.assertEqual(reader.kw["primary_source_kind"], "courtlistener")
+        self.assertEqual(reader.kw["primary_source_label"], "CourtListener")
+        self.assertEqual(
+            reader.kw["primary_source_url"],
+            "https://www.courtlistener.com/opinion/99/roe-v-wade/")
+
+    def test_it_is_built_inside_the_viewer_beside_the_pages(self):
+        viewer = self._click()
+        reader = self._press_t(viewer)
+        self.assertIs(reader.host, "body")
+        self.assertTrue(reader.kw["chromeless"])
+        self.assertFalse(reader.kw["prefetch_pdf"])
+        # The scan goes across too, so T and P keep the reader's place.
+        self.assertEqual(reader.kw["initial_pdf"],
+                         (b"%PDF-1", "https://loc.test/usrep410113.pdf"))
+
+    def test_the_cluster_already_in_hand_is_not_looked_up_again(self):
+        self._click()
+        # Once, by the PDF resolver — the fallback reuses what it found.
+        self.assertEqual(CL_LOOKUPS, [("410 U.S. 113", "Roe v. Wade")])
+
+    def test_a_case_courtlistener_does_not_have_either_stays_on_the_scan(self):
+        CL_ITEMS.clear()
+        viewer = self._click()
+        self.assertIsNone(self._press_t(viewer))
+
+    def test_nor_does_a_cluster_with_no_text_in_it(self):
+        CL_PARTS.clear()
+        self.assertIsNone(self._press_t(self._click()))
+
+    def test_without_a_token_there_is_no_courtlistener_to_ask(self):
+        self.app = _App(token="", scholar=False)
+        self.assertIsNone(self._press_t(self._click()))
+
+    def test_scholar_s_own_copy_still_wins_where_there_is_one(self):
+        self.app = _App(scholar=True)
+        reader = self._press_t(self._click())
+        self.assertEqual(reader.url, "https://scholar.test/410 U.S. 113")
+        self.assertNotIn("cl_text", reader.kw)
+
+    # --- and what it names the window -------------------------------
+    def test_the_window_is_named_from_courtlistener(self):
+        viewer = self._click()
+        self.assertEqual(viewer.title, "Roe v. Wade, 410 U.S. 113")
+
+    def test_the_opinion_s_own_caption_beats_the_docket_caption(self):
+        self._click()
+        self.assertEqual(TITLED[-1]["caseName"], "Roe v. Wade")
+
+    def test_the_court_and_the_date_come_with_it(self):
+        self._click()
+        self.assertEqual(TITLED[-1]["dateFiled"], "1973-01-22")
+        self.assertEqual(TITLED[-1]["court_id"], "scotus")
+
+    def test_a_case_with_no_text_anywhere_keeps_the_clicked_citation(self):
+        CL_ITEMS.clear()
+        viewer = self._click()
+        self.assertEqual(viewer.title, "Roe v. Wade — 410 U.S. 113")
+
+
+class CourtListenerTextRecordTests(unittest.TestCase):
+    """The Bluebook pieces read off a CourtListener cluster — the same shape
+    the Google Scholar page yields, so a window is named from either."""
+
+    def setUp(self):
+        CL_CAPTIONS.clear()
+
+    def _record(self, item, blocks=()):
+        return CL_TEXT_RECORD(
+            CASE_PDF_TEXT_SOURCE(
+                "courtlistener", "Text", "CourtListener", "", "text",
+                item, [], list(blocks)))
+
+    def test_the_caption_the_reports_print_names_the_case(self):
+        CL_CAPTIONS[("ROE v. WADE",)] = "Roe v. Wade"
+        record = self._record({"caseName": "Roe v. Wade, Illinois"},
+                              ["ROE v. WADE"])
+        self.assertEqual(record["name"], "Roe v. Wade")
+
+    def test_an_unreadable_caption_leaves_the_cluster_s_own_name(self):
+        record = self._record({"caseName": "Roe v. <em>Wade</em>"})
+        self.assertEqual(record["name"], "Roe v. Wade")
+
+    def test_the_parallel_citations_come_across(self):
+        record = self._record(
+            {"citation": ["410 U.S. 113", "93 S. Ct. 705"]})
+        self.assertEqual(record["cites"], ["410 U.S. 113", "93 S. Ct. 705"])
+
+    def test_the_date_dates_the_case_and_yields_its_year(self):
+        record = self._record({"dateFiled": "1973-01-22"})
+        self.assertEqual(record["date_filed"], "1973-01-22")
+        self.assertEqual(record["year"], "1973")
+
+    def test_the_court_id_is_what_a_bluebook_parenthetical_wants(self):
+        record = self._record({"court_id": "ca2", "court": "Second Circuit"})
+        self.assertEqual(record["court"], "ca2")
+
+    def test_a_cluster_without_one_falls_back_to_the_court_s_name(self):
+        record = self._record({"court": "Second Circuit"})
+        self.assertEqual(record["court"], "Second Circuit")
+
+    def test_a_bare_cluster_reports_empty_pieces_rather_than_failing(self):
+        self.assertEqual(
+            self._record({}),
+            {"name": "", "cites": [], "date_filed": "", "year": "",
+             "court": ""})
 
 
 class CitedCaseItemTests(unittest.TestCase):
