@@ -37,7 +37,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-REPO_SLUG = "ypomeranz/GetCases"
+REPO_SLUG = "ypomeranz/GetCases3"
 BRANCH = "main"
 _API = "https://api.github.com"
 _UA = "GetCases-updater"
@@ -226,7 +226,7 @@ def download_and_stage(dest_dir: Optional[Path] = None) -> Path:
     extract_dir.mkdir(exist_ok=True)
     with tarfile.open(tar_path, "r:gz") as tf:
         _safe_extractall(tf, extract_dir)
-    # GitHub wraps the tree in a single "GetCases-<branch>/" directory.
+    # GitHub wraps the tree in a single "GetCases3-<branch>/" directory.
     subdirs = [p for p in extract_dir.iterdir() if p.is_dir()]
     root = subdirs[0] if len(subdirs) == 1 else extract_dir
     if not (root / "courtlistener_gui.py").is_file():
