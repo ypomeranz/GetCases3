@@ -81,6 +81,21 @@ def _source_of(cls: str, name: str) -> str:
     raise AssertionError(f"{cls} has no {name}")
 
 
+def _class_value(cls: str, name: str):
+    """A class-level constant, evaluated from the source, so a test reads the
+    real thing rather than a restatement of it."""
+    body = next(n.body for n in TREE.body
+                if isinstance(n, ast.ClassDef) and n.name == cls)
+    for node in body:
+        targets = (
+            node.targets if isinstance(node, ast.Assign)
+            else [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{cls} has no {name}")
+
+
 # ---------------------------------------------------------------------------
 # 2. The part-picker row is gone
 # ---------------------------------------------------------------------------
@@ -708,7 +723,7 @@ class PartMapLabelTests(unittest.TestCase):
 
 class ReporterSidePanelTests(unittest.TestCase):
     """The reporter interface stands the side panel beside the whole window
-    rather than inside it, and asks it for the case's details alone
+    rather than inside it, and asks it for a shorter list of views
     (see _FloatingPdfWindow._open_details)."""
 
     def test_the_panel_is_built_where_the_window_says(self):
@@ -717,9 +732,13 @@ class ReporterSidePanelTests(unittest.TestCase):
                       src)
         self.assertIn("else self._text_frame", src)
 
-    def test_the_show_selector_belongs_to_the_case_window(self):
+    def test_the_window_says_which_views_its_panel_offers(self):
         src = _source_of("_ScholarTextWindow", "_details_panel")
-        self.assertIn("if self._details_views:", src)
+        self.assertIn("for name in self._details_views", src)
+
+    def test_a_panel_with_one_view_gets_no_selector(self):
+        src = _source_of("_ScholarTextWindow", "_details_panel")
+        self.assertIn("if len(mode_values) > 1:", src)
 
     def test_and_without_it_the_panel_shows_the_case_s_details(self):
         # _details_mode is what reads the selector; with none it says "case".
@@ -730,7 +749,30 @@ class ReporterSidePanelTests(unittest.TestCase):
     def test_both_start_out_as_the_case_window_s_own(self):
         src = _source_of("_ScholarTextWindow", "_build_ui")
         self.assertIn("self._details_host: Optional[tk.Misc] = None", src)
-        self.assertIn("self._details_views = True", src)
+        self.assertIn("self._details_views = self._DETAILS_VIEWS", src)
+
+    def test_the_case_window_offers_every_view(self):
+        self.assertEqual(
+            _class_value("_ScholarTextWindow", "_DETAILS_VIEWS"),
+            ("Case details", "Docket", "Recent SCOTUS",
+             "Related cases", "Outline"))
+
+    def test_the_panel_beside_a_scan_offers_the_case_and_its_docket(self):
+        # The docket is what a reader looking at the pages asks for next; the
+        # rest answer questions that want the room a window has.
+        self.assertEqual(
+            _class_value("_ScholarTextWindow", "_SCAN_DETAILS_VIEWS"),
+            ("Case details", "Docket"))
+
+    def test_the_case_s_own_details_lead_either_way(self):
+        # current(0) is what the panel opens on, so Oyez is the default.
+        for name in ("_DETAILS_VIEWS", "_SCAN_DETAILS_VIEWS"):
+            self.assertEqual(
+                _class_value("_ScholarTextWindow", name)[0], "Case details")
+
+    def test_the_docket_comes_off_for_a_court_that_has_none(self):
+        src = _source_of("_ScholarTextWindow", "_details_panel")
+        self.assertIn('if name != "Docket" or self._is_scotus', src)
 
     def test_a_chromeless_reader_leaves_the_s_key_to_its_viewer(self):
         # The viewer's own "s" serves the scan as well as the opinion, and one

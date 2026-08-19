@@ -6476,8 +6476,10 @@ class CourtListenerGUI:
             label="Open Citation List…",
             command=self._show_citation_list_dialog,
         )
+        # No accelerator: Ctrl/Cmd+S is the save key wherever a case is open,
+        # and a lookup box is not what that key should reach for.
         lookup_menu.add_command(
-            label="Quick Look Up (case or statute)…", accelerator=f"{_ACCEL}+S",
+            label="Quick Look Up (case or statute)…",
             command=self._show_quick_lookup,
         )
         lookup_menu.add_command(
@@ -6523,7 +6525,6 @@ class CourtListenerGUI:
         # The Mac modifier is Cmd, and Tk keeps the two apart — the same
         # reason Ctrl-F alone never opened the find bar there (_bind_find_keys).
         for key, command in (("l", self._show_statute_lookup),
-                             ("s", self._show_quick_lookup),
                              ("b", self._open_brief)):
             self.root.bind(f"<Control-{key}>", lambda _e, c=command: c())
             if sys.platform == "darwin":
@@ -9201,7 +9202,7 @@ class CourtListenerGUI:
         open_btn.config(command=go)
 
     def _show_quick_lookup(self) -> None:
-        """Ctrl+S: one-line lookup that takes either a case citation
+        """The Look Up menu's one-line lookup, taking either a case citation
         (resolved exactly like a line of the citation-list dialog, pin
         cite included) or a statute/regulation citation."""
         dlg = tk.Toplevel(self.root)
@@ -18415,7 +18416,8 @@ class _FloatingPdfWindow:
     def _details_window(self, reader) -> tk.Toplevel:
         """A window holding this case's details panel, built by the opinion
         that owns them.  Mastered on this window, so it is closed with the
-        case it belongs to; the panel offers the case's details alone (see
+        case it belongs to; it opens on the case's own details and, for a
+        Supreme Court case, offers the docket behind them (see
         ``_ScholarTextWindow._details_panel``)."""
         win = _ui_toplevel(self._win)
         _ensure_modern_ttk_styles(win)
@@ -18431,7 +18433,7 @@ class _FloatingPdfWindow:
         # checkbox nor the key for one — so this is the panel, and it is built
         # here, in this window.
         reader._details_host = body
-        reader._details_views = False
+        reader._details_views = _ScholarTextWindow._SCAN_DETAILS_VIEWS
         reader._details_panel().pack(fill="both", expand=True)
         reader._details_on = True
         try:
@@ -19331,6 +19333,16 @@ class _ScholarTextWindow:
     # cases, where the panel opens by default, so the opinion text keeps its
     # full width instead of shrinking to make room.
     _DETAILS_PANEL_W = 300
+    #: Every view the side panel's "Show" selector can offer, in the order it
+    #: offers them.  "Docket" is a Supreme Court view and is dropped for any
+    #: other court (see _details_panel).
+    _DETAILS_VIEWS = ("Case details", "Docket", "Recent SCOTUS",
+                      "Related cases", "Outline")
+    #: What the panel standing beside a scan offers.  Recent SCOTUS, Related
+    #: cases and the outline answer questions that want the room a window has;
+    #: the case's own details and the docket behind them are what a reader
+    #: looking at the pages asks for, so those two are here.
+    _SCAN_DETAILS_VIEWS = ("Case details", "Docket")
     _JUSTIFY_HARD_BREAK_EXTRA_SPACES = 4
     _JUSTIFY_PAD_TAG = "justify-pad"
     _JUSTIFY_HIDE_TAG = "justify-hide"
@@ -19883,14 +19895,13 @@ class _ScholarTextWindow:
                   follow_motion=True)
         self._text_frame, self._vsb = text_frame, vsb
         self._details_frame: Optional[ttk.Frame] = None
-        # Where the side panel is built, and how much of it is offered there.
+        # Where the side panel is built, and which views are offered there.
         # In a case window it is a column of the window itself, and its "Show"
         # selector offers every view.  The reporter interface sets both — the
         # panel is built into a window of its own standing beside the scan,
-        # and holds the case's details and nothing else (see
-        # _FloatingPdfWindow._open_details).
+        # and offers the shorter list (see _FloatingPdfWindow._open_details).
         self._details_host: Optional[tk.Misc] = None
-        self._details_views = True
+        self._details_views = self._DETAILS_VIEWS
         self._details_loaded = False
         self._details_case: Optional[tuple] = None  # cached (title, lines)
         self._related_loaded = False
@@ -20027,6 +20038,15 @@ class _ScholarTextWindow:
             for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
                 win.bind(seq, lambda _e: self._zoom(-1))
             win.bind("<Control-0>", lambda _e: self._zoom(0))
+            # Ctrl/Cmd+S saves the case, as it does over a scan — here that is
+            # the opinion written out as Rich Text, the first thing the Export
+            # menu offers.  Chromeless, the key is the viewer's, whose own save
+            # already comes here (see _FloatingPdfWindow._save).
+            for seq in ("<Control-s>", "<Command-s>"):
+                try:
+                    win.bind(seq, lambda _e: self._export_rtf() or "break")
+                except tk.TclError:
+                    pass    # modifier not supported on this platform
         # Bare "s" toggles whichever side panel the current view has, except
         # while a text field has focus.  Chromeless, the key is the viewer's:
         # it owns a side panel that stands beside the whole window, and serves
@@ -23783,8 +23803,9 @@ class _ScholarTextWindow:
     def _post_export_menu(self) -> None:
         """Drop the export-format menu under the Export button."""
         menu = tk.Menu(self._win, tearoff=0)
-        menu.add_command(label="Rich Text (.rtf) — two columns…",
-                         command=self._export_rtf)
+        menu.add_command(
+            label=f"Rich Text (.rtf) — two columns…\t{_ACCEL}+S",
+            command=self._export_rtf)
         menu.add_command(label="PDF (.pdf) — typeset with LaTeX…",
                          command=self._export_pdf_latex)
         menu.add_command(label="LaTeX source (.tex) — edit, then typeset…",
@@ -24107,22 +24128,21 @@ class _ScholarTextWindow:
             # proceedings), or the opinion's detected outline.  Case details
             # and the recent-decisions list are separate views now, not one
             # falling through to the other.
-            # The other views are the case window's: they answer questions
-            # about the docket, the Court's term and the shape of the opinion,
-            # which want the room a window has.  A panel standing beside a
-            # scan is opened for the case's own details, so it offers those
-            # and leaves the selector out (_details_mode then reads "case").
-            if self._details_views:
+            # Which of them this panel offers is the window's to say: a case
+            # window offers every view, a panel standing beside a scan the
+            # case's details and the docket behind them.  The docket is a
+            # Supreme Court view either way, so it comes off for any other
+            # court — and a panel left with one view needs no selector at all
+            # (_details_mode then reads "case").
+            mode_values = [name for name in self._details_views
+                           if name != "Docket" or self._is_scotus]
+            if len(mode_values) > 1:
                 mode_row = ttk.Frame(f)
                 mode_row.pack(fill="x", padx=6, pady=(0, 2))
                 ttk.Label(
                     mode_row, text="Show",
                     style="ModernMuted.TLabel" if _CTK_AVAILABLE else "TLabel",
                 ).pack(side="left")
-                mode_values = ["Case details"]
-                if self._is_scotus:
-                    mode_values.append("Docket")
-                mode_values.extend(("Recent SCOTUS", "Related cases", "Outline"))
                 self._details_mode_combo = ttk.Combobox(
                     mode_row, state="readonly", width=16,
                     values=tuple(mode_values),
@@ -27742,6 +27762,14 @@ class _PdfWindow:
         for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
             self._win.bind(seq, lambda _e: self._zoom(-1))
         self._win.bind("<Control-0>", lambda _e: self._zoom(0))
+        # Ctrl/Cmd+S saves the scan, as it does in the floating viewer —
+        # this window shows the pages itself whenever it is not handing
+        # them over.
+        for seq in ("<Control-s>", "<Command-s>"):
+            try:
+                self._win.bind(seq, lambda _e: self._download() or "break")
+            except tk.TclError:
+                pass    # modifier not supported on this platform
         _bind_reader_scroll_keys(
             self._win,
             lambda direction: (
