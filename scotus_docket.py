@@ -68,6 +68,13 @@ COVER_COLORS = {
 }
 
 _TIMEOUT = 25
+# A caller's session may advertise a content coding its ``requests`` install
+# cannot decode; SCOTUSblog honors Brotli, and an undecodable case page parses
+# as a case with no briefs rather than as a failed fetch.  Every request from
+# this module asks only for codings this install can actually read.
+_ACCEPT_ENCODING = getattr(
+    requests.utils, "DEFAULT_ACCEPT_ENCODING", "gzip, deflate",
+)
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) "
     "Gecko/20100101 Firefox/144.0"
@@ -91,6 +98,11 @@ _GRANT_RE = re.compile(
     r"postponed to (?:the )?hearing on the merits)\b",
     re.IGNORECASE,
 )
+# "Argued. For petitioner: ... as amicus curiae, supporting the petitioner.
+# For respondents: ..." records the sitting, not a filing.  SCOTUSblog hangs
+# its Oyez argument page off that row, and the counsel list names both sides
+# and often an amicus, so it otherwise reads as a merits amicus brief.
+_ARGUMENT_SESSION_RE = re.compile(r"argued\b", re.IGNORECASE)
 _BRIEF_COVER_CLASS_RE = re.compile(r"\bbg-brief-([\w-]+)\b")
 _MERITS_COVER_HINTS = {
     "light_blue", "light_red", "yellow", "light_green", "dark_green",
@@ -260,6 +272,8 @@ def _classify(
     section_low = section.casefold()
     if "transcript" in low and "argument" in low:
         return ("merits", "oral_argument_transcript", "plain")
+    if _ARGUMENT_SESSION_RE.match(_clean(description)):
+        return None
     is_amicus = (
         bool(re.search(r"\bamic(?:us|i)\b", low))
         or "amicus brief" in section_low
@@ -735,7 +749,11 @@ def _dedupe_and_order(
 
 def _session_get(session, url: str) -> str:
     try:
-        response = session.get(url, timeout=_TIMEOUT)
+        response = session.get(
+            url,
+            timeout=_TIMEOUT,
+            headers={"Accept-Encoding": _ACCEPT_ENCODING},
+        )
         if int(getattr(response, "status_code", 200)) != 200:
             return ""
         return str(getattr(response, "text", "") or "")
@@ -745,7 +763,11 @@ def _session_get(session, url: str) -> str:
 
 def _session_get_json(session, url: str, *, headers: Optional[dict] = None) -> dict:
     try:
-        response = session.get(url, timeout=_TIMEOUT, headers=headers or {})
+        response = session.get(
+            url,
+            timeout=_TIMEOUT,
+            headers={"Accept-Encoding": _ACCEPT_ENCODING, **(headers or {})},
+        )
         if int(getattr(response, "status_code", 200)) != 200:
             return {}
         data = response.json()

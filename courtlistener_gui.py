@@ -1427,6 +1427,15 @@ def _display_hotkey(hotkey: str) -> str:
     return "+".join(parts) or _display_hotkey(_default_spotlight_hotkey())
 
 
+# Only the content codings this install can actually decode.  Advertising one
+# ``requests`` has no decoder for (Brotli, unless "brotli" is installed) makes
+# hosts that honor it -- scotusblog.com among them -- answer with bytes the
+# response object then hands back as mojibake, so every parser downstream sees
+# an empty page instead of a fetch error.
+_ACCEPT_ENCODING = getattr(
+    _requests.utils, "DEFAULT_ACCEPT_ENCODING", "gzip, deflate",
+)
+
 # Persistent session for third-party hosts (LOC, GovInfo, static.case.law).
 # Uses a full browser-like header set; government CDNs reset connections when
 # they see Python's default User-Agent or missing Accept/Sec-Fetch headers.
@@ -1439,7 +1448,7 @@ _anon_session.headers.update({
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
               "application/pdf,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": _ACCEPT_ENCODING,
     "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",

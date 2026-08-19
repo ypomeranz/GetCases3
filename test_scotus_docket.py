@@ -279,6 +279,14 @@ CURRENT_BLOG_FIXTURE = """
     <span>Sep 29, 2023</span>
     <span>Brief amicus curiae of Public Citizen filed.</span>
   </a>
+  <a href="http://www.oyez.org/cases/2020-2029/2023/2023_22_451"
+     class="bg-brief-white flex items-center">
+    <span>Oct 3, 2023</span>
+    <span>Argued. For petitioners: Roman Martinez, Washington, D. C.; and
+      Elizabeth B. Prelogar, Solicitor General, Department of Justice,
+      Washington, D. C., as amicus curiae, supporting the petitioners.
+      For respondents: Sarah M. Harris, Washington, D. C.</span>
+  </a>
   <a href="https://www.supremecourt.gov/oral_arguments/argument_transcripts/2023/22-451_114p.pdf"></a>
 </main>
 """
@@ -436,6 +444,13 @@ class SCOTUSblogParsingTests(unittest.TestCase):
         self.assertEqual(documents[2].kind, "oral_argument_transcript")
         self.assertEqual(documents[2].cover, "plain")
         self.assertIn("/argument_transcripts/", documents[2].url)
+        # "Argued. For petitioners: ... as amicus curiae ..." records the
+        # sitting; SCOTUSblog links it to Oyez, and its counsel list names
+        # both sides and an amicus, so it must not read as a merits brief.
+        self.assertFalse([
+            document for document in documents
+            if "oyez.org" in document.url
+        ])
 
     def test_older_timeline_uses_cover_hints_without_resetting_filing_side(self):
         documents = scotus_docket.parse_scotusblog_case(
@@ -489,6 +504,62 @@ class _Session:
         return _Response(self.responses.get(url, ""), 200)
 
 
+def _brotli_decoder_installed() -> bool:
+    for module in ("brotlicffi", "brotli"):
+        try:
+            __import__(module)
+        except ImportError:
+            continue
+        return True
+    return False
+
+
+class ContentEncodingTests(unittest.TestCase):
+    """A coding the client cannot decode looks like a case with no briefs.
+
+    SCOTUSblog answers ``Accept-Encoding: br`` with Brotli.  Without a Brotli
+    decoder installed the response body stays compressed, ``response.text`` is
+    mojibake, and the case page yields an empty document list instead of an
+    error -- so the panel reports no briefs for every pre-2017 case, whose
+    filings the Court's own docket does not carry.
+    """
+
+    def test_every_request_asks_only_for_decodable_codings(self):
+        session = _Session({})
+
+        scotus_docket.fetch_case_docket("22-451", session=session)
+
+        self.assertTrue(session.calls)
+        for url, _timeout, headers in session.calls:
+            offered = {
+                part.strip().casefold()
+                for part in (headers or {}).get("Accept-Encoding", "").split(",")
+                if part.strip()
+            }
+            self.assertTrue(offered, url)
+            self.assertEqual("br" in offered, _brotli_decoder_installed(), url)
+
+    def test_request_headers_survive_beside_the_typesense_api_key(self):
+        session = _Session({})
+
+        scotus_docket.fetch_case_docket("22-451", session=session)
+
+        keyed = [
+            headers for url, _timeout, headers in session.calls
+            if scotus_docket.SCOTUSBLOG_TYPESENSE_HOST in url
+        ]
+        self.assertTrue(keyed)
+        for headers in keyed:
+            self.assertIn("X-TYPESENSE-API-KEY", headers)
+            self.assertIn("Accept-Encoding", headers)
+
+    def test_shared_gui_session_does_not_hardcode_brotli(self):
+        source = Path("courtlistener_gui.py").read_text(encoding="utf-8")
+
+        self.assertIn('"Accept-Encoding": _ACCEPT_ENCODING,', source)
+        self.assertNotIn('"gzip, deflate, br"', source)
+
+
 class DocketFetchAndPanelTests(unittest.TestCase):
     def test_merges_sources_and_deduplicates_the_same_court_pdf(self):
         official_url = scotus_docket.official_docket_url("22-451")
@@ -522,7 +593,11 @@ class DocketFetchAndPanelTests(unittest.TestCase):
     def test_right_panel_exposes_docket_mode_and_cover_color_tags(self):
         source = Path("courtlistener_gui.py").read_text(encoding="utf-8")
 
-        self.assertIn('mode_values.append("Docket")', source)
+        # The panel now names its views in a tuple and drops the docket for
+        # any court but the Supreme Court, rather than appending it.
+        self.assertIn('_DETAILS_VIEWS = ("Case details", "Docket"', source)
+        self.assertIn('_SCAN_DETAILS_VIEWS = ("Case details", "Docket")', source)
+        self.assertIn('if name != "Docket" or self._is_scotus', source)
         self.assertIn('if sel == "Docket":', source)
         self.assertIn('elif mode == "docket":', source)
         self.assertIn('f"docket_{cover}"', source)
