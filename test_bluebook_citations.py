@@ -154,6 +154,26 @@ class CaptionCapitalizationTests(unittest.TestCase):
         self.assertTrue(is_personal_all_caps_run(["THOMAS"], ["Corrine", "Morgan"]))
         self.assertTrue(is_personal_all_caps_run(["EMORY"], ["Dr.", "Theresa", "Swain"]))
 
+    def test_table_abbreviation_is_not_mistaken_for_caps_surname(self):
+        # "R.R." is all caps because its letters are capitals, not because a
+        # reporter set a surname that way.  Read as a surname it took the
+        # place name with it, citing Palsgraf as "Palsgraf v. R.R. Co.".
+        self.assertFalse(is_personal_all_caps_run(["R.R."], ["Long", "Island"]))
+        self.assertFalse(is_personal_all_caps_run(["RY."], ["Long", "Island"]))
+        self.assertFalse(is_personal_all_caps_run(["CENT."], ["New", "York"]))
+        self.assertEqual(
+            collapse_personal_all_caps_run("Long Island R.R. Co."),
+            "Long Island R.R. Co.",
+        )
+        self.assertEqual(
+            abbreviate_case_name("Palsgraf v. Long Island R.R. Co."),
+            "Palsgraf v. Long Island R.R. Co.",
+        )
+        self.assertEqual(
+            abbreviate_case_name("Palsgraf v. Long Island Railroad Co."),
+            "Palsgraf v. Long Island R.R. Co.",
+        )
+
     def test_mixed_case_caps_run_drops_any_name_shaped_first_names(self):
         self.assertEqual(
             collapse_personal_all_caps_run("Corrine Morgan THOMAS"),

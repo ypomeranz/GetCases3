@@ -610,7 +610,19 @@ def is_personal_all_caps_run(
         key = re.sub(r"[^A-Za-z]", "", display).lower()
         if (display in _NONPERSON_CAPS
                 or key in _ORG_WORDS
-                or key in _T6_WORDS):
+                or key in _T6_WORDS
+                # An abbreviation reads as all caps because its letters are
+                # capitals, not because a reporter set a surname in capitals:
+                # "R.R." is Railroad, "Ry." Railway, "Cent." Central.  The
+                # word sets above hold only spelled-out forms, so without
+                # this the abbreviation becomes the "surname" and the words
+                # ahead of it are discarded as given names — "Long Island
+                # R.R. Co." would cite as "R.R. Co.".
+                or key in _TABLE_ABBREVIATIONS
+                # A dotted initialism ("L.I.", "B.&O.") is the same kind of
+                # evidence even when no table lists it; a surname never
+                # carries an internal period.
+                or "." in display):
             return False
         names.append(token)
 
@@ -1092,6 +1104,16 @@ _WORD_MAP = _build_word_map()
 # Washington University").  T10 place names are excluded from that signal:
 # they double as given names far too often (Virginia, Georgia).
 _T6_WORDS = frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
+
+# The same tables read from the other side: the *abbreviated* forms the tables
+# produce ("R.R.", "Ry.", "Cent.", "N.Y."), keyed like a caption token.  A
+# source that already abbreviated a party writes those instead of the
+# spelled-out words above, and they are organizational or geographic
+# descriptors just the same — which matters wherever a rule asks whether a
+# token could be a party's own name.
+_TABLE_ABBREVIATIONS = frozenset(
+    re.sub(r"[^A-Za-z]", "", _abbr).lower() for _abbr in _WORD_MAP.values()
+)
 
 # A token is a run of letters with internal apostrophes/periods, so already-
 # abbreviated forms ("Ass'n", "Inc.") and possessives ("Children's") come
