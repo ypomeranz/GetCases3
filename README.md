@@ -172,7 +172,7 @@ Google Scholar not working – install beautifulsoup4 (pip install beautifulsoup
 
 PDF viewer not working – install pypdfium2 and Pillow (pip install pypdfium2 Pillow).
 
-English Reports CloudFlare issues – ensure you have curl_cffi, browser_cookie3, and Playwright installed, and run playwright install chromium. Firefox users can also clear the check in Firefox once – the app will reuse that cookie.
+English Reports CloudFlare issues – ensure you have curl_cffi, browser_cookie3, and Playwright installed, and run playwright install chromium. Firefox users can also clear the check in Firefox once – the app will reuse that cookie. If clearing the check no longer helps, run `python -X utf8 eng_rep_pdf.py`: it lists every Firefox profile it found, the live CommonLII cookies in each, when that profile’s clearance expires, and which one the app will send – a machine with two Firefox installations (a Microsoft Store build beside a regular one) has a clearance in each, and only one of them is the one you just obtained.
 
 License & Credits
 This tool is built on top of the excellent free legal data sources:
