@@ -139,6 +139,9 @@ class _FakeMenu:
     def add_radiobutton(self, **kw):
         self.items.append(("radiobutton", kw))
 
+    def add_checkbutton(self, **kw):
+        self.items.append(("checkbutton", kw))
+
     def add_separator(self):
         self.items.append(("separator", {}))
 
@@ -606,8 +609,17 @@ class CopyMenuTests(unittest.TestCase):
         self.assertEqual(
             menu.labels(),
             ["Edit citation…", None, "Copy citation to clipboard", None,
-             "Plain", "With citation", None, "Copy now \tCtrl+C"],
+             "Plain", "With citation", None, "Preview what was copied",
+             None, "Copy now \tCtrl+C"],
         )
+        # The preview switch is a checkbutton on the reader's own variable, so
+        # the viewer's Copy button and the case window's menu bar show — and
+        # change — one setting rather than two.
+        kinds = dict(zip(menu.labels(), (kind for kind, _kw in menu.items)))
+        self.assertEqual(kinds["Preview what was copied"], "checkbutton")
+        preview = next(kw for kind, kw in menu.items
+                       if kw.get("label") == "Preview what was copied")
+        self.assertIs(preview["variable"], reader._copy_preview_var)
 
     def test_editing_the_citation_leads(self):
         # Everything below it copies *this* citation, so correcting it is the

@@ -458,6 +458,12 @@ def _build_copy_menu(master: tk.Misc, reader) -> "Optional[tk.Menu]":
             command=reader.on_copy_mode_chosen,
         )
     copy_menu.add_separator()
+    copy_menu.add_checkbutton(
+        label="Preview what was copied",
+        variable=reader._copy_preview_var,
+        command=reader.on_copy_preview_toggled,
+    )
+    copy_menu.add_separator()
     copy_menu.add_command(
         label=f"Copy now \t{_ACCEL}+C", command=reader._copy_formatted)
     return copy_menu
@@ -1361,6 +1367,19 @@ def _save_copy_mode(mode: str) -> None:
         return
     data = _load_config()
     data["copy_mode"] = mode
+    _save_config(data)
+
+
+def _load_copy_preview() -> bool:
+    """Whether a copy briefly shows what it put on the clipboard.  On by
+    default: the preview is how a reader checks the Bluebooking before
+    pasting, which is no use to them if they have to find it first."""
+    return bool(_load_config().get("copy_preview", True))
+
+
+def _save_copy_preview(show: bool) -> None:
+    data = _load_config()
+    data["copy_preview"] = bool(show)
     _save_config(data)
 
 
@@ -13236,6 +13255,227 @@ def _plain_without_layout_chars(
     return "".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Copy preview — reading the clipboard's own RTF back into styled runs
+# ---------------------------------------------------------------------------
+# The preview has to show what was *copied*, not what was on screen: the two
+# differ wherever a copy style acts (a quotation's flipped quote marks, an
+# appended citation, omitted footnote markers and page numbers).  Reading the
+# finished RTF back is what keeps them from drifting — the preview is built
+# from the same bytes the clipboard receives, so a change to the copy path
+# shows up in the preview without anything here being taught about it.
+
+# Groups holding machinery rather than visible text.  ``\*`` marks an
+# ignorable destination in general; these are the named ones this app writes.
+_RTF_SKIPPED_DESTINATIONS = frozenset({
+    "fonttbl", "colortbl", "stylesheet", "info", "header", "footer",
+    "fldinst", "bkmkstart", "bkmkend",
+})
+
+# A control word (with its optional numeric argument and the single space that
+# delimits it) or a control symbol.
+_RTF_CONTROL_RE = re.compile(r"\\(?:([a-zA-Z]+)(-?\d+)? ?|(.))", re.DOTALL)
+
+# Visible characters kept before and after the elision in a long preview.  The
+# tail matters as much as the head: the citation this feature exists to check
+# is appended at the very end of the copy.
+_PREVIEW_HEAD_CHARS = 320
+_PREVIEW_TAIL_CHARS = 260
+
+
+def _rtf_preview_runs(rtf: str) -> "list[tuple[str, frozenset]]":
+    """An RTF document this app produced, read back as ``(text, styles)`` runs.
+
+    A reader for the subset :func:`_rtf_document`, :func:`_dump_to_rtf` and
+    :func:`_run_to_rtf` write — character formatting, paragraph shape, the
+    escapes, and the bookmark/hyperlink groups wrapped around footnote markers
+    — not a general RTF parser.  Control words it does not know are dropped
+    rather than shown, so an unrecognised one cannot leak into the preview as
+    literal text.
+
+    Styles are the names the preview renders: ``italic``, ``bold``,
+    ``underline``, ``small``, ``super``, ``center``, ``indent``, ``pagenum``.
+    """
+    runs: list[tuple[str, frozenset]] = []
+    buf: list[str] = []
+    state = {"italic": False, "bold": False, "underline": False,
+             "small": False, "super": False, "color": 0,
+             "center": False, "indent": False}
+    stack: list[dict] = []
+    skip_depth: "Optional[int]" = None
+    depth = 0
+
+    def styles() -> frozenset:
+        out = {k for k in ("italic", "bold", "underline", "super",
+                           "center", "indent") if state[k]}
+        if state["small"] and not state["super"]:
+            out.add("small")   # \super already carries its own smaller size
+        if state["color"] == 1:
+            out.add("pagenum")
+        return frozenset(out)
+
+    def flush() -> None:
+        if buf:
+            runs.append(("".join(buf), styles()))
+            buf.clear()
+
+    def emit(text: str) -> None:
+        if skip_depth is None and text:
+            buf.append(text)
+
+    def setst(key: str, value) -> None:
+        if state[key] != value:
+            flush()          # the run so far still belongs to the old style
+            state[key] = value
+
+    i, n = 0, len(rtf)
+    while i < n:
+        ch = rtf[i]
+        if ch == "{":
+            flush()
+            stack.append(dict(state))
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            flush()
+            if skip_depth is not None and depth <= skip_depth:
+                skip_depth = None
+            if stack:
+                state = stack.pop()
+            depth -= 1
+            i += 1
+            continue
+        if ch != "\\":
+            j = i
+            while j < n and rtf[j] not in "\\{}":
+                j += 1
+            # A raw newline in the source is RTF's ignorable whitespace, not
+            # content; the breaks the reader should see arrive as \par.
+            emit(rtf[i:j].replace("\r", "").replace("\n", ""))
+            i = j
+            continue
+
+        m = _RTF_CONTROL_RE.match(rtf, i)
+        if not m:
+            i += 1
+            continue
+        word, arg, symbol = m.group(1), m.group(2), m.group(3)
+        i = m.end()
+
+        if symbol is not None:
+            if symbol in "\\{}":
+                emit(symbol)
+            elif symbol == "~":
+                emit("\u00a0")
+            elif symbol == "-":
+                pass             # optional hyphen: invisible unless it breaks
+            elif symbol == "'":
+                pair, i = rtf[i:i + 2], i + 2
+                try:
+                    emit(bytes.fromhex(pair).decode("cp1252"))
+                except (ValueError, UnicodeDecodeError):
+                    pass
+            elif symbol == "*" and skip_depth is None:
+                skip_depth = depth
+            continue
+
+        if word in _RTF_SKIPPED_DESTINATIONS:
+            if skip_depth is None:
+                skip_depth = depth
+            continue
+        if skip_depth is not None:
+            continue
+
+        value = int(arg) if arg is not None else None
+        if word in ("par", "line"):
+            flush()
+            runs.append(("\n", styles()))
+        elif word == "tab":
+            emit("\t")
+        elif word == "u" and value is not None:
+            emit(chr(value if value >= 0 else value + 65536))
+            # \uN is followed by the fallback character it replaces.
+            if i < n and rtf[i] not in "\\{}":
+                i += 1
+        elif word == "pard":
+            setst("center", False)
+            setst("indent", False)
+        elif word == "qc":
+            setst("center", True)
+        elif word == "li":
+            setst("indent", bool(value))
+        elif word == "i":
+            setst("italic", value != 0)
+        elif word == "b":
+            setst("bold", value != 0)
+        elif word == "ul":
+            setst("underline", value != 0)
+        elif word == "ulnone":
+            setst("underline", False)
+        elif word == "super":
+            setst("super", True)
+        elif word in ("nosupersub", "sub"):
+            setst("super", False)
+        elif word == "fs":
+            setst("small", value is not None and value < 22)
+        elif word == "cf":
+            setst("color", value or 0)
+    flush()
+
+    # Merge neighbours sharing a style, then drop the blank lines the document
+    # opens and closes on — the preview is a fragment, not a page.
+    merged: list[tuple[str, frozenset]] = []
+    for text, style in runs:
+        if merged and merged[-1][1] == style:
+            merged[-1] = (merged[-1][0] + text, style)
+        else:
+            merged.append((text, style))
+    while merged and not merged[0][0].strip():
+        merged.pop(0)
+    while merged and not merged[-1][0].strip():
+        merged.pop()
+    if merged:
+        merged[0] = (merged[0][0].lstrip("\n"), merged[0][1])
+        merged[-1] = (merged[-1][0].rstrip("\n"), merged[-1][1])
+    return [(t, s) for t, s in merged if t]
+
+
+def _elide_preview_runs(
+    runs: "list[tuple[str, frozenset]]",
+    head: int = _PREVIEW_HEAD_CHARS,
+    tail: int = _PREVIEW_TAIL_CHARS,
+) -> "tuple[list, list, bool]":
+    """Split *runs* into a head and a tail with the middle left out.
+
+    Returns ``(head_runs, tail_runs, elided)``.  Both ends are kept because
+    both ends are what a reader checks: the opening of the passage, and the
+    citation the copy appends after it.  A short copy comes back whole, with
+    an empty tail.
+    """
+    total = sum(len(t) for t, _ in runs)
+    if total <= head + tail:
+        return runs, [], False
+
+    def take(source, budget):
+        out, used = [], 0
+        for text, style in source:
+            if used + len(text) <= budget:
+                out.append((text, style))
+                used += len(text)
+                continue
+            room = budget - used
+            if room > 0:
+                out.append((text[:room], style))
+            break
+        return out
+
+    head_runs = take(runs, head)
+    tail_runs = [(t[::-1], s) for t, s in
+                 take([(t[::-1], s) for t, s in reversed(runs)], tail)][::-1]
+    return head_runs, tail_runs, True
+
+
 def _dump_statute_rtf(txt: tk.Text, start: str, end: str) -> str:
     """Convert a statute / rule / constitution window's Text range to an RTF
     body, mapping the ``_StatuteWindow`` tag set — section headings, bold
@@ -19619,6 +19859,13 @@ class _ScholarTextWindow:
         # Created before the menubar, which binds its radio items to this var.
         self._copy_mode_var = tk.StringVar(
             master=self._win, value=_load_copy_mode())
+        # Whether each copy shows a moment's preview of what it put on the
+        # clipboard.  Also bound by the menubar, so it is created here too.
+        self._copy_preview_var = tk.BooleanVar(
+            master=self._win, value=_load_copy_preview())
+        self._copy_preview: Optional[tk.Toplevel] = None
+        self._copy_preview_after: Optional[str] = None
+        self._copy_preview_bound = False
         # A chromeless reader has no menu bar to hang menus from — the viewer
         # it is embedded in offers the copy styles on its own Copy button.
         self._history_menubar = None if self._chromeless else (
@@ -20433,6 +20680,189 @@ class _ScholarTextWindow:
         if self._fn_tip is not None:
             self._fn_tip.destroy()
             self._fn_tip = None
+
+    # ------------------------------------------------------------------
+    # Copy preview
+    # ------------------------------------------------------------------
+    # What a copy actually put on the clipboard, shown for a few seconds in a
+    # corner of the reading area.  A footnote tip interrupts to answer a
+    # question the reader asked by pointing at something; this one reports on
+    # an action already taken, so it keeps out of the text entirely, never
+    # takes focus, and leaves on its own.
+
+    _PREVIEW_MAX_LINES = 9
+    _PREVIEW_WIDTH_CHARS = 46
+    _PREVIEW_DWELL_MS = 5000
+
+    def _copy_preview_enabled(self) -> bool:
+        try:
+            return bool(self._copy_preview_var.get())
+        except (AttributeError, tk.TclError):
+            return False
+
+    def on_copy_preview_toggled(self) -> None:
+        """The Copy menu's preview checkbutton was used."""
+        show = self._copy_preview_enabled()
+        _save_copy_preview(show)
+        if not show:
+            self._hide_copy_preview()
+
+    def _show_copy_preview(self, rtf: str, caption: str) -> None:
+        """Show, for a moment, how the text just copied will arrive.
+
+        *rtf* is the very document handed to the clipboard, so what appears
+        here is the copy itself — quotation marks flipped, footnote markers
+        dropped, citation appended — rather than the passage as it sits on
+        screen.
+        """
+        if not self._copy_preview_enabled():
+            return
+        self._hide_copy_preview()
+        try:
+            runs = _rtf_preview_runs(rtf)
+        except Exception as exc:            # a preview is never worth a crash
+            print(f"[copy] preview could not read the RTF: {exc}")
+            return
+        if not runs:
+            return
+        head, tail, elided = _elide_preview_runs(runs)
+
+        try:
+            tip = tk.Toplevel(self._text)
+            tip.wm_overrideredirect(True)
+            tip.configure(bg=_UI["border"])
+        except tk.TclError:
+            return
+        for attempt in (("-topmost", True), ("-alpha", 0.97)):
+            try:
+                tip.attributes(*attempt)
+            except tk.TclError:
+                pass
+
+        frame = tk.Frame(tip, bg=_UI["window"])
+        frame.pack(padx=1, pady=1)          # the 1px border is the Toplevel bg
+        tk.Label(
+            frame, text=caption, anchor="w", justify="left",
+            bg=_UI["window"], fg=_UI["muted"],
+            font=(self._family, max(self._base_size - 4, 7)),
+            padx=12, pady=0,
+        ).pack(fill="x", pady=(8, 2))
+
+        size = max(self._base_size - 3, 8)
+        body = tk.Text(
+            frame, width=self._PREVIEW_WIDTH_CHARS, height=1, wrap="word",
+            bg=_UI["window"], fg=_UI["text"], relief="flat",
+            highlightthickness=0, borderwidth=0, padx=12, pady=0,
+            cursor="arrow", spacing1=1, spacing3=2,
+            font=(self._family, size),
+        )
+        body.pack(fill="both", padx=0, pady=(0, 9))
+        self._configure_preview_tags(body, size)
+        self._insert_preview_runs(body, head)
+        if elided:
+            body.insert("end", "\n … \n", ("elision",))
+            self._insert_preview_runs(body, tail)
+        body.config(state="disabled")
+
+        # Height the box to its content, within the cap.
+        body.update_idletasks()
+        try:
+            lines = int(body.count("1.0", "end-1c", "displaylines")[0]) + 1
+        except (tk.TclError, TypeError, IndexError):
+            lines = self._PREVIEW_MAX_LINES
+        body.config(height=max(1, min(lines, self._PREVIEW_MAX_LINES)))
+
+        self._copy_preview = tip
+        self._place_copy_preview(tip)
+        self._bind_copy_preview_dismissal()
+        self._copy_preview_after = self._win.after(
+            self._PREVIEW_DWELL_MS, self._hide_copy_preview)
+
+    def _bind_copy_preview_dismissal(self) -> None:
+        """Let the reader's next action clear the preview.
+
+        Bound once for the window's life rather than per preview: ``add="+"``
+        stacks a fresh handler on every call, and Tk has no dependable way to
+        remove just one of them again, so re-binding each copy would leave the
+        text widget carrying a handler per copy the reader had ever made.
+        """
+        if getattr(self, "_copy_preview_bound", False):
+            return
+        for seq in ("<Button-1>", "<Key>", "<MouseWheel>", "<Button-4>",
+                    "<Button-5>", "<Configure>"):
+            try:
+                self._text.bind(seq, self._dismiss_copy_preview, add="+")
+            except tk.TclError:
+                return
+        self._copy_preview_bound = True
+
+    def _configure_preview_tags(self, body: tk.Text, size: int) -> None:
+        """Give the preview widget one tag per style the RTF reader reports."""
+        fam = self._family
+        body.tag_configure("italic", font=(fam, size, "italic"))
+        body.tag_configure("bold", font=(fam, size, "bold"))
+        body.tag_configure("italic bold", font=(fam, size, "bold italic"))
+        body.tag_configure("underline", underline=True)
+        body.tag_configure("small", font=(fam, max(size - 2, 6)))
+        body.tag_configure(
+            "super", font=(fam, max(size - 3, 6)), offset=max(size // 3, 2))
+        body.tag_configure("center", justify="center")
+        body.tag_configure("indent", lmargin1=18, lmargin2=18, rmargin=18)
+        body.tag_configure("pagenum", foreground="#8e44ad")
+        body.tag_configure(
+            "elision", foreground=_UI["muted"], justify="center")
+
+    @staticmethod
+    def _insert_preview_runs(body: tk.Text, runs) -> None:
+        """Write the runs into the preview, mapping styles onto its tags.
+
+        Bold and italic together need their own font, so the pair is applied
+        as one tag rather than two that would each overwrite the other.
+        """
+        for text, styles in runs:
+            names = set(styles)
+            if {"italic", "bold"} <= names:
+                names -= {"italic", "bold"}
+                names.add("italic bold")
+            body.insert("end", text, tuple(sorted(names)))
+
+    def _place_copy_preview(self, tip: tk.Toplevel) -> None:
+        """Sit the card in the bottom-right of the reading area, inside the
+        screen.  Away from the top-left where the prose and the reader's own
+        selection are, and clear of the status line under the text."""
+        tip.update_idletasks()
+        w, h = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        txt = self._text
+        margin = 18
+        x = txt.winfo_rootx() + txt.winfo_width() - w - margin
+        y = txt.winfo_rooty() + txt.winfo_height() - h - margin
+        try:
+            left, top, area_w, area_h = _work_area(tip)
+        except Exception:
+            left, top = 0, 0
+            area_w, area_h = tip.winfo_screenwidth(), tip.winfo_screenheight()
+        x = max(left + 4, min(x, left + area_w - w - 4))
+        y = max(top + 4, min(y, top + area_h - h - 4))
+        tip.wm_geometry(f"+{int(x)}+{int(y)}")
+
+    def _dismiss_copy_preview(self, _event=None):
+        """Bound to the reader's next action; never swallows that action."""
+        self._hide_copy_preview()
+        return None
+
+    def _hide_copy_preview(self) -> None:
+        if self._copy_preview_after is not None:
+            try:
+                self._win.after_cancel(self._copy_preview_after)
+            except (tk.TclError, ValueError):
+                pass
+            self._copy_preview_after = None
+        if self._copy_preview is not None:
+            try:
+                self._copy_preview.destroy()
+            except tk.TclError:
+                pass
+            self._copy_preview = None
 
     # ------------------------------------------------------------------
     # Text/PDF location-map marks
@@ -21457,6 +21887,7 @@ class _ScholarTextWindow:
         self._clear_part_region_marks()
         txt.delete("1.0", "end")
         self._hide_fn_tip()
+        self._hide_copy_preview()
         self._link_actions.clear()
         self._fn_text.clear()
         self._fnref_pages: dict[str, Optional[int]] = {}
@@ -22347,6 +22778,7 @@ class _ScholarTextWindow:
         self._clear_part_region_marks()
         txt.delete("1.0", "end")
         self._hide_fn_tip()
+        self._hide_copy_preview()
         self._link_actions.clear()
         self._fn_text.clear()
         self._fnref_pages: dict[str, Optional[int]] = {}
@@ -23417,6 +23849,16 @@ class _ScholarTextWindow:
             self._win, rtf, plain
         )
         self._status_var.set(f"Copied the case citation as {how}.")
+        self._show_copy_preview(
+            rtf, self._copy_preview_caption(how, "Case citation"))
+
+    def _copy_preview_caption(self, how: str, label: str = "") -> str:
+        """The preview's one-line heading: which copy style produced it, and
+        a word of warning when the clipboard could only take plain text — the
+        formatting on show below would not survive that paste."""
+        label = label or dict(COPY_MODE_LABELS).get(
+            self.copy_mode(), "Copied")
+        return label if how.startswith("formatted") else f"{label} · plain text only"
 
     def _copy_formatted(self) -> None:
         txt = self._text
@@ -23528,6 +23970,7 @@ class _ScholarTextWindow:
                   "quote": "; quoted with citation.",
                   "parenthetical": "; copied as a parenthetical quote."}[mode]
         self._status_var.set(f"Copied {what} as {how}{styled}")
+        self._show_copy_preview(rtf, self._copy_preview_caption(how))
 
     def _fn_link_map(self) -> dict[str, tuple[str, str]]:
         """Link tags that anchor footnote jumps, for RTF bookmarks."""

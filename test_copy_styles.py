@@ -27,6 +27,8 @@ def _load(*names):
         "_QUOTE_OPEN", "_QUOTE_CLOSE", "_SQUOTE_OPEN", "_SQUOTE_CLOSE",
         "_RTF_QUOTE_TOKEN_RE", "COPY_MODES", "COPY_MODE_LABELS",
         "_DEFAULT_COPY_MODE", "_CONFIG_PATH",
+        "_RTF_HEADER", "_RTF_CONTROL_RE", "_RTF_SKIPPED_DESTINATIONS",
+        "_PREVIEW_HEAD_CHARS", "_PREVIEW_TAIL_CHARS",
     }
     consts = {}
 
@@ -63,7 +65,8 @@ NS = _load(
     "_QuoteFlipper", "_flip_quotes", "_rtf_escape", "_flip_rtf_quotes",
     "_parenthetical_plain", "_parenthetical_rtf",
     "_load_config", "_save_config", "_load_copy_mode", "_save_copy_mode",
-    "_next_copy_mode",
+    "_next_copy_mode", "_load_copy_preview", "_save_copy_preview",
+    "_rtf_document", "_rtf_preview_runs", "_elide_preview_runs",
 )
 flip = NS["_flip_quotes"]
 flip_rtf = NS["_flip_rtf_quotes"]
@@ -217,6 +220,121 @@ class CopyModePersistenceTests(unittest.TestCase):
             mode = NS["_next_copy_mode"](mode)
         self.assertEqual(tuple(visited), NS["COPY_MODES"])
         self.assertEqual(mode, NS["COPY_MODES"][0])
+
+
+class CopyPreviewPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        NS["_CONFIG_PATH"] = pathlib.Path(tempfile.mkdtemp()) / "config.json"
+
+    def test_the_preview_is_on_until_turned_off(self):
+        self.assertTrue(NS["_load_copy_preview"]())
+
+    def test_the_choice_round_trips(self):
+        for want in (False, True):
+            with self.subTest(want=want):
+                NS["_save_copy_preview"](want)
+                self.assertIs(NS["_load_copy_preview"](), want)
+
+    def test_saving_it_keeps_other_settings(self):
+        NS["_save_config"]({"api_token": "abc123", "copy_mode": "quote"})
+        NS["_save_copy_preview"](False)
+        self.assertEqual(NS["_load_config"]()["api_token"], "abc123")
+        self.assertEqual(NS["_load_copy_mode"](), "quote")
+
+
+class RtfPreviewReadbackTests(unittest.TestCase):
+    """The preview is read back out of the RTF the clipboard is given.
+
+    Building it from the finished document is what keeps the preview honest:
+    a copy style that changes the RTF changes the preview with it.
+    """
+
+    def runs(self, body):
+        return NS["_rtf_preview_runs"](NS["_rtf_document"](body))
+
+    def text_of(self, body):
+        return "".join(t for t, _s in self.runs(body))
+
+    def styled(self, body, style):
+        return [t for t, s in self.runs(body) if style in s]
+
+    def test_the_header_tables_are_not_shown_as_text(self):
+        # The font and colour tables are groups of machinery; a reader must
+        # never see "Times New Roman;" at the top of the preview.
+        text = self.text_of("\\pard\\sa120 Just the passage.\\par\n")
+        self.assertEqual(text, "Just the passage.")
+
+    def test_italics_survive(self):
+        body = ("\\pard\\sa120 See {\\i Palsgraf v. Long Island R.R. Co.}"
+                + esc(", 248 N.Y. 339 (1928).") + "\\par\n")
+        self.assertEqual(self.styled(body, "italic"),
+                         ["Palsgraf v. Long Island R.R. Co."])
+
+    def test_a_footnote_marker_keeps_its_number_but_not_its_plumbing(self):
+        # The marker is wrapped in a bookmark and a hyperlink field: the
+        # bookmark name and the HYPERLINK instruction are machinery, and only
+        # the field's result — the superscript digit — is visible text.
+        body = ("\\pard\\sa120 risk imports"
+                "{\\*\\bkmkstart FNR_3}{\\*\\bkmkend FNR_3}"
+                "{\\field{\\*\\fldinst{HYPERLINK \\\\l \"FNB_3\"}}"
+                "{\\fldrslt {\\super\\fs16 3}}}"
+                " relation.\\par\n")
+        self.assertEqual(self.text_of(body), "risk imports3 relation.")
+        self.assertEqual(self.styled(body, "super"), ["3"])
+        self.assertNotIn("FNR_3", self.text_of(body))
+        self.assertNotIn("HYPERLINK", self.text_of(body))
+
+    def test_escapes_and_unicode_come_back_as_characters(self):
+        body = "\\pard\\sa120 " + esc(f"{LD}a{RD} \\ {{ }} \u00a7 5") + "\\par\n"
+        self.assertEqual(self.text_of(body), f"{LD}a{RD} \\ {{ }} \u00a7 5")
+
+    def test_paragraph_shape_and_the_rest_of_the_styles(self):
+        body = ("\\pard\\qc\\sa120 {\\b Syllabus}\\par\n"
+                "\\pard\\li720\\ri720\\sa120 Indented.\\par\n"
+                "\\pard\\sa120 Body {\\cf1\\b *344} and {\\ul under}.\\par\n")
+        self.assertEqual(self.styled(body, "center"), ["Syllabus", "\n"])
+        self.assertEqual(self.styled(body, "indent"), ["Indented.\n"])
+        self.assertEqual(self.styled(body, "underline"), ["under"])
+        self.assertEqual(self.styled(body, "pagenum"), ["*344"])
+
+    def test_an_unknown_control_word_is_dropped_rather_than_printed(self):
+        body = "\\pard\\sa120 \\somethingnew Plain enough.\\par\n"
+        self.assertEqual(self.text_of(body), "Plain enough.")
+
+    def test_junk_never_raises(self):
+        for junk in ("", "{", "}}}", "not rtf", "{\\rtf1\\ansi", "\\u"):
+            with self.subTest(junk=junk):
+                NS["_rtf_preview_runs"](junk)   # must not raise
+
+
+class PreviewElisionTests(unittest.TestCase):
+    def test_a_short_copy_is_shown_whole(self):
+        runs = [("A short passage.", frozenset())]
+        head, tail, elided = NS["_elide_preview_runs"](runs)
+        self.assertFalse(elided)
+        self.assertEqual(head, runs)
+        self.assertEqual(tail, [])
+
+    def test_a_long_copy_keeps_the_citation_at_the_end(self):
+        # The citation is the thing the preview exists to check, and the copy
+        # styles append it last — so eliding only the tail would hide it.
+        runs = [("Quoted prose. " * 200, frozenset()),
+                ("\n\n", frozenset()),
+                ("Palsgraf v. Long Island R.R. Co.", frozenset({"italic"})),
+                (", 248 N.Y. 339, 344 (1928).", frozenset())]
+        head, tail, elided = NS["_elide_preview_runs"](runs)
+        self.assertTrue(elided)
+        self.assertTrue("".join(t for t, _ in head).startswith("Quoted prose."))
+        joined = "".join(t for t, _ in tail)
+        self.assertTrue(joined.endswith(", 248 N.Y. 339, 344 (1928)."))
+        self.assertIn("Palsgraf v. Long Island R.R. Co.",
+                      [t for t, s in tail if "italic" in s])
+
+    def test_neither_end_runs_past_its_budget(self):
+        runs = [("x" * 5000, frozenset())]
+        head, tail, _ = NS["_elide_preview_runs"](runs, head=40, tail=25)
+        self.assertEqual(sum(len(t) for t, _ in head), 40)
+        self.assertEqual(sum(len(t) for t, _ in tail), 25)
 
 
 class CopyMenuLayoutTests(unittest.TestCase):
