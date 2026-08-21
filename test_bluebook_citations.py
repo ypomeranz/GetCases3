@@ -37,6 +37,10 @@ from courtlistener_gui import (
     _CaseLawTextRecord,
     _case_law_case_html,
     _case_law_html_url,
+    _case_law_pdf_for_json_url,
+    _case_law_text_for_scan,
+    _cites_led_by,
+    _scan_printed_cite,
     _case_law_may_hold,
     _case_law_text_for_cite,
     _case_law_text_for_pdf_url,
@@ -1935,6 +1939,15 @@ class CaseLawPdfTextTests(unittest.TestCase):
             },
         }
 
+    @staticmethod
+    def _record():
+        return _CaseLawTextRecord(
+            "CAP text", "Pearson v. Dodd, 410 F.2d 701 (D.C. Cir. 1969)",
+            {"caseName": "Pearson v. Dodd", "citation": ["410 F.2d 701"]},
+            "https://static.case.law/f2d/410/cases/0701-01.json",
+            ["part"], ["block"],
+        )
+
     def test_cap_json_record_keeps_exact_text_and_display_metadata(self):
         record = _case_law_text_record(
             self._data(), "123 F. App'x 456",
@@ -2024,6 +2037,119 @@ class CaseLawPdfTextTests(unittest.TestCase):
             self.assertIsNone(_case_law_text_source(
                 ["601 U.S. 416"], "Smith v. Jones", "2024-03-01"))
         lookup.assert_not_called()
+
+    def test_a_scan_is_answered_from_its_own_file(self):
+        # The pages on screen and the text behind them are one document.
+        with (
+            patch("courtlistener_gui._case_law_text_for_pdf_url",
+                  return_value=self._record()) as exact,
+            patch("courtlistener_gui._case_law_text_source") as by_cite,
+        ):
+            source = _case_law_text_for_scan(
+                "https://static.case.law/f2d/410/case-pdfs/0701-01.pdf",
+                ["93 S. Ct. 705", "410 F.2d 701"], "Pearson v. Dodd")
+
+        self.assertEqual(source.kind, "case_law")
+        exact.assert_called_once_with(
+            "https://static.case.law/f2d/410/case-pdfs/0701-01.pdf")
+        by_cite.assert_not_called()
+
+    def test_another_scan_is_answered_only_by_the_reporter_it_prints(self):
+        # A U.S. Reports scan: CAP's copy of that volume, and no other
+        # printing of the same case, whatever else the result lists.
+        with (
+            patch("courtlistener_gui._case_law_text_for_pdf_url",
+                  return_value=None),
+            patch("courtlistener_gui._case_law_text_source") as by_cite,
+        ):
+            _case_law_text_for_scan(
+                "https://tile.loc.gov/.../usrep410113.pdf",
+                ["93 S. Ct. 705", "410 U.S. 113"], "Roe v. Wade", "1973-01-22")
+
+        by_cite.assert_called_once_with(
+            ["410 U.S. 113"], "Roe v. Wade", "1973-01-22",
+            prefer="410 U.S. 113")
+
+    def test_a_scan_naming_no_reporter_is_left_to_courtlistener(self):
+        # A slip opinion or CourtListener's own stored copy: CAP's text would
+        # be paginated to a reporter these pages are not.
+        with patch("courtlistener_gui._case_law_text_for_pdf_url",
+                   return_value=None):
+            self.assertIsNone(_case_law_text_for_scan(
+                "https://storage.courtlistener.com/pdf/2020/x.pdf",
+                ["410 U.S. 113"], "Roe v. Wade"))
+
+    def test_with_no_scan_the_ordinary_preference_applies(self):
+        with (
+            patch("courtlistener_gui._case_law_text_for_pdf_url",
+                  return_value=None),
+            patch("courtlistener_gui._case_law_text_source") as by_cite,
+        ):
+            _case_law_text_for_scan("", ["410 U.S. 113"], "Roe v. Wade", "d")
+        by_cite.assert_called_once_with(["410 U.S. 113"], "Roe v. Wade", "d")
+
+    def test_the_reporter_on_screen_leads_whatever_series_it_is(self):
+        tried = []
+
+        def lookup(cite, name=""):
+            tried.append(cite)
+            return None
+
+        with patch("courtlistener_gui._case_law_text_for_cite", lookup):
+            _case_law_text_source(
+                ["410 U.S. 113", "93 S. Ct. 705"], "Roe v. Wade",
+                prefer="93 S. Ct. 705")
+
+        # The vendor series would ordinarily come last; the scan on screen
+        # settles it instead.
+        self.assertEqual(tried, ["93 S. Ct. 705", "410 U.S. 113"])
+
+    def test_the_scans_reporter_is_read_off_its_url(self):
+        self.assertEqual(
+            _scan_printed_cite(
+                "https://static.case.law/p2d/506/case-pdfs/0020-01.pdf",
+                ["81 Wash. 2d 886"]),
+            "506 P.2d 20")
+        self.assertEqual(
+            _scan_printed_cite("https://tile.loc.gov/x/usrep410113.pdf",
+                               ["93 S. Ct. 705", "410 U.S. 113"]),
+            "410 U.S. 113")
+        self.assertEqual(
+            _scan_printed_cite("https://storage.courtlistener.com/a.pdf",
+                               ["410 U.S. 113"]),
+            "")
+
+    def test_the_file_a_text_came_from_names_the_scan_of_those_pages(self):
+        self.assertEqual(
+            _case_law_pdf_for_json_url(
+                "https://static.case.law/f2d/410/cases/0701-01.json"),
+            "https://static.case.law/f2d/410/case-pdfs/0701-01.pdf")
+        self.assertEqual(_case_law_pdf_for_json_url("https://x.test/a.json"),
+                         "")
+
+    def test_that_reporter_then_leads_the_windows_citations(self):
+        self.assertEqual(
+            _cites_led_by(["93 S. Ct. 705", "410 U.S. 113"], "410 U.S. 113"),
+            ["410 U.S. 113", "93 S. Ct. 705"])
+        # A reporter the result never listed is added at the front.
+        self.assertEqual(_cites_led_by(["81 Wash. 2d 886"], "506 P.2d 20"),
+                         ["506 P.2d 20", "81 Wash. 2d 886"])
+        # Nothing to lead with leaves the order alone.
+        self.assertEqual(_cites_led_by(["410 U.S. 113"], ""), ["410 U.S. 113"])
+
+    def test_the_source_leads_its_own_citations_by_the_file_it_read(self):
+        record = _CaseLawTextRecord(
+            "CAP text", "Pearson v. Dodd, 410 F.2d 701 (D.C. Cir. 1969)",
+            {"caseName": "Pearson v. Dodd",
+             "citation": ["93 S. Ct. 705", "410 F.2d 701"]},
+            "https://static.case.law/f2d/410/cases/0701-01.json",
+            ["part"], ["block"],
+        )
+        with patch("courtlistener_gui._case_law_text_for_cite",
+                   return_value=record):
+            source = _case_law_text_source(["410 F.2d 701"], "Pearson v. Dodd")
+        self.assertEqual(source.item["citation"],
+                         ["410 F.2d 701", "93 S. Ct. 705"])
 
     def test_official_reporters_are_tried_before_the_vendor_series(self):
         tried = []

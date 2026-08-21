@@ -2736,6 +2736,34 @@ def _case_law_pdf_for_cite(cite: str) -> Optional[str]:
     return choices[0].url if choices else None
 
 
+def _case_law_pdf_for_json_url(json_url: str) -> str:
+    """The per-case PDF beside a CAP JSON file — the reverse of
+    :func:`_case_law_json_for_pdf_url`, so the file a text came from can name
+    the scan of the very same pages."""
+    m = re.match(
+        r"^(https://static\.case\.law/.*)/cases/([\w-]+)\.json$",
+        (json_url or "").strip(), re.IGNORECASE,
+    )
+    return f"{m.group(1)}/case-pdfs/{m.group(2)}.pdf" if m else ""
+
+
+def _cites_led_by(cites, lead: str) -> list:
+    """*cites* with *lead* moved to the front (added if it is not among them).
+
+    The PDF resolver walks a case's citations in order and stops at the first
+    reporter static.case.law has a scan of, so putting the reporter already on
+    screen first is what keeps the scan and the text the same printing.
+    """
+    out = [re.sub(r"<[^>]+>", "", str(c or "")).strip() for c in (cites or [])]
+    out = [c for c in out if c]
+    lead = re.sub(r"\s+", " ", str(lead or "")).strip()
+    if not lead:
+        return out
+    key = re.sub(r"\s+", "", lead).lower()
+    return [lead] + [c for c in out
+                     if re.sub(r"\s+", "", c).lower() != key]
+
+
 def _case_law_json_url(citation: str) -> Optional[str]:
     """The per-case JSON URL on static.case.law for *citation* (e.g.
     ``https://static.case.law/f-appx/1/cases/0002-01.json`` for ``1 F. App'x
@@ -5836,12 +5864,23 @@ class _CasePdfTextSource:
 def _case_law_source_from_record(
     record: "_CaseLawTextRecord",
 ) -> "_CasePdfTextSource":
-    """Wrap a parsed CAP record as the text source a viewer renders."""
+    """Wrap a parsed CAP record as the text source a viewer renders.
+
+    The reporter the text was actually read from leads the item's citation
+    list.  The PDF resolver walks that list in order and stops at the first
+    reporter it finds a scan of, so this is what keeps a window's scan and its
+    text the same printing of the case rather than two parallel reporters'.
+    """
+    item = dict(record.item)
+    item["citation"] = _cites_led_by(
+        item.get("citation") or [],
+        _case_law_reporter_cite(_case_law_pdf_for_json_url(record.json_url)),
+    )
     return _CasePdfTextSource(
         # Under a PDF there is only one text to switch to, so the button says
         # "Text"; source_label still names where the text came from.
         "case_law", "Text", "static.case.law",
-        record.json_url, record.text, record.item,
+        record.json_url, record.text, item,
         list(record.parts), list(record.blocks), record,
     )
 
@@ -5859,7 +5898,7 @@ def _item_case_law_key(item: dict) -> "tuple[list[str], str, str]":
 
 
 def _case_law_text_source(
-    cites, name: str = "", date: str = "",
+    cites, name: str = "", date: str = "", prefer: str = "",
 ) -> "Optional[_CasePdfTextSource]":
     """static.case.law's text of a case, found by its reporter citations.
 
@@ -5869,21 +5908,29 @@ def _case_law_text_source(
     and the reporter's own page breaks — so the text on screen is the pages
     the citation names rather than a differently-paginated transcription.
 
-    Official reporters are tried before the vendor series (S. Ct., L. Ed.),
-    whose CAP files are separately scanned and separately paginated: the star
-    pagination a reader pin-cites from should be the official one wherever
-    CAP has it.  ``None`` when CAP holds none of the citations — the caller
-    then falls back to CourtListener exactly as it did before asking.
+    A case commonly carries three or four parallel citations, and CAP scanned
+    each reporter separately: every one of them is a different set of pages
+    for the same opinion.  Which one is wanted is therefore not a matter of
+    taste.  ``prefer`` is the citation whose pages the reader already has in
+    front of them — the reporter the scan on screen prints — and it leads,
+    whatever series it belongs to; without one, an official reporter leads
+    the vendor series (S. Ct., L. Ed.), which is the same reporter the PDF
+    resolver would reach for.  ``None`` when CAP holds none of the citations —
+    the caller then falls back to CourtListener exactly as it did before
+    asking.
 
     ``date`` is the decision date where it is known, which spares a decision
     too recent for CAP's scans the round trip (see :func:`_case_law_may_hold`).
     """
     if not _case_law_may_hold(date):
         return None
+    preferred: list[str] = []
     official: list[str] = []
     vendor: list[str] = []
     seen: set[str] = set()
-    for raw in cites:
+    prefer_key = re.sub(r"\s+", "", re.sub(
+        r"<[^>]+>", "", str(prefer or ""))).lower()
+    for raw in list(cites) + [prefer]:
         for cite in (
             re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str(raw or ""))).strip(),
             _us_reports_cite(str(raw or "")),
@@ -5896,9 +5943,13 @@ def _case_law_text_source(
                     or not _case_law_json_url(cite)):
                 continue
             seen.add(key)
-            (vendor if _CAP_VENDOR_REPORTER_RE.search(cite)
-             else official).append(cite)
-    for cite in (official + vendor)[:_CASE_LAW_TEXT_CITE_TRIES]:
+            bucket = (
+                preferred if key == prefer_key
+                else vendor if _CAP_VENDOR_REPORTER_RE.search(cite)
+                else official
+            )
+            bucket.append(cite)
+    for cite in (preferred + official + vendor)[:_CASE_LAW_TEXT_CITE_TRIES]:
         try:
             record = _case_law_text_for_cite(cite, name)
         except Exception as exc:
@@ -5908,6 +5959,56 @@ def _case_law_text_source(
             print(f"[case.law-text] using static.case.law for {cite!r}")
             return _case_law_source_from_record(record)
     return None
+
+
+def _scan_printed_cite(url: str, cites=(), printed_us_cite: str = "") -> str:
+    """The one citation whose pages the scan at *url* actually prints, or "".
+
+    The same narrowing that names the window and the files it saves (see
+    :func:`_scan_citation_item`): a U.S. Reports scan prints U.S. pages, any
+    static.case.law scan prints the reporter its own file names, and a scan
+    from anywhere else — a slip opinion, CourtListener's stored copy — names
+    no reporter of its own.
+    """
+    narrowed = _scan_citation_item(
+        {"citation": [c for c in cites if c]}, url, printed_us_cite)
+    return str(
+        narrowed.get("_us_reports_cite") or narrowed.get("_scan_cite") or ""
+    ).strip()
+
+
+def _case_law_text_for_scan(
+    pdf_url: str, cites, name: str = "", date: str = "",
+) -> "Optional[_CasePdfTextSource]":
+    """CAP's text of the pages a scan on screen actually prints.
+
+    Text shown beside a scan has to be the *same* document, not another
+    printing of the same case: a state opinion sits in an official reporter
+    and a regional one, a Supreme Court opinion in three, and CAP scanned
+    each separately, so the star pagination of the wrong one names pages the
+    reader is not looking at and every pin cite taken from it would be wrong.
+
+    So the scan itself decides, and it decides alone: a static.case.law scan
+    is answered from its own file — same volume, same page, same numbered
+    opinion — and any other scan only from CAP's copy of the reporter it
+    prints.  Where CAP has not got that reporter the answer is ``None`` and
+    CourtListener takes the question, because a parallel printing's pages
+    would not be these pages.  ``None`` too for a scan that names no reporter
+    at all — a slip opinion, CourtListener's own stored copy.
+
+    With no scan on screen (``pdf_url`` empty) there is nothing to match, and
+    the ordinary preference among the case's citations applies.
+    """
+    record = _case_law_text_for_pdf_url(pdf_url)
+    if record is not None and record.text.strip():
+        print(f"[case.law-text] using the scan's own file: {record.json_url}")
+        return _case_law_source_from_record(record)
+    if not pdf_url:
+        return _case_law_text_source(cites, name, date)
+    printed = _scan_printed_cite(pdf_url, cites)
+    if not printed:
+        return None
+    return _case_law_text_source([printed], name, date, prefer=printed)
 
 
 def _courtlistener_text_source(
@@ -6005,14 +6106,16 @@ def _cl_text_record(source: "_CasePdfTextSource") -> dict:
 def _case_pdf_text_source(
     pdf_url: str, title: str, client=None,
 ) -> "Optional[_CasePdfTextSource]":
-    """The text behind a CAP scan: that scan's own CAP file, then CourtListener.
+    """The text behind a scan: static.case.law's, then CourtListener's.
 
-    The file is the one this exact numbered PDF was made from, so its text is
-    the text on the pages the reader is looking at, page break for page break —
-    which is what makes the T button a second view of the *same* document
-    rather than another copy of the same case.  CourtListener answers for a
-    scan whose CAP file will not parse, and for one that is not a CAP scan at
-    all.
+    A CAP scan is answered from the file this exact numbered PDF was made
+    from, so its text is the text on the pages the reader is looking at, page
+    break for page break — which is what makes the T button a second view of
+    the *same* document rather than another copy of the same case.  A U.S.
+    Reports scan is answered from CAP's copy of that volume, which prints the
+    same pages.  CourtListener answers for a scan whose CAP file will not
+    parse, for one whose reporter CAP never held, and for one that names no
+    reporter at all.
     """
     parsed = _parse_citation_line(title or "")
     fallback_cite = parsed[1] if parsed else ""
@@ -6026,6 +6129,11 @@ def _case_pdf_text_source(
     else:
         name = fallback_name
         cites = [fallback_cite] if fallback_cite else []
+        # Not a CAP scan, but the pages still belong to some reporter — a
+        # U.S. Reports volume — and CAP may hold that same volume.
+        scan_source = _case_law_text_for_scan(pdf_url, cites, name)
+        if scan_source is not None:
+            return scan_source
 
     source = _courtlistener_text_source(
         client, cites, name,
@@ -8868,7 +8976,7 @@ class CourtListenerGUI:
         self._warm_case_text(cite, name, on_record=described,
                              on_page=page_ready,
                              on_text_source=text_source_ready,
-                             cl_item=cl_item)
+                             cl_item=cl_item, scan_url=url)
         try:
             window = _FloatingPdfWindow(
                 self.root, data, url, title, margin=margin, app=self,
@@ -8990,7 +9098,8 @@ class CourtListenerGUI:
 
     def _warm_case_text(self, cite: str, name: str, on_record=None,
                         on_page=None, on_text_source=None,
-                        cl_item: "Optional[dict]" = None) -> None:
+                        cl_item: "Optional[dict]" = None,
+                        scan_url: str = "") -> None:
         """Fetch the cited opinion's text in the background, so the case name
         on the viewer's strip opens a page that is already in hand.  Uses the
         ordinary Google Scholar path, whose result is cached and saved to the
@@ -9009,9 +9118,13 @@ class CourtListenerGUI:
         button works after all: static.case.law's text of the printed report
         first, being the reporter's own pages, and CourtListener's
         transcription where CAP has nothing.  ``cl_item`` is the cluster
-        already resolved, so the citation is not looked up a second time.
-        Scholar is still tried first: it is the better-typeset copy, and the
-        one every other view of a case prefers."""
+        already resolved, so the citation is not looked up a second time, and
+        ``scan_url`` is the scan this text will stand beside — which reporter
+        it prints is what decides which of the case's parallel citations the
+        text is taken from, since CAP scanned each of them separately and only
+        one of them paginates the pages on screen.  Scholar is still tried
+        first: it is the better-typeset copy, and the one every other view of
+        a case prefers."""
         if not cite:
             return
         try:
@@ -9053,10 +9166,15 @@ class CourtListenerGUI:
             return False
 
         def fallback() -> None:
-            """The copy to show when Google Scholar has none: the reporter's
-            own pages from static.case.law, then CourtListener's text."""
-            source = _case_law_text_source(
-                _citation_search_variants(cite), name,
+            """The copy to show when Google Scholar has none: static.case.law's
+            text of the very pages on screen, then CourtListener's."""
+            cites = list(_citation_search_variants(cite))
+            for parallel in (cl_item or {}).get("citation") or []:
+                parallel = re.sub(r"<[^>]+>", "", str(parallel or "")).strip()
+                if parallel and parallel not in cites:
+                    cites.append(parallel)
+            source = _case_law_text_for_scan(
+                scan_url, cites, name,
                 str((cl_item or {}).get("dateFiled") or ""),
             )
             if source is None and client is not None:
@@ -12041,7 +12159,11 @@ class CourtListenerGUI:
         CourtListener-primary case opens in, named for where its text came
         from.  The search result's own metadata still identifies the case (it
         carries the cluster the PDF button and the background Scholar hunt
-        both need); CAP fills in only what that result left blank."""
+        both need); CAP fills in only what that result left blank.
+
+        The reporter this text was taken from leads the citation list, so the
+        scan the PDF button goes looking for is the scan of these very pages
+        rather than a parallel reporter's printing of the same case."""
         self._status_var.set(
             "Loaded static.case.law text — searching Google Scholar…"
             if search else "Loaded static.case.law text."
@@ -12050,6 +12172,9 @@ class CourtListenerGUI:
         for key, value in (source.item or {}).items():
             if value and not merged.get(key):
                 merged[key] = value
+        merged["citation"] = _cites_led_by(
+            merged.get("citation") or [], _case_law_reporter_cite(
+                _case_law_pdf_for_json_url(source.source_url)))
         win = _ScholarTextWindow(
             self.root, self, "", "", item=merged, cl_text=source.text,
             cl_parts=list(source.parts), cl_blocks=list(source.blocks),

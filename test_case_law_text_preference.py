@@ -78,6 +78,18 @@ ITEM_CASE_LAW_KEY = _load_function(
     "_item_case_law_key",
     {"_cluster_citations_to_strings": lambda cites: [str(c) for c in cites]})
 
+#: And the real rule for which reporter leads a window's citation list, so a
+#: test exercises it rather than a restatement of it.
+CASE_LAW_PDF_FOR_JSON_URL = _load_function("_case_law_pdf_for_json_url")
+CITES_LED_BY = _load_function("_cites_led_by")
+CASE_LAW_REPORTER_CITE = _load_function(
+    "_case_law_reporter_cite",
+    {"_CASE_LAW_URL_RE": re.compile(
+        r"static\.case\.law/([^/]+)/(\d+)/case-pdfs/0*(\d+)-\d+\.pdf", re.I),
+     "_CASE_LAW_SLUG_REPORTERS": {"us": "U.S.", "sct": "S. Ct.",
+                                  "f2d": "F.2d", "p2d": "P.2d",
+                                  "wash-2d": "Wash. 2d"}})
+
 
 class _Source:
     """A text source shaped the way the real ones come back."""
@@ -168,6 +180,9 @@ APP_NS = _load(
      "_SCHOLAR_MATCH_THRESHOLD": 0.72,
      "_find_scholar_for_item": lambda *a, **kw: (None, None, ""),
      "_cluster_citations_to_strings": lambda cites: [str(c) for c in cites],
+     "_cites_led_by": CITES_LED_BY,
+     "_case_law_pdf_for_json_url": CASE_LAW_PDF_FOR_JSON_URL,
+     "_case_law_reporter_cite": CASE_LAW_REPORTER_CITE,
      })
 
 
@@ -229,6 +244,12 @@ class SourcePreferenceTests(unittest.TestCase):
         self.app._scholar_first_worker(
             dict(CLUSTER), fetcher or _Fetcher(), client)
         return _Reader.built[-1] if _Reader.built else None
+
+    def _open_with(self, **fields):
+        item = dict(CLUSTER)
+        item.update(fields)
+        self.app._scholar_first_worker(item, _Fetcher(), "client")
+        return _Reader.built[-1]
 
     # --- opening a case from a search result -------------------------
     def test_static_case_law_is_preferred_to_courtlistener(self):
@@ -310,6 +331,36 @@ class SourcePreferenceTests(unittest.TestCase):
         CAP_ANSWER[0] = CAP
         self._open()
         self.assertIn("static.case.law", self.app._status_var.get())
+
+    # --- and the scan the PDF button will find ------------------------
+    def test_the_reporter_the_text_came_from_leads_the_citations(self):
+        # The PDF resolver walks a case's citations in order and stops at the
+        # first reporter static.case.law has a scan of.  A window showing the
+        # F.2d text must therefore ask for the F.2d scan, not the parallel
+        # reporter CourtListener happened to list first.
+        CAP_ANSWER[0] = _Source(
+            "case_law", "static.case.law",
+            "https://static.case.law/f2d/410/cases/0701-01.json",
+            item={"citation": ["410 F.2d 701"]})
+        reader = self._open_with(citation=["93 S. Ct. 705", "410 F.2d 701"])
+        self.assertEqual(reader.kw["item"]["citation"],
+                         ["410 F.2d 701", "93 S. Ct. 705"])
+
+    def test_a_reporter_the_result_never_listed_is_added_at_the_front(self):
+        CAP_ANSWER[0] = _Source(
+            "case_law", "static.case.law",
+            "https://static.case.law/p2d/506/cases/0020-01.json",
+            item={"citation": ["506 P.2d 20"]})
+        reader = self._open_with(citation=["81 Wash. 2d 886"])
+        self.assertEqual(reader.kw["item"]["citation"],
+                         ["506 P.2d 20", "81 Wash. 2d 886"])
+
+    def test_a_source_that_names_no_cap_file_leaves_the_order_alone(self):
+        CAP_ANSWER[0] = _Source("case_law", "static.case.law", "",
+                                item={"citation": ["410 F.2d 701"]})
+        reader = self._open_with(citation=["93 S. Ct. 705", "410 F.2d 701"])
+        self.assertEqual(reader.kw["item"]["citation"],
+                         ["93 S. Ct. 705", "410 F.2d 701"])
 
 
 class CitationListTests(unittest.TestCase):

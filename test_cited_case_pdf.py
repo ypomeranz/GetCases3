@@ -214,12 +214,21 @@ COURTLISTENER_TEXT_SOURCE = _load_function(
      "_assemble_case_text": lambda client, item: ""})
 
 CASE_LAW_TEXTS: dict = {}    # cite -> the static.case.law text found for it
-CASE_LAW_LOOKUPS: list = []  # (cites, name, date) each lookup was asked with
+CASE_LAW_SCANS: dict = {}    # scan url -> the text that scan's own file holds
+CASE_LAW_LOOKUPS: list = []  # (scan url, cites, name, date) each lookup got
 
 
-def _case_law_text_source(cites, name="", date=""):
-    """static.case.law's text of a case, keyed on its citations."""
-    CASE_LAW_LOOKUPS.append((tuple(cites), name, date))
+def _case_law_text_for_scan(pdf_url, cites, name="", date=""):
+    """static.case.law's text of the pages the scan at *pdf_url* prints.
+
+    The real one is exercised against real CAP URLs in
+    ``test_bluebook_citations``; here it only has to record what it was asked,
+    so a test can see that the scan on screen — not the first citation
+    CourtListener happens to list — is what the lookup was keyed on.
+    """
+    CASE_LAW_LOOKUPS.append((pdf_url, tuple(cites), name, date))
+    if pdf_url in CASE_LAW_SCANS:
+        return CASE_LAW_SCANS[pdf_url]
     for cite in cites:
         source = CASE_LAW_TEXTS.get(cite)
         if source is not None:
@@ -282,7 +291,7 @@ APP_NS = _load(
      "_open_citation_in_browser": lambda *a: None,
      "_SCHOLAR_AVAILABLE": True,
      "_citation_search_variants": lambda cite: (cite,),
-     "_case_law_text_source": _case_law_text_source,
+     "_case_law_text_for_scan": _case_law_text_for_scan,
      "_courtlistener_text_source": COURTLISTENER_TEXT_SOURCE,
      "_cl_text_record": CL_TEXT_RECORD,
      "_ScholarTextWindow": _FakeReader,
@@ -701,7 +710,8 @@ class CourtListenerFallbackTests(unittest.TestCase):
     def setUp(self):
         RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
         CL_LOOKUPS.clear(); CL_PARTS.clear(); CL_CAPTIONS.clear()
-        CASE_LAW_TEXTS.clear(); CASE_LAW_LOOKUPS.clear()
+        CASE_LAW_TEXTS.clear(); CASE_LAW_SCANS.clear()
+        CASE_LAW_LOOKUPS.clear()
         TITLED.clear(); TEXT_OPENS.clear()
         _FakeViewer.opened.clear(); _FakeReader.built.clear()
         _Thread.started.clear()
@@ -804,12 +814,25 @@ class CourtListenerFallbackTests(unittest.TestCase):
         self.assertEqual(reader.url, "https://scholar.test/410 U.S. 113")
         self.assertEqual(CASE_LAW_LOOKUPS, [])
 
-    def test_the_decision_date_spares_a_modern_case_the_lookup(self):
-        # The date travels with the citations so a decision CAP's scans stop
-        # short of is not asked for at all.
+    def test_the_scan_on_screen_is_what_the_lookup_is_keyed_on(self):
+        # Not the first citation CourtListener lists: CAP scanned each
+        # parallel reporter separately, and only one of them paginates the
+        # pages the reader is looking at.  The date travels with them, so a
+        # decision CAP's scans stop short of is not asked for at all.
         self._click()
-        self.assertEqual(CASE_LAW_LOOKUPS,
-                         [(("410 U.S. 113",), "Roe v. Wade", "1973-01-22")])
+        self.assertEqual(
+            CASE_LAW_LOOKUPS,
+            [("https://loc.test/usrep410113.pdf",
+              ("410 U.S. 113", "93 S. Ct. 705"),
+              "Roe v. Wade", "1973-01-22")])
+
+    def test_the_scans_own_text_wins_over_any_parallel_reporters(self):
+        CASE_LAW_SCANS["https://loc.test/usrep410113.pdf"] = _case_law_source(
+            text="The U.S. Reports text")
+        CASE_LAW_TEXTS["93 S. Ct. 705"] = _case_law_source(
+            text="The S. Ct. text")
+        reader = self._press_t(self._click())
+        self.assertEqual(reader.kw["cl_text"], "The U.S. Reports text")
 
     def test_a_case_neither_source_has_still_stays_on_the_scan(self):
         CL_ITEMS.clear()
