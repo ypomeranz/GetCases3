@@ -212,6 +212,28 @@ COURTLISTENER_TEXT_SOURCE = _load_function(
      "_cl_item_for_citation": _cl_item_for_citation,
      "_assemble_case_parts": _assemble_case_parts,
      "_assemble_case_text": lambda client, item: ""})
+
+CASE_LAW_TEXTS: dict = {}    # cite -> the static.case.law text found for it
+CASE_LAW_LOOKUPS: list = []  # (cites, name, date) each lookup was asked with
+
+
+def _case_law_text_source(cites, name="", date=""):
+    """static.case.law's text of a case, keyed on its citations."""
+    CASE_LAW_LOOKUPS.append((tuple(cites), name, date))
+    for cite in cites:
+        source = CASE_LAW_TEXTS.get(cite)
+        if source is not None:
+            return source
+    return None
+
+
+def _case_law_source(text="The static.case.law text", parts=("cap part",),
+                     blocks=("PEARSON v. DODD",), item=None):
+    """A CAP source shaped the way the real one comes back."""
+    return CASE_PDF_TEXT_SOURCE(
+        "case_law", "Text", "static.case.law",
+        "https://static.case.law/us/410/cases/0113-01.json",
+        text, dict(item or {}), list(parts), list(blocks), None)
 CL_TEXT_RECORD = _load_function(
     "_cl_text_record",
     {"_scholar_caption_name": lambda blocks: CL_CAPTIONS.get(tuple(blocks), ""),
@@ -260,6 +282,7 @@ APP_NS = _load(
      "_open_citation_in_browser": lambda *a: None,
      "_SCHOLAR_AVAILABLE": True,
      "_citation_search_variants": lambda cite: (cite,),
+     "_case_law_text_source": _case_law_text_source,
      "_courtlistener_text_source": COURTLISTENER_TEXT_SOURCE,
      "_cl_text_record": CL_TEXT_RECORD,
      "_ScholarTextWindow": _FakeReader,
@@ -661,8 +684,10 @@ class WarmedCaseRecordTests(unittest.TestCase):
 
 
 class CourtListenerFallbackTests(unittest.TestCase):
-    """Google Scholar has no copy: the scan's T button shows CourtListener's
-    text instead, and CourtListener names the window."""
+    """Google Scholar has no copy: the scan's T button shows the best text
+    there is instead — static.case.law's report where the Caselaw Access
+    Project has the case, CourtListener's where it does not — and that text
+    names the window."""
 
     CLUSTER = {
         "cluster_id": 99,
@@ -676,6 +701,7 @@ class CourtListenerFallbackTests(unittest.TestCase):
     def setUp(self):
         RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
         CL_LOOKUPS.clear(); CL_PARTS.clear(); CL_CAPTIONS.clear()
+        CASE_LAW_TEXTS.clear(); CASE_LAW_LOOKUPS.clear()
         TITLED.clear(); TEXT_OPENS.clear()
         _FakeViewer.opened.clear(); _FakeReader.built.clear()
         _Thread.started.clear()
@@ -754,6 +780,48 @@ class CourtListenerFallbackTests(unittest.TestCase):
         reader = self._press_t(self._click())
         self.assertEqual(reader.url, "https://scholar.test/410 U.S. 113")
         self.assertNotIn("cl_text", reader.kw)
+
+    # --- static.case.law comes before CourtListener -----------------
+    def test_the_report_on_static_case_law_is_preferred_to_courtlistener(self):
+        CASE_LAW_TEXTS["410 U.S. 113"] = _case_law_source()
+        reader = self._press_t(self._click())
+        self.assertEqual(reader.kw["cl_text"], "The static.case.law text")
+        self.assertEqual(reader.kw["cl_parts"], ["cap part"])
+        self.assertEqual(reader.kw["primary_source_kind"], "case_law")
+        self.assertEqual(reader.kw["primary_source_label"], "static.case.law")
+        self.assertEqual(
+            reader.kw["primary_source_url"],
+            "https://static.case.law/us/410/cases/0113-01.json")
+
+    def test_courtlistener_still_answers_for_a_case_cap_lacks(self):
+        reader = self._press_t(self._click())
+        self.assertEqual(reader.kw["primary_source_kind"], "courtlistener")
+
+    def test_scholar_is_asked_before_static_case_law(self):
+        CASE_LAW_TEXTS["410 U.S. 113"] = _case_law_source()
+        self.app = _App(scholar=True)
+        reader = self._press_t(self._click())
+        self.assertEqual(reader.url, "https://scholar.test/410 U.S. 113")
+        self.assertEqual(CASE_LAW_LOOKUPS, [])
+
+    def test_the_decision_date_spares_a_modern_case_the_lookup(self):
+        # The date travels with the citations so a decision CAP's scans stop
+        # short of is not asked for at all.
+        self._click()
+        self.assertEqual(CASE_LAW_LOOKUPS,
+                         [(("410 U.S. 113",), "Roe v. Wade", "1973-01-22")])
+
+    def test_a_case_neither_source_has_still_stays_on_the_scan(self):
+        CL_ITEMS.clear()
+        self.assertIsNone(self._press_t(self._click()))
+
+    def test_static_case_law_names_the_window_without_a_token(self):
+        CASE_LAW_TEXTS["410 U.S. 113"] = _case_law_source(
+            item={"caseName": "Roe v. Wade", "citation": ["410 U.S. 113"]})
+        self.app = _App(token="", scholar=False)
+        reader = self._press_t(self._click())
+        self.assertIsNotNone(reader)
+        self.assertEqual(reader.kw["primary_source_kind"], "case_law")
 
     # --- and what it names the window -------------------------------
     def test_the_window_is_named_from_courtlistener(self):
