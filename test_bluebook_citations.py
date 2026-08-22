@@ -27,7 +27,7 @@ from citation_overrides import (
     format_edited_citation,
     update_overrides,
 )
-from court_catalog import bluebook_federal_trial_court
+from court_catalog import bluebook_federal_trial_court, state_of_court
 from courtlistener_gui import (
     CourtListenerGUI,
     _CasePdfTextSource,
@@ -1017,6 +1017,106 @@ class ReporterAndDecisionDateTests(unittest.TestCase):
         bb = win._compute_bluebook_parts()
 
         self.assertEqual(bb["display_cite"], "409 Mich. 672")
+
+
+class StateCourtPartyTests(unittest.TestCase):
+    """Rule 10.2.1(f): "State of," "Commonwealth of," and "People of" drop out
+    of a party name, leaving the state's name — except when the citation is to
+    a decision of that state's own courts, where the designation is what
+    survives instead."""
+
+    # The caption as static.case.law prints it (254 N.Y. 192).
+    ZACKOWITZ = ("The People of the State of New York, Respondent, "
+                 "v. Joseph Zackowitz, Appellant.")
+
+    def test_state_high_court_keeps_the_people(self):
+        self.assertEqual(
+            abbreviate_case_name(self.ZACKOWITZ, court_state="new york"),
+            "People v. Zackowitz",
+        )
+
+    def test_another_courts_citation_names_the_state(self):
+        # People of the State of New York v. Tanella, 374 F.3d 141 (2d Cir.
+        # 2004) — a federal court, so the state is named.
+        self.assertEqual(
+            abbreviate_case_name(
+                "People of the State of New York v. Tanella"),
+            "New York v. Tanella",
+        )
+
+    def test_state_and_commonwealth_designations(self):
+        self.assertEqual(
+            abbreviate_case_name("State of Washington v. Glucksberg",
+                                 court_state="washington"),
+            "State v. Glucksberg",
+        )
+        self.assertEqual(
+            abbreviate_case_name("Commonwealth of Massachusetts v. John Smith",
+                                 court_state="massachusetts"),
+            "Commonwealth v. Smith",
+        )
+
+    def test_designation_survives_a_relator_clause(self):
+        self.assertEqual(
+            abbreviate_case_name(
+                "People of the State of New York ex rel. Spitzer v. Grasso",
+                court_state="new york"),
+            "People ex rel. Spitzer v. Grasso",
+        )
+
+    def test_abbreviation_is_idempotent_and_state_spelling_agnostic(self):
+        once = abbreviate_case_name(self.ZACKOWITZ, court_state="N.Y.")
+        self.assertEqual(once, "People v. Zackowitz")
+        self.assertEqual(
+            abbreviate_case_name(once, court_state="new york"), once)
+
+    def test_court_resolves_from_an_id_or_a_name(self):
+        for court_id, court_name in (
+            ("ny", ""),                              # CourtListener id
+            ("ny-app-div", ""),                      # CAP's hyphenated slug
+            ("", "N.Y."),                            # CAP name_abbreviation
+            ("", "Court of Appeals of New York"),    # CourtListener name
+        ):
+            with self.subTest(court_id=court_id, court_name=court_name):
+                self.assertEqual(
+                    state_of_court(court_id, court_name), "new york")
+
+    def test_a_federal_court_sitting_in_the_state_is_not_its_court(self):
+        for court_id, court_name in (
+            ("nysd", "United States District Court, S.D. New York"),
+            ("ca2", "United States Court of Appeals for the Second Circuit"),
+            ("scotus", "Supreme Court of the United States"),
+            ("", ""),
+        ):
+            with self.subTest(court_id=court_id, court_name=court_name):
+                self.assertEqual(state_of_court(court_id, court_name), "")
+
+    def test_case_law_caption_cites_as_people_in_the_reader(self):
+        # The whole path the reader runs for a static.case.law opinion: the
+        # caption comes off the head matter, the court off CAP's metadata.
+        win = object.__new__(_ScholarTextWindow)
+        win._item = {
+            "caseName": "",
+            "citation": ["254 N.Y. 192"],
+            "court": "N.Y.",
+            "court_id": "ny",
+            "dateFiled": "1930-07-08",
+        }
+        win._blocks = [
+            Block("center", [Span(self.ZACKOWITZ)]),
+            Block("center", [Span("(Argued June 9, 1930; "
+                                  "decided July 8, 1930.)")]),
+            Block("para", [Span("Cardozo, Ch. J.")]),
+            Block("para", [Span("On November 10, 1929, shortly after "
+                                "midnight, the defendant in Kings county "
+                                "shot Frank Coppola and killed him.")]),
+        ]
+
+        bb = win._compute_bluebook_parts()
+
+        self.assertEqual(bb["name"], "People v. Zackowitz")
+        self.assertEqual(bb["cite"], "254 N.Y. 192")
+        self.assertEqual(bb["year"], "1930")
 
 
 class NominativeCitationSearchTests(unittest.TestCase):

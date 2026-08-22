@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Optional
 
 import citations
+from court_catalog import state_of_court
 from bluebook_names import (
     abbreviate_case_name,
     cut_companion_cases,
@@ -466,12 +467,21 @@ def extract_record(
             prose = _prose_text(blocks)
             raw_name = refine_caption_case(raw_name, prose)
             raw_name = simplify_historical_entity_caption(raw_name, prose)
-    name = abbreviate_case_name(raw_name) if raw_name else ""
 
     cites = _header_cites(blocks)
     for c in item.get("citation", []) or []:
         cites.append(str(c))
     cites = _dedupe_cites(cites)
+
+    header_court = _court_from_header(blocks)
+    court = str(item.get("court_id") or "").strip().lower()
+    if not court:
+        court = _court_from_cites(cites) or header_court
+
+    # Rule 10.2.1(f): whether a "People of the State of …" party keeps the
+    # designation or the state name turns on the deciding court.
+    name = abbreviate_case_name(
+        raw_name, court_state=state_of_court(court)) if raw_name else ""
 
     parties = parties_from_name(name or raw_name)
 
@@ -479,7 +489,6 @@ def extract_record(
         item.get("dateFiled") or item.get("date_filed") or ""
     ).strip()
     header_date = decision_date_from_blocks(blocks)
-    header_court = _court_from_header(blocks)
     # Scholar-only records otherwise retain just a year.  For SCOTUS, trust
     # the opinion's own "Decided ..." line even when external metadata carries
     # a later rehearing date.
@@ -523,10 +532,6 @@ def extract_record(
         )
         if years:
             year = years[-1]
-
-    court = str(item.get("court_id") or "").strip().lower()
-    if not court:
-        court = _court_from_cites(cites) or header_court
 
     return {
         "v": _SCHEMA_VERSION,

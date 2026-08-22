@@ -1007,6 +1007,7 @@ from court_catalog import (
     all_court_ids as _all_court_ids,
     bluebook_court_from_name as _bluebook_court_from_name,
     bluebook_federal_trial_court as _bluebook_federal_trial_court,
+    state_of_court as _state_of_court,
 )
 
 _CONFIG_PATH = Path.home() / ".config" / "courtlistener" / "config.json"
@@ -1852,11 +1853,17 @@ def _bluebook_display_name(item: dict) -> str:
     and whenever the reporter already conveys it (e.g. ``60 Fed. Cl. 600``).
     Falls back gracefully when citation or date are missing.
     """
-    # Case name, abbreviated per Bluebook rule 10.2.2 (table T6/T10)
-    case_name = abbreviate_case_name(re.sub(
-        r"<[^>]+>", "",
-        item.get("caseName") or item.get("case_name") or "opinion"
-    ).strip())
+    # Case name, abbreviated per Bluebook rule 10.2.2 (table T6/T10); the
+    # deciding court settles the "People of"/"State of" party (rule
+    # 10.2.1(f)).
+    case_name = abbreviate_case_name(
+        re.sub(
+            r"<[^>]+>", "",
+            item.get("caseName") or item.get("case_name") or "opinion"
+        ).strip(),
+        court_state=_state_of_court(
+            str(item.get("court_id") or ""), str(item.get("court") or "")),
+    )
 
     # Best citation (U.S. Reports > S.Ct. > Federal Reporters > others).
     # A U.S. Reports scan resolved for this case names its own volume and page
@@ -2328,6 +2335,9 @@ class _CaseLawPageOpinion:
     url: str
     json_url: str
     name: str
+    #: CAP's court slug, so the label can apply rule 10.2.1(f) to a
+    #: "People of the State of …" caption.
+    court_id: str = ""
 
 
 _CASE_LAW_NUMBERED_PDF_RE = re.compile(
@@ -2392,6 +2402,7 @@ def _case_law_page_opinions(url: str) -> list[_CaseLawPageOpinion]:
     for pdf_url in pdf_urls:
         json_url = _case_law_json_for_pdf_url(pdf_url) or ""
         name = ""
+        court_id = ""
         if json_url:
             try:
                 resp = _anon_session.get(json_url, timeout=10)
@@ -2404,9 +2415,12 @@ def _case_law_page_opinions(url: str) -> list[_CaseLawPageOpinion]:
                                 or data.get("name") or ""
                             ),
                         ).strip()
+                        court = data.get("court")
+                        if isinstance(court, dict):
+                            court_id = str(court.get("slug") or "").strip()
             except Exception as exc:
                 print(f"[case.law] metadata fetch failed {json_url}: {exc}")
-        out.append(_CaseLawPageOpinion(pdf_url, json_url, name))
+        out.append(_CaseLawPageOpinion(pdf_url, json_url, name, court_id))
     return out
 
 
@@ -2415,7 +2429,10 @@ def _case_law_opinion_name(opinion: _CaseLawPageOpinion) -> str:
     if not opinion.name:
         return ""
     try:
-        return abbreviate_case_name(normal_case_caption(opinion.name))
+        return abbreviate_case_name(
+            normal_case_caption(opinion.name),
+            court_state=_state_of_court(opinion.court_id),
+        )
     except Exception:
         return opinion.name
 
@@ -5205,7 +5222,9 @@ def _bluebook_saved_opinion_name(db, hit: dict) -> str:
     try:
         name = refine_caption_case(normal_case_caption(raw), body)
         name = simplify_historical_entity_caption(name, body)
-        return abbreviate_case_name(name)
+        # The store keeps the court id under "court" (see opinion_db).
+        return abbreviate_case_name(
+            name, court_state=_state_of_court(str(hit.get("court") or "")))
     except Exception:
         return raw
 
@@ -19819,6 +19838,7 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
     m_name = str(meta.get("name_abbreviation") or "").strip()
     m_court = str(meta_court.get("name_abbreviation")
                   or meta_court.get("name") or "").strip()
+    m_court_id = str(meta_court.get("slug") or "").strip()
     m_year = str(meta.get("decision_date") or "")[:4]
     if not m_year.isdigit():
         m_year = ""
@@ -19916,8 +19936,15 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
     if name:
         name = re.sub(r"<[^>]+>", "", name).strip(" ,")
         name = _trim_geographic_tails(name)
+        # Rule 10.2.1(f): only that state's own courts keep the bare
+        # "People"/"State"/"Commonwealth" party.
+        court_state = _state_of_court(
+            m_court_id or court_id or cl_court_id,
+            m_court or it_court or cl_court or (cap_court or ""),
+        )
         try:
-            name = abbreviate_case_name(name)   # the app's Bluebook form
+            name = abbreviate_case_name(   # the app's Bluebook form
+                name, court_state=court_state)
         except Exception:
             pass
 
@@ -23600,7 +23627,13 @@ class _ScholarTextWindow:
                     if abbr:
                         court_abbr = abbr
                         break
-        name = abbreviate_case_name(name)
+        # Rule 10.2.1(f) needs the deciding court to finish a "People of the
+        # State of …" party: its own state's courts cite it as "People v.
+        # Zackowitz", everyone else's as "New York v. Zackowitz".
+        name = abbreviate_case_name(
+            name,
+            court_state=_state_of_court(court_id, str(item.get("court") or "")),
+        )
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
