@@ -2,11 +2,12 @@
 
 A case carrying separate writings maps them onto a slim rail just inside the
 scrollbar — each part a band in its own colour.  The colour says a dissent
-begins here; it does not say whose.  Taking hold of the scrollbar (or of the
-rail, which scrolls the document too) now names them all at once: each
-author's surname in caps, in the part's own colour, set directly to the left
-of the band that writing starts at — the Court's opinion among them — and they
-fade out a moment after the scrolling stops.
+begins here; it does not say whose.  Taking the pointer to the scrollbar (or
+to the rail beside it) now names them all at once: each author's surname in
+caps, in the part's own colour, set directly to the left of the band that
+writing starts at — the Court's opinion among them.  They stay while the
+pointer is there or the thumb is held, and fade out a moment after it leaves.
+This is what took the place of the hover tip that named one band at a time.
 
 ``_PartNameFlash`` is lifted out of ``courtlistener_gui`` with ``ast``
 (importing it needs tkinter, absent on a headless run) and driven against
@@ -420,6 +421,62 @@ class FlashStackTests(unittest.TestCase):
         self.assertEqual(flash.host.live()[0].placed["y"], 40)
 
 
+class FlashHoverTests(unittest.TestCase):
+    """Pointing at the scrollbar is enough — no click needed."""
+
+    def setUp(self):
+        self.flash = _flash()
+        self.host, self.rail = self.flash.host, self.flash.rail
+
+    def test_the_pointer_arriving_names_every_writing(self):
+        self.flash._over_strip()
+        self.assertEqual(_texts(self.host), ["ROBERTS", "KAGAN", "THOMAS"])
+
+    def test_they_stay_for_as_long_as_it_is_there(self):
+        self.flash._over_strip()
+        self.flash._over_strip()          # …and on across the strip
+        self.assertEqual(self.host.pending(), [])
+        self.assertTrue(self.flash.showing())
+
+    def test_they_start_fading_once_it_leaves(self):
+        self.flash._over_strip()
+        self.flash._left_strip()
+        self.assertEqual(self.host.pending(), [Flash._LINGER_MS])
+
+    def test_letting_go_over_the_scrollbar_leaves_them_up(self):
+        # The pointer is still on the thumb it just released — nothing has
+        # stopped hovering, so nothing starts counting down.
+        self.flash._over_strip()
+        self.flash._pressed()
+        self.flash._released()
+        self.assertEqual(self.host.pending(), [])
+        self.assertTrue(self.flash.showing())
+
+    def test_a_drag_that_wanders_off_the_scrollbar_keeps_them(self):
+        # Tk sends <Leave> mid-drag when the pointer crosses the scrollbar's
+        # edge; the names must not go with it.
+        self.flash._over_strip()
+        self.flash._pressed()
+        self.flash._left_strip()
+        self.flash._dragged()
+        self.assertEqual(self.host.pending(), [])
+        self.assertTrue(self.flash.showing())
+
+    def test_the_pointer_leaving_a_strip_with_nothing_on_it_starts_nothing(self):
+        flash = _flash(rows=[])
+        flash._over_strip()
+        flash._left_strip()
+        self.assertEqual(flash.host.pending(), [])
+
+    def test_hovering_is_bound_on_the_strip_itself(self):
+        strip = _FakeStrip()
+        self.flash.watch(strip)
+        for seq in ("<Enter>", "<Motion>", "<Leave>"):
+            self.assertIn(seq, strip.bindings)
+        strip.fire("<Enter>")
+        self.assertTrue(self.flash.showing())
+
+
 class FlashTimingTests(unittest.TestCase):
     """While the scrollbar is in use, and a moment after — no longer."""
 
@@ -433,14 +490,19 @@ class FlashTimingTests(unittest.TestCase):
         self.assertEqual(self.host.pending(), [])   # nothing is taking them away
         self.assertTrue(self.flash.showing())
 
-    def test_letting_go_starts_the_clock(self):
+    def test_letting_go_away_from_the_scrollbar_starts_the_clock(self):
+        # A press that came from the keyboard-less case: the thumb was grabbed
+        # and released with the pointer already gone from the strip.
         self.flash._pressed()
         self.flash._released()
         self.assertEqual(self.host.pending(), [Flash._LINGER_MS])
 
     def test_the_wheel_over_the_scrollbar_flashes_them_too(self):
+        self.flash._over_strip()       # the pointer is there to wheel at all
         self.flash._wheeled()
         self.assertTrue(self.flash.showing())
+        self.assertEqual(self.host.pending(), [])
+        self.flash._left_strip()
         self.assertEqual(self.host.pending(), [Flash._LINGER_MS])
 
     def test_they_fade_out_rather_than_being_snatched_away(self):
@@ -480,13 +542,15 @@ class FlashTimingTests(unittest.TestCase):
     def test_a_name_gets_out_of_the_way_of_the_pointer(self):
         # It sits over the opinion for a second or two; a reader reaching past
         # it should not have the click swallowed by a fading label.
-        self.flash._pressed()
-        self.flash._released()
+        self.flash._over_strip()
+        self.flash._left_strip()          # off the scrollbar, onto a name
         self.host.live()[0].fire("<Enter>")
         self.assertFalse(self.flash.showing())
 
     def test_it_stands_its_ground_while_the_thumb_is_held(self):
+        self.flash._over_strip()
         self.flash._pressed()
+        self.flash._left_strip()          # the drag has wandered off the strip
         self.host.live()[0].fire("<Enter>")
         self.assertTrue(self.flash.showing())
 

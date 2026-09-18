@@ -1467,54 +1467,61 @@ class PartNameTests(unittest.TestCase):
 
 
 class PartHoverTests(unittest.TestCase):
-    """The tip on the strip itself, in both the rail and the labelled map."""
+    """The tip on the labelled strip — the one surface that still carries one.
+
+    The slim rail beside a chromeless reader's scrollbar has none any more:
+    pointing at the scrollbar names every writing at once, in caps beside its
+    own band (``_PartNameFlash``, covered in test_part_name_flash.py), which
+    leaves nothing for a popup naming one part at a time to add."""
 
     def _reader(self, **kw):
         reader = _RailReader(["majority", "concurrence", "dissent"],
-                             [0, 5000, 8000], labels=HEADINGS, **kw)
+                             [0, 5000, 8000], labels=HEADINGS,
+                             chromeless=False, **kw)
         reader._draw_part_map()
         return reader
 
-    def test_resting_on_a_band_names_that_writing(self):
-        # Bands: majority 0-300, concurrence 300-480, dissent 480-600.
-        reader = self._reader()
-        self.assertEqual(reader.point_at(520), "Dissent — Rehnquist")
+    def _at(self, reader, i):
+        """Rest the pointer on the marker for part *i* and read the tip."""
+        return reader.point_at(reader._partmap_rows[i][0] + 1)
 
-    def test_each_band_answers_for_itself(self):
-        reader = self._reader()
-        self.assertEqual(
-            [reader.point_at(y) for y in (100, 400, 550)],
-            ["Opinion of the Court — Blackmun", "Concurrence — Stewart",
-             "Dissent — Rehnquist"])
+    def test_resting_on_a_part_names_that_writing(self):
+        # The strip shows a surname at most; the tip is what says whether it
+        # is a dissent or a concurrence.
+        self.assertEqual(self._at(self._reader(), 2), "Dissent — Rehnquist")
 
-    def test_the_labelled_map_answers_the_same_way(self):
-        # The strip in the ordinary case window shows a surname at most; the
-        # tip is what says whether it is a dissent or a concurrence.
-        reader = self._reader(chromeless=False)
-        y = reader._partmap_rows[2][0]
-        self.assertEqual(reader.point_at(y + 1), "Dissent — Rehnquist")
+    def test_each_part_answers_for_itself(self):
+        reader = self._reader()
+        self.assertEqual([self._at(reader, i) for i in range(3)],
+                         ["Opinion of the Court — Blackmun",
+                          "Concurrence — Stewart", "Dissent — Rehnquist"])
 
     def test_it_quotes_the_reporter_page_the_part_starts_on(self):
         reader = self._reader(pages={113: "s0", 171: "s2"})
-        self.assertEqual(reader.point_at(520), "Dissent — Rehnquist — p. 171")
+        self.assertEqual(self._at(reader, 2), "Dissent — Rehnquist — p. 171")
 
     def test_an_opinion_with_no_star_pagination_just_names_the_part(self):
-        reader = self._reader(pages={})
-        self.assertEqual(reader.point_at(520), "Dissent — Rehnquist")
+        self.assertEqual(self._at(self._reader(pages={}), 2),
+                         "Dissent — Rehnquist")
 
     def test_a_pointer_that_has_left_says_nothing(self):
-        reader = self._reader()
-        self.assertEqual(reader.point_at(-20), "")
+        self.assertEqual(self._reader().point_at(-20), "")
 
     def test_nor_does_a_strip_with_nothing_on_it(self):
-        reader = _RailReader(["majority"], [0], labels=HEADINGS)
+        reader = _RailReader([], [], labels=HEADINGS, chromeless=False)
         reader._draw_part_map()
         self.assertEqual(reader.point_at(100), "")
 
-    def test_the_strip_is_given_the_tip_the_pdf_rail_has(self):
-        src = _source_of("_ScholarTextWindow", "_build_ui")
-        self.assertIn("_HoverTip(self._partmap, self._partmap_tip_text", src)
-        self.assertIn("follow_motion=True", src)
+    def test_the_rail_is_given_no_tip_at_all(self):
+        body = ast.parse(_source_of("_ScholarTextWindow", "_build_ui"))
+        tipped = [n for n in ast.walk(body)
+                  if isinstance(n, ast.If) and "_chromeless" in ast.dump(n.test)
+                  and "_partmap_tip_text" in ast.dump(n)]
+        self.assertEqual(len(tipped), 1, "the strip's tip is not guarded")
+        self.assertIsInstance(tipped[0].test, ast.UnaryOp)   # "if not …"
+        tip = next(n for n in ast.walk(tipped[0]) if isinstance(n, ast.Call))
+        self.assertTrue(any(kw.arg == "follow_motion" and kw.value.value
+                            for kw in tip.keywords))
 
 
 # ---------------------------------------------------------------------------
