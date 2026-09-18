@@ -17,10 +17,26 @@ works -- discovered empirically -- is:
      ``browser_cookie3``'s single hard-coded path fails ("Could not find firefox
      profile directory"); ``browser_cookie3`` remains a last-ditch fallback.
 
-     Two things about that store are not what they used to be, and both matter
-     here because a *stale* clearance looks exactly like a fresh one until
-     CloudFlare rejects it:
+     What CloudFlare will honour is narrower than what the store says is live,
+     and a clearance it has stopped honouring looks exactly like a good one
+     until it is refused:
 
+       * The clearance is bound to the **User-Agent of the Firefox that
+         obtained it** -- the version string included.  Sent under any other
+         version, even the same Firefox one release later, it is refused.  A
+         machine can run two Firefox builds at two versions (a Microsoft
+         Store build beside a regular one), each with its own profile and its
+         own clearance, and either can update underneath a running app.  So
+         the UA goes with the profile: it is read from the
+         ``compatibility.ini`` beside the cookie store (which records the
+         build that last ran that profile), afresh for every fetch.
+       * A clearance dies long before ``moz_cookies.expiry`` says.  CloudFlare
+         writes it with a year's life and stops honouring it within weeks
+         (the address changes, the site re-keys), so the expiry is only a
+         floor.  Every profile's clearance is therefore a *candidate*: the
+         fetch tries them freshest first and takes the first CloudFlare
+         accepts, and only when every one is refused does it send the reader
+         back to Firefox.
        * ``moz_cookies.expiry`` is now written in **milliseconds**.  It used to
          be seconds (``creationTime``/``lastAccessed``/``updateTime`` are still
          microseconds), so a reader that trusts the old unit sees every cookie
@@ -30,17 +46,20 @@ works -- discovered empirically -- is:
          ``originAttributes`` of ``^partitionKey=(https,commonlii.org)``, and
          copies of the same host+name linger under other partition keys.  One
          host and one name can therefore mean several rows, some of them dead.
+         A server re-set keeps a row's original ``creationTime`` too, so a
+         clearance obtained this afternoon can carry a creation date from
+         months ago; ``updateTime`` is what dates it.
 
-     So we drop expired rows, keep the most recently created copy of each name,
-     and choose between profiles by the age of the clearance itself rather than
-     by which ``cookies.sqlite`` was touched last -- a machine with a Microsoft
+     So we drop expired rows, keep the most recently set copy of each name,
+     and order profiles by the age of the clearance itself rather than by
+     which ``cookies.sqlite`` was touched last -- a machine with a Microsoft
      Store Firefox beside a regular one has several stores holding a CommonLII
      clearance, and file mtime says nothing about which the user just solved
      the check in.
   3. We GET the PDF with ``curl_cffi`` impersonating Firefox's TLS fingerprint,
-     sending the user's real Firefox User-Agent (so it matches the cookie) and a
-     ``Referer`` to the case's ``.html`` page -- the origin Apache hotlink-blocks
-     PDFs requested without it.
+     sending the UA of the Firefox that runs the profile the cookie came from
+     (so it matches the cookie) and a ``Referer`` to the case's ``.html`` page
+     -- the origin Apache hotlink-blocks PDFs requested without it.
   4. The bytes are cached on disk, so the same case never needs the network (or
      the captcha) again.
 
@@ -49,8 +68,10 @@ All of this is optional: ``curl_cffi`` and Firefox may be absent, in which case
 citation in the user's browser.
 
 No tkinter here -- the GUI drives the user-facing hand-off/retry; this module is
-the headless fetch+cache engine.  Run ``python -X utf8 eng_rep_pdf.py`` to fetch
-a sample PDF live.
+the headless fetch+cache engine.  Run ``python -X utf8 eng_rep_pdf.py`` to see
+every profile, its clearance and the UA it will be sent under, and to fetch a
+sample PDF live (``--fresh`` drops the sample from the cache first so the
+network path is really exercised).
 """
 
 from __future__ import annotations
@@ -64,7 +85,7 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # CommonLII case PDFs land here; keyed by the neutral cite (year-num), which is
 # unique per case.  Sits next to the app's existing config file.
@@ -124,9 +145,6 @@ def _firefox_exe() -> Optional[str]:
     return None
 
 
-_UA_CACHE: Optional[str] = None
-
-
 def _major_from_ini(path: str, section: str, option: str) -> Optional[str]:
     """The leading version number of *option* in an INI file, or None."""
     try:
@@ -139,24 +157,23 @@ def _major_from_ini(path: str, section: str, option: str) -> Optional[str]:
         return None
 
 
-def _detect_firefox_major() -> Optional[str]:
-    """The installed Firefox's major version.  Prefer ``application.ini`` next to
-    a real firefox.exe; for a Microsoft Store install the exe is a stub alias
-    with no application.ini beside it, so fall back to the active profile's
-    ``compatibility.ini`` (which records the exact version Firefox last ran)."""
+def _profile_firefox_major(db: Path) -> Optional[str]:
+    """The major version of the Firefox that last ran the profile holding the
+    cookie store *db*, from the ``compatibility.ini`` beside it.  Firefox
+    rewrites that file at start-up whenever the build has changed, so by the
+    time the reader has cleared a check in it, it names the build that did."""
+    return _major_from_ini(str(db.parent / "compatibility.ini"),
+                           "Compatibility", "LastVersion")
+
+
+def _installed_firefox_major() -> Optional[str]:
+    """The major version from the ``application.ini`` beside firefox.exe --
+    absent for a Microsoft Store install, whose exe is a stub alias."""
     exe = _firefox_exe()
-    if exe:
-        major = _major_from_ini(
-            os.path.join(os.path.dirname(exe), "application.ini"),
-            "App", "Version")
-        if major:
-            return major
-    for db in _firefox_cookie_dbs():  # newest profile first
-        major = _major_from_ini(
-            str(db.parent / "compatibility.ini"), "Compatibility", "LastVersion")
-        if major:
-            return major
-    return None
+    if not exe:
+        return None
+    return _major_from_ini(
+        os.path.join(os.path.dirname(exe), "application.ini"), "App", "Version")
 
 
 def _ua_platform() -> str:
@@ -172,20 +189,41 @@ def _ua_platform() -> str:
     return "X11; Linux x86_64"
 
 
-def firefox_user_agent() -> str:
-    """The user's real Firefox UA for *this* OS, derived from the install/profile
-    version so it matches the UA Firefox used to obtain ``cf_clearance``.
-    CloudFlare ties the clearance to the exact UA -- including the platform
-    token -- so a Windows UA hard-coded on every OS made the borrowed clearance
-    work on Windows but fail on macOS and Linux.  Falls back to a recent version
-    if the installed version is unreadable."""
-    global _UA_CACHE
-    if _UA_CACHE:
-        return _UA_CACHE
-    major = _detect_firefox_major() or "128"
-    _UA_CACHE = (f"Mozilla/5.0 ({_ua_platform()}; rv:{major}.0) "
-                 f"Gecko/20100101 Firefox/{major}.0")
-    return _UA_CACHE
+#: Used only when no profile and no install says otherwise (a Firefox that
+#: has never run has no clearance to send anyway).
+_FALLBACK_MAJOR = "128"
+
+
+def _user_agent_for(major: str) -> str:
+    return (f"Mozilla/5.0 ({_ua_platform()}; rv:{major}.0) "
+            f"Gecko/20100101 Firefox/{major}.0")
+
+
+def firefox_user_agent(profile_db: Optional[Path] = None) -> str:
+    """The real User-Agent of the Firefox that runs the profile whose cookie
+    store is *profile_db* -- or, given none, of the profile Firefox wrote to
+    most recently.
+
+    CloudFlare ties a clearance to the exact UA that obtained it, platform
+    token and version both, so the version comes from that profile's own
+    ``compatibility.ini`` rather than from whichever firefox.exe is on PATH:
+    two installs at two versions can share a machine (a Microsoft Store build
+    beside a regular one), and a clearance from one is refused under the
+    other's version.  Nothing here is cached, either -- Firefox updates
+    underneath a running app, and a clearance obtained after the update is
+    good only under the new version.  The ``application.ini`` beside the exe
+    is the fallback when a profile does not say, and a recent version the
+    fallback when nothing does."""
+    major = None
+    if profile_db is not None:
+        major = _profile_firefox_major(profile_db)
+    else:
+        for db in _firefox_cookie_dbs():
+            major = _profile_firefox_major(db)
+            if major:
+                break
+    return _user_agent_for(major or _installed_firefox_major()
+                           or _FALLBACK_MAJOR)
 
 
 def firefox_available() -> bool:
@@ -381,8 +419,11 @@ def _windows_store_cookie_dbs() -> "list[Path]":
 
 
 def _firefox_cookie_dbs() -> "list[Path]":
-    """All Firefox cookies.sqlite files we can find, newest first (the profile
-    the user just cleared CloudFlare in has the freshest mtime)."""
+    """All Firefox cookies.sqlite files we can find, most recently written
+    first.  That is an order to scan them in, nothing more: SQLite touches a
+    store for reasons that have nothing to do with the cookie, so which was
+    written last says little about which clearance is good (see
+    :func:`_firefox_clearances`)."""
     cands: list[Path] = []
     for root in _firefox_data_roots():
         cands += _profiles_ini_cookie_dbs(root)
@@ -422,29 +463,41 @@ def _cookie_expiry_seconds(raw) -> float:
     return value / 1000.0 if value > _MS_EXPIRY_FLOOR else value
 
 
+#: The columns Firefox stamps a row with, all in microseconds.  ``updateTime``
+#: (newer schemas only) is when the cookie was last set; a server re-set keeps
+#: the original ``creationTime``.
+_STAMP_COLUMNS = ("updateTime", "lastAccessed", "creationTime")
+
+
+def _micros_to_seconds(raw) -> float:
+    try:
+        return float(raw or 0) / 1_000_000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _read_cookie_rows(db: Path, domain_substr: str) -> dict:
-    """``{name: (value, created, expiry)}`` for hosts containing
-    *domain_substr*, read straight from a Firefox cookies.sqlite.
+    """``{name: (value, expiry, touched)}`` for hosts containing
+    *domain_substr*, read straight from a Firefox cookies.sqlite; all times
+    Unix seconds, ``expiry`` 0.0 for a session cookie.
 
     Firefox stores cookies unencrypted, so no browser_cookie3/decryption is
     needed.  The DB (and any -wal/-shm) is copied first so a running Firefox
     can't block the read and recent writes -- the just-obtained clearance --
     are visible.
 
+    ``touched`` is the latest of the row's ``updateTime``/``lastAccessed``/
+    ``creationTime`` -- when Firefox last set or sent the cookie.  A server
+    re-set keeps the original ``creationTime``, so a ``cf_clearance`` reissued
+    this afternoon can still carry a creation date from months ago; it is
+    ``updateTime`` (or, on a schema without it, ``lastAccessed``) that dates
+    the clearance the reader has just obtained.
+
     Expired rows are dropped, and where one host+name exists several times
-    (Total Cookie Protection keeps a copy per partition) the longest-lived one
-    wins, tie-broken by when it was last used: the clearance obtained minutes
-    ago must not lose to a dead partitioned copy of the same name that happens
-    to sort later.
-
-    Longest-lived rather than most recently *created*, because Firefox keeps a
-    cookie's original ``creationTime`` when the server re-sets it -- a
-    ``cf_clearance`` reissued this afternoon can still carry a creation date
-    from months ago.  Its lifetime is fixed at issue, so the furthest expiry is
-    the one most recently granted as well as the one that will last longest.
-
-    Returns ``{name: (value, expiry, last_used)}``, all times Unix seconds,
-    with ``expiry`` 0.0 for a session cookie.
+    (Total Cookie Protection keeps a copy per partition) the most recently
+    touched one wins, tie-broken by the furthest expiry: the clearance
+    obtained minutes ago must not lose to a dead partitioned copy of the same
+    name that happens to sort later.
     """
     import shutil
     import sqlite3
@@ -464,9 +517,12 @@ def _read_cookie_rows(db: Path, domain_substr: str) -> dict:
                     pass
         con = sqlite3.connect(tmp)
         try:
+            have = {row[1] for row in con.execute("PRAGMA table_info(moz_cookies)")}
+            stamps = [c for c in _STAMP_COLUMNS if c in have]
             rows = con.execute(
-                "SELECT name, value, expiry, lastAccessed FROM moz_cookies "
-                "WHERE host LIKE ?",
+                "SELECT name, value, expiry"
+                + "".join(f", {c}" for c in stamps)
+                + " FROM moz_cookies WHERE host LIKE ?",
                 (f"%{domain_substr}%",),
             ).fetchall()
         finally:
@@ -478,16 +534,13 @@ def _read_cookie_rows(db: Path, domain_substr: str) -> dict:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     best: dict = {}
-    for name, value, expiry, accessed in rows:
+    for name, value, expiry, *when in rows:
         exp = _cookie_expiry_seconds(expiry)
         if exp and exp <= now:
             continue                       # dead; sending it re-challenges us
-        try:
-            used = float(accessed or 0) / 1_000_000.0   # microseconds
-        except (TypeError, ValueError):
-            used = 0.0
-        if name not in best or (exp, used) > best[name][1:]:
-            best[name] = (value, exp, used)
+        touched = max((_micros_to_seconds(w) for w in when), default=0.0)
+        if name not in best or (touched, exp) > (best[name][2], best[name][1]):
+            best[name] = (value, exp, touched)
     return best
 
 
@@ -498,61 +551,82 @@ def _read_cookies_sqlite(db: Path, domain_substr: str) -> dict:
             _read_cookie_rows(db, domain_substr).items()}
 
 
-def _firefox_cookies() -> Optional[dict]:
-    """{name: value} of live commonlii.org cookies from Firefox, or None.  Must
-    include ``cf_clearance`` to be useful.
+class Clearance(NamedTuple):
+    """One Firefox profile's CommonLII clearance, with everything that has to
+    travel with it: the profile's whole cookie set and the User-Agent of the
+    Firefox that runs that profile."""
+
+    db: Optional[Path]      # the profile's cookies.sqlite (None: browser_cookie3)
+    cookies: dict           # every live commonlii cookie of that profile
+    obtained: float         # when cf_clearance was last set or sent, Unix seconds
+    expiry: float           # its stated expiry -- a floor, not a promise
+    user_agent: str         # what the clearance must be sent under
+
+    @property
+    def value(self) -> str:
+        return self.cookies.get("cf_clearance", "")
+
+
+def _browser_cookie3_clearance() -> Optional[Clearance]:
+    """Last-ditch: browser_cookie3's own Firefox reader, for any layout the
+    direct search misses.  Its expiry check cannot be trusted on a modern
+    profile -- it reads ``expiry`` as seconds, so every cookie looks live to
+    it -- and it cannot say which profile a cookie came from, so this gets
+    the best-guess UA and goes last."""
+    try:
+        import browser_cookie3
+        cj = browser_cookie3.firefox(domain_name="commonlii.org")
+        cookies = {c.name: c.value for c in cj if "commonlii" in (c.domain or "")}
+    except Exception as exc:
+        print(f"[eng_rep_pdf] browser_cookie3 fallback failed: {exc}")
+        return None
+    if "cf_clearance" not in cookies:
+        return None
+    return Clearance(None, cookies, 0.0, 0.0, firefox_user_agent())
+
+
+def _firefox_clearances() -> "list[Clearance]":
+    """Every Firefox profile's live-looking CommonLII clearance, freshest
+    first -- the order :func:`fetch_pdf` tries them in.
 
     Searches every known Firefox profile location and reads cookies.sqlite
     directly -- so a Microsoft Store install or a non-default profile path,
     which trip browser_cookie3's "Could not find firefox profile directory",
     are handled.
 
-    Every profile is read and the **longest-lived live clearance** wins.  Which
-    store was written last says nothing: a machine running a Microsoft Store
-    Firefox beside a regular one holds a CommonLII clearance in each, SQLite
-    touches a file for reasons that have nothing to do with the cookie, and
-    taking the wrong one leaves the reader passing the check in Firefox over
-    and over while the app keeps sending the other profile's dead cookie.
+    Each candidate carries its own profile's whole cookie set (``cf_clearance``
+    and the ``__cf_bm`` beside it are issued together and only accepted
+    together, so one profile's cookies are never mixed with another's) and
+    the UA of the Firefox that runs that profile, since CloudFlare refuses a
+    clearance sent under any other version.  Ordering is by when the
+    clearance was last set or sent, not by which store was written last: a
+    machine running a Microsoft Store Firefox beside a regular one holds a
+    clearance in each, and file mtime says nothing about which the user just
+    solved the check in.
 
-    One profile's cookies are never mixed with another's: ``cf_clearance`` and
-    the ``__cf_bm`` token beside it are issued together and are only accepted
-    together.  Falls back to browser_cookie3 for any exotic layout the direct
-    search misses.
+    "Live-looking" is as far as the store can take it.  CloudFlare stops
+    honouring a clearance long before its stated expiry, so the list is a set
+    of candidates, and only the fetch can tell which of them is good.
     """
-    chosen: Optional[dict] = None
-    chosen_rank: tuple = (-1.0, -1.0)
-    fallback: Optional[dict] = None
+    out: list[Clearance] = []
     dbs = _firefox_cookie_dbs()
     for db in dbs:
         rows = _read_cookie_rows(db, "commonlii")
-        if not rows:
-            continue
-        cookies = {name: row[0] for name, row in rows.items()}
         clearance = rows.get("cf_clearance")
         if clearance is None:
-            fallback = fallback or cookies   # commonlii cookies, no clearance
             continue
-        if clearance[1:] > chosen_rank:
-            chosen, chosen_rank = cookies, clearance[1:]
-    if chosen is not None:
-        return chosen
+        out.append(Clearance(
+            db, {name: row[0] for name, row in rows.items()},
+            clearance[2], clearance[1], firefox_user_agent(db)))
+    out.sort(key=lambda c: (c.obtained, c.expiry), reverse=True)
     if not dbs:
         print("[eng_rep_pdf] no Firefox cookies.sqlite found in: "
               + ", ".join(str(r) for r in _firefox_data_roots()))
-    # Fallback: browser_cookie3 (covers any layout our globs/profiles.ini miss).
-    # Its own expiry check cannot be trusted on a modern profile -- it reads
-    # ``expiry`` as seconds, so every cookie now looks live to it -- which is
-    # the other reason the direct read above is what we lead with.
-    try:
-        import browser_cookie3
-        cj = browser_cookie3.firefox(domain_name="commonlii.org")
-        cookies = {c.name: c.value for c in cj if "commonlii" in (c.domain or "")}
-        if "cf_clearance" in cookies:
-            return cookies
-        fallback = fallback or (cookies or None)
-    except Exception as exc:
-        print(f"[eng_rep_pdf] browser_cookie3 fallback failed: {exc}")
-    return fallback
+    if not out:
+        extra = _browser_cookie3_clearance()
+        if extra is not None:
+            out.append(extra)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +670,25 @@ def is_cached(year: int, num: int) -> bool:
 _CHALLENGE_MARKERS = (b"Just a moment", b"challenge-platform",
                       b"cf-browser-verification", b"__cf_chl")
 
+#: The (profile, clearance value) CloudFlare accepted last, tried first next
+#: time.  Harmless when wrong -- it is just tried first and, refused, the
+#: others follow -- and it keeps a refused-but-unexpired clearance in another
+#: profile from costing a round trip on every case.
+_LAST_GOOD: Optional[tuple] = None
+
+
+def _is_challenge(status: int, body: bytes) -> bool:
+    return status in (403, 503) and any(mk in body for mk in _CHALLENGE_MARKERS)
+
+
+def _get(url: str, headers: dict, cookies: dict) -> "tuple[int, bytes]":
+    """One GET through curl_cffi under Firefox's TLS fingerprint:
+    ``(status, body)``."""
+    from curl_cffi import requests as creq
+    resp = creq.get(url, headers=headers, cookies=cookies,
+                    impersonate=_impersonate_target(), timeout=_TIMEOUT)
+    return resp.status_code, resp.content or b""
+
 
 def fetch_pdf(year: int, num: int, web_url: str) -> bytes:
     """Return the PDF bytes for a CommonLII case, from cache or the network.
@@ -604,7 +697,17 @@ def fetch_pdf(year: int, num: int, web_url: str) -> bytes:
     caller links out), :class:`CloudflareChallenge` when the user must clear the
     check in Firefox, or :class:`OriginError` on an origin HTTP error.
     Successful fetches are cached.
+
+    Every Firefox profile holding a live-looking clearance is a candidate,
+    tried freshest first with its own cookies under its own Firefox's
+    User-Agent.  A candidate CloudFlare refuses is simply passed over --
+    its cookie's expiry said nothing, CloudFlare had already dropped it --
+    and only when every candidate is refused is the reader sent to Firefox.
+    That is what keeps a dead clearance in one profile (the regular Firefox's,
+    say) from hiding the one just obtained in another (the Microsoft Store
+    build's), whichever the store's timestamps happen to favour.
     """
+    global _LAST_GOOD
     cached = get_cached(year, num)
     if cached is not None:
         return cached
@@ -612,46 +715,60 @@ def fetch_pdf(year: int, num: int, web_url: str) -> bytes:
     if not can_fetch():
         raise FetchUnavailable()
 
-    cookies = _firefox_cookies()
-    if not cookies or "cf_clearance" not in cookies:
-        # No clearance yet -- the user has to pass the check in Firefox first.
+    candidates = _firefox_clearances()
+    if not candidates:
+        # No clearance anywhere -- the user has to pass the check in Firefox.
         raise CloudflareChallenge(web_url)
-
-    from curl_cffi import requests as creq
+    if _LAST_GOOD is not None:
+        # Stable sort: the one that worked last goes first, the rest keep
+        # their freshest-first order.
+        candidates.sort(key=lambda c: (str(c.db), c.value) != _LAST_GOOD)
 
     pdf_url = re.sub(r"\.html?$", ".pdf", web_url)
-    headers = {
-        "User-Agent": firefox_user_agent(),
-        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
-                   "image/avif,image/webp,*/*;q=0.8"),
-        "Accept-Language": "en-US,en;q=0.5",
-        "Referer": web_url,  # origin Apache hotlink-blocks PDFs without this
-    }
-    try:
-        resp = creq.get(pdf_url, headers=headers, cookies=cookies,
-                        impersonate=_impersonate_target(), timeout=_TIMEOUT)
-    except Exception as exc:
-        raise OriginError(0) from exc
+    for cand in candidates:
+        headers = {
+            "User-Agent": cand.user_agent,
+            "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                       "image/avif,image/webp,*/*;q=0.8"),
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": web_url,  # origin Apache hotlink-blocks PDFs without this
+        }
+        try:
+            status, data = _get(pdf_url, headers, cand.cookies)
+        except Exception as exc:
+            raise OriginError(0) from exc
 
-    data = resp.content or b""
-    if resp.status_code == 200 and data[:4] == b"%PDF":
-        _store(year, num, data)
-        return data
+        if status == 200 and data[:4] == b"%PDF":
+            _LAST_GOOD = (str(cand.db), cand.value)
+            _store(year, num, data)
+            return data
 
-    # CloudFlare re-challenge (cookie expired / fingerprint mismatch) -> user
-    # must re-clear in Firefox; a bare origin error -> surface the status.
-    if resp.status_code in (403, 503) and any(mk in data for mk in _CHALLENGE_MARKERS):
-        raise CloudflareChallenge(web_url)
-    raise OriginError(resp.status_code)
+        if _is_challenge(status, data):
+            # CloudFlare no longer honours this clearance (dropped early, or
+            # obtained by a Firefox since updated) -- on to the next profile.
+            print(f"[eng_rep_pdf] CloudFlare refused the clearance from "
+                  f"{cand.db or 'browser_cookie3'} "
+                  f"(sent as {cand.user_agent.rsplit(' ', 1)[-1]})")
+            continue
+        raise OriginError(status)
+
+    # Every clearance refused: cookie expired server-side, or fingerprint
+    # mismatch -> the user must re-clear in Firefox.
+    raise CloudflareChallenge(web_url)
 
 
 # ---------------------------------------------------------------------------
-# Live test:  python -X utf8 eng_rep_pdf.py
+# Live test:  python -X utf8 eng_rep_pdf.py [--fresh] [--open]
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import datetime as _dt
+
+    def _when(ts: float) -> str:
+        return f"{_dt.datetime.fromtimestamp(ts):%Y-%m-%d %H:%M}" if ts else "-"
+
     print("firefox exe       :", _firefox_exe())
-    print("firefox UA        :", firefox_user_agent())
+    print("firefox UA        :", firefox_user_agent(), "(freshest profile)")
     print("deps present      :", deps_present())
     print("can_fetch         :", can_fetch())
     print("impersonate target:", _impersonate_target())
@@ -659,43 +776,49 @@ if __name__ == "__main__":
 
     # Profile search diagnostics: shows where we looked and whether the
     # clearance cookie is actually on disk (the two distinct failure modes are
-    # "no profile/cookie found" vs "found but rejected at fetch").
+    # "no profile/cookie found" vs "found but refused at fetch").
     print("\nfirefox profile search:")
     print("  data roots      :",
           [str(r) for r in _firefox_data_roots()] or "(none)")
     dbs = _firefox_cookie_dbs()
     if not dbs:
         print("  cookies.sqlite  : (none found)")
-    import datetime as _dt
     for db in dbs:
         rows = _read_cookie_rows(db, "commonlii")
         clearance = rows.get("cf_clearance")
         if clearance is None:
             flag = "cf_clearance=no (or expired)"
         else:
-            dies = (_dt.datetime.fromtimestamp(clearance[1])
-                    if clearance[1] else None)
-            used = (_dt.datetime.fromtimestamp(clearance[2])
-                    if clearance[2] else None)
-            flag = ("cf_clearance=YES"
-                    + (f" expires {dies:%Y-%m-%d %H:%M}" if dies else " (session)")
-                    + (f", last used {used:%Y-%m-%d %H:%M}" if used else ""))
-        print(f"  - {db}\n      live commonlii cookies {sorted(rows)}  {flag}")
-    picked = _firefox_cookies()
-    print("  chosen          :",
-          "none" if not picked else
-          f"{sorted(picked)} (cf_clearance="
-          f"{'yes' if 'cf_clearance' in picked else 'NO'})")
+            flag = (f"cf_clearance=YES obtained {_when(clearance[2])}, "
+                    + (f"expires {_when(clearance[1])}" if clearance[1]
+                       else "session"))
+        print(f"  - {db}\n      runs under {firefox_user_agent(db).rsplit(' ', 1)[-1]}"
+              f"; live commonlii cookies {sorted(rows)}  {flag}")
+    cands = _firefox_clearances()
+    print("  will try        :", "none" if not cands
+          else f"{len(cands)} clearance(s), in this order:")
+    for i, c in enumerate(cands, 1):
+        print(f"    {i}. {c.db or 'browser_cookie3'}  as "
+              f"{c.user_agent.rsplit(' ', 1)[-1]}  cookies {sorted(c.cookies)}")
 
     # Hadley v Baxendale, 156 E.R. 145  ->  [1854] EngR 296
     year, num = 1854, 296
     web = f"https://www.commonlii.org/uk/cases/EngR/{year}/{num}.html"
-    print(f"\nfetching {year}/{num} (Hadley v Baxendale)...")
+    if "--fresh" in sys.argv:
+        try:
+            cache_path(year, num).unlink()
+        except OSError:
+            pass
+    print(f"\nfetching {year}/{num} (Hadley v Baxendale)"
+          + (" from the cache -- pass --fresh to go to the network..."
+             if is_cached(year, num) else " from CommonLII..."))
     try:
         data = fetch_pdf(year, num, web)
         print(f"  OK: {len(data):,} bytes, head={data[:8]!r}")
         print(f"  cached at: {cache_path(year, num)} "
               f"(exists={cache_path(year, num).exists()})")
+        if _LAST_GOOD:
+            print(f"  accepted: the clearance from {_LAST_GOOD[0]}")
         # second call should be served from cache
         again = fetch_pdf(year, num, web)
         print(f"  cache hit on 2nd call: {again == data}")
