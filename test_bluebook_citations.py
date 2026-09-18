@@ -473,6 +473,62 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
         self.assertEqual(name, "The “Scotland.”")
         self.assertEqual(abbreviate_case_name(name), "The Scotland")
 
+    def test_a_second_vessel_in_the_caption_is_a_companion_case(self):
+        # The Paquete Habana, 175 U.S. 677 (1900): two fishing smacks, seized
+        # off Cuba and condemned as prize, were appealed and decided together,
+        # so the reports head the case with both ships and the docket line
+        # carries both numbers.  The citation is to the first alone (rule
+        # 10.2.1(b)) — and neither of the older companion cuts could see the
+        # boundary, there being no party, and so no "v.", anywhere in it.
+        # Scholar sets the two names as one centered heading broken by a rule.
+        blocks = [
+            Block("center", [Span("175 U.S. 677 (1900)")]),
+            Block("center", [Span("THE PAQUETE HABANA."), Span("\n"),
+                             Span("THE LOLA.")]),
+            Block("center", [Span("Nos. 395, 396.")]),
+            Block("center", [Span("Supreme Court of United States.")]),
+            # The line naming the court below rides the header as ordinary
+            # text, and its capitals are what refine_caption_case reads the
+            # vessel's own "THE" from.
+            Block("para", [Span(
+                "APPEALS FROM THE DISTRICT COURT OF THE UNITED STATES FOR "
+                "THE SOUTHERN DISTRICT OF FLORIDA."
+            )]),
+            Block("para", [Span(
+                "These are two appeals from decrees of the District Court of "
+                "the United States for the Southern District of Florida "
+                "condemning two fishing vessels and their cargoes as prize "
+                "of war."
+            )]),
+        ]
+
+        self.assertEqual(
+            abbreviate_case_name(_scholar_caption_name(blocks)),
+            "The Paquete Habana",
+        )
+
+    def test_the_in_rem_companion_cut_leaves_one_ship_alone(self):
+        cut = _cut_companion_cases
+        # Both ships, however the source cases them.
+        self.assertEqual(cut("THE PAQUETE HABANA. THE LOLA."),
+                         "THE PAQUETE HABANA.")
+        self.assertEqual(cut("The Paquete Habana. The Lola."),
+                         "The Paquete Habana.")
+        # One ship, whatever its name holds: nothing to cut.
+        for caption in ("THE PAQUETE HABANA.", "THE SCOTLAND.",
+                        "THE ST. LAWRENCE.", "THE JAMES G. SWAN.",
+                        "THE NEW YORK & CUBA MAIL S.S. CO."):
+            self.assertEqual(cut(caption), caption)
+        # An abbreviated given name ends a party, never a case — "The William
+        # the Fourth" is a single ship, not the Wm. and the Fourth.
+        self.assertEqual(cut("The Wm. The Fourth."), "The Wm. The Fourth.")
+        # A caption with parties in it belongs to the older strategies, which
+        # read the separator rather than the ship's "The" — however the source
+        # happens to case that separator.
+        for caption in ("THE STEAMSHIP CO. v. The Lola.",
+                        "THE ACME V. THE LOLA.", "THE ACME VS. THE LOLA."):
+            self.assertEqual(cut(caption), caption)
+
     def test_a_doubled_initial_survives_the_repeated_abbreviation_collapse(self):
         # A.A.R.P. v. Trump, 605 U.S. 246 (2025): the applicants are
         # anonymized to initials, and the reporter spaces them out.  The
