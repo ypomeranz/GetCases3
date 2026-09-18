@@ -968,6 +968,22 @@ class _FakeScrollbar:
         self.set_to = (first, last)
 
 
+class _FakeFlash:
+    """The names flashed beside the scrollbar (_PartNameFlash), as far as the
+    pane is concerned: something to hand the rail to, and to take down with
+    it.  Its own behaviour is covered in test_part_name_flash.py."""
+
+    def __init__(self):
+        self.watched = []
+        self.hidden = 0
+
+    def watch(self, widget):
+        self.watched.append(widget)
+
+    def hide(self):
+        self.hidden += 1
+
+
 _Tk.Canvas = _FakeCanvas   # the rail builds its own canvas
 
 
@@ -1014,6 +1030,7 @@ class _Pane:
         self.zooms_reported = []
         self._on_zoom = self.zooms_reported.append
         self._canvas = _FakeCanvas()
+        self._part_flash = _FakeFlash()
         self._vsb = object()
         self._body = object()
         self._hsb = _FakeScrollbar()
@@ -1129,6 +1146,17 @@ class RailBuildTests(unittest.TestCase):
         self.pane.idle.clear()
         self.pane.set_section_marks([])
         self.assertIn("fit_to_view", self._refit_scheduled())
+
+    def test_the_rail_flashes_the_writers_names_when_it_is_used(self):
+        # Dragging the rail scrolls the document, so it names the parts the
+        # way the scrollbar does (the scrollbar itself is watched in __init__).
+        self.pane.set_section_marks(SECTIONS)
+        self.assertIn(self.pane._rail, self.pane._part_flash.watched)
+
+    def test_the_names_go_when_the_rail_does(self):
+        self.pane.set_section_marks(SECTIONS)
+        self.pane.set_section_marks(SECTIONS[:1])
+        self.assertEqual(self.pane._part_flash.hidden, 1)
 
     def test_a_zoomed_pane_keeps_its_zoom_when_the_rail_appears(self):
         self.pane._target_w = 900          # zoomed to 150%
