@@ -1085,9 +1085,11 @@ def _load_filename_builder():
                 ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE")):
             names[node.targets[0].id] = ast.get_source_segment(src, node)
     ns = {"re": re,
-          # Stubs: name abbreviation and the court parenthetical are their own
-          # (well-tested) machinery; this exercises citation *choice*.
-          "abbreviate_case_name": lambda n: n,
+          # Stubs: name abbreviation (with the deciding court rule 10.2.1(f)
+          # reads off) and the court parenthetical are their own (well-tested)
+          # machinery; this exercises citation *choice*.
+          "abbreviate_case_name": lambda n, **_kw: n,
+          "_state_of_court": lambda *_a, **_kw: "",
           "_court_for_paren": lambda cite, court_id, court: "",
           "Optional": None}
     for key in ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE"):

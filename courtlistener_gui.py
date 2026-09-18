@@ -458,6 +458,12 @@ def _build_copy_menu(master: tk.Misc, reader) -> "Optional[tk.Menu]":
             command=reader.on_copy_mode_chosen,
         )
     copy_menu.add_separator()
+    copy_menu.add_checkbutton(
+        label="Preview what was copied",
+        variable=reader._copy_preview_var,
+        command=reader.on_copy_preview_toggled,
+    )
+    copy_menu.add_separator()
     copy_menu.add_command(
         label=f"Copy now \t{_ACCEL}+C", command=reader._copy_formatted)
     return copy_menu
@@ -943,6 +949,10 @@ from citation_overrides import (
     format_edited_citation,
     update_overrides,
 )
+from case_law_parse import (
+    parse_case_law_html as _parse_case_law_html,
+    parse_case_law_json as _parse_case_law_json,
+)
 from cl_parse import parse_cl_html as _parse_cl_html
 import courtlistener as cl_api
 from courtlistener import CourtListenerClient, CourtListenerError
@@ -997,6 +1007,7 @@ from court_catalog import (
     all_court_ids as _all_court_ids,
     bluebook_court_from_name as _bluebook_court_from_name,
     bluebook_federal_trial_court as _bluebook_federal_trial_court,
+    state_of_court as _state_of_court,
 )
 
 _CONFIG_PATH = Path.home() / ".config" / "courtlistener" / "config.json"
@@ -1364,6 +1375,19 @@ def _save_copy_mode(mode: str) -> None:
     _save_config(data)
 
 
+def _load_copy_preview() -> bool:
+    """Whether a copy briefly shows what it put on the clipboard.  On by
+    default: the preview is how a reader checks the Bluebooking before
+    pasting, which is no use to them if they have to find it first."""
+    return bool(_load_config().get("copy_preview", True))
+
+
+def _save_copy_preview(show: bool) -> None:
+    data = _load_config()
+    data["copy_preview"] = bool(show)
+    _save_config(data)
+
+
 def _next_copy_mode(mode: str) -> str:
     """The mode reached by one press of the reader's ``x`` shortcut."""
     try:
@@ -1427,6 +1451,15 @@ def _display_hotkey(hotkey: str) -> str:
     return "+".join(parts) or _display_hotkey(_default_spotlight_hotkey())
 
 
+# Only the content codings this install can actually decode.  Advertising one
+# ``requests`` has no decoder for (Brotli, unless "brotli" is installed) makes
+# hosts that honor it -- scotusblog.com among them -- answer with bytes the
+# response object then hands back as mojibake, so every parser downstream sees
+# an empty page instead of a fetch error.
+_ACCEPT_ENCODING = getattr(
+    _requests.utils, "DEFAULT_ACCEPT_ENCODING", "gzip, deflate",
+)
+
 # Persistent session for third-party hosts (LOC, GovInfo, static.case.law).
 # Uses a full browser-like header set; government CDNs reset connections when
 # they see Python's default User-Agent or missing Accept/Sec-Fetch headers.
@@ -1439,7 +1472,7 @@ _anon_session.headers.update({
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
               "application/pdf,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": _ACCEPT_ENCODING,
     "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
@@ -1820,11 +1853,17 @@ def _bluebook_display_name(item: dict) -> str:
     and whenever the reporter already conveys it (e.g. ``60 Fed. Cl. 600``).
     Falls back gracefully when citation or date are missing.
     """
-    # Case name, abbreviated per Bluebook rule 10.2.2 (table T6/T10)
-    case_name = abbreviate_case_name(re.sub(
-        r"<[^>]+>", "",
-        item.get("caseName") or item.get("case_name") or "opinion"
-    ).strip())
+    # Case name, abbreviated per Bluebook rule 10.2.2 (table T6/T10); the
+    # deciding court settles the "People of"/"State of" party (rule
+    # 10.2.1(f)).
+    case_name = abbreviate_case_name(
+        re.sub(
+            r"<[^>]+>", "",
+            item.get("caseName") or item.get("case_name") or "opinion"
+        ).strip(),
+        court_state=_state_of_court(
+            str(item.get("court_id") or ""), str(item.get("court") or "")),
+    )
 
     # Best citation (U.S. Reports > S.Ct. > Federal Reporters > others).
     # A U.S. Reports scan resolved for this case names its own volume and page
@@ -2296,6 +2335,9 @@ class _CaseLawPageOpinion:
     url: str
     json_url: str
     name: str
+    #: CAP's court slug, so the label can apply rule 10.2.1(f) to a
+    #: "People of the State of …" caption.
+    court_id: str = ""
 
 
 _CASE_LAW_NUMBERED_PDF_RE = re.compile(
@@ -2360,6 +2402,7 @@ def _case_law_page_opinions(url: str) -> list[_CaseLawPageOpinion]:
     for pdf_url in pdf_urls:
         json_url = _case_law_json_for_pdf_url(pdf_url) or ""
         name = ""
+        court_id = ""
         if json_url:
             try:
                 resp = _anon_session.get(json_url, timeout=10)
@@ -2372,9 +2415,12 @@ def _case_law_page_opinions(url: str) -> list[_CaseLawPageOpinion]:
                                 or data.get("name") or ""
                             ),
                         ).strip()
+                        court = data.get("court")
+                        if isinstance(court, dict):
+                            court_id = str(court.get("slug") or "").strip()
             except Exception as exc:
                 print(f"[case.law] metadata fetch failed {json_url}: {exc}")
-        out.append(_CaseLawPageOpinion(pdf_url, json_url, name))
+        out.append(_CaseLawPageOpinion(pdf_url, json_url, name, court_id))
     return out
 
 
@@ -2383,7 +2429,10 @@ def _case_law_opinion_name(opinion: _CaseLawPageOpinion) -> str:
     if not opinion.name:
         return ""
     try:
-        return abbreviate_case_name(normal_case_caption(opinion.name))
+        return abbreviate_case_name(
+            normal_case_caption(opinion.name),
+            court_state=_state_of_court(opinion.court_id),
+        )
     except Exception:
         return opinion.name
 
@@ -2704,6 +2753,34 @@ def _case_law_pdf_for_cite(cite: str) -> Optional[str]:
     return choices[0].url if choices else None
 
 
+def _case_law_pdf_for_json_url(json_url: str) -> str:
+    """The per-case PDF beside a CAP JSON file — the reverse of
+    :func:`_case_law_json_for_pdf_url`, so the file a text came from can name
+    the scan of the very same pages."""
+    m = re.match(
+        r"^(https://static\.case\.law/.*)/cases/([\w-]+)\.json$",
+        (json_url or "").strip(), re.IGNORECASE,
+    )
+    return f"{m.group(1)}/case-pdfs/{m.group(2)}.pdf" if m else ""
+
+
+def _cites_led_by(cites, lead: str) -> list:
+    """*cites* with *lead* moved to the front (added if it is not among them).
+
+    The PDF resolver walks a case's citations in order and stops at the first
+    reporter static.case.law has a scan of, so putting the reporter already on
+    screen first is what keeps the scan and the text the same printing.
+    """
+    out = [re.sub(r"<[^>]+>", "", str(c or "")).strip() for c in (cites or [])]
+    out = [c for c in out if c]
+    lead = re.sub(r"\s+", " ", str(lead or "")).strip()
+    if not lead:
+        return out
+    key = re.sub(r"\s+", "", lead).lower()
+    return [lead] + [c for c in out
+                     if re.sub(r"\s+", "", c).lower() != key]
+
+
 def _case_law_json_url(citation: str) -> Optional[str]:
     """The per-case JSON URL on static.case.law for *citation* (e.g.
     ``https://static.case.law/f-appx/1/cases/0002-01.json`` for ``1 F. App'x
@@ -2795,17 +2872,90 @@ def _case_law_name_for_cites(cites) -> str:
 
 @dataclass(frozen=True)
 class _CaseLawTextRecord:
-    """Parsed opinion text and display metadata from one exact CAP JSON file."""
+    """Parsed opinion text and display metadata from one exact CAP JSON file.
+
+    ``text`` is CAP's own flattened body, kept verbatim for anything that
+    wants the case as a string (the brief compiler's export, the short-cite
+    index).  ``parts`` and ``blocks`` are the same case in the viewer's
+    model — head matter, one part per opinion, footnotes attached, reporter
+    pages marked — built from the HTML CAP publishes beside the JSON, or from
+    the JSON's own paragraphs when that file will not load.
+    """
     text: str
     citation: str
     item: dict
     json_url: str = ""
+    parts: list = field(default_factory=list)
+    blocks: list = field(default_factory=list)
+
+
+def _case_law_html_url(json_url: str) -> str:
+    """The formatted HTML CAP publishes beside a per-case JSON file.
+
+    ``.../f2d/410/cases/0701-01.json`` → ``.../f2d/410/html/0701-01.html``.
+    Same case, same file name; the JSON carries the metadata and a flattened
+    body, the HTML carries the structure — paragraphs, blockquotes, bylines,
+    footnotes, and the reporter page breaks the JSON has no room for.
+    """
+    m = re.match(
+        r"^(https://static\.case\.law/.*)/cases/([\w-]+)\.json$",
+        (json_url or "").strip(), re.IGNORECASE,
+    )
+    return f"{m.group(1)}/html/{m.group(2)}.html" if m else ""
+
+
+#: Held HTML files.  A CAP case runs to a couple of hundred kilobytes, so this
+#: is a small cache on purpose: it exists so reopening a case from History or
+#: from a bookmark costs no second fetch, not to hold a reading session.
+_CASE_LAW_HTML_CACHE = 32
+
+
+@lru_cache(maxsize=_CASE_LAW_HTML_CACHE)
+def _case_law_case_html(json_url: str) -> str:
+    """CAP's formatted HTML for a per-case JSON URL, or "" when it can't be
+    had.  Cached beside :func:`_case_law_metadata`: a reader who reopens a case
+    from History, or follows the same citation twice, refetches neither."""
+    url = _case_law_html_url(json_url)
+    if not url:
+        return ""
+    try:
+        resp = _anon_session.get(url, timeout=15)
+    except Exception as exc:
+        print(f"[case.law-text] HTML fetch failed for {url}: {exc}")
+        return ""
+    if resp.status_code != 200:
+        print(f"[case.law-text] {resp.status_code} for {url}")
+        return ""
+    return resp.text or ""
+
+
+def _case_law_case_parts(body, html: str = "") -> "tuple[list, list]":
+    """``(parts, blocks)`` for a CAP case — its formatted HTML where there is
+    any, its flattened JSON body where there is not."""
+    if html:
+        try:
+            parts, blocks = _parse_case_law_html(html)
+        except Exception as exc:
+            print(f"[case.law-text] HTML parse failed: {exc}")
+            parts, blocks = [], []
+        if parts:
+            return parts, blocks
+    try:
+        return _parse_case_law_json(body)
+    except Exception as exc:
+        print(f"[case.law-text] JSON parse failed: {exc}")
+        return [], []
 
 
 def _case_law_text_record(
-    data, fallback_cite: str = "", json_url: str = "",
+    data, fallback_cite: str = "", json_url: str = "", html: str = "",
 ) -> "Optional[_CaseLawTextRecord]":
-    """Turn a static.case.law case JSON object into a text-view record."""
+    """Turn a static.case.law case JSON object into a text-view record.
+
+    ``html`` is CAP's formatted copy of the same case (see
+    :func:`_case_law_case_html`); without it the record still renders, from
+    the JSON's own paragraphs, but with no reporter pages to show.
+    """
     if not isinstance(data, dict):
         return None
 
@@ -2831,10 +2981,14 @@ def _case_law_text_record(
         court_data.get("name_abbreviation")
         or court_data.get("name") or ""
     ).strip()
-    court_id = str(
-        court_data.get("slug")
-        or court_data.get("id") or ""
-    ).strip()
+    # CAP's numeric ``id`` is its own court key and means nothing here, so
+    # only a real slug is kept — plus the Supreme Court, whose CAP name the
+    # app already knows how to recognize and whose own id drives the badge
+    # colour and the reports' typeface.  An empty id lets the reader fall
+    # back to reading the court off the opinion itself.
+    court_id = str(court_data.get("slug") or "").strip()
+    if not court_id and _CAP_SCOTUS_RE.match(court):
+        court_id = "scotus"
     date = str(data.get("decision_date") or "")
     year = date[:4] if len(date) >= 4 else ""
     paren = " ".join(p for p in (court, year) if p)
@@ -2872,24 +3026,68 @@ def _case_law_text_record(
         "court_id": court_id,
         "dateFiled": date,
     }
-    return _CaseLawTextRecord(text, stem, item, json_url)
+    parts, blocks = _case_law_case_parts(body, html)
+    return _CaseLawTextRecord(text, stem, item, json_url, parts, blocks)
 
 
-def _case_law_text_for_pdf_url(
-    pdf_url: str, fallback_cite: str = "",
+def _case_law_text_for_json_url(
+    json_url: str, fallback_cite: str = "",
 ) -> "Optional[_CaseLawTextRecord]":
-    """Fetch the JSON corresponding to this exact numbered CAP case PDF."""
-    json_url = _case_law_json_for_pdf_url(pdf_url)
+    """Read one exact CAP case file — its JSON, and the HTML beside it."""
     if not json_url:
         return None
     try:
         resp = _anon_session.get(json_url, timeout=15)
         if resp.status_code != 200:
             return None
-        return _case_law_text_record(resp.json(), fallback_cite, json_url)
+        return _case_law_text_record(
+            resp.json(), fallback_cite, json_url,
+            _case_law_case_html(json_url),
+        )
     except Exception as exc:
         print(f"[case.law-text] JSON fetch failed for {json_url}: {exc}")
         return None
+
+
+def _case_law_text_for_pdf_url(
+    pdf_url: str, fallback_cite: str = "",
+) -> "Optional[_CaseLawTextRecord]":
+    """Fetch the JSON corresponding to this exact numbered CAP case PDF, and
+    the formatted HTML published beside it."""
+    return _case_law_text_for_json_url(
+        _case_law_json_for_pdf_url(pdf_url) or "", fallback_cite)
+
+
+def _case_law_text_for_cite(
+    cite: str, expected_name: str = "",
+) -> "Optional[_CaseLawTextRecord]":
+    """CAP's copy of the case printed at *cite*, or None when it has none.
+
+    A citation-keyed URL names a page of a reporter, and more than one opinion
+    can begin on one page — CAP files the second at ``-02``, the third at
+    ``-03``.  Where that happened the caption decides which is wanted, exactly
+    as it does when the same page is opened as a scan; a page whose opinions
+    *no* caption matches is left alone rather than guessed at, and the caller
+    falls back to whatever else it has.
+    """
+    json_url = _case_law_json_url(cite)
+    if not json_url:
+        return None
+    data = _case_law_metadata(cite)
+    if not data:
+        return None
+    pdf_url = _static_case_law_url(cite)
+    siblings = _case_law_page_opinions(pdf_url) if pdf_url else []
+    if len(siblings) > 1:
+        matched = _match_page_opinion(siblings, expected_name)
+        if matched is None:
+            print(f"[case.law-text] {len(siblings)} opinions begin at "
+                  f"{cite!r}; {expected_name!r} names none of them")
+            return None
+        if matched.json_url and matched.json_url != json_url:
+            return _case_law_text_for_json_url(matched.json_url, cite)
+    return _case_law_text_record(
+        data, cite, json_url, _case_law_case_html(json_url))
 
 
 def _case_law_json_case(cite: str) -> "Optional[tuple[str, str]]":
@@ -5024,7 +5222,9 @@ def _bluebook_saved_opinion_name(db, hit: dict) -> str:
     try:
         name = refine_caption_case(normal_case_caption(raw), body)
         name = simplify_historical_entity_caption(name, body)
-        return abbreviate_case_name(name)
+        # The store keeps the court id under "court" (see opinion_db).
+        return abbreviate_case_name(
+            name, court_state=_state_of_court(str(hit.get("court") or "")))
     except Exception:
         return raw
 
@@ -5641,6 +5841,31 @@ except ImportError:
     def fix_title_comma(text: str) -> str:  # graceful degradation
         return text
 
+
+#: How many of a case's parallel citations to try on static.case.law before
+#: giving up.  A cluster can carry a dozen (regional reporter, vendor series,
+#: annotation services); the ones that matter are always near the front.
+_CASE_LAW_TEXT_CITE_TRIES = 6
+
+#: The Caselaw Access Project scanned the reporters through the volumes
+#: published in 2018 and stopped.  A decision handed down after that is not
+#: there under any reporter, so a text lookup for one is a round trip spent
+#: to be told 404 — the year is worth a look first.  Deliberately a year
+#: past the last volume: a reporter's own publication year can lag the
+#: decisions it prints.
+_CASE_LAW_LAST_YEAR = 2019
+
+
+def _case_law_may_hold(date_or_year) -> bool:
+    """Whether static.case.law can hold a decision of this date at all.
+
+    A missing or unreadable date answers yes: the lookup is only skipped on
+    positive evidence that the decision post-dates CAP's scans.
+    """
+    m = re.match(r"\s*(\d{4})", str(date_or_year or ""))
+    return not m or int(m.group(1)) <= _CASE_LAW_LAST_YEAR
+
+
 @dataclass(frozen=True)
 class _CasePdfTextSource:
     """A text representation discovered for a PDF-first case."""
@@ -5655,10 +5880,262 @@ class _CasePdfTextSource:
     case_law_record: "Optional[_CaseLawTextRecord]" = None
 
 
+def _case_law_source_from_record(
+    record: "_CaseLawTextRecord",
+) -> "_CasePdfTextSource":
+    """Wrap a parsed CAP record as the text source a viewer renders.
+
+    The reporter the text was actually read from leads the item's citation
+    list.  The PDF resolver walks that list in order and stops at the first
+    reporter it finds a scan of, so this is what keeps a window's scan and its
+    text the same printing of the case rather than two parallel reporters'.
+    """
+    item = dict(record.item)
+    item["citation"] = _cites_led_by(
+        item.get("citation") or [],
+        _case_law_reporter_cite(_case_law_pdf_for_json_url(record.json_url)),
+    )
+    return _CasePdfTextSource(
+        # Under a PDF there is only one text to switch to, so the button says
+        # "Text"; source_label still names where the text came from.
+        "case_law", "Text", "static.case.law",
+        record.json_url, record.text, item,
+        list(record.parts), list(record.blocks), record,
+    )
+
+
+def _item_case_law_key(item: dict) -> "tuple[list[str], str, str]":
+    """``(cites, case name, decision date)`` — what a search result gives
+    :func:`_case_law_text_source` to look the case up on static.case.law by."""
+    item = item or {}
+    return (
+        _cluster_citations_to_strings(item.get("citation") or []),
+        re.sub(r"<[^>]+>", "", str(
+            item.get("caseName") or item.get("case_name") or "")).strip(),
+        str(item.get("dateFiled") or item.get("date_filed") or ""),
+    )
+
+
+def _case_law_text_source(
+    cites, name: str = "", date: str = "", prefer: str = "",
+) -> "Optional[_CasePdfTextSource]":
+    """static.case.law's text of a case, found by its reporter citations.
+
+    What the app reads when Google Scholar has no copy: the Caselaw Access
+    Project's own text of the printed report, rendered from the HTML CAP
+    publishes beside each case — head matter, separate writings, footnotes,
+    and the reporter's own page breaks — so the text on screen is the pages
+    the citation names rather than a differently-paginated transcription.
+
+    A case commonly carries three or four parallel citations, and CAP scanned
+    each reporter separately: every one of them is a different set of pages
+    for the same opinion.  Which one is wanted is therefore not a matter of
+    taste.  ``prefer`` is the citation whose pages the reader already has in
+    front of them — the reporter the scan on screen prints — and it leads,
+    whatever series it belongs to; without one, an official reporter leads
+    the vendor series (S. Ct., L. Ed.), which is the same reporter the PDF
+    resolver would reach for.  ``None`` when CAP holds none of the citations —
+    the caller then falls back to CourtListener exactly as it did before
+    asking.
+
+    ``date`` is the decision date where it is known, which spares a decision
+    too recent for CAP's scans the round trip (see :func:`_case_law_may_hold`).
+    """
+    if not _case_law_may_hold(date):
+        return None
+    preferred: list[str] = []
+    official: list[str] = []
+    vendor: list[str] = []
+    seen: set[str] = set()
+    prefer_key = re.sub(r"\s+", "", re.sub(
+        r"<[^>]+>", "", str(prefer or ""))).lower()
+    for raw in list(cites) + [prefer]:
+        for cite in (
+            re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str(raw or ""))).strip(),
+            _us_reports_cite(str(raw or "")),
+        ):
+            key = re.sub(r"\s+", "", cite).lower()
+            if not cite or key in seen:
+                continue
+            if (_NOISE_CITE_RE.search(cite)
+                    or _NONSTANDARD_CITE_RE.search(cite)
+                    or not _case_law_json_url(cite)):
+                continue
+            seen.add(key)
+            bucket = (
+                preferred if key == prefer_key
+                else vendor if _CAP_VENDOR_REPORTER_RE.search(cite)
+                else official
+            )
+            bucket.append(cite)
+    for cite in (preferred + official + vendor)[:_CASE_LAW_TEXT_CITE_TRIES]:
+        try:
+            record = _case_law_text_for_cite(cite, name)
+        except Exception as exc:
+            print(f"[case.law-text] lookup failed for {cite!r}: {exc}")
+            continue
+        if record is not None and record.text.strip():
+            print(f"[case.law-text] using static.case.law for {cite!r}")
+            return _case_law_source_from_record(record)
+    return None
+
+
+def _scan_printed_cite(url: str, cites=(), printed_us_cite: str = "") -> str:
+    """The one citation whose pages the scan at *url* actually prints, or "".
+
+    The same narrowing that names the window and the files it saves (see
+    :func:`_scan_citation_item`): a U.S. Reports scan prints U.S. pages, any
+    static.case.law scan prints the reporter its own file names, and a scan
+    from anywhere else — a slip opinion, CourtListener's stored copy — names
+    no reporter of its own.
+    """
+    narrowed = _scan_citation_item(
+        {"citation": [c for c in cites if c]}, url, printed_us_cite)
+    return str(
+        narrowed.get("_us_reports_cite") or narrowed.get("_scan_cite") or ""
+    ).strip()
+
+
+def _case_law_text_for_scan(
+    pdf_url: str, cites, name: str = "", date: str = "",
+) -> "Optional[_CasePdfTextSource]":
+    """CAP's text of the pages a scan on screen actually prints.
+
+    Text shown beside a scan has to be the *same* document, not another
+    printing of the same case: a state opinion sits in an official reporter
+    and a regional one, a Supreme Court opinion in three, and CAP scanned
+    each separately, so the star pagination of the wrong one names pages the
+    reader is not looking at and every pin cite taken from it would be wrong.
+
+    So the scan itself decides, and it decides alone: a static.case.law scan
+    is answered from its own file — same volume, same page, same numbered
+    opinion — and any other scan only from CAP's copy of the reporter it
+    prints.  Where CAP has not got that reporter the answer is ``None`` and
+    CourtListener takes the question, because a parallel printing's pages
+    would not be these pages.  ``None`` too for a scan that names no reporter
+    at all — a slip opinion, CourtListener's own stored copy.
+
+    With no scan on screen (``pdf_url`` empty) there is nothing to match, and
+    the ordinary preference among the case's citations applies.
+    """
+    record = _case_law_text_for_pdf_url(pdf_url)
+    if record is not None and record.text.strip():
+        print(f"[case.law-text] using the scan's own file: {record.json_url}")
+        return _case_law_source_from_record(record)
+    if not pdf_url:
+        return _case_law_text_source(cites, name, date)
+    printed = _scan_printed_cite(pdf_url, cites)
+    if not printed:
+        return None
+    return _case_law_text_source([printed], name, date, prefer=printed)
+
+
+def _courtlistener_text_source(
+    client, cites, name: str = "", *, item: "Optional[dict]" = None,
+    defaults: "Optional[dict]" = None,
+    case_law_record: "Optional[_CaseLawTextRecord]" = None,
+) -> "Optional[_CasePdfTextSource]":
+    """The CourtListener text of a case whose scan is already on screen.
+
+    The one route to that text, wherever a PDF-first view needs it: a CAP
+    reporter scan looking for something to show behind its T button, and a
+    case opened as its scan from a CourtListener search result — or followed
+    to as a citation — that Google Scholar turns out to have no copy of.
+
+    ``item`` is a cluster already in hand (the search result the scan was
+    opened from), which skips the lookup; otherwise ``cites`` are resolved in
+    order until one of them names a cluster.  ``defaults`` fill metadata a
+    sparse cluster lacks — CAP often has the better reporter data, and the
+    window title is built from what this returns.
+
+    ``None`` when there is no client, when nothing bears any of the citations,
+    or when the cluster carries no text: the caller then falls back to
+    whatever else it has, exactly as it did before asking.
+    """
+    if client is None:
+        return None
+    try:
+        target = dict(item) if item else None
+        if not (target and (target.get("cluster_id") or target.get("id"))):
+            target = None
+            for cite in cites:
+                if not str(cite or "").strip():
+                    continue
+                found = _cl_item_for_citation(client, cite, name=name)
+                if found:
+                    target = dict(found)
+                    break
+        if not target:
+            return None
+        for key, value in (defaults or {}).items():
+            target.setdefault(key, value)
+        parts, blocks, plain, _cluster = _assemble_case_parts(client, target)
+        text = plain or _assemble_case_text(client, target)
+        if not (text or "").strip():
+            return None
+        source_url = str(
+            target.get("absolute_url")
+            or target.get("cluster_absolute_url") or ""
+        ).strip()
+        if source_url.startswith("/"):
+            source_url = "https://www.courtlistener.com" + source_url
+        return _CasePdfTextSource(
+            # Under a PDF there is only one text to switch to, so the button
+            # says "Text" and leaves the bar its room; source_label still
+            # names where it came from.
+            "courtlistener", "Text",
+            "CourtListener", source_url, text, target,
+            parts or [], blocks or [], case_law_record,
+        )
+    except Exception as exc:
+        print(f"[pdf-text] CourtListener discovery failed: {exc}")
+        return None
+
+
+def _cl_text_record(source: "_CasePdfTextSource") -> dict:
+    """The pieces a Bluebook name is made of, read off CourtListener's text.
+
+    The same shape :func:`opinion_db.extract_record` reads off a Google
+    Scholar page, so a window named from one is named from the other without
+    knowing which it got: caption, parallel citations, court and decision
+    date.  The opinion's own printed caption wins over the docket caption the
+    cluster carries — the reports print "Manuel v. City of Joliet" where the
+    court filed "Manuel v. City of Joliet, Illinois".
+    """
+    item = dict(source.item or {})
+    name = re.sub(
+        r"<[^>]+>", "",
+        str(item.get("caseName") or item.get("case_name") or ""),
+    ).strip()
+    try:
+        caption = _scholar_caption_name(list(source.blocks or ()))
+    except Exception as exc:
+        print(f"[cite-pdf] reading the CourtListener caption failed: {exc}")
+        caption = ""
+    date_filed = str(item.get("dateFiled") or item.get("date_filed") or "")
+    return {
+        "name": caption or name,
+        "cites": _cluster_citations_to_strings(item.get("citation") or []),
+        "date_filed": date_filed,
+        "year": date_filed[:4],
+        "court": str(item.get("court_id") or item.get("court") or ""),
+    }
+
+
 def _case_pdf_text_source(
     pdf_url: str, title: str, client=None,
 ) -> "Optional[_CasePdfTextSource]":
-    """Prefer CourtListener text for a CAP PDF, then its exact CAP JSON text."""
+    """The text behind a scan: static.case.law's, then CourtListener's.
+
+    A CAP scan is answered from the file this exact numbered PDF was made
+    from, so its text is the text on the pages the reader is looking at, page
+    break for page break — which is what makes the T button a second view of
+    the *same* document rather than another copy of the same case.  A U.S.
+    Reports scan is answered from CAP's copy of that volume, which prints the
+    same pages.  CourtListener answers for a scan whose CAP file will not
+    parse, for one whose reporter CAP never held, and for one that names no
+    reporter at all.
+    """
     parsed = _parse_citation_line(title or "")
     fallback_cite = parsed[1] if parsed else ""
     fallback_name = parsed[0] if parsed else ""
@@ -5666,55 +6143,39 @@ def _case_pdf_text_source(
     if record is not None:
         name = str(record.item.get("caseName") or "").strip() or fallback_name
         cites = _cluster_citations_to_strings(record.item.get("citation", []))
+        if record.parts:
+            return _case_law_source_from_record(record)
     else:
         name = fallback_name
         cites = [fallback_cite] if fallback_cite else []
+        # Not a CAP scan, but the pages still belong to some reporter — a
+        # U.S. Reports volume — and CAP may hold that same volume.
+        scan_source = _case_law_text_for_scan(pdf_url, cites, name)
+        if scan_source is not None:
+            return scan_source
 
-    if client is not None:
-        try:
-            target = None
-            for cite in cites:
-                target = _cl_item_for_citation(client, cite, name=name)
-                if target:
-                    break
-            if target:
-                # CAP often has better reporter metadata than a sparse CL
-                # search result.  Preserve it as a fallback for the title.
-                target = dict(target)
-                if record is not None:
-                    target.setdefault("caseName", record.item.get("caseName", ""))
-                    target.setdefault("citation", record.item.get("citation", []))
-                    target.setdefault("dateFiled", record.item.get("dateFiled", ""))
-                    target.setdefault("court", record.item.get("court", ""))
-                    target.setdefault("court_id", record.item.get("court_id", ""))
-                parts, blocks, plain, _cluster = _assemble_case_parts(
-                    client, target
-                )
-                text = plain or _assemble_case_text(client, target)
-                if (text or "").strip():
-                    source_url = str(
-                        target.get("absolute_url")
-                        or target.get("cluster_absolute_url") or ""
-                    ).strip()
-                    if source_url.startswith("/"):
-                        source_url = "https://www.courtlistener.com" + source_url
-                    return _CasePdfTextSource(
-                        # Under a PDF there is only one text to switch to, so
-                        # the button says "Text" and leaves the bar its room;
-                        # source_label still names where it came from.
-                        "courtlistener", "Text",
-                        "CourtListener", source_url, text, target,
-                        parts or [], blocks or [], record,
-                    )
-        except Exception as exc:
-            print(f"[pdf-text] CourtListener discovery failed: {exc}")
+    source = _courtlistener_text_source(
+        client, cites, name,
+        # CAP often has better reporter metadata than a sparse CL search
+        # result.  Preserve it as a fallback for the title.
+        defaults=(
+            {
+                "caseName": record.item.get("caseName", ""),
+                "citation": record.item.get("citation", []),
+                "dateFiled": record.item.get("dateFiled", ""),
+                "court": record.item.get("court", ""),
+                "court_id": record.item.get("court_id", ""),
+            }
+            if record is not None else None
+        ),
+        case_law_record=record,
+    )
+    if source is not None:
+        return source
 
     if record is None:
         return None
-    return _CasePdfTextSource(
-        "case_law", "Text", "static.case.law",
-        record.json_url, record.text, record.item, [], [], record,
-    )
+    return _case_law_source_from_record(record)
 
 
 try:
@@ -5910,7 +6371,9 @@ class CourtListenerGUI:
         self, item: dict, label: str, prefetch_pdf: bool = True,
     ) -> None:
         client = self._get_client() if self._token_var.get().strip() else None
-        if client is None:
+        # No token is only a dead end when static.case.law cannot answer
+        # either: the reopen below tries the case's citations there first.
+        if client is None and not (item or {}).get("citation"):
             self._status_var.set(
                 "History needs a CourtListener API token for that case."
             )
@@ -5919,13 +6382,15 @@ class CourtListenerGUI:
 
         def run() -> None:
             target = dict(item)
-            if not (target.get("cluster_id") or target.get("id")):
+            if client is not None and not (
+                    target.get("cluster_id") or target.get("id")):
                 cite = _pick_citation(target.get("citation", []))
                 if cite:
                     found = _cl_item_for_citation(client, cite)
                     if found:
                         target = found
-            if not (target.get("cluster_id") or target.get("id")):
+            if not (target.get("cluster_id") or target.get("id")
+                    or target.get("citation")):
                 self._post_root(
                     self._status_var.set,
                     "Could not reopen that history item from CourtListener.",
@@ -6189,9 +6654,17 @@ class CourtListenerGUI:
             if parts:
                 blocks = _blocks_from_json(payload.get("blocks"))
                 text = str(payload.get("cl_text") or "")
+                # Bookmarks saved before the app read static.case.law's text
+                # carry no source at all, and CourtListener is what they were.
+                source_label = str(payload.get("source_label") or "")
+                source_url = str(payload.get("source_url") or "")
+                source_kind = str(payload.get("source_kind") or "courtlistener")
                 return lambda: _ScholarTextWindow(
                     self.root, self, "", "", item=item, cl_text=text,
-                    cl_parts=parts, cl_blocks=blocks, prefetch_pdf=prefetch)
+                    cl_parts=parts, cl_blocks=blocks, prefetch_pdf=prefetch,
+                    primary_source_label=source_label,
+                    primary_source_url=source_url,
+                    primary_source_kind=source_kind)
             return lambda: self._open_history_cl(item, label, prefetch)
         if kind == "pdf":
             url = str(payload.get("url") or "")
@@ -6404,8 +6877,10 @@ class CourtListenerGUI:
             label="Open Citation List…",
             command=self._show_citation_list_dialog,
         )
+        # No accelerator: Ctrl/Cmd+S is the save key wherever a case is open,
+        # and a lookup box is not what that key should reach for.
         lookup_menu.add_command(
-            label="Quick Look Up (case or statute)…", accelerator=f"{_ACCEL}+S",
+            label="Quick Look Up (case or statute)…",
             command=self._show_quick_lookup,
         )
         lookup_menu.add_command(
@@ -6451,11 +6926,9 @@ class CourtListenerGUI:
         # The Mac modifier is Cmd, and Tk keeps the two apart — the same
         # reason Ctrl-F alone never opened the find bar there (_bind_find_keys).
         for key, command in (("l", self._show_statute_lookup),
-                             ("s", self._show_quick_lookup),
                              ("b", self._open_brief)):
-            self.root.bind(f"<Control-{key}>", lambda _e, c=command: c())
-            if sys.platform == "darwin":
-                self.root.bind(f"<Command-{key}>", lambda _e, c=command: c())
+            for seq in _accel_sequences(key):
+                self.root.bind(seq, lambda _e, c=command: c())
 
         # --- Search frame ---
         search_frame = ttk.LabelFrame(self.root, text="Search", padding=6)
@@ -8355,6 +8828,7 @@ class CourtListenerGUI:
 
         def run() -> None:
             url = ""
+            item: dict = {}
             try:
                 item = self._cited_case_pdf_item(client, cite, name)
                 url = self._resolve_pdf_url(client, item) or ""
@@ -8372,10 +8846,13 @@ class CourtListenerGUI:
                                     "opening the text instead."))
                 return
             data, final_url = fetched
+            # The cluster this scan was found through is worth keeping: it is
+            # what the T button falls back to when Google Scholar has no copy
+            # of the case, and it saves looking the citation up a second time.
             self._post_root(
                 lambda: self._show_cited_case_pdf(
                     parent, data, final_url, cite, pin, name, action,
-                    snippet, safe_status,
+                    snippet, safe_status, cl_item=item,
                 )
             )
 
@@ -8432,8 +8909,13 @@ class CourtListenerGUI:
 
     def _show_cited_case_pdf(self, parent, data: bytes, url: str, cite: str,
                              pin: str, name: str, action: tuple,
-                             snippet: str, status) -> None:
-        """Put a cited case's scan on screen, with its text warming behind it."""
+                             snippet: str, status, *,
+                             cl_item: "Optional[dict]" = None) -> None:
+        """Put a cited case's scan on screen, with its text warming behind it.
+
+        ``cl_item`` is the CourtListener cluster the scan was found through,
+        when there was one: what the T button shows if Google Scholar has no
+        copy of the case."""
         title = f"{name} — {cite}" if name and cite else (cite or name or "PDF")
         margin = _PdfPane._MARGIN * 3 if _is_us_reports_pdf(url) else None
         host = self.root if parent is None else parent
@@ -8450,7 +8932,8 @@ class CourtListenerGUI:
         # fetched below replaces them with the real caption, the parallel
         # citations and the decision date a Bluebook filename is built from.
         named = {"data": data, "url": url, "cite": cite, "name": name,
-                 "pin": pin, "record": None, "page": None, "pin_page": None}
+                 "pin": pin, "record": None, "page": None, "pin_page": None,
+                 "text_source": None}
 
         def described(record: dict) -> None:
             """The text has loaded: name the window properly."""
@@ -8461,6 +8944,18 @@ class CourtListenerGUI:
             """Keep the opinion page itself: the viewer's T button renders it
             in place of the scan, with nothing left to fetch."""
             named["page"] = (page_url, html)
+
+        def text_source_ready(source: "_CasePdfTextSource") -> None:
+            """Google Scholar has no copy of this case, so the best other text
+            is what the T button shows — static.case.law's report, or
+            CourtListener's — held here already assembled, so pressing T
+            renders it with nothing left to fetch.  It names the case as well:
+            what it carries is the caption, the parallel citations, the court
+            and the decision date a Bluebook title is made of, which the
+            clicked citation cannot supply on its own."""
+            named["text_source"] = source
+            named["record"] = _cl_text_record(source)
+            self._post_root(lambda: self._retitle_cited_pdf(named))
 
         def onward() -> tk.Misc:
             """Where a citation followed *out of this window* starts from —
@@ -8498,7 +8993,9 @@ class CourtListenerGUI:
         # the case name opens a page already in hand — and so the window can be
         # titled with the case's real citation rather than the clicked one.
         self._warm_case_text(cite, name, on_record=described,
-                             on_page=page_ready)
+                             on_page=page_ready,
+                             on_text_source=text_source_ready,
+                             cl_item=cl_item, scan_url=url)
         try:
             window = _FloatingPdfWindow(
                 self.root, data, url, title, margin=margin, app=self,
@@ -8578,21 +9075,40 @@ class CourtListenerGUI:
     def _embed_cited_case_text(self, host, named: dict):
         """Render a cited case's opinion inside its PDF viewer — what the T
         button shows there.  Returns None while the background fetch of the
-        text is still running (or if it found nothing), which is the viewer's
-        cue to stay on the scan and say so.
+        text is still running (or if it found nothing anywhere), which is the
+        viewer's cue to stay on the scan and say so.
+
+        Google Scholar's copy where there is one; where there is not, the
+        text warmed behind the scan instead — static.case.law's own report, or
+        CourtListener's — rendered from its parts exactly as a window primary
+        to that source renders them.  Either way the text is already in hand,
+        so T switches at once.
 
         The scan and what has been read off it go across as well, so the reader
         can align the two and the switch keeps the reader's place."""
-        page = named.get("page")
-        if not page:
-            return None
-        page_url, html = page
         item = self._cited_filename_item(named)
         item.pop("_us_reports_cite", None)   # a filename hint, not case data
+        initial_pdf = (named.get("data"), named.get("url") or "")
+        page = named.get("page")
+        if not page:
+            source = named.get("text_source")
+            if source is None:
+                return None
+            return _ScholarTextWindow(
+                host, self, "", "", item=item, cl_text=source.text,
+                cl_parts=list(source.parts), cl_blocks=list(source.blocks),
+                prefetch_pdf=False, chromeless=True,
+                primary_source_label=source.source_label,
+                primary_source_url=source.source_url,
+                primary_source_kind=source.kind,
+                initial_pdf=initial_pdf,
+                initial_pdf_analysis=named.get("analysis"),
+            )
+        page_url, html = page
         return _ScholarTextWindow(
             host, self, page_url, html, item=item, prefetch_pdf=False,
             chromeless=True,
-            initial_pdf=(named.get("data"), named.get("url") or ""),
+            initial_pdf=initial_pdf,
             initial_pdf_analysis=named.get("analysis"),
         )
 
@@ -8600,7 +9116,9 @@ class CourtListenerGUI:
         self._cited_pdf_windows.discard(window)
 
     def _warm_case_text(self, cite: str, name: str, on_record=None,
-                        on_page=None) -> None:
+                        on_page=None, on_text_source=None,
+                        cl_item: "Optional[dict]" = None,
+                        scan_url: str = "") -> None:
         """Fetch the cited opinion's text in the background, so the case name
         on the viewer's strip opens a page that is already in hand.  Uses the
         ordinary Google Scholar path, whose result is cached and saved to the
@@ -8611,17 +9129,43 @@ class CourtListenerGUI:
         pieces a Bluebook filename is made of, which a citation and a link's
         visible text cannot supply on their own.  ``on_page`` receives the
         page itself, ``(url, html)``, which is what the viewer's T button
-        renders in place of the scan."""
-        if not cite or not _SCHOLAR_AVAILABLE:
+        renders in place of the scan.
+
+        Google Scholar does not have every case — an unpublished disposition,
+        a very recent decision, a state reporter it never scraped.  Then
+        ``on_text_source`` receives the best copy there is instead, and the T
+        button works after all: static.case.law's text of the printed report
+        first, being the reporter's own pages, and CourtListener's
+        transcription where CAP has nothing.  ``cl_item`` is the cluster
+        already resolved, so the citation is not looked up a second time, and
+        ``scan_url`` is the scan this text will stand beside — which reporter
+        it prints is what decides which of the case's parallel citations the
+        text is taken from, since CAP scanned each of them separately and only
+        one of them paginates the pages on screen.  Scholar is still tried
+        first: it is the better-typeset copy, and the one every other view of
+        a case prefers."""
+        if not cite:
             return
         try:
-            fetcher = self._get_scholar()
+            fetcher = self._get_scholar() if _SCHOLAR_AVAILABLE else None
         except Exception:
             fetcher = None
-        if fetcher is None:
+        if fetcher is None and on_text_source is None:
             return
+        # Resolved here rather than on the worker: the token lives in a Tk
+        # variable, which belongs to the thread the widgets are on.
+        client = None
+        if on_text_source is not None:
+            try:
+                if self._token_var.get().strip():
+                    client = self._get_client()
+            except Exception as exc:
+                print(f"[cite-pdf] no CourtListener client for {cite!r}: {exc}")
 
-        def run() -> None:
+        def scholar() -> bool:
+            """Whether Google Scholar answered with a copy of the case."""
+            if fetcher is None:
+                return False
             try:
                 for lookup_cite in _citation_search_variants(cite):
                     fetched = fetcher.fetch_by_citation(lookup_cite)
@@ -8635,9 +9179,41 @@ class CourtListenerGUI:
                                   f"failed: {exc}")
                     if on_record is not None:
                         self._describe_warmed_case(fetched, name, on_record)
-                    return
+                    return True
             except Exception as exc:
                 print(f"[cite-pdf] warming the text of {cite!r} failed: {exc}")
+            return False
+
+        def fallback() -> None:
+            """The copy to show when Google Scholar has none: static.case.law's
+            text of the very pages on screen, then CourtListener's."""
+            cites = list(_citation_search_variants(cite))
+            for parallel in (cl_item or {}).get("citation") or []:
+                parallel = re.sub(r"<[^>]+>", "", str(parallel or "")).strip()
+                if parallel and parallel not in cites:
+                    cites.append(parallel)
+            source = _case_law_text_for_scan(
+                scan_url, cites, name,
+                str((cl_item or {}).get("dateFiled") or ""),
+            )
+            if source is None and client is not None:
+                source = _courtlistener_text_source(
+                    client, _citation_search_variants(cite), name,
+                    item=cl_item,
+                )
+            if source is None:
+                return
+            try:
+                on_text_source(source)
+            except Exception as exc:
+                print(f"[cite-pdf] keeping the {source.source_label} text "
+                      f"failed: {exc}")
+
+        def run() -> None:
+            if scholar():
+                return
+            if on_text_source is not None:
+                fallback()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -8832,12 +9408,14 @@ class CourtListenerGUI:
                            view_parent: "Optional[tk.Misc]" = None) -> bool:
         """Resolve one case citation and open its window (call from a
         worker thread).  Google Scholar by citation first — retrying as a
-        name+citation search — with a pin-cite jump; then the
-        CourtListener text.  Returns False when nothing was found.
+        name+citation search — with a pin-cite jump; then static.case.law's
+        text of the printed report, which is paginated to the very reporter
+        the citation names; then the CourtListener text.  Returns False when
+        nothing was found.
 
-        ``prefetch_pdf=False`` opens the Scholar/CL text without warming the
-        official PDF in the background — used by the PDF brief viewer, where a
-        second PDF load alongside the open brief can hang the app."""
+        ``prefetch_pdf=False`` opens the text without warming the official PDF
+        in the background — used by the PDF brief viewer, where a second PDF
+        load alongside the open brief can hang the app."""
         target_parent = self.root if view_parent is None else view_parent
         # Federal Appendix cases are scans Google Scholar rarely has — open the
         # static.case.law PDF built straight from the citation.
@@ -8891,14 +9469,36 @@ class CourtListenerGUI:
                 self._post_root(open_scholar)
                 return True
         # Google Scholar found the case on its results page but the opinion
-        # page didn't load — fall back to CourtListener now and retry this exact
-        # Scholar opinion in the background (the toggle lights up if it comes).
+        # page didn't load — fall back to the next-best text now and retry this
+        # exact Scholar opinion in the background (the toggle lights up if it
+        # comes through).
         retry_url = ""
         if fetcher is not None:
             try:
                 retry_url = fetcher.take_post_search_failure() or ""
             except Exception:
                 retry_url = ""
+        cap = _case_law_text_source([cite], name) if cite else None
+        if cap is not None:
+            def open_case_law() -> None:
+                try:
+                    w = _ScholarTextWindow(
+                        target_parent, self, "", "", item=dict(cap.item),
+                        cl_text=cap.text, cl_parts=list(cap.parts),
+                        cl_blocks=list(cap.blocks), prefetch_pdf=prefetch_pdf,
+                        primary_source_label=cap.source_label,
+                        primary_source_url=cap.source_url,
+                        primary_source_kind=cap.kind,
+                    )
+                    if pin:
+                        w.jump_to_cite_page(cite, pin)
+                    if retry_url:
+                        w._retry_scholar_link(cite, pin, retry_url)
+                except tk.TclError:
+                    pass
+
+            self._post_root(open_case_law)
+            return True
         if client is not None:
             try:
                 target = _cl_item_for_citation(client, cite, name=name)
@@ -8936,8 +9536,9 @@ class CourtListenerGUI:
         """Dialog that opens a batch of cases: one citation per line
         ("Monroe v. Pape, 365 U.S. 167, 171 (1961)").  Each line is
         resolved on Google Scholar first (jumping to the pin cite when
-        the text is paginated by that reporter), falling back to the
-        CourtListener text; the lines that resolved nowhere are listed."""
+        the text is paginated by that reporter), falling back to
+        static.case.law's report and then to the CourtListener text; the
+        lines that resolved nowhere are listed."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Open Citation List")
         dlg.geometry("560x420")
@@ -9044,7 +9645,7 @@ class CourtListenerGUI:
         open_btn.config(command=go)
 
     def _show_quick_lookup(self) -> None:
-        """Ctrl+S: one-line lookup that takes either a case citation
+        """The Look Up menu's one-line lookup, taking either a case citation
         (resolved exactly like a line of the citation-list dialog, pin
         cite included) or a statute/regulation citation."""
         dlg = tk.Toplevel(self.root)
@@ -11164,21 +11765,34 @@ class CourtListenerGUI:
         name: str = "",
     ) -> None:
         """A Google Scholar opinion page failed to load (Google is flaky).  Show
-        the CourtListener view located by the case's reporter citation and retry
-        the Scholar opinion in the background — the "Scholar" button
-        lights up if it comes through.  With no citation to locate the case on
-        CourtListener, just retry Scholar and open it if it returns."""
+        the next-best view located by the case's reporter citation —
+        static.case.law's own report, else CourtListener's text — and retry the
+        Scholar opinion in the background; the "Scholar" button lights
+        up if it comes through.  With no citation to locate the case by, just
+        retry Scholar and open it if it returns."""
         client = self._get_client() if self._token_var.get().strip() else None
         fetcher = self._get_scholar()
         cite = (cite or "").strip()
 
         if cite and client is not None:
             self._status_var.set(
-                f"Google Scholar busy — loading {cite} from CourtListener…"
+                f"Google Scholar busy — looking for {cite}…"
             )
 
             def run() -> None:
                 try:
+                    cap = _case_law_text_source([cite], name)
+                    if cap is not None:
+                        def open_case_law(source=cap) -> None:
+                            try:
+                                w = self._open_case_law_window(
+                                    dict(source.item), source, prefetch_pdf)
+                                w._retry_scholar_link(cite, pin, url)
+                            except tk.TclError:
+                                pass
+
+                        self._post_root(open_case_law)
+                        return
                     target = _cl_item_for_citation(client, cite)
                     if not target:
                         pdf = _case_law_pdf_for_cite(cite)
@@ -11373,12 +11987,19 @@ class CourtListenerGUI:
         """Worker-thread body for opening a CourtListener-identified case.
 
         Tries Google Scholar's first case (by primary citation):
-          • Scholar errors           → give up, show the CourtListener text.
+          • Scholar errors           → give up, show the next-best text.
           • first case matches CL    → show the Scholar text and we're done.
-          • first case doesn't match → show the CourtListener text now, but
-            keep hunting for a matching Scholar case in the background; if one
+          • first case doesn't match → show the next-best text now, but keep
+            hunting for a matching Scholar case in the background; if one
             turns up the "Scholar" button lights up so the reader
             can switch over.
+
+        The next-best text is static.case.law's, where the Caselaw Access
+        Project has the case: it is the printed report itself — the reporter's
+        own pages, its head matter, its separate writings — where
+        CourtListener's is a transcription that need not be paginated to any
+        reporter at all.  CourtListener answers for everything CAP does not
+        hold, which is every decision since its scans stop.
 
         (Federal Appendix cases are handled by callers before this runs.)
         """
@@ -11415,11 +12036,12 @@ class CourtListenerGUI:
                     print(f"[scholar] first-case fetch error for {primary!r}: {exc}")
                     quick_error = True
 
-        # An error from Google Scholar — give up right away, show the CL text.
+        # An error from Google Scholar — give up right away and show whatever
+        # else has this case.
         if quick_error:
             self._assemble_and_open_cl(
                 item, client, prefetch_pdf, finish, search=False,
-                note="Google Scholar error — showing CourtListener text",
+                note="Google Scholar error",
             )
             return
 
@@ -11467,8 +12089,15 @@ class CourtListenerGUI:
             # Doesn't match — fall through to the CourtListener text below.
 
         # Scholar's first case either didn't match or wasn't there: open the
-        # CourtListener text now and keep looking for a Scholar match.
+        # best other text now and keep looking for a Scholar match.
         search = fetcher is not None
+        cap = _case_law_text_source(*_item_case_law_key(item))
+        if cap is not None:
+            self._post_root(
+                self._open_case_law_window, item, cap, prefetch_pdf, search,
+            )
+            finish()
+            return
         if cl_parts or cl_text:
             self._post_root(
                 self._open_cl_window, item, cl_parts, cl_blocks, cl_text,
@@ -11501,8 +12130,16 @@ class CourtListenerGUI:
         self, item: dict, client, prefetch_pdf, finish,
         search: bool = False, note: str = "",
     ) -> None:
-        """Worker thread: assemble the CourtListener case and open it (showing
-        a failure dialog when there's nothing to display)."""
+        """Worker thread: open the case from the best text Google Scholar is
+        not — static.case.law's printed report, else CourtListener's own text
+        (showing a failure dialog when there's nothing to display)."""
+        cap = _case_law_text_source(*_item_case_law_key(item))
+        if cap is not None:
+            self._post_root(
+                self._open_case_law_window, item, cap, prefetch_pdf, search,
+            )
+            finish()
+            return
         parts: list = []
         blocks: list = []
         plain = ""
@@ -11532,6 +12169,42 @@ class CourtListenerGUI:
             self.root, self, url, html, item=item, cl_text=cl_text,
             note=note, prefetch_pdf=prefetch_pdf,
         )
+
+    def _open_case_law_window(
+        self, item: Optional[dict], source: "_CasePdfTextSource",
+        prefetch_pdf: bool = True, search: bool = False,
+    ) -> "_ScholarTextWindow":
+        """Open a case on static.case.law's text — the same window a
+        CourtListener-primary case opens in, named for where its text came
+        from.  The search result's own metadata still identifies the case (it
+        carries the cluster the PDF button and the background Scholar hunt
+        both need); CAP fills in only what that result left blank.
+
+        The reporter this text was taken from leads the citation list, so the
+        scan the PDF button goes looking for is the scan of these very pages
+        rather than a parallel reporter's printing of the same case."""
+        self._status_var.set(
+            "Loaded static.case.law text — searching Google Scholar…"
+            if search else "Loaded static.case.law text."
+        )
+        merged = dict(item or {})
+        for key, value in (source.item or {}).items():
+            if value and not merged.get(key):
+                merged[key] = value
+        merged["citation"] = _cites_led_by(
+            merged.get("citation") or [], _case_law_reporter_cite(
+                _case_law_pdf_for_json_url(source.source_url)))
+        win = _ScholarTextWindow(
+            self.root, self, "", "", item=merged, cl_text=source.text,
+            cl_parts=list(source.parts), cl_blocks=list(source.blocks),
+            prefetch_pdf=prefetch_pdf,
+            primary_source_label=source.source_label,
+            primary_source_url=source.source_url,
+            primary_source_kind=source.kind,
+        )
+        if search:
+            win._search_for_scholar_version(source.text)
+        return win
 
     def _open_cl_window(
         self, item: Optional[dict], parts, blocks, plain,
@@ -13070,6 +13743,227 @@ def _plain_without_layout_chars(
     return "".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Copy preview — reading the clipboard's own RTF back into styled runs
+# ---------------------------------------------------------------------------
+# The preview has to show what was *copied*, not what was on screen: the two
+# differ wherever a copy style acts (a quotation's flipped quote marks, an
+# appended citation, omitted footnote markers and page numbers).  Reading the
+# finished RTF back is what keeps them from drifting — the preview is built
+# from the same bytes the clipboard receives, so a change to the copy path
+# shows up in the preview without anything here being taught about it.
+
+# Groups holding machinery rather than visible text.  ``\*`` marks an
+# ignorable destination in general; these are the named ones this app writes.
+_RTF_SKIPPED_DESTINATIONS = frozenset({
+    "fonttbl", "colortbl", "stylesheet", "info", "header", "footer",
+    "fldinst", "bkmkstart", "bkmkend",
+})
+
+# A control word (with its optional numeric argument and the single space that
+# delimits it) or a control symbol.
+_RTF_CONTROL_RE = re.compile(r"\\(?:([a-zA-Z]+)(-?\d+)? ?|(.))", re.DOTALL)
+
+# Visible characters kept before and after the elision in a long preview.  The
+# tail matters as much as the head: the citation this feature exists to check
+# is appended at the very end of the copy.
+_PREVIEW_HEAD_CHARS = 320
+_PREVIEW_TAIL_CHARS = 260
+
+
+def _rtf_preview_runs(rtf: str) -> "list[tuple[str, frozenset]]":
+    """An RTF document this app produced, read back as ``(text, styles)`` runs.
+
+    A reader for the subset :func:`_rtf_document`, :func:`_dump_to_rtf` and
+    :func:`_run_to_rtf` write — character formatting, paragraph shape, the
+    escapes, and the bookmark/hyperlink groups wrapped around footnote markers
+    — not a general RTF parser.  Control words it does not know are dropped
+    rather than shown, so an unrecognised one cannot leak into the preview as
+    literal text.
+
+    Styles are the names the preview renders: ``italic``, ``bold``,
+    ``underline``, ``small``, ``super``, ``center``, ``indent``, ``pagenum``.
+    """
+    runs: list[tuple[str, frozenset]] = []
+    buf: list[str] = []
+    state = {"italic": False, "bold": False, "underline": False,
+             "small": False, "super": False, "color": 0,
+             "center": False, "indent": False}
+    stack: list[dict] = []
+    skip_depth: "Optional[int]" = None
+    depth = 0
+
+    def styles() -> frozenset:
+        out = {k for k in ("italic", "bold", "underline", "super",
+                           "center", "indent") if state[k]}
+        if state["small"] and not state["super"]:
+            out.add("small")   # \super already carries its own smaller size
+        if state["color"] == 1:
+            out.add("pagenum")
+        return frozenset(out)
+
+    def flush() -> None:
+        if buf:
+            runs.append(("".join(buf), styles()))
+            buf.clear()
+
+    def emit(text: str) -> None:
+        if skip_depth is None and text:
+            buf.append(text)
+
+    def setst(key: str, value) -> None:
+        if state[key] != value:
+            flush()          # the run so far still belongs to the old style
+            state[key] = value
+
+    i, n = 0, len(rtf)
+    while i < n:
+        ch = rtf[i]
+        if ch == "{":
+            flush()
+            stack.append(dict(state))
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            flush()
+            if skip_depth is not None and depth <= skip_depth:
+                skip_depth = None
+            if stack:
+                state = stack.pop()
+            depth -= 1
+            i += 1
+            continue
+        if ch != "\\":
+            j = i
+            while j < n and rtf[j] not in "\\{}":
+                j += 1
+            # A raw newline in the source is RTF's ignorable whitespace, not
+            # content; the breaks the reader should see arrive as \par.
+            emit(rtf[i:j].replace("\r", "").replace("\n", ""))
+            i = j
+            continue
+
+        m = _RTF_CONTROL_RE.match(rtf, i)
+        if not m:
+            i += 1
+            continue
+        word, arg, symbol = m.group(1), m.group(2), m.group(3)
+        i = m.end()
+
+        if symbol is not None:
+            if symbol in "\\{}":
+                emit(symbol)
+            elif symbol == "~":
+                emit("\u00a0")
+            elif symbol == "-":
+                pass             # optional hyphen: invisible unless it breaks
+            elif symbol == "'":
+                pair, i = rtf[i:i + 2], i + 2
+                try:
+                    emit(bytes.fromhex(pair).decode("cp1252"))
+                except (ValueError, UnicodeDecodeError):
+                    pass
+            elif symbol == "*" and skip_depth is None:
+                skip_depth = depth
+            continue
+
+        if word in _RTF_SKIPPED_DESTINATIONS:
+            if skip_depth is None:
+                skip_depth = depth
+            continue
+        if skip_depth is not None:
+            continue
+
+        value = int(arg) if arg is not None else None
+        if word in ("par", "line"):
+            flush()
+            runs.append(("\n", styles()))
+        elif word == "tab":
+            emit("\t")
+        elif word == "u" and value is not None:
+            emit(chr(value if value >= 0 else value + 65536))
+            # \uN is followed by the fallback character it replaces.
+            if i < n and rtf[i] not in "\\{}":
+                i += 1
+        elif word == "pard":
+            setst("center", False)
+            setst("indent", False)
+        elif word == "qc":
+            setst("center", True)
+        elif word == "li":
+            setst("indent", bool(value))
+        elif word == "i":
+            setst("italic", value != 0)
+        elif word == "b":
+            setst("bold", value != 0)
+        elif word == "ul":
+            setst("underline", value != 0)
+        elif word == "ulnone":
+            setst("underline", False)
+        elif word == "super":
+            setst("super", True)
+        elif word in ("nosupersub", "sub"):
+            setst("super", False)
+        elif word == "fs":
+            setst("small", value is not None and value < 22)
+        elif word == "cf":
+            setst("color", value or 0)
+    flush()
+
+    # Merge neighbours sharing a style, then drop the blank lines the document
+    # opens and closes on — the preview is a fragment, not a page.
+    merged: list[tuple[str, frozenset]] = []
+    for text, style in runs:
+        if merged and merged[-1][1] == style:
+            merged[-1] = (merged[-1][0] + text, style)
+        else:
+            merged.append((text, style))
+    while merged and not merged[0][0].strip():
+        merged.pop(0)
+    while merged and not merged[-1][0].strip():
+        merged.pop()
+    if merged:
+        merged[0] = (merged[0][0].lstrip("\n"), merged[0][1])
+        merged[-1] = (merged[-1][0].rstrip("\n"), merged[-1][1])
+    return [(t, s) for t, s in merged if t]
+
+
+def _elide_preview_runs(
+    runs: "list[tuple[str, frozenset]]",
+    head: int = _PREVIEW_HEAD_CHARS,
+    tail: int = _PREVIEW_TAIL_CHARS,
+) -> "tuple[list, list, bool]":
+    """Split *runs* into a head and a tail with the middle left out.
+
+    Returns ``(head_runs, tail_runs, elided)``.  Both ends are kept because
+    both ends are what a reader checks: the opening of the passage, and the
+    citation the copy appends after it.  A short copy comes back whole, with
+    an empty tail.
+    """
+    total = sum(len(t) for t, _ in runs)
+    if total <= head + tail:
+        return runs, [], False
+
+    def take(source, budget):
+        out, used = [], 0
+        for text, style in source:
+            if used + len(text) <= budget:
+                out.append((text, style))
+                used += len(text)
+                continue
+            room = budget - used
+            if room > 0:
+                out.append((text[:room], style))
+            break
+        return out
+
+    head_runs = take(runs, head)
+    tail_runs = [(t[::-1], s) for t, s in
+                 take([(t[::-1], s) for t, s in reversed(runs)], tail)][::-1]
+    return head_runs, tail_runs, True
+
+
 def _dump_statute_rtf(txt: tk.Text, start: str, end: str) -> str:
     """Convert a statute / rule / constitution window's Text range to an RTF
     body, mapping the ``_StatuteWindow`` tag set — section headings, bold
@@ -14317,6 +15211,25 @@ def _bind_text_scroll_keys(win: tk.Misc, txt: tk.Text, scroll_cb=None,
     )
     if window_keys:
         _bind_reader_scroll_keys(win, scroll_cb or scroll_text)
+
+
+def _accel_sequences(*keys: str) -> tuple:
+    """The event patterns for Ctrl+*key* — and, on macOS only, Cmd+*key*.
+
+    ``<Command-…>`` must never be bound off macOS.  Tk aliases ``Command`` to
+    ``Mod1``, and Tk's Windows port sets Mod1 from the **Num Lock** toggle
+    (``TkWinGetModifierState`` in tkWinX.c), so on a Windows keyboard with Num
+    Lock on — the usual state — *every* plain keypress arrives carrying Mod1.
+    A ``<Command-s>`` binding then matches a bare "s" and, being the more
+    specific pattern, out-scores the window's own ``<KeyPress-s>``: the case
+    saved itself instead of opening the panel beside it, and a bare "w" closed
+    the window.  Binding the Mac patterns only where Cmd exists is the fix, and
+    costs a Mac keyboard nothing.
+    """
+    seqs = [f"<Control-{key}>" for key in keys]
+    if sys.platform == "darwin":
+        seqs.extend(f"<Command-{key}>" for key in keys)
+    return tuple(seqs)
 
 
 def _bind_find_keys(win: tk.Misc, open_cb, next_cb, prev_cb) -> None:
@@ -17133,8 +18046,8 @@ class _PdfPane(ttk.Frame):
         c = self._canvas
         c.bind("<Button-1>", self._on_sel_press, add="+")
         c.bind("<B1-Motion>", self._on_sel_drag, add="+")
-        c.bind("<Control-c>", self._copy_selection, add="+")
-        c.bind("<Command-c>", self._copy_selection, add="+")   # macOS
+        for seq in _accel_sequences("c"):
+            c.bind(seq, self._copy_selection, add="+")
 
     def _on_sel_press(self, event) -> None:
         # Take keyboard focus so Ctrl-C reaches the canvas binding.
@@ -17595,22 +18508,22 @@ class _FloatingPdfWindow:
         self._body.pack(side="top", fill="both", expand=True)
 
         # Cmd and Control are separate modifiers in Tk, so a Mac keyboard needs
-        # its own bindings for the same accelerators.
+        # its own bindings for the same accelerators — and only a Mac keyboard
+        # may have them: off macOS a Cmd pattern would swallow the bare "s"
+        # bound further down (see _accel_sequences).
         # The same keys serve both surfaces: on the scan they zoom the page, on
         # the opinion they size the type, exactly as the −/+ buttons do.
-        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>",
-                    "<Command-plus>", "<Command-equal>"):
+        for seq in _accel_sequences("plus", "equal", "KP_Add"):
             self._win.bind(seq, lambda _e: self._bigger())
-        for seq in ("<Control-minus>", "<Control-KP_Subtract>",
-                    "<Command-minus>"):
+        for seq in _accel_sequences("minus", "KP_Subtract"):
             self._win.bind(seq, lambda _e: self._smaller())
-        for seq in ("<Control-0>", "<Command-0>"):
+        for seq in _accel_sequences("0"):
             self._win.bind(seq, lambda _e: self._reset_scale())
-        for seq in ("<Control-w>", "<Command-w>"):
+        for seq in _accel_sequences("w"):
             self._win.bind(seq, lambda _e: self.close())
-        for seq in ("<Control-s>", "<Command-s>"):
+        for seq in _accel_sequences("s"):
             self._win.bind(seq, lambda _e: self._save())
-        for seq in ("<Control-p>", "<Command-p>"):
+        for seq in _accel_sequences("p"):
             self._win.bind(seq, lambda _e: self._print())
         _bind_reader_scroll_keys(self._win, self._scroll_key)
         _bind_reader_page_keys(self._win, self._page_key)
@@ -18258,7 +19171,8 @@ class _FloatingPdfWindow:
     def _details_window(self, reader) -> tk.Toplevel:
         """A window holding this case's details panel, built by the opinion
         that owns them.  Mastered on this window, so it is closed with the
-        case it belongs to; the panel offers the case's details alone (see
+        case it belongs to; it opens on the case's own details and, for a
+        Supreme Court case, offers the docket behind them (see
         ``_ScholarTextWindow._details_panel``)."""
         win = _ui_toplevel(self._win)
         _ensure_modern_ttk_styles(win)
@@ -18274,7 +19188,7 @@ class _FloatingPdfWindow:
         # checkbox nor the key for one — so this is the panel, and it is built
         # here, in this window.
         reader._details_host = body
-        reader._details_views = False
+        reader._details_views = _ScholarTextWindow._SCAN_DETAILS_VIEWS
         reader._details_panel().pack(fill="both", expand=True)
         reader._details_on = True
         try:
@@ -18282,7 +19196,7 @@ class _FloatingPdfWindow:
         except (AttributeError, tk.TclError):
             pass
         reader._refresh_details_view()
-        for seq in ("<KeyPress-s>", "<Escape>", "<Control-w>", "<Command-w>"):
+        for seq in ("<KeyPress-s>", "<Escape>") + _accel_sequences("w"):
             try:
                 win.bind(seq, lambda _e: self._hide_details() or "break")
             except tk.TclError:
@@ -18924,6 +19838,7 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
     m_name = str(meta.get("name_abbreviation") or "").strip()
     m_court = str(meta_court.get("name_abbreviation")
                   or meta_court.get("name") or "").strip()
+    m_court_id = str(meta_court.get("slug") or "").strip()
     m_year = str(meta.get("decision_date") or "")[:4]
     if not m_year.isdigit():
         m_year = ""
@@ -19021,8 +19936,15 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
     if name:
         name = re.sub(r"<[^>]+>", "", name).strip(" ,")
         name = _trim_geographic_tails(name)
+        # Rule 10.2.1(f): only that state's own courts keep the bare
+        # "People"/"State"/"Commonwealth" party.
+        court_state = _state_of_court(
+            m_court_id or court_id or cl_court_id,
+            m_court or it_court or cl_court or (cap_court or ""),
+        )
         try:
-            name = abbreviate_case_name(name)   # the app's Bluebook form
+            name = abbreviate_case_name(   # the app's Bluebook form
+                name, court_state=court_state)
         except Exception:
             pass
 
@@ -19174,6 +20096,16 @@ class _ScholarTextWindow:
     # cases, where the panel opens by default, so the opinion text keeps its
     # full width instead of shrinking to make room.
     _DETAILS_PANEL_W = 300
+    #: Every view the side panel's "Show" selector can offer, in the order it
+    #: offers them.  "Docket" is a Supreme Court view and is dropped for any
+    #: other court (see _details_panel).
+    _DETAILS_VIEWS = ("Case details", "Docket", "Recent SCOTUS",
+                      "Related cases", "Outline")
+    #: What the panel standing beside a scan offers.  Recent SCOTUS, Related
+    #: cases and the outline answer questions that want the room a window has;
+    #: the case's own details and the docket behind them are what a reader
+    #: looking at the pages asks for, so those two are here.
+    _SCAN_DETAILS_VIEWS = ("Case details", "Docket")
     _JUSTIFY_HARD_BREAK_EXTRA_SPACES = 4
     _JUSTIFY_PAD_TAG = "justify-pad"
     _JUSTIFY_HIDE_TAG = "justify-hide"
@@ -19423,6 +20355,13 @@ class _ScholarTextWindow:
         # Created before the menubar, which binds its radio items to this var.
         self._copy_mode_var = tk.StringVar(
             master=self._win, value=_load_copy_mode())
+        # Whether each copy shows a moment's preview of what it put on the
+        # clipboard.  Also bound by the menubar, so it is created here too.
+        self._copy_preview_var = tk.BooleanVar(
+            master=self._win, value=_load_copy_preview())
+        self._copy_preview: Optional[tk.Toplevel] = None
+        self._copy_preview_after: Optional[str] = None
+        self._copy_preview_bound = False
         # A chromeless reader has no menu bar to hang menus from — the viewer
         # it is embedded in offers the copy styles on its own Copy button.
         self._history_menubar = None if self._chromeless else (
@@ -19509,7 +20448,8 @@ class _ScholarTextWindow:
             # case's own view, so it belongs in both.
             return
         item = dict(self._item)
-        if self._cl_primary and self._primary_source_kind == "case_law":
+        if (self._cl_primary and self._primary_source_kind == "case_law"
+                and self._history_pdf_url):
             parts, blocks = self._cl_parts, self._cl_blocks
             text = self._cl_text
             prefetch = self._prefetch_ok
@@ -19543,20 +20483,33 @@ class _ScholarTextWindow:
             parts, blocks = self._cl_parts, self._cl_blocks
             text = self._cl_text
             prefetch = self._prefetch_ok
+            # Which text this is stays with the entry: a case opened on
+            # static.case.law's report must not come back from History
+            # labelled as CourtListener's.
+            label_, url_, kind_ = (
+                self._primary_source_label, self._primary_source_url,
+                self._primary_source_kind,
+            )
             payload = {
                 "type": "cl",
                 "item": item,
                 "prefetch_pdf": bool(prefetch),
+                "source_label": label_,
+                "source_url": url_,
+                "source_kind": kind_,
             }
 
             def reopen(
                 parent=None, app=app, item=item, parts=parts, blocks=blocks,
-                text=text, prefetch=prefetch,
+                text=text, prefetch=prefetch, label_=label_, url_=url_,
+                kind_=kind_,
             ) -> None:
                 _ScholarTextWindow(
                     app.root if parent is None else parent,
                     app, "", "", item=item, cl_text=text, cl_parts=parts,
                     cl_blocks=blocks, prefetch_pdf=prefetch,
+                    primary_source_label=label_, primary_source_url=url_,
+                    primary_source_kind=kind_,
                 )
         else:
             url, html = self._scholar_url, self._history_html
@@ -19607,6 +20560,9 @@ class _ScholarTextWindow:
                 "parts": _parts_to_json(self._cl_parts),
                 "blocks": _blocks_to_json(self._cl_blocks),
                 "prefetch_pdf": bool(self._prefetch_ok),
+                "source_label": self._primary_source_label,
+                "source_url": self._primary_source_url,
+                "source_kind": self._primary_source_kind,
             }
         else:
             payload = {
@@ -19726,14 +20682,13 @@ class _ScholarTextWindow:
                   follow_motion=True)
         self._text_frame, self._vsb = text_frame, vsb
         self._details_frame: Optional[ttk.Frame] = None
-        # Where the side panel is built, and how much of it is offered there.
+        # Where the side panel is built, and which views are offered there.
         # In a case window it is a column of the window itself, and its "Show"
         # selector offers every view.  The reporter interface sets both — the
         # panel is built into a window of its own standing beside the scan,
-        # and holds the case's details and nothing else (see
-        # _FloatingPdfWindow._open_details).
+        # and offers the shorter list (see _FloatingPdfWindow._open_details).
         self._details_host: Optional[tk.Misc] = None
-        self._details_views = True
+        self._details_views = self._DETAILS_VIEWS
         self._details_loaded = False
         self._details_case: Optional[tuple] = None  # cached (title, lines)
         self._related_loaded = False
@@ -19870,6 +20825,15 @@ class _ScholarTextWindow:
             for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
                 win.bind(seq, lambda _e: self._zoom(-1))
             win.bind("<Control-0>", lambda _e: self._zoom(0))
+            # Ctrl/Cmd+S saves the case, as it does over a scan — here that is
+            # the opinion written out as Rich Text, the first thing the Export
+            # menu offers.  Chromeless, the key is the viewer's, whose own save
+            # already comes here (see _FloatingPdfWindow._save).
+            for seq in _accel_sequences("s"):
+                try:
+                    win.bind(seq, lambda _e: self._export_rtf() or "break")
+                except tk.TclError:
+                    pass    # modifier not supported on this platform
         # Bare "s" toggles whichever side panel the current view has, except
         # while a text field has focus.  Chromeless, the key is the viewer's:
         # it owns a side panel that stands beside the whole window, and serves
@@ -19890,7 +20854,7 @@ class _ScholarTextWindow:
         # citation" box is checked, else the selection alone (the plain default
         # copy is suppressed either way); the find bar's entry keeps native
         # copy since this is bound to the text widget only.
-        for seq in ("<Control-c>", "<Command-c>"):
+        for seq in _accel_sequences("c"):
             try:
                 txt.bind(seq, lambda _e: self._copy_formatted() or "break")
             except tk.TclError:
@@ -20229,6 +21193,189 @@ class _ScholarTextWindow:
         if self._fn_tip is not None:
             self._fn_tip.destroy()
             self._fn_tip = None
+
+    # ------------------------------------------------------------------
+    # Copy preview
+    # ------------------------------------------------------------------
+    # What a copy actually put on the clipboard, shown for a few seconds in a
+    # corner of the reading area.  A footnote tip interrupts to answer a
+    # question the reader asked by pointing at something; this one reports on
+    # an action already taken, so it keeps out of the text entirely, never
+    # takes focus, and leaves on its own.
+
+    _PREVIEW_MAX_LINES = 9
+    _PREVIEW_WIDTH_CHARS = 46
+    _PREVIEW_DWELL_MS = 5000
+
+    def _copy_preview_enabled(self) -> bool:
+        try:
+            return bool(self._copy_preview_var.get())
+        except (AttributeError, tk.TclError):
+            return False
+
+    def on_copy_preview_toggled(self) -> None:
+        """The Copy menu's preview checkbutton was used."""
+        show = self._copy_preview_enabled()
+        _save_copy_preview(show)
+        if not show:
+            self._hide_copy_preview()
+
+    def _show_copy_preview(self, rtf: str, caption: str) -> None:
+        """Show, for a moment, how the text just copied will arrive.
+
+        *rtf* is the very document handed to the clipboard, so what appears
+        here is the copy itself — quotation marks flipped, footnote markers
+        dropped, citation appended — rather than the passage as it sits on
+        screen.
+        """
+        if not self._copy_preview_enabled():
+            return
+        self._hide_copy_preview()
+        try:
+            runs = _rtf_preview_runs(rtf)
+        except Exception as exc:            # a preview is never worth a crash
+            print(f"[copy] preview could not read the RTF: {exc}")
+            return
+        if not runs:
+            return
+        head, tail, elided = _elide_preview_runs(runs)
+
+        try:
+            tip = tk.Toplevel(self._text)
+            tip.wm_overrideredirect(True)
+            tip.configure(bg=_UI["border"])
+        except tk.TclError:
+            return
+        for attempt in (("-topmost", True), ("-alpha", 0.97)):
+            try:
+                tip.attributes(*attempt)
+            except tk.TclError:
+                pass
+
+        frame = tk.Frame(tip, bg=_UI["window"])
+        frame.pack(padx=1, pady=1)          # the 1px border is the Toplevel bg
+        tk.Label(
+            frame, text=caption, anchor="w", justify="left",
+            bg=_UI["window"], fg=_UI["muted"],
+            font=(self._family, max(self._base_size - 4, 7)),
+            padx=12, pady=0,
+        ).pack(fill="x", pady=(8, 2))
+
+        size = max(self._base_size - 3, 8)
+        body = tk.Text(
+            frame, width=self._PREVIEW_WIDTH_CHARS, height=1, wrap="word",
+            bg=_UI["window"], fg=_UI["text"], relief="flat",
+            highlightthickness=0, borderwidth=0, padx=12, pady=0,
+            cursor="arrow", spacing1=1, spacing3=2,
+            font=(self._family, size),
+        )
+        body.pack(fill="both", padx=0, pady=(0, 9))
+        self._configure_preview_tags(body, size)
+        self._insert_preview_runs(body, head)
+        if elided:
+            body.insert("end", "\n … \n", ("elision",))
+            self._insert_preview_runs(body, tail)
+        body.config(state="disabled")
+
+        # Height the box to its content, within the cap.
+        body.update_idletasks()
+        try:
+            lines = int(body.count("1.0", "end-1c", "displaylines")[0]) + 1
+        except (tk.TclError, TypeError, IndexError):
+            lines = self._PREVIEW_MAX_LINES
+        body.config(height=max(1, min(lines, self._PREVIEW_MAX_LINES)))
+
+        self._copy_preview = tip
+        self._place_copy_preview(tip)
+        self._bind_copy_preview_dismissal()
+        self._copy_preview_after = self._win.after(
+            self._PREVIEW_DWELL_MS, self._hide_copy_preview)
+
+    def _bind_copy_preview_dismissal(self) -> None:
+        """Let the reader's next action clear the preview.
+
+        Bound once for the window's life rather than per preview: ``add="+"``
+        stacks a fresh handler on every call, and Tk has no dependable way to
+        remove just one of them again, so re-binding each copy would leave the
+        text widget carrying a handler per copy the reader had ever made.
+        """
+        if getattr(self, "_copy_preview_bound", False):
+            return
+        for seq in ("<Button-1>", "<Key>", "<MouseWheel>", "<Button-4>",
+                    "<Button-5>", "<Configure>"):
+            try:
+                self._text.bind(seq, self._dismiss_copy_preview, add="+")
+            except tk.TclError:
+                return
+        self._copy_preview_bound = True
+
+    def _configure_preview_tags(self, body: tk.Text, size: int) -> None:
+        """Give the preview widget one tag per style the RTF reader reports."""
+        fam = self._family
+        body.tag_configure("italic", font=(fam, size, "italic"))
+        body.tag_configure("bold", font=(fam, size, "bold"))
+        body.tag_configure("italic bold", font=(fam, size, "bold italic"))
+        body.tag_configure("underline", underline=True)
+        body.tag_configure("small", font=(fam, max(size - 2, 6)))
+        body.tag_configure(
+            "super", font=(fam, max(size - 3, 6)), offset=max(size // 3, 2))
+        body.tag_configure("center", justify="center")
+        body.tag_configure("indent", lmargin1=18, lmargin2=18, rmargin=18)
+        body.tag_configure("pagenum", foreground="#8e44ad")
+        body.tag_configure(
+            "elision", foreground=_UI["muted"], justify="center")
+
+    @staticmethod
+    def _insert_preview_runs(body: tk.Text, runs) -> None:
+        """Write the runs into the preview, mapping styles onto its tags.
+
+        Bold and italic together need their own font, so the pair is applied
+        as one tag rather than two that would each overwrite the other.
+        """
+        for text, styles in runs:
+            names = set(styles)
+            if {"italic", "bold"} <= names:
+                names -= {"italic", "bold"}
+                names.add("italic bold")
+            body.insert("end", text, tuple(sorted(names)))
+
+    def _place_copy_preview(self, tip: tk.Toplevel) -> None:
+        """Sit the card in the bottom-right of the reading area, inside the
+        screen.  Away from the top-left where the prose and the reader's own
+        selection are, and clear of the status line under the text."""
+        tip.update_idletasks()
+        w, h = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        txt = self._text
+        margin = 18
+        x = txt.winfo_rootx() + txt.winfo_width() - w - margin
+        y = txt.winfo_rooty() + txt.winfo_height() - h - margin
+        try:
+            left, top, area_w, area_h = _work_area(tip)
+        except Exception:
+            left, top = 0, 0
+            area_w, area_h = tip.winfo_screenwidth(), tip.winfo_screenheight()
+        x = max(left + 4, min(x, left + area_w - w - 4))
+        y = max(top + 4, min(y, top + area_h - h - 4))
+        tip.wm_geometry(f"+{int(x)}+{int(y)}")
+
+    def _dismiss_copy_preview(self, _event=None):
+        """Bound to the reader's next action; never swallows that action."""
+        self._hide_copy_preview()
+        return None
+
+    def _hide_copy_preview(self) -> None:
+        if self._copy_preview_after is not None:
+            try:
+                self._win.after_cancel(self._copy_preview_after)
+            except (tk.TclError, ValueError):
+                pass
+            self._copy_preview_after = None
+        if self._copy_preview is not None:
+            try:
+                self._copy_preview.destroy()
+            except tk.TclError:
+                pass
+            self._copy_preview = None
 
     # ------------------------------------------------------------------
     # Text/PDF location-map marks
@@ -21253,6 +22400,7 @@ class _ScholarTextWindow:
         self._clear_part_region_marks()
         txt.delete("1.0", "end")
         self._hide_fn_tip()
+        self._hide_copy_preview()
         self._link_actions.clear()
         self._fn_text.clear()
         self._fnref_pages: dict[str, Optional[int]] = {}
@@ -22143,6 +23291,7 @@ class _ScholarTextWindow:
         self._clear_part_region_marks()
         txt.delete("1.0", "end")
         self._hide_fn_tip()
+        self._hide_copy_preview()
         self._link_actions.clear()
         self._fn_text.clear()
         self._fnref_pages: dict[str, Optional[int]] = {}
@@ -22478,7 +23627,13 @@ class _ScholarTextWindow:
                     if abbr:
                         court_abbr = abbr
                         break
-        name = abbreviate_case_name(name)
+        # Rule 10.2.1(f) needs the deciding court to finish a "People of the
+        # State of …" party: its own state's courts cite it as "People v.
+        # Zackowitz", everyone else's as "New York v. Zackowitz".
+        name = abbreviate_case_name(
+            name,
+            court_state=_state_of_court(court_id, str(item.get("court") or "")),
+        )
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
@@ -23213,6 +24368,16 @@ class _ScholarTextWindow:
             self._win, rtf, plain
         )
         self._status_var.set(f"Copied the case citation as {how}.")
+        self._show_copy_preview(
+            rtf, self._copy_preview_caption(how, "Case citation"))
+
+    def _copy_preview_caption(self, how: str, label: str = "") -> str:
+        """The preview's one-line heading: which copy style produced it, and
+        a word of warning when the clipboard could only take plain text — the
+        formatting on show below would not survive that paste."""
+        label = label or dict(COPY_MODE_LABELS).get(
+            self.copy_mode(), "Copied")
+        return label if how.startswith("formatted") else f"{label} · plain text only"
 
     def _copy_formatted(self) -> None:
         txt = self._text
@@ -23324,6 +24489,7 @@ class _ScholarTextWindow:
                   "quote": "; quoted with citation.",
                   "parenthetical": "; copied as a parenthetical quote."}[mode]
         self._status_var.set(f"Copied {what} as {how}{styled}")
+        self._show_copy_preview(rtf, self._copy_preview_caption(how))
 
     def _fn_link_map(self) -> dict[str, tuple[str, str]]:
         """Link tags that anchor footnote jumps, for RTF bookmarks."""
@@ -23626,8 +24792,9 @@ class _ScholarTextWindow:
     def _post_export_menu(self) -> None:
         """Drop the export-format menu under the Export button."""
         menu = tk.Menu(self._win, tearoff=0)
-        menu.add_command(label="Rich Text (.rtf) — two columns…",
-                         command=self._export_rtf)
+        menu.add_command(
+            label=f"Rich Text (.rtf) — two columns…\t{_ACCEL}+S",
+            command=self._export_rtf)
         menu.add_command(label="PDF (.pdf) — typeset with LaTeX…",
                          command=self._export_pdf_latex)
         menu.add_command(label="LaTeX source (.tex) — edit, then typeset…",
@@ -23950,22 +25117,21 @@ class _ScholarTextWindow:
             # proceedings), or the opinion's detected outline.  Case details
             # and the recent-decisions list are separate views now, not one
             # falling through to the other.
-            # The other views are the case window's: they answer questions
-            # about the docket, the Court's term and the shape of the opinion,
-            # which want the room a window has.  A panel standing beside a
-            # scan is opened for the case's own details, so it offers those
-            # and leaves the selector out (_details_mode then reads "case").
-            if self._details_views:
+            # Which of them this panel offers is the window's to say: a case
+            # window offers every view, a panel standing beside a scan the
+            # case's details and the docket behind them.  The docket is a
+            # Supreme Court view either way, so it comes off for any other
+            # court — and a panel left with one view needs no selector at all
+            # (_details_mode then reads "case").
+            mode_values = [name for name in self._details_views
+                           if name != "Docket" or self._is_scotus]
+            if len(mode_values) > 1:
                 mode_row = ttk.Frame(f)
                 mode_row.pack(fill="x", padx=6, pady=(0, 2))
                 ttk.Label(
                     mode_row, text="Show",
                     style="ModernMuted.TLabel" if _CTK_AVAILABLE else "TLabel",
                 ).pack(side="left")
-                mode_values = ["Case details"]
-                if self._is_scotus:
-                    mode_values.append("Docket")
-                mode_values.extend(("Recent SCOTUS", "Related cases", "Outline"))
                 self._details_mode_combo = ttk.Combobox(
                     mode_row, state="readonly", width=16,
                     values=tuple(mode_values),
@@ -25272,6 +26438,30 @@ class _ScholarTextWindow:
             # new window's "Scholar" button if it comes through.
             win._retry_scholar_link(*retry)
 
+    def _on_case_law_link_ready(
+        self, source: "_CasePdfTextSource", cite: str = "", pin: str = "",
+        retry=None,
+    ) -> None:
+        """Open a cited case on static.case.law's report — the same window a
+        CourtListener-primary case opens in, named for where its text came
+        from, and jumped to the pin cite: this text is paginated to the very
+        reporter the citation names."""
+        self._status_var.set("Cited case loaded from static.case.law.")
+        win = _ScholarTextWindow(
+            self._win, self._app, "", "", item=dict(source.item),
+            cl_text=source.text, cl_parts=list(source.parts),
+            cl_blocks=list(source.blocks),
+            primary_source_label=source.source_label,
+            primary_source_url=source.source_url,
+            primary_source_kind=source.kind,
+        )
+        if pin:
+            win.jump_to_cite_page(cite, pin)
+        if retry:
+            # A Google Scholar link failed; keep retrying it and light up the
+            # new window's "Scholar" button if it comes through.
+            win._retry_scholar_link(*retry)
+
     def _on_cl_link_error(self, msg: str) -> None:
         self._status_var.set(f"CourtListener: {msg}")
 
@@ -25288,27 +26478,45 @@ class _ScholarTextWindow:
     def _follow_cite_via_cl(self, cite: str, pin: str = "", name: str = "",
                             retry=None) -> None:
         """Follow a cited-case link Google Scholar can't supply — whether it is
-        missing, flaky, or blocking.  Resolve in order of how surely each source
-        is the opinion *at* the clicked cite: CourtListener by citation, then
-        the citation-keyed static.case.law PDF, and only then a (fuzzy)
-        CourtListener name search — so a cite CourtListener lacks opens the
-        right case.law scan rather than a same-party namesake (clicking "5
-        Johns. 37", Kilburn v. Woodworth, must never open Kilbourn v. Thompson).
+        missing, flaky, or blocking.  Resolve in order of how surely each
+        source is the opinion *at* the clicked cite: static.case.law's own
+        report, which is filed under that very citation and paginated to that
+        very reporter; then CourtListener by citation; then the
+        citation-keyed static.case.law PDF; and only then a (fuzzy)
+        CourtListener name search — so a cite the first three lack never opens
+        a same-party namesake (clicking "5 Johns. 37", Kilburn v. Woodworth,
+        must never open Kilbourn v. Thompson).
 
         ``retry`` (cite, pin, url, name) keeps trying Google Scholar in the
-        background after the CourtListener view opens (used when a Scholar link
-        failed rather than Scholar being absent)."""
+        background after the other view opens (used when a Scholar link failed
+        rather than Scholar being absent)."""
         client = self._app._get_client()
-        if client is None:
-            return
+        if client is None and not cite:
+            return  # nothing to look the case up with anywhere
         label = name or cite or "cited case"
         self._status_var.set(
-            f"Google Scholar busy — loading {label} from CourtListener…"
-            if retry else f"Fetching {label} from CourtListener…"
+            f"Google Scholar busy — looking for {label}…"
+            if retry else f"Fetching {label}…"
         )
 
         def run() -> None:
             try:
+                cap = (_case_law_text_source([cite], name) if cite else None)
+                if cap is not None:
+                    self._post(self._on_case_law_link_ready, cap, cite, pin,
+                               retry)
+                    return
+                if client is None:
+                    # No token, so no CourtListener to ask: the case.law scan
+                    # is the last thing keyed to this citation.
+                    if self._try_case_law_link_pdf(cite, pin, name):
+                        return
+                    if retry:
+                        self._post(self._retry_scholar_only, *retry)
+                    else:
+                        self._post(self._on_cl_link_error,
+                                   f"No match for {label}.")
+                    return
                 # CourtListener by the cite as printed and — for an old
                 # nominative SCOTUS cite — by its modern "U.S." form; then the
                 # citation-keyed case.law PDF; and only as a last resort the
@@ -25384,32 +26592,18 @@ class _ScholarTextWindow:
     def _link_scholar_failed(self, cite: str, pin: str, url_val: str,
                              name: str = "") -> None:
         """A Google Scholar opinion link failed — missing, flaky, or blocking.
-        Show the CourtListener view now if the case can be located by citation
-        or by name (else its case.law PDF), and keep retrying Google Scholar in
-        the background; if it comes through, the window's "Scholar"
-        button lights up so the reader can switch to it."""
+        Show the next-best view now if the case can be located by citation or
+        by name — static.case.law's report, CourtListener's text, else the
+        case.law PDF — and keep retrying Google Scholar in the background; if
+        it comes through, the window's "Scholar" button lights up so
+        the reader can switch to it."""
         client = self._app._get_client()
         fetcher = self._app._get_scholar()
-        if (cite or name) and client is not None:
-            # Open CourtListener / case.law now; retry Scholar in the background.
+        if cite or (name and client is not None):
+            # Open case.law / CourtListener now; retry Scholar in the background.
             self._follow_cite_via_cl(
                 cite, pin, name=name, retry=(cite, pin, url_val, name),
             )
-        elif cite:
-            self._status_var.set(f"Checking case.law for {cite}…")
-
-            def run() -> None:
-                if self._try_case_law_link_pdf(cite, pin, name):
-                    return
-                if fetcher is not None and (url_val or cite):
-                    self._post(self._retry_scholar_only, cite, pin, url_val, name)
-                else:
-                    self._post(
-                        self._status_var.set,
-                        "Google Scholar: cited case not found (or blocked).",
-                    )
-
-            threading.Thread(target=run, daemon=True).start()
         elif fetcher is not None and (url_val or cite):
             # Nothing to locate the case with — just keep retrying Google
             # Scholar, and open it if it comes through.
@@ -27585,6 +28779,14 @@ class _PdfWindow:
         for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
             self._win.bind(seq, lambda _e: self._zoom(-1))
         self._win.bind("<Control-0>", lambda _e: self._zoom(0))
+        # Ctrl/Cmd+S saves the scan, as it does in the floating viewer —
+        # this window shows the pages itself whenever it is not handing
+        # them over.
+        for seq in _accel_sequences("s"):
+            try:
+                self._win.bind(seq, lambda _e: self._download() or "break")
+            except tk.TclError:
+                pass    # modifier not supported on this platform
         _bind_reader_scroll_keys(
             self._win,
             lambda direction: (
@@ -30875,7 +32077,7 @@ class _StatuteWindow:
         # the selection's subdivision (the plain default copy is
         # suppressed); the find bar's entry keeps native copy since this
         # is bound to the text widget only.
-        for seq in ("<Control-c>", "<Command-c>"):
+        for seq in _accel_sequences("c"):
             try:
                 txt.bind(seq, lambda _e: self._copy_cite() or "break")
             except tk.TclError:

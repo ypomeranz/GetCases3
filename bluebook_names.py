@@ -335,10 +335,14 @@ _GEO_PARTIES = (
 
 # "State of X" / "Commonwealth of X" / "People of the State of X" are
 # omitted from party names (rule 10.2.1(f)), leaving the protected
-# geographic name: "State of Washington" -> "Washington".
+# geographic name: "State of Washington" -> "Washington".  The rule's one
+# exception is the *deciding* court: a citation to a decision of that state's
+# own courts keeps the bare designation instead — "People v. Zackowitz, 254
+# N.Y. 192" for the New York Court of Appeals, but "New York v. Tanella, 374
+# F.3d 141" for the Second Circuit.  Group 1 is the designation kept there.
 _STATE_OF_RE = re.compile(
-    r"^(?:the\s+)?(?:people\s+of\s+(?:the\s+state\s+of\s+)?|"
-    r"state\s+of\s+|commonwealth\s+of\s+)",
+    r"^(?:the\s+)?(people|state|commonwealth)\s+of\s+"
+    r"(?:the\s+(?:state|commonwealth)\s+of\s+)?",
     re.IGNORECASE,
 )
 
@@ -384,6 +388,20 @@ def _expand_geo_party(head: str) -> str:
     "U.S." -> "United States") so the no-abbreviation rule for a named
     geographic party (rule 10.2.2) applies; other heads pass through."""
     return _GEO_EXPANSIONS.get(_norm_geo(head), head)
+
+
+def _same_state(place: str, state: str) -> bool:
+    """Whether a party's geographic name and a deciding court's state are the
+    same place.  Either side may be spelled out or abbreviated ("N.Y." /
+    "New York"), so both are expanded to the full name before comparing."""
+    if not place or not state:
+        return False
+
+    def key(s: str) -> str:
+        return re.sub(r"[^a-z]", "",
+                      _expand_geo_party(s.strip(" ,.")).lower())
+
+    return key(place) == key(state)
 
 
 # A municipal party named "<Unit> of <Place>" — "City of New York", "Village
@@ -610,7 +628,19 @@ def is_personal_all_caps_run(
         key = re.sub(r"[^A-Za-z]", "", display).lower()
         if (display in _NONPERSON_CAPS
                 or key in _ORG_WORDS
-                or key in _T6_WORDS):
+                or key in _T6_WORDS
+                # An abbreviation reads as all caps because its letters are
+                # capitals, not because a reporter set a surname in capitals:
+                # "R.R." is Railroad, "Ry." Railway, "Cent." Central.  The
+                # word sets above hold only spelled-out forms, so without
+                # this the abbreviation becomes the "surname" and the words
+                # ahead of it are discarded as given names — "Long Island
+                # R.R. Co." would cite as "R.R. Co.".
+                or key in _TABLE_ABBREVIATIONS
+                # A dotted initialism ("L.I.", "B.&O.") is the same kind of
+                # evidence even when no table lists it; a surname never
+                # carries an internal period.
+                or "." in display):
             return False
         names.append(token)
 
@@ -1093,6 +1123,16 @@ _WORD_MAP = _build_word_map()
 # they double as given names far too often (Virginia, Georgia).
 _T6_WORDS = frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
 
+# The same tables read from the other side: the *abbreviated* forms the tables
+# produce ("R.R.", "Ry.", "Cent.", "N.Y."), keyed like a caption token.  A
+# source that already abbreviated a party writes those instead of the
+# spelled-out words above, and they are organizational or geographic
+# descriptors just the same — which matters wherever a rule asks whether a
+# token could be a party's own name.
+_TABLE_ABBREVIATIONS = frozenset(
+    re.sub(r"[^A-Za-z]", "", _abbr).lower() for _abbr in _WORD_MAP.values()
+)
+
 # A token is a run of letters with internal apostrophes/periods, so already-
 # abbreviated forms ("Ass'n", "Inc.") and possessives ("Children's") come
 # through as single tokens that miss the table and pass unchanged.
@@ -1485,7 +1525,8 @@ _IN_REM_ADVERSARY_PARTIES = {
 }
 
 
-def _abbreviate_party(party: str, *, recognize_initials: bool = True) -> str:
+def _abbreviate_party(party: str, *, recognize_initials: bool = True,
+                      court_state: str = "") -> str:
     p = _strip_party_designations(re.sub(r"\s+", " ", party).strip())
     # Rule 10.2.1(d): a party's leading "The" is omitted — except when "The
     # King" or "The Queen" is the party, where the article is part of the
@@ -1500,7 +1541,26 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True) -> str:
     p = re.sub(r"^the\s+", "", p, flags=re.IGNORECASE)  # rule 10.2.1(d)
     p = re.sub(r"\bUnited States of America\b", "United States", p,
                flags=re.IGNORECASE)
-    p = _STATE_OF_RE.sub("", p)  # "State of Washington" -> "Washington"
+    # Rule 10.2.1(f): "State of Washington" -> "Washington" — unless the
+    # citation is to a decision of that state's own courts, where the
+    # designation alone survives and the state name drops instead ("People
+    # of the State of New York" -> "People", in the New York Court of
+    # Appeals).  A relator tail rides along either way: "People of the State
+    # of New York ex rel. Spitzer" -> "People ex rel. Spitzer".
+    state_m = _STATE_OF_RE.match(p)
+    if state_m:
+        p = p[state_m.end():]
+        rel = _EX_REL_RE.search(p)
+        place = (p[:rel.start()] if rel else p).strip(" ,")
+        if _same_state(place, court_state):
+            designation = state_m.group(1).capitalize()
+            if not rel:
+                return designation
+            relator = p[rel.end():].strip(" ,")
+            if relator:
+                return f"{designation} ex rel. " + _abbreviate_party(
+                    relator, recognize_initials=recognize_initials)
+            return designation
     # Rule 10.2.1(f): "city of," "county of," and like expressions are
     # omitted unless they begin the party name — "Bd. of Educ. of the
     # Borough of Hawthorne" -> "Bd. of Educ. of Hawthorne", while "City of
@@ -1517,7 +1577,8 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True) -> str:
         head = _expand_geo_party(p[:rel_m.start()].strip(" ,"))
         tail = p[rel_m.end():].strip(" ,")
         if head and tail:
-            lhs = _abbreviate_party(head, recognize_initials=recognize_initials)
+            lhs = _abbreviate_party(head, recognize_initials=recognize_initials,
+                                    court_state=court_state)
             rhs = _abbreviate_party(tail, recognize_initials=recognize_initials)
             return f"{lhs} ex rel. {rhs}"
 
@@ -1717,11 +1778,21 @@ def _lowercase_small_words(name: str) -> str:
     return " ".join(out)
 
 
-def abbreviate_case_name(name: str) -> str:
+def abbreviate_case_name(name: str, *, court_state: str = "") -> str:
     """Abbreviate a case name for use in a citation or filename per
     Bluebook rule 10.2.2 (= Indigo Book R8.3), dropping given names of
     individuals (rule 10.2.1(g)) and "State of" prefixes (10.2.1(f)).
-    Safe to call twice."""
+    Safe to call twice.
+
+    *court_state* is the state whose own courts decided the case (any
+    spelling: "new york", "N.Y."), which rule 10.2.1(f) needs to finish the
+    job on a "State of"/"Commonwealth of"/"People of" party: cited to that
+    state's own courts the designation is what survives ("People v.
+    Zackowitz"), cited to anyone else's the state name is ("New York v.
+    Tanella").  Left empty — the court is unknown, or is a federal one —
+    the state name is kept, as it is for every court but that state's own.
+    See :func:`court_catalog.state_of_court`, which derives it from a court
+    id or a court name."""
     # OCR renders the early reports' turned-comma apostrophe as U+2018
     # ("M‘Intosh"); normalize so name patterns and casing rules see it.
     name = re.sub(r"\s+", " ", (name or "").replace("‘", "'")).strip()
@@ -1787,7 +1858,8 @@ def abbreviate_case_name(name: str) -> str:
                 return _strip_trailing_period(
                     _lowercase_small_words("The " + res[art.end():]))
     joined = " v. ".join(
-        _drop_redundant_entity(_abbreviate_party(p)) for p in parts
+        _drop_redundant_entity(_abbreviate_party(p, court_state=court_state))
+        for p in parts
     )
     # A stray capital after a possessive apostrophe ("Sailor'S") is a
     # title-casing artifact, never a name; all-caps runs (MCDONALD'S USA,
@@ -2042,11 +2114,52 @@ if __name__ == "__main__":
         ("U.S. Env't Prot. Agency v. Smith", "EPA v. Smith"),
         ("Fed. Commc'ns Comm'n v. Smith", "FCC v. Smith"),
     ]
+    # Rule 10.2.1(f)'s other half: cited to the deciding state's own courts,
+    # "State"/"Commonwealth"/"People" is what survives instead of the state
+    # name.  Third element is that state; the pairs above all cite it with no
+    # court known, which keeps the state name.
+    _STATE_COURT_CASES = [
+        ("The People of the State of New York, Respondent, "
+         "v. Joseph Zackowitz, Appellant.", "People v. Zackowitz", "new york"),
+        # An abbreviated spelling of the same state reads the same.
+        ("People of the State of New York v. Zackowitz",
+         "People v. Zackowitz", "N.Y."),
+        # Already in its state-court form: unchanged, so the pass is safe to
+        # repeat.
+        ("People v. Zackowitz", "People v. Zackowitz", "new york"),
+        # A different state's courts, or a federal one (no state at all), cite
+        # the state by name.
+        ("People of the State of New York v. Zackowitz",
+         "New York v. Zackowitz", "illinois"),
+        ("People of the State of New York v. Tanella",
+         "New York v. Tanella", ""),
+        ("State of Washington v. Glucksberg", "State v. Glucksberg",
+         "washington"),
+        ("Commonwealth of Massachusetts v. John Smith", "Commonwealth v. Smith",
+         "massachusetts"),
+        ("People of the State of Illinois v. Gates", "People v. Gates",
+         "illinois"),
+        # The designation survives on either side of the "v.".
+        ("John Stern v. State of Florida", "Stern v. State", "florida"),
+        ("John Stern v. State of Florida", "Stern v. Florida", ""),
+        # A relator tail rides along (rule 10.2.1(b)).
+        ("People of the State of New York ex rel. Spitzer v. Grasso",
+         "People ex rel. Spitzer v. Grasso", "new york"),
+        ("State of Ohio ex rel. Smith v. Jones", "State ex rel. Smith v. Jones",
+         "ohio"),
+    ]
     failed = 0
     for raw, want in _CASES:
         got = abbreviate_case_name(raw)
         ok = got == want
         failed += not ok
         print(("ok   " if ok else "FAIL ") + f"{raw!r} -> {got!r}"
+              + ("" if ok else f"  (want {want!r})"))
+    for raw, want, state in _STATE_COURT_CASES:
+        got = abbreviate_case_name(raw, court_state=state)
+        ok = got == want
+        failed += not ok
+        print(("ok   " if ok else "FAIL ")
+              + f"[{state or 'no court'}] {raw!r} -> {got!r}"
               + ("" if ok else f"  (want {want!r})"))
     raise SystemExit(1 if failed else 0)

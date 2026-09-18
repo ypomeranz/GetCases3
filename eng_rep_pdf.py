@@ -16,6 +16,27 @@ works -- discovered empirically -- is:
      custom ``profiles.ini`` paths, Snap/Flatpak -- so this works where
      ``browser_cookie3``'s single hard-coded path fails ("Could not find firefox
      profile directory"); ``browser_cookie3`` remains a last-ditch fallback.
+
+     Two things about that store are not what they used to be, and both matter
+     here because a *stale* clearance looks exactly like a fresh one until
+     CloudFlare rejects it:
+
+       * ``moz_cookies.expiry`` is now written in **milliseconds**.  It used to
+         be seconds (``creationTime``/``lastAccessed``/``updateTime`` are still
+         microseconds), so a reader that trusts the old unit sees every cookie
+         as either long dead or absurdly far in the future.
+       * Under Total Cookie Protection a cookie is stored **per partition**:
+         ``cf_clearance`` arrives with ``isPartitionedAttributeSet=1`` and an
+         ``originAttributes`` of ``^partitionKey=(https,commonlii.org)``, and
+         copies of the same host+name linger under other partition keys.  One
+         host and one name can therefore mean several rows, some of them dead.
+
+     So we drop expired rows, keep the most recently created copy of each name,
+     and choose between profiles by the age of the clearance itself rather than
+     by which ``cookies.sqlite`` was touched last -- a machine with a Microsoft
+     Store Firefox beside a regular one has several stores holding a CommonLII
+     clearance, and file mtime says nothing about which the user just solved
+     the check in.
   3. We GET the PDF with ``curl_cffi`` impersonating Firefox's TLS fingerprint,
      sending the user's real Firefox User-Agent (so it matches the cookie) and a
      ``Referer`` to the case's ``.html`` page -- the origin Apache hotlink-blocks
@@ -381,15 +402,55 @@ def _firefox_cookie_dbs() -> "list[Path]":
     return dbs
 
 
-def _read_cookies_sqlite(db: Path, domain_substr: str) -> dict:
-    """{name: value} for hosts containing *domain_substr*, read straight from a
-    Firefox cookies.sqlite.  Firefox stores cookies unencrypted, so no
-    browser_cookie3/decryption is needed.  The DB (and any -wal/-shm) is copied
-    first so a running Firefox can't block the read and recent writes (the
-    just-obtained clearance) are visible."""
+#: Above this, a ``moz_cookies.expiry`` cannot be seconds: as seconds it would
+#: be the year 5138.  Firefox writes milliseconds now and wrote seconds before,
+#: and no real cookie lands between the two magnitudes.
+_MS_EXPIRY_FLOOR = 1e11
+
+
+def _cookie_expiry_seconds(raw) -> float:
+    """A ``moz_cookies.expiry`` as Unix seconds, whichever unit Firefox wrote.
+
+    Returns 0.0 for a session cookie (no expiry) and for anything unreadable.
+    """
+    try:
+        value = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if value <= 0:
+        return 0.0
+    return value / 1000.0 if value > _MS_EXPIRY_FLOOR else value
+
+
+def _read_cookie_rows(db: Path, domain_substr: str) -> dict:
+    """``{name: (value, created, expiry)}`` for hosts containing
+    *domain_substr*, read straight from a Firefox cookies.sqlite.
+
+    Firefox stores cookies unencrypted, so no browser_cookie3/decryption is
+    needed.  The DB (and any -wal/-shm) is copied first so a running Firefox
+    can't block the read and recent writes -- the just-obtained clearance --
+    are visible.
+
+    Expired rows are dropped, and where one host+name exists several times
+    (Total Cookie Protection keeps a copy per partition) the longest-lived one
+    wins, tie-broken by when it was last used: the clearance obtained minutes
+    ago must not lose to a dead partitioned copy of the same name that happens
+    to sort later.
+
+    Longest-lived rather than most recently *created*, because Firefox keeps a
+    cookie's original ``creationTime`` when the server re-sets it -- a
+    ``cf_clearance`` reissued this afternoon can still carry a creation date
+    from months ago.  Its lifetime is fixed at issue, so the furthest expiry is
+    the one most recently granted as well as the one that will last longest.
+
+    Returns ``{name: (value, expiry, last_used)}``, all times Unix seconds,
+    with ``expiry`` 0.0 for a session cookie.
+    """
     import shutil
     import sqlite3
     import tempfile
+    import time
+    now = time.time()
     tmpdir = tempfile.mkdtemp(prefix="engr_ff_")
     try:
         tmp = os.path.join(tmpdir, "cookies.sqlite")
@@ -404,51 +465,94 @@ def _read_cookies_sqlite(db: Path, domain_substr: str) -> dict:
         con = sqlite3.connect(tmp)
         try:
             rows = con.execute(
-                "SELECT name, value FROM moz_cookies WHERE host LIKE ?",
+                "SELECT name, value, expiry, lastAccessed FROM moz_cookies "
+                "WHERE host LIKE ?",
                 (f"%{domain_substr}%",),
             ).fetchall()
         finally:
             con.close()
-        return {name: value for name, value in rows}
     except Exception as exc:
         print(f"[eng_rep_pdf] reading {db} failed: {exc}")
         return {}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+    best: dict = {}
+    for name, value, expiry, accessed in rows:
+        exp = _cookie_expiry_seconds(expiry)
+        if exp and exp <= now:
+            continue                       # dead; sending it re-challenges us
+        try:
+            used = float(accessed or 0) / 1_000_000.0   # microseconds
+        except (TypeError, ValueError):
+            used = 0.0
+        if name not in best or (exp, used) > best[name][1:]:
+            best[name] = (value, exp, used)
+    return best
+
+
+def _read_cookies_sqlite(db: Path, domain_substr: str) -> dict:
+    """{name: value} for hosts containing *domain_substr* (see
+    :func:`_read_cookie_rows`, which does the work and the winnowing)."""
+    return {name: row[0] for name, row in
+            _read_cookie_rows(db, domain_substr).items()}
+
 
 def _firefox_cookies() -> Optional[dict]:
-    """{name: value} of commonlii.org cookies from Firefox, or None.  Must
+    """{name: value} of live commonlii.org cookies from Firefox, or None.  Must
     include ``cf_clearance`` to be useful.
 
-    Searches every known Firefox profile location (newest first) and reads
-    cookies.sqlite directly -- so a Microsoft Store install or a non-default
-    profile path, which trip browser_cookie3's "Could not find firefox profile
-    directory", are handled.  Falls back to browser_cookie3 for any exotic
-    layout the direct search misses."""
-    best: Optional[dict] = None
+    Searches every known Firefox profile location and reads cookies.sqlite
+    directly -- so a Microsoft Store install or a non-default profile path,
+    which trip browser_cookie3's "Could not find firefox profile directory",
+    are handled.
+
+    Every profile is read and the **longest-lived live clearance** wins.  Which
+    store was written last says nothing: a machine running a Microsoft Store
+    Firefox beside a regular one holds a CommonLII clearance in each, SQLite
+    touches a file for reasons that have nothing to do with the cookie, and
+    taking the wrong one leaves the reader passing the check in Firefox over
+    and over while the app keeps sending the other profile's dead cookie.
+
+    One profile's cookies are never mixed with another's: ``cf_clearance`` and
+    the ``__cf_bm`` token beside it are issued together and are only accepted
+    together.  Falls back to browser_cookie3 for any exotic layout the direct
+    search misses.
+    """
+    chosen: Optional[dict] = None
+    chosen_rank: tuple = (-1.0, -1.0)
+    fallback: Optional[dict] = None
     dbs = _firefox_cookie_dbs()
     for db in dbs:
-        cookies = _read_cookies_sqlite(db, "commonlii")
-        if not cookies:
+        rows = _read_cookie_rows(db, "commonlii")
+        if not rows:
             continue
-        if "cf_clearance" in cookies:
-            return cookies          # the profile that holds the clearance
-        best = best or cookies      # commonlii cookies but no clearance yet
+        cookies = {name: row[0] for name, row in rows.items()}
+        clearance = rows.get("cf_clearance")
+        if clearance is None:
+            fallback = fallback or cookies   # commonlii cookies, no clearance
+            continue
+        if clearance[1:] > chosen_rank:
+            chosen, chosen_rank = cookies, clearance[1:]
+    if chosen is not None:
+        return chosen
     if not dbs:
         print("[eng_rep_pdf] no Firefox cookies.sqlite found in: "
               + ", ".join(str(r) for r in _firefox_data_roots()))
     # Fallback: browser_cookie3 (covers any layout our globs/profiles.ini miss).
+    # Its own expiry check cannot be trusted on a modern profile -- it reads
+    # ``expiry`` as seconds, so every cookie now looks live to it -- which is
+    # the other reason the direct read above is what we lead with.
     try:
         import browser_cookie3
         cj = browser_cookie3.firefox(domain_name="commonlii.org")
         cookies = {c.name: c.value for c in cj if "commonlii" in (c.domain or "")}
         if "cf_clearance" in cookies:
             return cookies
-        best = best or (cookies or None)
+        fallback = fallback or (cookies or None)
     except Exception as exc:
         print(f"[eng_rep_pdf] browser_cookie3 fallback failed: {exc}")
-    return best
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -562,10 +666,26 @@ if __name__ == "__main__":
     dbs = _firefox_cookie_dbs()
     if not dbs:
         print("  cookies.sqlite  : (none found)")
+    import datetime as _dt
     for db in dbs:
-        ck = _read_cookies_sqlite(db, "commonlii")
-        flag = "cf_clearance=YES" if "cf_clearance" in ck else "cf_clearance=no"
-        print(f"  - {db}\n      commonlii cookies {sorted(ck)}  {flag}")
+        rows = _read_cookie_rows(db, "commonlii")
+        clearance = rows.get("cf_clearance")
+        if clearance is None:
+            flag = "cf_clearance=no (or expired)"
+        else:
+            dies = (_dt.datetime.fromtimestamp(clearance[1])
+                    if clearance[1] else None)
+            used = (_dt.datetime.fromtimestamp(clearance[2])
+                    if clearance[2] else None)
+            flag = ("cf_clearance=YES"
+                    + (f" expires {dies:%Y-%m-%d %H:%M}" if dies else " (session)")
+                    + (f", last used {used:%Y-%m-%d %H:%M}" if used else ""))
+        print(f"  - {db}\n      live commonlii cookies {sorted(rows)}  {flag}")
+    picked = _firefox_cookies()
+    print("  chosen          :",
+          "none" if not picked else
+          f"{sorted(picked)} (cf_clearance="
+          f"{'yes' if 'cf_clearance' in picked else 'NO'})")
 
     # Hadley v Baxendale, 156 E.R. 145  ->  [1854] EngR 296
     year, num = 1854, 296

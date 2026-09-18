@@ -27,7 +27,7 @@ from citation_overrides import (
     format_edited_citation,
     update_overrides,
 )
-from court_catalog import bluebook_federal_trial_court
+from court_catalog import bluebook_federal_trial_court, state_of_court
 from courtlistener_gui import (
     CourtListenerGUI,
     _CasePdfTextSource,
@@ -35,8 +35,17 @@ from courtlistener_gui import (
     _ScholarTextWindow,
     _CaseLawPageOpinion,
     _CaseLawTextRecord,
+    _case_law_case_html,
+    _case_law_html_url,
+    _case_law_pdf_for_json_url,
+    _case_law_text_for_scan,
+    _cites_led_by,
+    _scan_printed_cite,
+    _case_law_may_hold,
+    _case_law_text_for_cite,
     _case_law_text_for_pdf_url,
     _case_law_text_record,
+    _case_law_text_source,
     _case_law_pdf_choices_for_cites,
     _case_pdf_text_source,
     _open_statute_action,
@@ -153,6 +162,26 @@ class CaptionCapitalizationTests(unittest.TestCase):
         self.assertTrue(is_personal_all_caps_run(["BREWBAKER"], ["Brent"]))
         self.assertTrue(is_personal_all_caps_run(["THOMAS"], ["Corrine", "Morgan"]))
         self.assertTrue(is_personal_all_caps_run(["EMORY"], ["Dr.", "Theresa", "Swain"]))
+
+    def test_table_abbreviation_is_not_mistaken_for_caps_surname(self):
+        # "R.R." is all caps because its letters are capitals, not because a
+        # reporter set a surname that way.  Read as a surname it took the
+        # place name with it, citing Palsgraf as "Palsgraf v. R.R. Co.".
+        self.assertFalse(is_personal_all_caps_run(["R.R."], ["Long", "Island"]))
+        self.assertFalse(is_personal_all_caps_run(["RY."], ["Long", "Island"]))
+        self.assertFalse(is_personal_all_caps_run(["CENT."], ["New", "York"]))
+        self.assertEqual(
+            collapse_personal_all_caps_run("Long Island R.R. Co."),
+            "Long Island R.R. Co.",
+        )
+        self.assertEqual(
+            abbreviate_case_name("Palsgraf v. Long Island R.R. Co."),
+            "Palsgraf v. Long Island R.R. Co.",
+        )
+        self.assertEqual(
+            abbreviate_case_name("Palsgraf v. Long Island Railroad Co."),
+            "Palsgraf v. Long Island R.R. Co.",
+        )
 
     def test_mixed_case_caps_run_drops_any_name_shaped_first_names(self):
         self.assertEqual(
@@ -988,6 +1017,106 @@ class ReporterAndDecisionDateTests(unittest.TestCase):
         bb = win._compute_bluebook_parts()
 
         self.assertEqual(bb["display_cite"], "409 Mich. 672")
+
+
+class StateCourtPartyTests(unittest.TestCase):
+    """Rule 10.2.1(f): "State of," "Commonwealth of," and "People of" drop out
+    of a party name, leaving the state's name — except when the citation is to
+    a decision of that state's own courts, where the designation is what
+    survives instead."""
+
+    # The caption as static.case.law prints it (254 N.Y. 192).
+    ZACKOWITZ = ("The People of the State of New York, Respondent, "
+                 "v. Joseph Zackowitz, Appellant.")
+
+    def test_state_high_court_keeps_the_people(self):
+        self.assertEqual(
+            abbreviate_case_name(self.ZACKOWITZ, court_state="new york"),
+            "People v. Zackowitz",
+        )
+
+    def test_another_courts_citation_names_the_state(self):
+        # People of the State of New York v. Tanella, 374 F.3d 141 (2d Cir.
+        # 2004) — a federal court, so the state is named.
+        self.assertEqual(
+            abbreviate_case_name(
+                "People of the State of New York v. Tanella"),
+            "New York v. Tanella",
+        )
+
+    def test_state_and_commonwealth_designations(self):
+        self.assertEqual(
+            abbreviate_case_name("State of Washington v. Glucksberg",
+                                 court_state="washington"),
+            "State v. Glucksberg",
+        )
+        self.assertEqual(
+            abbreviate_case_name("Commonwealth of Massachusetts v. John Smith",
+                                 court_state="massachusetts"),
+            "Commonwealth v. Smith",
+        )
+
+    def test_designation_survives_a_relator_clause(self):
+        self.assertEqual(
+            abbreviate_case_name(
+                "People of the State of New York ex rel. Spitzer v. Grasso",
+                court_state="new york"),
+            "People ex rel. Spitzer v. Grasso",
+        )
+
+    def test_abbreviation_is_idempotent_and_state_spelling_agnostic(self):
+        once = abbreviate_case_name(self.ZACKOWITZ, court_state="N.Y.")
+        self.assertEqual(once, "People v. Zackowitz")
+        self.assertEqual(
+            abbreviate_case_name(once, court_state="new york"), once)
+
+    def test_court_resolves_from_an_id_or_a_name(self):
+        for court_id, court_name in (
+            ("ny", ""),                              # CourtListener id
+            ("ny-app-div", ""),                      # CAP's hyphenated slug
+            ("", "N.Y."),                            # CAP name_abbreviation
+            ("", "Court of Appeals of New York"),    # CourtListener name
+        ):
+            with self.subTest(court_id=court_id, court_name=court_name):
+                self.assertEqual(
+                    state_of_court(court_id, court_name), "new york")
+
+    def test_a_federal_court_sitting_in_the_state_is_not_its_court(self):
+        for court_id, court_name in (
+            ("nysd", "United States District Court, S.D. New York"),
+            ("ca2", "United States Court of Appeals for the Second Circuit"),
+            ("scotus", "Supreme Court of the United States"),
+            ("", ""),
+        ):
+            with self.subTest(court_id=court_id, court_name=court_name):
+                self.assertEqual(state_of_court(court_id, court_name), "")
+
+    def test_case_law_caption_cites_as_people_in_the_reader(self):
+        # The whole path the reader runs for a static.case.law opinion: the
+        # caption comes off the head matter, the court off CAP's metadata.
+        win = object.__new__(_ScholarTextWindow)
+        win._item = {
+            "caseName": "",
+            "citation": ["254 N.Y. 192"],
+            "court": "N.Y.",
+            "court_id": "ny",
+            "dateFiled": "1930-07-08",
+        }
+        win._blocks = [
+            Block("center", [Span(self.ZACKOWITZ)]),
+            Block("center", [Span("(Argued June 9, 1930; "
+                                  "decided July 8, 1930.)")]),
+            Block("para", [Span("Cardozo, Ch. J.")]),
+            Block("para", [Span("On November 10, 1929, shortly after "
+                                "midnight, the defendant in Kings county "
+                                "shot Frank Coppola and killed him.")]),
+        ]
+
+        bb = win._compute_bluebook_parts()
+
+        self.assertEqual(bb["name"], "People v. Zackowitz")
+        self.assertEqual(bb["cite"], "254 N.Y. 192")
+        self.assertEqual(bb["year"], "1930")
 
 
 class NominativeCitationSearchTests(unittest.TestCase):
@@ -1910,6 +2039,15 @@ class CaseLawPdfTextTests(unittest.TestCase):
             },
         }
 
+    @staticmethod
+    def _record():
+        return _CaseLawTextRecord(
+            "CAP text", "Pearson v. Dodd, 410 F.2d 701 (D.C. Cir. 1969)",
+            {"caseName": "Pearson v. Dodd", "citation": ["410 F.2d 701"]},
+            "https://static.case.law/f2d/410/cases/0701-01.json",
+            ["part"], ["block"],
+        )
+
     def test_cap_json_record_keeps_exact_text_and_display_metadata(self):
         record = _case_law_text_record(
             self._data(), "123 F. App'x 456",
@@ -1929,24 +2067,308 @@ class CaseLawPdfTextTests(unittest.TestCase):
 
     def test_exact_numbered_pdf_uses_its_matching_json(self):
         response = SimpleNamespace(
-            status_code=200, json=lambda: self._data(),
+            status_code=200, json=lambda: self._data(), text="",
         )
         session = Mock()
         session.get.return_value = response
         pdf = "https://static.case.law/f-appx/123/case-pdfs/0456-02.pdf"
 
         with patch("courtlistener_gui._anon_session", session):
+            _case_law_case_html.cache_clear()
             record = _case_law_text_for_pdf_url(pdf)
 
         self.assertIsNotNone(record)
-        session.get.assert_called_once_with(
-            "https://static.case.law/f-appx/123/cases/0456-02.json",
-            timeout=15,
+        # The JSON for this exact numbered case, and the formatted HTML CAP
+        # publishes beside it under the same file name.
+        self.assertEqual(
+            [c.args[0] for c in session.get.call_args_list],
+            ["https://static.case.law/f-appx/123/cases/0456-02.json",
+             "https://static.case.law/f-appx/123/html/0456-02.html"],
         )
 
-    def test_pdf_text_source_prefers_courtlistener(self):
+    def test_the_html_beside_a_case_is_found_by_its_json_url(self):
+        self.assertEqual(
+            _case_law_html_url(
+                "https://static.case.law/f2d/410/cases/0701-01.json"),
+            "https://static.case.law/f2d/410/html/0701-01.html",
+        )
+        # Anything that is not a CAP per-case JSON has no HTML twin.
+        self.assertEqual(_case_law_html_url("https://example.test/a.json"), "")
+        self.assertEqual(_case_law_html_url(""), "")
+
+    def test_cap_html_supplies_the_parts_the_json_cannot(self):
+        html = (
+            '<section class="casebody">'
+            '<section class="head-matter">'
+            '<h4 class="parties">SMITH v. JONES</h4></section>'
+            '<article class="opinion" data-type="majority">'
+            '<p class="author">Per Curiam.</p>'
+            '<p><a class="page-label" data-label="457">*457</a>Affirmed.</p>'
+            '</article></section>'
+        )
+        record = _case_law_text_record(
+            self._data(), "123 F. App\'x 456",
+            "https://static.case.law/f-appx/123/cases/0456-01.json", html,
+        )
+
+        self.assertEqual([p.kind for p in record.parts],
+                         ["header", "majority"])
+        self.assertEqual(
+            [s.text for p in record.parts for b in p.blocks
+             for s in b.spans if s.pagenum],
+            ["*457"],
+        )
+        # The flat CAP text is still the record's text: the brief compiler and
+        # the short-cite index both read the case as one string.
+        self.assertIn("410 U.S. 113", record.text)
+
+    def test_without_the_html_the_json_paragraphs_still_render(self):
+        record = _case_law_text_record(self._data(), "123 F. App\'x 456")
+        self.assertEqual([p.kind for p in record.parts],
+                         ["header", "majority", "majority"])
+        self.assertEqual(record.parts[0].blocks[0].kind, "center")
+
+    def test_a_decision_after_caps_scans_is_not_looked_up_at_all(self):
+        self.assertTrue(_case_law_may_hold("1973-01-22"))
+        self.assertTrue(_case_law_may_hold(""))          # unknown — go and see
+        self.assertTrue(_case_law_may_hold("nonsense"))
+        self.assertFalse(_case_law_may_hold("2024-03-01"))
+        with patch("courtlistener_gui._case_law_text_for_cite") as lookup:
+            self.assertIsNone(_case_law_text_source(
+                ["601 U.S. 416"], "Smith v. Jones", "2024-03-01"))
+        lookup.assert_not_called()
+
+    def test_a_scan_is_answered_from_its_own_file(self):
+        # The pages on screen and the text behind them are one document.
+        with (
+            patch("courtlistener_gui._case_law_text_for_pdf_url",
+                  return_value=self._record()) as exact,
+            patch("courtlistener_gui._case_law_text_source") as by_cite,
+        ):
+            source = _case_law_text_for_scan(
+                "https://static.case.law/f2d/410/case-pdfs/0701-01.pdf",
+                ["93 S. Ct. 705", "410 F.2d 701"], "Pearson v. Dodd")
+
+        self.assertEqual(source.kind, "case_law")
+        exact.assert_called_once_with(
+            "https://static.case.law/f2d/410/case-pdfs/0701-01.pdf")
+        by_cite.assert_not_called()
+
+    def test_another_scan_is_answered_only_by_the_reporter_it_prints(self):
+        # A U.S. Reports scan: CAP's copy of that volume, and no other
+        # printing of the same case, whatever else the result lists.
+        with (
+            patch("courtlistener_gui._case_law_text_for_pdf_url",
+                  return_value=None),
+            patch("courtlistener_gui._case_law_text_source") as by_cite,
+        ):
+            _case_law_text_for_scan(
+                "https://tile.loc.gov/.../usrep410113.pdf",
+                ["93 S. Ct. 705", "410 U.S. 113"], "Roe v. Wade", "1973-01-22")
+
+        by_cite.assert_called_once_with(
+            ["410 U.S. 113"], "Roe v. Wade", "1973-01-22",
+            prefer="410 U.S. 113")
+
+    def test_a_scan_naming_no_reporter_is_left_to_courtlistener(self):
+        # A slip opinion or CourtListener's own stored copy: CAP's text would
+        # be paginated to a reporter these pages are not.
+        with patch("courtlistener_gui._case_law_text_for_pdf_url",
+                   return_value=None):
+            self.assertIsNone(_case_law_text_for_scan(
+                "https://storage.courtlistener.com/pdf/2020/x.pdf",
+                ["410 U.S. 113"], "Roe v. Wade"))
+
+    def test_with_no_scan_the_ordinary_preference_applies(self):
+        with (
+            patch("courtlistener_gui._case_law_text_for_pdf_url",
+                  return_value=None),
+            patch("courtlistener_gui._case_law_text_source") as by_cite,
+        ):
+            _case_law_text_for_scan("", ["410 U.S. 113"], "Roe v. Wade", "d")
+        by_cite.assert_called_once_with(["410 U.S. 113"], "Roe v. Wade", "d")
+
+    def test_the_reporter_on_screen_leads_whatever_series_it_is(self):
+        tried = []
+
+        def lookup(cite, name=""):
+            tried.append(cite)
+            return None
+
+        with patch("courtlistener_gui._case_law_text_for_cite", lookup):
+            _case_law_text_source(
+                ["410 U.S. 113", "93 S. Ct. 705"], "Roe v. Wade",
+                prefer="93 S. Ct. 705")
+
+        # The vendor series would ordinarily come last; the scan on screen
+        # settles it instead.
+        self.assertEqual(tried, ["93 S. Ct. 705", "410 U.S. 113"])
+
+    def test_the_scans_reporter_is_read_off_its_url(self):
+        self.assertEqual(
+            _scan_printed_cite(
+                "https://static.case.law/p2d/506/case-pdfs/0020-01.pdf",
+                ["81 Wash. 2d 886"]),
+            "506 P.2d 20")
+        self.assertEqual(
+            _scan_printed_cite("https://tile.loc.gov/x/usrep410113.pdf",
+                               ["93 S. Ct. 705", "410 U.S. 113"]),
+            "410 U.S. 113")
+        self.assertEqual(
+            _scan_printed_cite("https://storage.courtlistener.com/a.pdf",
+                               ["410 U.S. 113"]),
+            "")
+
+    def test_the_file_a_text_came_from_names_the_scan_of_those_pages(self):
+        self.assertEqual(
+            _case_law_pdf_for_json_url(
+                "https://static.case.law/f2d/410/cases/0701-01.json"),
+            "https://static.case.law/f2d/410/case-pdfs/0701-01.pdf")
+        self.assertEqual(_case_law_pdf_for_json_url("https://x.test/a.json"),
+                         "")
+
+    def test_that_reporter_then_leads_the_windows_citations(self):
+        self.assertEqual(
+            _cites_led_by(["93 S. Ct. 705", "410 U.S. 113"], "410 U.S. 113"),
+            ["410 U.S. 113", "93 S. Ct. 705"])
+        # A reporter the result never listed is added at the front.
+        self.assertEqual(_cites_led_by(["81 Wash. 2d 886"], "506 P.2d 20"),
+                         ["506 P.2d 20", "81 Wash. 2d 886"])
+        # Nothing to lead with leaves the order alone.
+        self.assertEqual(_cites_led_by(["410 U.S. 113"], ""), ["410 U.S. 113"])
+
+    def test_the_source_leads_its_own_citations_by_the_file_it_read(self):
         record = _CaseLawTextRecord(
-            "CAP fallback", "Smith v. Jones, 123 F. App'x 456 (2d Cir. 2004)",
+            "CAP text", "Pearson v. Dodd, 410 F.2d 701 (D.C. Cir. 1969)",
+            {"caseName": "Pearson v. Dodd",
+             "citation": ["93 S. Ct. 705", "410 F.2d 701"]},
+            "https://static.case.law/f2d/410/cases/0701-01.json",
+            ["part"], ["block"],
+        )
+        with patch("courtlistener_gui._case_law_text_for_cite",
+                   return_value=record):
+            source = _case_law_text_source(["410 F.2d 701"], "Pearson v. Dodd")
+        self.assertEqual(source.item["citation"],
+                         ["410 F.2d 701", "93 S. Ct. 705"])
+
+    def test_official_reporters_are_tried_before_the_vendor_series(self):
+        tried = []
+
+        def lookup(cite, name=""):
+            tried.append(cite)
+            return None
+
+        with patch("courtlistener_gui._case_law_text_for_cite", lookup):
+            _case_law_text_source(
+                ["93 S. Ct. 705", "410 U.S. 113", "35 L. Ed. 2d 147",
+                 "1973 WL 4187", "<i>410 U. S. 113</i>"],
+                "Roe v. Wade",
+            )
+
+        # The official cite first; the vendor series after it; the Westlaw
+        # cite and the duplicate spelling of the official one not at all.
+        self.assertEqual(tried,
+                         ["410 U.S. 113", "93 S. Ct. 705", "35 L. Ed. 2d 147"])
+
+    def test_the_source_carries_the_caps_own_parts_and_url(self):
+        record = _CaseLawTextRecord(
+            "CAP text", "Roe v. Wade, 410 U.S. 113 (U.S. 1973)",
+            {"caseName": "Roe v. Wade", "citation": ["410 U.S. 113"]},
+            "https://static.case.law/us/410/cases/0113-01.json",
+            ["part"], ["block"],
+        )
+        with patch("courtlistener_gui._case_law_text_for_cite",
+                   return_value=record):
+            source = _case_law_text_source(["410 U.S. 113"], "Roe v. Wade")
+
+        self.assertEqual(source.kind, "case_law")
+        self.assertEqual(source.source_label, "static.case.law")
+        self.assertEqual(source.button_label, "Text")
+        self.assertEqual(source.parts, ["part"])
+        self.assertEqual(source.blocks, ["block"])
+        self.assertEqual(
+            source.source_url,
+            "https://static.case.law/us/410/cases/0113-01.json")
+
+    def test_a_shared_reporter_page_is_settled_by_the_case_name(self):
+        siblings = [
+            _CaseLawPageOpinion(
+                "https://static.case.law/f2d/410/case-pdfs/0701-01.pdf",
+                "https://static.case.law/f2d/410/cases/0701-01.json",
+                "Alpha v. One"),
+            _CaseLawPageOpinion(
+                "https://static.case.law/f2d/410/case-pdfs/0701-02.pdf",
+                "https://static.case.law/f2d/410/cases/0701-02.json",
+                "Beta v. Two"),
+        ]
+        with (
+            patch("courtlistener_gui._case_law_metadata",
+                  return_value=self._data()),
+            patch("courtlistener_gui._case_law_page_opinions",
+                  return_value=siblings),
+            patch("courtlistener_gui._case_law_text_for_json_url",
+                  return_value="the second opinion") as read,
+        ):
+            got = _case_law_text_for_cite("410 F.2d 701", "Beta v. Two")
+
+        self.assertEqual(got, "the second opinion")
+        read.assert_called_once_with(
+            "https://static.case.law/f2d/410/cases/0701-02.json",
+            "410 F.2d 701")
+
+    def test_a_shared_page_no_name_settles_is_left_alone(self):
+        siblings = [
+            _CaseLawPageOpinion("a.pdf", "a.json", "Alpha v. One"),
+            _CaseLawPageOpinion("b.pdf", "b.json", "Beta v. Two"),
+        ]
+        with (
+            patch("courtlistener_gui._case_law_metadata",
+                  return_value=self._data()),
+            patch("courtlistener_gui._case_law_page_opinions",
+                  return_value=siblings),
+        ):
+            self.assertIsNone(
+                _case_law_text_for_cite("410 F.2d 701", "Gamma v. Three"))
+
+    def test_pdf_text_source_prefers_the_scans_own_cap_file(self):
+        # The scan on screen was made from this file, so its text is the text
+        # on those very pages — CourtListener is not even asked.
+        record = _CaseLawTextRecord(
+            "CAP text with 410 U.S. 113",
+            "Smith v. Jones, 123 F. App'x 456 (2d Cir. 2004)",
+            {
+                "caseName": "Smith v. Jones",
+                "citation": ["123 F. App'x 456"],
+                "court": "2d Cir.",
+                "court_id": "ca2",
+                "dateFiled": "2004-05-06",
+            },
+            "https://static.case.law/f-appx/123/cases/0456-01.json",
+            ["part"], ["block"],
+        )
+        with (
+            patch("courtlistener_gui._case_law_text_for_pdf_url",
+                  return_value=record),
+            patch("courtlistener_gui._cl_item_for_citation") as find,
+        ):
+            source = _case_pdf_text_source(
+                "https://static.case.law/f-appx/123/case-pdfs/0456-01.pdf",
+                "123 F. App'x 456", client=object(),
+            )
+
+        self.assertEqual(source.kind, "case_law")
+        # The button says just "Text"; source_label still names the origin.
+        self.assertEqual(source.button_label, "Text")
+        self.assertEqual(source.source_label, "static.case.law")
+        self.assertEqual(source.parts, ["part"])
+        self.assertIn("410 U.S. 113", source.text)
+        find.assert_not_called()
+
+    def test_pdf_text_source_falls_back_to_courtlistener(self):
+        # A CAP file that yielded no renderable parts: CourtListener answers,
+        # with CAP's better reporter metadata behind it for the title.
+        record = _CaseLawTextRecord(
+            "CAP text", "Smith v. Jones, 123 F. App'x 456 (2d Cir. 2004)",
             {
                 "caseName": "Smith v. Jones",
                 "citation": ["123 F. App'x 456"],
@@ -1983,7 +2405,7 @@ class CaseLawPdfTextTests(unittest.TestCase):
             ANY, "123 F. App'x 456", name="Smith v. Jones",
         )
 
-    def test_pdf_text_source_falls_back_to_cap_json(self):
+    def test_pdf_text_source_keeps_the_cap_text_when_nothing_else_answers(self):
         record = _CaseLawTextRecord(
             "CAP fallback with 410 U.S. 113", "Smith v. Jones",
             {"caseName": "Smith v. Jones",
@@ -2002,8 +2424,6 @@ class CaseLawPdfTextTests(unittest.TestCase):
             )
 
         self.assertEqual(source.kind, "case_law")
-        # The button says just "Text"; source_label still names the origin.
-        self.assertEqual(source.button_label, "Text")
         self.assertEqual(source.source_label, "static.case.law")
         self.assertIn("410 U.S. 113", source.text)
 

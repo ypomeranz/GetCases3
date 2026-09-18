@@ -71,6 +71,7 @@ def _google_cookie_rows() -> list:
     import shutil
     import sqlite3
     import tempfile
+    import time
     try:
         import eng_rep_pdf
         dbs = eng_rep_pdf._firefox_cookie_dbs()
@@ -85,11 +86,19 @@ def _google_cookie_rows() -> list:
             os.close(fd)
             shutil.copy2(db, tmp)
             con = sqlite3.connect(tmp)
-            for name, value, host, path, is_secure in con.execute(
-                "SELECT name, value, host, path, isSecure FROM moz_cookies "
-                "WHERE host LIKE '%google.com'"
+            now = time.time()
+            for name, value, host, path, is_secure, expiry in con.execute(
+                "SELECT name, value, host, path, isSecure, expiry "
+                "FROM moz_cookies WHERE host LIKE '%google.com'"
             ):
                 if name.startswith("__Host-") or name in seen:
+                    continue
+                # Firefox writes ``expiry`` in milliseconds now; a dead cookie
+                # replayed into the browser is worse than none, since it is the
+                # standing behind these that keeps a search from being
+                # challenged (see eng_rep_pdf._cookie_expiry_seconds).
+                exp = eng_rep_pdf._cookie_expiry_seconds(expiry)
+                if exp and exp <= now:
                     continue
                 seen.add(name)
                 rows.append({

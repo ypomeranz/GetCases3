@@ -13,6 +13,8 @@ Structured catalog of CourtListener court IDs:
 
 from __future__ import annotations
 
+import re
+
 # --- Federal appellate -----------------------------------------------------
 
 CIRCUIT_COURTS: dict[str, str] = {
@@ -850,3 +852,98 @@ def bluebook_court_from_name(name: str) -> str:
         if phrase in low:
             return f"{state} {abbr}".strip()
     return ""
+
+
+# --- Whose courts decided it (rule 10.2.1(f)) --------------------------------
+# "State of," "Commonwealth of," and "People of" drop out of a party name —
+# except when the citation is to a decision of *that state's own* courts,
+# where the bare designation is what survives: a New York Court of Appeals
+# decision is "People v. Zackowitz, 254 N.Y. 192", while the Second Circuit's
+# is "New York v. Tanella, 374 F.3d 141".  Deciding that needs the state whose
+# judiciary the deciding court belongs to, which is never the state a federal
+# court happens to sit in — S.D.N.Y. is a court of the United States, not of
+# New York — so the federal maps above are deliberately excluded below.
+
+# State abbreviation -> the state's name.  Later spellings win, which picks
+# the plain "hawaii" over "hawai'i" for the same "Haw.".
+_STATE_BY_BLUEBOOK: dict[str, str] = {
+    abbr: name for name, abbr in STATE_BLUEBOOK.items()
+}
+
+
+def _norm_court_id(court_id: str) -> str:
+    """Comparison key for a court id.  CAP slugs hyphenate where
+    CourtListener ids run together ("ny-app-div" / "nyappdiv"), so the
+    separators come out."""
+    return re.sub(r"[^a-z0-9]", "", (court_id or "").strip().lower())
+
+
+def _state_of_bluebook_abbr(abbr: str) -> str:
+    """The state named by the leading element of a Bluebook court
+    abbreviation ("N.Y. App. Div." -> "new york", "W. Va." -> "west
+    virginia"), or "" when it does not open with one."""
+    a = re.sub(r"\s+", " ", (abbr or "")).strip()
+    for sabbr in sorted(_STATE_BY_BLUEBOOK, key=len, reverse=True):
+        if a == sabbr or a.startswith(sabbr + " "):
+            return _STATE_BY_BLUEBOOK[sabbr]
+    return ""
+
+
+#: Court id -> the state whose judiciary it belongs to.  Built from the
+#: state-court catalog, plus the extra state courts, whose Bluebook
+#: abbreviations name their state.
+COURT_STATE: dict[str, str] = {}
+for _state, _courts in STATE_COURTS:
+    for _cid, _abbr, _label in _courts:
+        COURT_STATE[_norm_court_id(_cid)] = _state.lower()
+for _cid, _abbr in EXTRA_BLUEBOOK.items():
+    _s = _state_of_bluebook_abbr(_abbr)
+    if _s:
+        COURT_STATE[_norm_court_id(_cid)] = _s
+
+#: Every federal court id, so a federal court is recognized as federal even
+#: when its name or id looks state-ish ("nysd", "D. Mass.").
+_FEDERAL_COURT_IDS: set[str] = {"scotus", "us", "ussupct"} | {
+    _norm_court_id(_cid) for _cid in (
+        set(CIRCUIT_COURTS) | set(DISTRICT_COURTS) | set(SPECIAL_COURTS)
+        | set(HISTORICAL_FEDERAL_BLUEBOOK)
+    )
+}
+
+# A court *name* that marks the court as federal.  "Circuit" alone cannot:
+# "Circuit Court of Cook County" is an Illinois trial court, so only a
+# numbered (or D.C./Federal) circuit counts.
+_FEDERAL_COURT_NAME_RE = re.compile(
+    r"\b(?:united\s+states|u\.\s?s\.|federal|bankruptcy)\b|"
+    r"\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|"
+    r"tenth|eleventh|d\.?\s?c\.?)\s+cir",
+    re.IGNORECASE,
+)
+
+
+def state_of_court(court_id: str = "", court_name: str = "") -> str:
+    """The state whose own courts decided the case, lowercased ("new york"),
+    for rule 10.2.1(f); "" for a federal court, an unrecognized one, or no
+    information at all.
+
+    Either hint alone is enough: *court_id* is a CourtListener id or a
+    Caselaw Access Project slug ("ny", "ny-app-div"), *court_name* the
+    court's name or its Bluebook abbreviation ("Court of Appeals of New
+    York", "N.Y. App. Div.").  The id is consulted first because it is
+    unambiguous; the name carries the rest.
+    """
+    cid = _norm_court_id(court_id)
+    if cid:
+        if cid in _FEDERAL_COURT_IDS:
+            return ""
+        state = COURT_STATE.get(cid)
+        if state:
+            return state
+    name = re.sub(r"\s+", " ", (court_name or "")).strip()
+    if not name or _FEDERAL_COURT_NAME_RE.search(name):
+        return ""
+    if bluebook_federal_trial_court(name):
+        return ""
+    # A name already in Bluebook form passes through unchanged, so one pass
+    # covers both "Court of Appeals of New York" and "N.Y.".
+    return _state_of_bluebook_abbr(bluebook_court_from_name(name) or name)

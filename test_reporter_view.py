@@ -1277,9 +1277,19 @@ DETAILS_NS = _load(
      "_EmbeddedCaseHost": lambda body, window: _Packable(body),
      "ttk": type("ttk", (), {"Frame": _Packable}),
      "_ScholarTextWindow": type(
-         "_ScholarTextWindow", (), {"_DETAILS_PANEL_W": 300}),
+         "_ScholarTextWindow", (),
+         {"_DETAILS_PANEL_W": 300,
+          "_SCAN_DETAILS_VIEWS": _class_value(
+              "_ScholarTextWindow", "_SCAN_DETAILS_VIEWS")}),
+     # The real one, so the panel's close keys are the platform's own.
+     "_accel_sequences": _load_functions(
+         ["_accel_sequences"])["_accel_sequences"],
      },
 )
+
+#: What ``_accel_sequences`` yields here — Ctrl alone off macOS, since
+#: ``<Command-…>`` is Mod1 and Tk's Windows port sets Mod1 from Num Lock.
+ACCEL = _load_functions(["_accel_sequences"])["_accel_sequences"]
 
 
 class _DetailsViewer:
@@ -1341,11 +1351,25 @@ class DetailsPanelTests(unittest.TestCase):
         viewer.press_s()
         reader = viewer.reader
         self.assertEqual(reader.built, 1)
-        self.assertFalse(reader._details_views)   # no "Show" selector here
         self.assertIs(reader.panel.master, reader._details_host)
         self.assertTrue(reader.panel.packed)
         self.assertTrue(reader._details_on)
         self.assertEqual(reader.refreshed, 1)
+
+    def test_it_offers_the_case_s_details_and_the_docket_behind_them(self):
+        # The shorter list: the rest of the views want a window's room.
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        self.assertEqual(
+            viewer.reader._details_views,
+            _class_value("_ScholarTextWindow", "_SCAN_DETAILS_VIEWS"))
+
+    def test_and_opens_on_the_case_s_own_details(self):
+        # First in the list is what the selector starts on, so a panel opened
+        # with "s" shows the Oyez/CourtListener details, not the docket.
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        self.assertEqual(viewer.reader._details_views[0], "Case details")
 
     def test_it_stands_to_the_right_of_the_window_at_its_height(self):
         viewer = _DetailsViewer(x=100, y=80, w=720, h=880)
@@ -1377,7 +1401,7 @@ class DetailsPanelTests(unittest.TestCase):
         viewer = _DetailsViewer()
         viewer.press_s()
         panel_win = _DetailsPanelWindow.made[0]
-        for seq in ("<KeyPress-s>", "<Escape>", "<Control-w>", "<Command-w>"):
+        for seq in ("<KeyPress-s>", "<Escape>") + ACCEL("w"):
             with self.subTest(seq=seq):
                 panel_win.mapped = True
                 self.assertEqual(panel_win.bindings[seq](None), "break")
