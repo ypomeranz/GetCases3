@@ -1168,6 +1168,10 @@ _CUT_NEVER_ENDS = frozenset({
     "st", "ste", "mt", "ft", "mr", "mrs", "ms", "dr", "hon", "rev",
     "sgt", "lt", "capt", "col", "gen", "jr", "sr", "ins", "mfg",
     "no", "nos",
+    # Given names as the older reports abbreviate them, which end a party's
+    # name mid-caption and never a case ("The Wm. The Fourth" is one ship,
+    # "Wm. Smith & Co." one firm).
+    "wm", "geo", "chas", "jas", "thos", "robt", "benj", "saml",
 })
 # Entity designators that usually *close* a party name — the period after
 # one is a case boundary ("… v. LUXSHARE, LTD. AlixPartners, LLP, et al.,
@@ -1202,10 +1206,13 @@ def cut_companion_cases(text: str) -> str:
     holds periods ("CLAYTON COUNTY, GEORGIA. Altitude Express, Inc., et
     al., Petitioners v. Zarda" — Bostock), so when a later separator proves
     a companion case exists, strategy two cuts at the first sentence period
-    before it, skipping initials and abbreviations.  Either strategy can
-    also fire at a *later* boundary than the true one (Olmstead's "… v.
-    SAME." line defeats one at the first boundary but not the second), so
-    the earliest cut wins."""
+    before it, skipping initials and abbreviations.  Strategy three is for a
+    caption with no party in it at all — two vessels libelled and appealed
+    together, "THE PAQUETE HABANA. THE LOLA." — where neither of the others
+    has a "v." to look ahead to or cut back from.  Any strategy can fire at
+    a *later* boundary than the true one (Olmstead's "… v. SAME." line
+    defeats one at the first boundary but not the second), so the earliest
+    cut wins."""
     cuts: list[int] = []
     cm = re.search(
         r"\.\s+(?=[^.]*?\s+vs?\.\s+|SAME\b|IN\s+RE\b|EX\s+PARTE\b"
@@ -1228,6 +1235,24 @@ def cut_companion_cases(text: str) -> str:
                     continue  # "Acme Co. of America" — same party's name
             cuts.append(c2.start())
             break
+    # Three: an in rem caption naming a second res.  The Paquete Habana and
+    # the Lola were condemned as prize and appealed together, and the reports
+    # head the case with both ships — but the citation is to the first alone
+    # (rule 10.2.1(b)).  Neither strategy above sees that boundary: there is
+    # no party, and so no separator anywhere to key on.  What marks it is the
+    # second name opening the way the first did, with the "The" rule 10.2.1(d)
+    # keeps on a vessel — so the cut is offered only for a caption that itself
+    # begins that way, and never at an abbreviation's period, which would read
+    # a single ship's "The Wm. The Fourth" as two of them.
+    if (re.match(r"\s*(?:THE|The)\s+\S", text)
+            and not re.search(r"\s+(?:vs?\.|versus|against)\s+", text,
+                              re.IGNORECASE)):
+        for c3 in re.finditer(r"\.\s+(?=(?:THE|The)\s+[A-Z])", text):
+            wm = re.search(r"([A-Za-z]+)$", text[: c3.start()])
+            word = (wm.group(1) if wm else "").lower()
+            if len(word) > 1 and word not in _CUT_NEVER_ENDS:
+                cuts.append(c3.start())
+                break
     if cuts:
         return text[: min(cuts) + 1]
     return text
