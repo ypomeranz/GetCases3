@@ -977,6 +977,8 @@ from citations import (
     NOMINATIVE_PARALLEL_RE as _NOMINATIVE_PARALLEL_RE,
     US_NOMINATIVE_PARALLEL_RE as _US_NOMINATIVE_PARALLEL_RE,
     NOMINATIVE_CITE_RE as _NOMINATIVE_TEXT_CITE_RE,
+    MASS_NOMINATIVE_CITE_RE as _MASS_NOMINATIVE_CITE_RE,
+    mass_reports_cite as _mass_reports_cite,
     EARLY_FED_CITE_RE as _EARLY_FED_CITE_RE,
     early_fed_cite_text as _early_fed_cite_text,
     SHORT_CITE_RE as _SHORT_CITE_RE,
@@ -2660,6 +2662,16 @@ def _us_reports_cite(cite: str) -> str:
     return f"{int(m.group(1)) + off} U.S. {m.group(3)}" if off is not None else ""
 
 
+def _official_series_cite(cite: str) -> str:
+    """A nominative citation in the numbered official series it was folded
+    into — the U.S. Reports for the early Supreme Court reporters ("1 Cranch
+    137" → "5 U.S. 137"), the Massachusetts Reports for Tyng, Pickering,
+    Metcalf, Cushing, Gray and Allen ("19 Pick. 234" → "36 Mass. 234") —
+    which is how CourtListener and static.case.law mostly index them; ""
+    for any other citation."""
+    return _us_reports_cite(cite) or _mass_reports_cite(cite)
+
+
 # The docket line a report prints under the caption: "No. 25-52.",
 # "Nos. 24-1287, 25-250.", "No. 24A1007 24-1177."  Consolidated dockets keep
 # only the first — rule 10.8.1(b) cites one.
@@ -2731,11 +2743,11 @@ def _citation_search_variants(query: str) -> tuple[str, ...]:
     if not query:
         return ()
     variants = list(_reporter_citation_variants(query))
-    m = _NOMINATIVE_CITE_RE.search(query)
-    if m:
-        us_cite = _us_reports_cite(m.group(0))
-        if us_cite:
-            expanded = query[:m.start()] + us_cite + query[m.end():]
+    for pattern in (_NOMINATIVE_CITE_RE, _MASS_NOMINATIVE_CITE_RE):
+        m = pattern.search(query)
+        official = _official_series_cite(m.group(0)) if m else ""
+        if official:
+            expanded = query[:m.start()] + official + query[m.end():]
             if expanded not in variants:
                 variants.append(expanded)
     return tuple(variants)
@@ -2764,7 +2776,8 @@ def _case_law_pdf_for_cite(cite: str) -> Optional[str]:
     canonicalizing reporter aliases (including Wn. → Wash.) and trying the
     modern U.S.-Reports form for an old nominative SCOTUS cite — or None when
     case.law has neither."""
-    choices = _case_law_pdf_choices_for_cites([cite, _us_reports_cite(cite)])
+    choices = _case_law_pdf_choices_for_cites(
+        [cite, _official_series_cite(cite)])
     return choices[0].url if choices else None
 
 
@@ -3650,7 +3663,7 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
         re.sub(r"\s+", "", variant).lower()
         for variant in lookup_cites
     }
-    alt = _us_reports_cite(cite)
+    alt = _official_series_cite(cite)
     altkey = re.sub(r"\s+", "", alt).lower() if alt else ""
 
     def norm_cites(raw) -> set[str]:
@@ -5967,7 +5980,7 @@ def _case_law_text_source(
     for raw in list(cites) + [prefer]:
         for cite in (
             re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str(raw or ""))).strip(),
-            _us_reports_cite(str(raw or "")),
+            _official_series_cite(str(raw or "")),
         ):
             key = re.sub(r"\s+", "", cite).lower()
             if not cite or key in seen:
@@ -8951,8 +8964,8 @@ class CourtListenerGUI:
                 print(f"[cite-pdf] CourtListener lookup for {cite!r}: {exc}")
         cites = [str(c) for c in (item.get("citation") or [])]
         # The cite as printed, and — for an old nominative cite — its modern
-        # U.S. Reports form, which is what the official scans are filed under.
-        for extra in (cite, _us_reports_cite(cite) or ""):
+        # U.S. or Mass. Reports form, which is what the scans are filed under.
+        for extra in (cite, _official_series_cite(cite) or ""):
             if extra and extra not in cites:
                 cites.append(extra)
         item["citation"] = cites
@@ -26937,7 +26950,7 @@ class _ScholarTextWindow:
                 target = (_cl_item_for_citation(client, cite, name=name)
                           if cite else None)
                 if target is None and cite:
-                    alt = _us_reports_cite(cite)
+                    alt = _official_series_cite(cite)
                     if alt:
                         target = _cl_item_for_citation(client, alt, name=name)
                 if target is None and cite:

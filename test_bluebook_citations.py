@@ -113,6 +113,69 @@ class SmartQuoteTests(unittest.TestCase):
         )
 
 
+class MassachusettsNominativeTests(unittest.TestCase):
+    """Tyng, Pickering, Metcalf, Cushing, Gray and Allen are volumes of the
+    Massachusetts Reports under their reporters' names: same pages, the
+    volume offset by the series before them."""
+
+    def test_each_reporter_maps_onto_its_mass_volumes(self):
+        from citations import mass_reports_cite
+        for cite, mass in (
+            ("1 Tyng 1", "2 Mass. 1"), ("16 Tyng 1", "17 Mass. 1"),
+            ("1 Pick. 1", "18 Mass. 1"), ("19 Pick. 234", "36 Mass. 234"),
+            ("24 Pick. 1", "41 Mass. 1"),
+            ("4 Met. 111", "45 Mass. 111"), ("13 Met. 1", "54 Mass. 1"),
+            ("5 Cush. 198", "59 Mass. 198"), ("12 Cush. 1", "66 Mass. 1"),
+            ("1 Gray 1", "67 Mass. 1"), ("16 Gray 1", "82 Mass. 1"),
+            ("1 Allen 1", "83 Mass. 1"), ("14 Allen 1", "96 Mass. 1"),
+            ("1 Pickering 5", "18 Mass. 5"), ("19 Pick 234", "36 Mass. 234"),
+        ):
+            with self.subTest(cite=cite):
+                self.assertEqual(mass_reports_cite(cite), mass)
+
+    def test_a_volume_past_the_series_is_no_citation(self):
+        from citations import mass_reports_cite
+        self.assertEqual(mass_reports_cite("25 Pick. 1"), "")
+        self.assertEqual(mass_reports_cite("17 Gray 1"), "")
+        self.assertEqual(mass_reports_cite("8 Wall. 168"), "")
+
+    def test_the_names_link_in_running_text(self):
+        for text, action in (
+            ("Commonwealth v. Hunt, 45 Mass. (4 Met.) 111 (1842).",
+             ("cite", "45 Mass. 111")),
+            ("Brown v. Kendall, 6 Cush. 292, 295 (1850).",
+             ("cite", "6 Cush. 292@295")),
+            ("Doe v. Roe, 1 Gray 1 (1854).", ("cite", "1 Gray 1")),
+            ("Doe v. Roe, 4 Allen 5 (1862).", ("cite", "4 Allen 5")),
+        ):
+            with self.subTest(text=text):
+                links = detect_brief_links(text)
+                self.assertEqual(links[0][2], action)
+        self.assertEqual(detect_brief_links("He had 30 Gray 5 hairs."), [])
+
+    def test_a_lookup_tries_the_mass_cite_after_the_one_typed(self):
+        from courtlistener_gui import _citation_search_variants
+        self.assertEqual(_citation_search_variants("19 Pick. 234"),
+                         ("19 Pick. 234", "36 Mass. 234"))
+        self.assertEqual(
+            _citation_search_variants("Smith v. Jones, 5 Cush. 198, 200"),
+            ("Smith v. Jones, 5 Cush. 198, 200",
+             "Smith v. Jones, 59 Mass. 198, 200"))
+
+    def test_courtlistener_is_asked_for_the_mass_cite_too(self):
+        client = Mock()
+        client.lookup_citation.side_effect = [
+            [],
+            [{"status": 200, "clusters": [{
+                "id": 36, "case_name": "Smith v. Jones",
+                "citations": ["36 Mass. 234"], "court_id": "mass"}]}],
+        ]
+        item = _cl_item_for_citation(client, "19 Pick. 234")
+        self.assertEqual(item["cluster_id"], 36)
+        self.assertEqual(client.lookup_citation.call_args_list,
+                         [call("19 Pick. 234"), call("36 Mass. 234")])
+
+
 class WashingtonCertificationTests(unittest.TestCase):
     """Bradley v. Am. Smelting & Refin. Co., 104 Wash. 2d 677 (1985), and
     the passage citing Garratt v. Dailey that turned up the problems."""

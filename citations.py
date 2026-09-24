@@ -205,6 +205,50 @@ US_NOMINATIVE_PARALLEL_RE = re.compile(
     r"\b(\d{1,3})\s+(U\.\s?S\.)\s*[\[(]\s*\d{1,2}\s+" + _NOM_SCOTUS_ALT +
     r"\.?\s*[\])]\s*[-–—]?\s*(\d{1,5})\b")
 
+# The Massachusetts reporters named for their reporters — Tyng, Pickering,
+# Metcalf, Cushing, Gray and Allen — were later renumbered as one series with
+# the official Massachusetts Reports: the same books, the same pages, a volume
+# number offset by the volumes before them.  19 Pick. 234 is 36 Mass. 234;
+# Commonwealth v. Hunt is 45 Mass. (4 Met.) 111.  Keyed by the reporter as
+# written (lower case, no period): (offset, volumes in the series).
+_MASS_NOMINATIVE = {
+    "tyng": (1, 16), "pick": (17, 24), "pickering": (17, 24),
+    "met": (41, 13), "metc": (41, 13), "metcalf": (41, 13),
+    "cush": (54, 12), "cushing": (54, 12),
+    "gray": (66, 16), "allen": (82, 14),
+}
+_MASS_NOM_ALT = (r"(?:Tyng|Pick(?:ering)?\.?|Met(?:c|calf)?\.?|"
+                 r"Cush(?:ing)?\.?|Gray|Allen)")
+# "19 Pick. 234", "1 Gray 1".  Case-sensitive, digits on both sides — the
+# bare names (Gray, Allen, Tyng) carry no period to mark them as reporters,
+# and the volume is checked against the series before the match is used.
+MASS_NOMINATIVE_CITE_RE = re.compile(
+    r"\b(\d{1,2})\s+(" + _MASS_NOM_ALT + r")(?!['’])\s+(\d{1,4})\b")
+# The Bluebook's parallel form, "45 Mass. (4 Met.) 111": read as the Mass.
+# cite it leads with.
+MASS_NOMINATIVE_PARALLEL_RE = re.compile(
+    r"\b(\d{2})\s+(Mass\.)\s*[\[(]\s*\d{1,2}\s+" + _MASS_NOM_ALT +
+    r"\s*[\])]\s*[-–—]?\s*(\d{1,4})\b")
+
+
+def _mass_offset(reporter: str, volume: int) -> "int | None":
+    key = re.sub(r"[^a-z]", "", (reporter or "").lower())
+    entry = _MASS_NOMINATIVE.get(key)
+    if entry is None or not 1 <= volume <= entry[1]:
+        return None
+    return entry[0]
+
+
+def mass_reports_cite(cite: str) -> str:
+    """A Massachusetts nominative citation in its Massachusetts Reports form
+    ("19 Pick. 234" → "36 Mass. 234", "5 Cush. 198" → "59 Mass. 198"), or ""
+    when *cite* names none of those reporters (or a volume past its series)."""
+    m = MASS_NOMINATIVE_CITE_RE.search(cite or "")
+    if not m:
+        return ""
+    off = _mass_offset(m.group(2), int(m.group(1)))
+    return f"{int(m.group(1)) + off} Mass. {m.group(3)}" if off is not None else ""
+
 # Early lower-federal reporters, cited by the reporter's name in 19th-century
 # opinions — "The Nestor, 1 Sumner, 73", "The Young Mechanic, 2 Curtis, 404",
 # "The Amos D. Carver, 35 Fed. Rep. 665" — normalized to the abbreviation
@@ -911,11 +955,15 @@ def _iter_case_cites(text: str) -> list[re.Match]:
     # groups, so the short-cite index and case_match_text treat them like
     # any other reporter match.
     for pat in (NOMINATIVE_PARALLEL_RE, US_NOMINATIVE_PARALLEL_RE,
-                NOMINATIVE_CITE_RE):
+                MASS_NOMINATIVE_PARALLEL_RE, NOMINATIVE_CITE_RE,
+                MASS_NOMINATIVE_CITE_RE):
         for m in pat.finditer(text or ""):
             if any(m.start() < km.end() and km.start() < m.end()
                    for km in matches):
                 continue
+            if (pat is MASS_NOMINATIVE_CITE_RE
+                    and _mass_offset(m.group(2), int(m.group(1))) is None):
+                continue  # "30 Gray 5": no such volume — not a citation
             matches.append(m)
     for m in BROAD_CITE_CAPTURE_RE.finditer(text or ""):
         if not _valid_case_reporter(m.group(2)):

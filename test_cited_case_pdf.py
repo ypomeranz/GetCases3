@@ -283,6 +283,11 @@ APP_NS = _load(
      "_fetch_pdf_bytes": _fetch_pdf_bytes,
      "_us_reports_cite": lambda cite: (
          "5 U.S. 137" if "Cranch" in cite else ""),
+     # The official-series form: the same stand-in for the early Supreme
+     # Court reporters, and the real Massachusetts mapping.
+     "_official_series_cite": lambda cite: (
+         "5 U.S. 137" if "Cranch" in cite
+         else citations.mass_reports_cite(cite)),
      "_pin_display": lambda pin: pin,
      "_is_us_reports_pdf": lambda url: "usrep" in (url or "").lower(),
      "_PdfPane": type("_PdfPane", (), {"_MARGIN": 18}),
@@ -985,6 +990,11 @@ class CitedCaseItemTests(unittest.TestCase):
         item = self.app._cited_case_pdf_item("client", "1 Cranch 137",
                                              "Marbury")
         self.assertEqual(item["citation"], ["1 Cranch 137", "5 U.S. 137"])
+
+    def test_and_so_does_a_massachusetts_nominative_cite(self):
+        # 19 Pick. is 36 Mass.: the scans are filed under the Mass. volume.
+        item = self.app._cited_case_pdf_item(None, "19 Pick. 234", "Smith")
+        self.assertEqual(item["citation"], ["19 Pick. 234", "36 Mass. 234"])
 
     def test_without_courtlistener_the_citation_alone_will_do(self):
         item = self.app._cited_case_pdf_item(None, "410 U.S. 113", "Roe")
