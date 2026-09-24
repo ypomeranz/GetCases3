@@ -616,5 +616,46 @@ class DocketFetchAndPanelTests(unittest.TestCase):
         self.assertIn('f, width=1, wrap="word"', source)
 
 
+class FrontMatterDocketTests(unittest.TestCase):
+    """Only the docket line of an opinion names its docket."""
+
+    # Garner v. Louisiana, 368 U.S. 157, as Google Scholar heads it.
+    GARNER = (
+        "368 U.S. 157 (1961)  GARNER ET AL. v. LOUISIANA.  No. 26.  "
+        "Supreme Court of United States.  Argued October 18-19, 1961.  "
+        "Decided December 11, 1961."
+    )
+
+    def test_an_argument_date_is_not_a_docket(self):
+        # "18-19" is Republic of Korea v. BAE Systems (2018).
+        from citations import docket_numbers_in
+        self.assertEqual(docket_numbers_in(self.GARNER), [])
+
+    def test_nor_is_it_stored_as_one(self):
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import _header_dockets
+        html = (
+            '<div id="gs_opinion"><center><b>368 U.S. 157 (1961)</b></center>'
+            '<center><h3 id="gsl_case_name">GARNER ET AL.<br/> v.<br/> '
+            "LOUISIANA.</h3></center><center>No. 26.</center>"
+            "<center><p><b>Supreme Court of United States.</b></p></center>"
+            "<center>Argued October 18-19, 1961.</center>"
+            "<center>Decided December 11, 1961.</center><p>Text.</p></div>"
+        )
+        self.assertEqual(_header_dockets(parse_opinion_blocks(html)), [])
+
+    def test_the_docket_line_still_counts(self):
+        from citations import docket_numbers_in
+        self.assertEqual(docket_numbers_in(
+            "No. 22-451.  Argued January 17, 2024"), ["22-451"])
+        self.assertEqual(docket_numbers_in(
+            "Nos. 24-109 and 24-110.  Argued October 15-16, 2025"),
+            ["24-109", "24-110"])
+        self.assertEqual(docket_numbers_in("Nos. 22-451, 22–1219"),
+                         ["22-451", "22-1219"])
+        self.assertEqual(docket_numbers_in("No. 24A884"), ["24A884"])
+        self.assertEqual(docket_numbers_in("Docket No. 18-19"), ["18-19"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1191,6 +1191,38 @@ def iter_recap_cites(text: str) -> list[tuple[int, int, "str | None"]]:
     return out
 
 
+# A modern Supreme Court docket number: "18-19", "24-1260", "24A884".
+_SCOTUS_DOCKET_NUMBER_RE = re.compile(
+    r"\b(?:\d{1,3}[-‐-―−]\d{1,5}|\d{1,3}[A-Z]\d{1,5})\b",
+    re.IGNORECASE,
+)
+# The docket line of an opinion's front matter — "No. 22-451.", "Nos. 24-109
+# and 24-110", "Docket No. 18-19" — and the run of numbers it lists.
+_DOCKET_LINE_RE = re.compile(
+    r"\bNos?\.\s*(\d[\w‐-―−-]*"
+    r"(?:\s*(?:,|&|and)\s*(?:Nos?\.\s*)?\d[\w‐-―−-]*)*)",
+    re.IGNORECASE,
+)
+
+
+def docket_numbers_in(text: str) -> list[str]:
+    """Supreme Court docket numbers an opinion's front matter gives as its
+    own — only those a "No."/"Nos." introduces, in order, dashes normalized.
+
+    Anything else shaped like one is not a docket: the argument dates of an
+    old opinion read "Argued October 18-19, 1961", and "18-19" is a real
+    docket (Republic of Korea v. BAE Systems, 2018).  An old-style number with
+    no term prefix ("No. 26.") names no page on supremecourt.gov and yields
+    nothing."""
+    out: list[str] = []
+    for line in _DOCKET_LINE_RE.finditer(text or ""):
+        for m in _SCOTUS_DOCKET_NUMBER_RE.finditer(line.group(1)):
+            docket = re.sub(r"[‐-―−]", "-", m.group(0)).upper()
+            if docket not in out:
+                out.append(docket)
+    return out
+
+
 def iter_docket_cites(text: str) -> list[tuple[int, int, str]]:
     """Slip opinions cited by docket number with no WL/LEXIS number at all —
     "Peninsula Pathology Assocs. v. Am. Int'l Indus., No. 23-1971 (4th Cir.

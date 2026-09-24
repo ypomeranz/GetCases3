@@ -994,6 +994,7 @@ from citations import (
     build_short_cite_index as _build_short_cite_index,
     cite_target_from_text as _cite_target_from_text,
     detect_links as detect_brief_links,
+    docket_numbers_in as _docket_numbers_in,
     iter_docket_cites as _iter_docket_cites,
     iter_recap_cites as _iter_recap_cites,
 )
@@ -27978,10 +27979,12 @@ class _ScholarTextWindow:
                 # another opinion or order on the same docket.
                 item["dateFiled"] = decision_date
             if not _scotus_docket_tokens(_item_docket_text(item)):
+                # Only the docket line counts: "Argued October 18-19, 1961"
+                # would otherwise read as docket No. 18-19.
                 front_matter = " ".join(
                     b.text() for b in self._blocks[:16]
                 )
-                dockets = list(_scotus_docket_tokens(front_matter))
+                dockets = _docket_numbers_in(front_matter)
                 if dockets:
                     item["docketNumber"] = ", ".join(sorted(dockets))
         cites: list[str] = []
