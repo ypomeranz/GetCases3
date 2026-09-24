@@ -968,20 +968,35 @@ class _FakeScrollbar:
         self.set_to = (first, last)
 
 
+class _FakeFlash:
+    """The names flashed beside the scrollbar (_PartNameFlash), as far as the
+    pane is concerned: something to hand the rail to, and to take down with
+    it.  Its own behaviour is covered in test_part_name_flash.py."""
+
+    def __init__(self):
+        self.watched = []
+        self.hidden = 0
+
+    def watch(self, widget):
+        self.watched.append(widget)
+
+    def hide(self):
+        self.hidden += 1
+
+
 _Tk.Canvas = _FakeCanvas   # the rail builds its own canvas
 
 
 PANE_NS = _load(
     "_PdfPane",
     ["set_section_marks", "has_section_marks", "_section_doc_y",
-     "_draw_section_rail", "_section_at_rail_y", "_rail_tip_text",
+     "_draw_section_rail", "_section_at_rail_y",
      "_on_rail_click", "fit_to_view", "_refit_by", "_update_scrollregion",
      "_show_hsb", "_x_overflow", "_x_center", "_center_x_at", "_hwheel",
      "_shift_wheel", "_wheel", "_scroll_x_into_view", "_notify_zoom",
      "zoom_percent"],
     {"_PDF_PART_COLORS": _PART_COLORS,
-     "_wash_hex": WASH_NS["_wash_hex"],
-     "_HoverTip": lambda *a, **kw: None},
+     "_wash_hex": WASH_NS["_wash_hex"]},
 )
 
 
@@ -1014,6 +1029,7 @@ class _Pane:
         self.zooms_reported = []
         self._on_zoom = self.zooms_reported.append
         self._canvas = _FakeCanvas()
+        self._part_flash = _FakeFlash()
         self._vsb = object()
         self._body = object()
         self._hsb = _FakeScrollbar()
@@ -1024,7 +1040,7 @@ class _Pane:
         self.idle = []
         for name in ("set_section_marks", "has_section_marks",
                      "_section_doc_y", "_draw_section_rail",
-                     "_section_at_rail_y", "_rail_tip_text", "_on_rail_click",
+                     "_section_at_rail_y", "_on_rail_click",
                      "fit_to_view", "_refit_by", "_update_scrollregion",
                      "_show_hsb", "_x_overflow", "_x_center", "_center_x_at",
                      "_hwheel", "_shift_wheel", "_wheel",
@@ -1130,6 +1146,17 @@ class RailBuildTests(unittest.TestCase):
         self.pane.set_section_marks([])
         self.assertIn("fit_to_view", self._refit_scheduled())
 
+    def test_the_rail_flashes_the_writers_names_when_it_is_used(self):
+        # Dragging the rail scrolls the document, so it names the parts the
+        # way the scrollbar does (the scrollbar itself is watched in __init__).
+        self.pane.set_section_marks(SECTIONS)
+        self.assertIn(self.pane._rail, self.pane._part_flash.watched)
+
+    def test_the_names_go_when_the_rail_does(self):
+        self.pane.set_section_marks(SECTIONS)
+        self.pane.set_section_marks(SECTIONS[:1])
+        self.assertEqual(self.pane._part_flash.hidden, 1)
+
     def test_a_zoomed_pane_keeps_its_zoom_when_the_rail_appears(self):
         self.pane._target_w = 900          # zoomed to 150%
         self.pane.set_section_marks(SECTIONS)
@@ -1232,22 +1259,13 @@ class RailNavigationTests(unittest.TestCase):
         self.pane._on_rail_click(mock.Mock(y=799))
         self.assertEqual(self.pane.scrolled, [(6, 396.0)])
 
-    def test_the_hover_tip_names_the_part_under_the_pointer(self):
-        self.rail.pointer = (6, 500)
-        self.assertEqual(self.pane._rail_tip_text(),
-                         "Rehnquist, J., dissenting — p. 7")
-
-    def test_the_tip_counts_pages_from_one(self):
-        self.rail.pointer = (6, 10)
-        self.assertTrue(self.pane._rail_tip_text().endswith("p. 1"))
-
-    def test_a_pointer_off_the_rail_gets_no_tip(self):
-        self.rail.pointer = (6, -30)      # left without a <Leave>
-        self.assertEqual(self.pane._rail_tip_text(), "")
-
-    def test_no_rail_means_no_tip(self):
-        self.pane._rail = None
-        self.assertEqual(self.pane._rail_tip_text(), "")
+    def test_the_rail_carries_no_hover_tip(self):
+        # It named one band at a time.  Pointing at the rail — or at the
+        # scrollbar — now names every writing at once (_PartNameFlash), so a
+        # popup over the pages would only be in the way.
+        self.assertNotIn("_HoverTip", _source_of("_PdfPane",
+                                                 "set_section_marks"))
+        self.assertFalse(hasattr(self.pane, "_rail_tip_text"))
 
 
 class FitToViewTests(unittest.TestCase):

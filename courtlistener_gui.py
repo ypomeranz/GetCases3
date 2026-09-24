@@ -689,7 +689,7 @@ class _HoverTip:
 
     ``follow_motion=True`` re-arms the tip whenever the pointer moves inside
     the widget, for a widget whose tip names whatever is *under* the pointer
-    rather than the widget as a whole (the PDF pane's opinion-parts rail)."""
+    rather than the widget as a whole (the labelled opinion-parts strip)."""
 
     def __init__(self, widget, text_getter, *, delay: int = 450,
                  wraplength: int = 520, follow_motion: bool = False) -> None:
@@ -16672,9 +16672,10 @@ _AUTHORED_PART_KINDS = frozenset(
 
 
 def _part_tip_text(label: str, kind: str, page: object = None) -> str:
-    """What the pointer resting on a part says: the kind of writing and who
-    wrote it, plus the page it starts on when that is known — the answer the
-    rail beside a PDF's scrollbar gives, for the opinion text as well."""
+    """What the pointer resting on a part of the labelled strip says: the kind
+    of writing and who wrote it, plus the page it starts on when that is
+    known.  The slim rail that replaces that strip carries no tip — pointing
+    at the scrollbar names every writing at once (see _PartNameFlash)."""
     name = _PART_KIND_NAMES.get(kind, "Part")
     author = _part_author(label, loose=kind in _AUTHORED_PART_KINDS)
     if author and author.lower() == name.lower():
@@ -16686,6 +16687,45 @@ def _part_tip_text(label: str, kind: str, page: object = None) -> str:
     else:
         text = name
     return f"{text} — p. {page}" if page else text
+
+
+#: What the rail flashes for a writing whose heading names nobody — the kind
+#: of writing itself, as short as it goes.
+_PART_FLASH_FALLBACKS = {
+    "majority": "OPINION",
+    "concurrence": "CONCURRENCE",
+    "dissent": "DISSENT",
+    "separate": "SEPARATE OPINION",
+    "syllabus": "SYLLABUS",
+}
+
+
+def _part_flash_name(label: str, kind: str) -> str:
+    """The name the parts rail flashes for a writing while the scrollbar is in
+    use: its author's surname set in caps, the way the reports print it —
+    "REHNQUIST", "PER CURIAM" — or the kind of writing where the heading names
+    nobody at all."""
+    name = _part_author(label, loose=kind in _AUTHORED_PART_KINDS)
+    if name and name.lower() == _PART_KIND_NAMES.get(kind, "").lower():
+        name = ""       # a heading that is only the word "Dissent" names nobody
+    return (name or _PART_FLASH_FALLBACKS.get(kind, "OPINION")).upper()
+
+
+def _blend_hex(color: str, toward: str, f: float) -> str:
+    """*color* mixed *f* (0..1) of the way to *toward* — the step a fading
+    name takes back toward the page it is drawn over."""
+    def rgb(text: str, fallback: list) -> list:
+        text = (text or "").lstrip("#")
+        try:
+            return [int(text[i:i + 2], 16) for i in (0, 2, 4)]
+        except (ValueError, IndexError):
+            return fallback
+    a = rgb(color, [102, 102, 102])
+    b = rgb(toward, [255, 255, 255])
+    f = max(0.0, min(1.0, f))
+    return "#" + "".join(
+        f"{int(round(v + (w - v) * f)):02x}" for v, w in zip(a, b)
+    )
 
 
 def _region_mostly_black(img, box, frac: float = 0.90) -> bool:
@@ -16788,6 +16828,254 @@ def _page_fully_redacted(text: str, boxes: list, size: tuple) -> bool:
     return len(re.findall(r"[A-Za-z]{2,}", text or "")) < 3
 
 
+class _PartNameFlash:
+    """The writers' names beside the scrollbar, for as long as it is in use.
+
+    The parts rail says in colour where each writing begins, but not whose it
+    is.  Taking the pointer to the scrollbar — or to the rail beside it —
+    names them all at once: each surname in caps, in its part's own colour,
+    set against the band that writing starts at, so a reader reaching for the
+    thumb can aim for THOMAS rather than for "the red one".  They stay for as
+    long as the pointer is there or the thumb is held, then fade out a moment
+    after it leaves and give the page back to the opinion.
+
+    ``rows()`` is read at flash time and answers ``[(y, name, colour), …]`` —
+    each writing's name and where it begins, in the coordinates of the strip
+    ``anchor()`` returns (the rail, which comes and goes with the parts).
+    """
+
+    _FONT = ("TkDefaultFont", 9, "bold")
+    _LINGER_MS = 1400    # how long the names stay once the scrolling stops
+    _FADE_STEPS = 6      # …and how the fade that follows is stepped out
+    _FADE_MS = 55
+    _GAP = 4             # between a name and the strip it is set against
+    _PADX = 5            # inside a name's own box
+    _MIN_GAP = 3         # least clear space between two stacked names
+    _BOX_WASH = 0.88     # how pale a name's box is against its own colour
+    _EDGE_WASH = 0.55    # …and the hairline drawn round it
+
+    def __init__(self, host, rows, anchor, *,
+                 backdrop: str = "#ffffff") -> None:
+        self._host = host
+        self._rows = rows
+        self._anchor = anchor
+        self._backdrop = backdrop
+        self._labels: list = []
+        self._colors: list = []
+        self._shown = None      # what is on screen: (rows, x, top, height)
+        self._after: Optional[str] = None
+        self._step = 0          # how far into the fade-out we are
+        self._held = False      # the scrollbar is under the button right now
+        self._over = False      # …or simply under the pointer
+
+    # ------------------------------------------------------------------
+    # What counts as using the scrollbar
+    # ------------------------------------------------------------------
+
+    def watch(self, widget) -> None:
+        """Flash the names whenever *widget* is scrolled with, or merely
+        pointed at — the scrollbar itself, and the rail beside it, which
+        scrolls the document too."""
+        if widget is None:
+            return
+        widget.bind("<Enter>", self._over_strip, add="+")
+        widget.bind("<Motion>", self._over_strip, add="+")
+        widget.bind("<Leave>", self._left_strip, add="+")
+        widget.bind("<Button-1>", self._pressed, add="+")
+        widget.bind("<B1-Motion>", self._dragged, add="+")
+        widget.bind("<ButtonRelease-1>", self._released, add="+")
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(seq, self._wheeled, add="+")
+
+    # Tk runs these before the scrollbar's own class bindings; each returns
+    # None so the drag, the page jump and the wheel still happen.
+    def _over_strip(self, _e=None) -> None:
+        """The pointer has come to the scrollbar: the names are up before the
+        reader has taken hold of anything, and stay while it is there."""
+        self._over = True
+        self.show()
+
+    def _left_strip(self, _e=None) -> None:
+        """It has gone again — leave them a moment longer, then fade.  Not
+        while the thumb is held: a drag carries the pointer off the scrollbar
+        and back, and the names must not go with it."""
+        self._over = False
+        if self._labels and not self._held:
+            self._linger()
+
+    def _pressed(self, _e=None) -> None:
+        self._held = True
+        self.show()
+
+    def _dragged(self, _e=None) -> None:
+        self.show()
+
+    def _released(self, _e=None) -> None:
+        self._held = False
+        self.flash()
+
+    def _wheeled(self, _e=None) -> None:
+        self.flash()
+
+    def _entered(self, _e=None) -> None:
+        """A name is in the reader's way only for a moment: the pointer
+        arriving on one takes them all down rather than swallowing the click
+        underneath it.  Not mid-drag — Tk holds the pointer for the scrollbar
+        then, so this is somebody who has finished scrolling."""
+        if not self._held:
+            self.hide()
+
+    # ------------------------------------------------------------------
+    # Showing them
+    # ------------------------------------------------------------------
+
+    def flash(self) -> None:
+        """Show the names, and start the clock that takes them away — unless
+        the reader is still on the scrollbar, or still holding it."""
+        self.show()
+        if not (self._held or self._over):
+            self._linger()
+
+    def show(self) -> None:
+        """Every name on screen at full strength, and staying there."""
+        self._cancel()
+        plan = self._plan()
+        if plan is None:
+            self.hide()
+            return
+        if plan != self._shown:
+            self._build(*plan)
+        elif self._step:
+            self._paint(0)      # a fade was under way: back to full strength
+        self._step = 0
+
+    def hide(self) -> None:
+        self._cancel()
+        for lbl in self._labels:
+            try:
+                lbl.destroy()
+            except tk.TclError:
+                pass
+        self._labels, self._colors, self._shown = [], [], None
+        self._step = 0
+
+    def showing(self) -> bool:
+        return bool(self._labels)
+
+    def _plan(self):
+        """``(rows, x, top, height)`` for the names as they stand — the strip
+        they are set against, and what the caller wants named.  ``None`` when
+        there is nothing to name (no rail, or a document of one writing)."""
+        anchor = self._anchor()
+        if anchor is None:
+            return None
+        try:
+            rows = [(float(y), str(name), str(color))
+                    for y, name, color in (self._rows() or [])]
+        except (TypeError, ValueError, tk.TclError):
+            return None
+        if not rows:
+            return None
+        try:
+            x = int(anchor.winfo_x()) - self._GAP
+            top = int(anchor.winfo_y())
+            height = int(anchor.winfo_height())
+        except (tk.TclError, TypeError, ValueError):
+            return None
+        if x <= 0 or height <= 1:
+            return None     # the strip has no place on screen yet
+        return (rows, x, top, height)
+
+    def _build(self, rows, x, top, height) -> None:
+        """Lay the names out afresh: one box each, none overlapping another,
+        every one of them inside the strip's own run."""
+        self.hide()
+        labels = []
+        for _y, name, color in rows:
+            labels.append(tk.Label(
+                self._host, text=name, font=self._FONT, fg=color,
+                bg=_wash_hex(color, self._BOX_WASH),
+                padx=self._PADX, pady=0, bd=0, highlightthickness=1,
+                highlightbackground=_wash_hex(color, self._EDGE_WASH),
+                takefocus=0,
+            ))
+        heights = [max(1, int(lbl.winfo_reqheight())) for lbl in labels]
+        ys = self._stack([top + y for y, _n, _c in rows], heights,
+                         top, top + height, self._MIN_GAP)
+        for lbl, y in zip(labels, ys):
+            lbl.bind("<Enter>", self._entered, add="+")
+            lbl.place(x=x, y=y, anchor="ne")
+            lbl.lift()
+        self._labels = labels
+        self._colors = [c for _y, _n, c in rows]
+        self._shown = (rows, x, top, height)
+
+    @staticmethod
+    def _stack(ys, heights, top, bottom, gap):
+        """Where the names go once they are kept off one another: pushed down
+        the strip in order, then the run packed up from its foot when that has
+        carried the last of them off the end — a dissent of two lines at the
+        very end of the opinion is exactly the name that would have gone."""
+        out: list[float] = []
+        for i, (y, h) in enumerate(zip(ys, heights)):
+            y = max(top, y)
+            if out:
+                y = max(y, out[-1] + heights[i - 1] + gap)
+            out.append(y)
+        limit = bottom
+        for i in range(len(out) - 1, -1, -1):
+            if out[i] + heights[i] > limit:
+                out[i] = limit - heights[i]
+            limit = out[i] - gap
+        return [max(top, y) for y in out]
+
+    # ------------------------------------------------------------------
+    # Taking them away again
+    # ------------------------------------------------------------------
+
+    def _linger(self) -> None:
+        self._cancel()
+        self._after = self._call_after(self._LINGER_MS, self._fade)
+
+    def _fade(self) -> None:
+        self._after = None
+        self._step += 1
+        if self._step > self._FADE_STEPS or not self._labels:
+            self.hide()
+            return
+        self._paint(self._step)
+        self._after = self._call_after(self._FADE_MS, self._fade)
+
+    def _paint(self, step: int) -> None:
+        """The names *step* of the way back into the page behind them."""
+        f = max(0.0, min(1.0, step / self._FADE_STEPS))
+        for lbl, color in zip(self._labels, self._colors):
+            try:
+                lbl.configure(
+                    fg=_blend_hex(color, self._backdrop, f),
+                    bg=_blend_hex(_wash_hex(color, self._BOX_WASH),
+                                  self._backdrop, f),
+                    highlightbackground=_blend_hex(
+                        _wash_hex(color, self._EDGE_WASH), self._backdrop, f),
+                )
+            except tk.TclError:
+                pass
+
+    def _call_after(self, ms: int, fn):
+        try:
+            return self._host.after(ms, fn)
+        except tk.TclError:
+            return None
+
+    def _cancel(self) -> None:
+        if self._after is not None:
+            try:
+                self._host.after_cancel(self._after)
+            except tk.TclError:
+                pass
+            self._after = None
+
+
 class _PdfPane(ttk.Frame):
     """A scrollable, lazily-rendered view of a PDF, embedded in the opinion
     window (pypdfium2 + Pillow).
@@ -16825,6 +17113,7 @@ class _PdfPane(ttk.Frame):
     _RAIL_BG = "#f0f1f3"
     _RAIL_EDGE = "#cdd0d5"
     _RAIL_BAND_WASH = 0.80   # how far a part's band is blended toward white
+    _PANE_BG = "#d9d9d9"     # the desk the pages lie on — what a name fades into
 
     # A resize this small is a hairline shift, not a reader asking for a
     # different page size; autofit ignores it (and its re-render).
@@ -16906,7 +17195,7 @@ class _PdfPane(ttk.Frame):
         self._body = body
         # Both scroll increments are 1px, so a wheel notch or an arrow key moves
         # the same distance on either axis (see _SCROLL_PX).
-        canvas = tk.Canvas(body, bg="#d9d9d9", highlightthickness=0,
+        canvas = tk.Canvas(body, bg=self._PANE_BG, highlightthickness=0,
                            yscrollincrement=1, xscrollincrement=1)
         vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=self._on_yview)
@@ -16919,6 +17208,12 @@ class _PdfPane(ttk.Frame):
         canvas.pack(side="left", fill="both", expand=True)
         self._canvas, self._vsb, self._hsb = canvas, vsb, hsb
         self._hsb_on = False
+        # Using the scrollbar names every writing the rail maps, beside the
+        # band it begins at, for as long as the scrolling lasts.
+        self._part_flash = _PartNameFlash(
+            body, self._flash_rows, lambda: self._rail,
+            backdrop=self._PANE_BG)
+        self._part_flash.watch(vsb)
 
         # Detect each page's content box once with a quick low-resolution render
         # (independent of zoom), so the wide blank margins of court PDFs are
@@ -17604,6 +17899,7 @@ class _PdfPane(ttk.Frame):
             self._sections = []
             self._rail_spans = []
             if self._rail is not None:
+                self._part_flash.hide()
                 self._rail.destroy()
                 self._rail = None
                 self.after_idle(self.fit_to_view)  # pages get the room back
@@ -17619,7 +17915,9 @@ class _PdfPane(ttk.Frame):
             rail.bind("<Configure>", lambda _e: self._draw_section_rail())
             rail.bind("<Button-1>", self._on_rail_click)
             self._rail = rail
-            _HoverTip(rail, self._rail_tip_text, delay=320, follow_motion=True)
+            # No hover tip naming one band at a time: pointing at the rail (or
+            # at the scrollbar) names every writing at once instead.
+            self._part_flash.watch(rail)
             # The rail takes its column out of the page area; re-fit the pages
             # to what is left rather than leaving one clipped by the strip that
             # just appeared.  The canvas resize behind it re-fits again, and
@@ -17672,6 +17970,24 @@ class _PdfPane(ttk.Frame):
                 1, y0, w, min(y0 + self._RAIL_TICK_H, y1), width=0, fill=color)
             self._rail_spans.append((y0, y1, sec))
 
+    def _flash_rows(self) -> list:
+        """Every writing the rail maps, named for the flash beside it: the
+        surname in caps, in the part's own colour, at the top of its band.
+
+        A syllabus is nobody's writing and is left unnamed — its band is what
+        the Court's opinion begins under, and that one is named."""
+        rows = []
+        for y0, _y1, sec in self._rail_spans:
+            kind = getattr(sec, "kind", "")
+            if kind not in _AUTHORED_PART_KINDS:
+                continue
+            rows.append((
+                y0,
+                _part_flash_name(getattr(sec, "label", "") or "", kind),
+                _PDF_PART_COLORS.get(kind, "#666666"),
+            ))
+        return rows
+
     def _section_at_rail_y(self, y: float):
         """The part whose band covers rail height *y*, or the nearest one."""
         spans = self._rail_spans
@@ -17683,26 +17999,6 @@ class _PdfPane(ttk.Frame):
             if y0 <= y < y1:
                 return sec
         return spans[-1][2]
-
-    def _rail_tip_text(self) -> str:
-        """The part under the pointer, named for the hover tip."""
-        rail = self._rail
-        if rail is None:
-            return ""
-        try:
-            x = rail.winfo_pointerx() - rail.winfo_rootx()
-            y = rail.winfo_pointery() - rail.winfo_rooty()
-        except tk.TclError:
-            return ""
-        if not (0 <= x <= rail.winfo_width() and 0 <= y <= rail.winfo_height()):
-            return ""   # the pointer left without a <Leave> reaching us
-        sec = self._section_at_rail_y(y)
-        if sec is None:
-            return ""
-        start_at = getattr(sec, "start_at", None)
-        page = int(start_at[0] if start_at
-                   else (getattr(sec, "start_page", 0) or 0))
-        return f"{getattr(sec, 'label', 'Part')} — p. {page + 1}"
 
     def _on_rail_click(self, event) -> None:
         sec = self._section_at_rail_y(event.y)
@@ -20675,12 +20971,22 @@ class _ScholarTextWindow:
         self._partmap.bind("<Button-1>", self._on_partmap_click)
         self._partmap.bind("<Enter>", lambda _e: self._partmap.config(cursor="hand2"))
         self._partmap.bind("<Leave>", lambda _e: self._partmap.config(cursor=""))
-        # The strip has room for a surname at most, and its colour alone does
-        # not distinguish a dissent from a concurrence — so resting on a part
-        # names it in full, exactly as the rail beside a PDF's scrollbar does.
-        _HoverTip(self._partmap, self._partmap_tip_text, delay=320,
-                  follow_motion=True)
+        if not self._chromeless:
+            # The labelled strip has room for a surname at most, and its colour
+            # alone does not distinguish a dissent from a concurrence — so
+            # resting on a part there names it in full, with its page.  The
+            # rail that replaces it chromeless needs no such tip: pointing at
+            # the scrollbar names every writing at once (see _PartNameFlash).
+            _HoverTip(self._partmap, self._partmap_tip_text, delay=320,
+                      follow_motion=True)
         self._text_frame, self._vsb = text_frame, vsb
+        # Using the scrollbar — or the rail beside it, which scrolls the
+        # opinion too — names every writing the rail maps, against the band it
+        # begins at, for as long as the scrolling lasts (see _PartNameFlash).
+        self._part_flash = _PartNameFlash(
+            text_frame, self._flash_part_rows, lambda: self._partmap)
+        self._part_flash.watch(vsb)
+        self._part_flash.watch(self._partmap)
         self._details_frame: Optional[ttk.Frame] = None
         # Where the side panel is built, and which views are offered there.
         # In a case window it is a column of the window itself, and its "Show"
@@ -23212,6 +23518,27 @@ class _ScholarTextWindow:
                 width=0, fill=color)
             rows.append((top, bottom, start, label, kind))
         self._partmap_rows = rows
+
+    def _flash_part_rows(self) -> list:
+        """Every writing on the rail, named for the flash beside it: the
+        surname in caps, in the part's own colour, at the top of its band.
+
+        The rail's only.  The labelled strip a case window carries prints the
+        names already, so a second set flashed over the top of them would say
+        it twice; and a syllabus, being nobody's writing, is left unnamed."""
+        if not getattr(self, "_chromeless", False):
+            return []
+        rows = []
+        for row in getattr(self, "_partmap_rows", None) or []:
+            top, _bottom, _start, label, kind = row[:5]
+            if kind not in _AUTHORED_PART_KINDS:
+                continue
+            rows.append((
+                top,
+                _part_flash_name(label or "", kind),
+                self._PARTMAP_COLORS.get(kind, "#666666"),
+            ))
+        return rows
 
     @staticmethod
     def _partmap_short_label(label: str, kind: str) -> str:
