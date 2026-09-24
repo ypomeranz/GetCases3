@@ -1069,7 +1069,8 @@ def _load_filename_builder():
     src = pathlib.Path(__file__).with_name("courtlistener_gui.py").read_text()
     tree = ast.parse(src)
     wanted = ("_pick_citation", "_bluebook_display_name",
-              "_build_default_filename", "_normalized_us_cite")
+              "_build_default_filename", "_normalized_us_cite",
+              "_bluebook_reporter_spelling")
     found = {n.name: ast.get_source_segment(src, n)
              for n in tree.body
              if isinstance(n, ast.FunctionDef) and n.name in wanted}
@@ -1091,6 +1092,7 @@ def _load_filename_builder():
           "abbreviate_case_name": lambda n, **_kw: n,
           "_state_of_court": lambda *_a, **_kw: "",
           "_court_for_paren": lambda cite, court_id, court: "",
+          "_reporter_family": citations.reporter_family,
           "Optional": None}
     for key in ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE"):
         exec(names[key], ns)
@@ -1127,7 +1129,8 @@ class UsReportsFilenameTests(unittest.TestCase):
     def test_no_us_scan_leaves_ordinary_naming_untouched(self):
         item = {"caseName": "Quinn v. Smith", "citation": ["8 F. 4th 557"],
                 "dateFiled": "2021-08-03"}
-        self.assertEqual(self._name(item), "Quinn v. Smith, 8 F. 4th 557 (2021)")
+        # (The reporter comes out in its Bluebook spelling, "F.4th".)
+        self.assertEqual(self._name(item), "Quinn v. Smith, 8 F.4th 557 (2021)")
 
     def test_normalizer_strips_pincites_and_parallel_cites(self):
         norm = self.ns["_normalized_us_cite"]

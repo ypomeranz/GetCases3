@@ -1184,11 +1184,34 @@ _RELATED_CASE_NOTE_RE = re.compile(
     r"\s*\(\s*(?:in\s+)?re[:.\s][^()]*\)[.,;]?", re.IGNORECASE)
 
 
+# A certified question's caption leads with the court that certified it:
+# "CERTIFICATION FROM THE UNITED STATES DISTRICT COURT FOR THE WESTERN
+# DISTRICT OF WASHINGTON IN MICHAEL O. BRADLEY, ET AL, Plaintiffs, v. …".
+# The case is the one named after "in" (Bradley v. Am. Smelting & Refin. Co.,
+# 104 Wash. 2d 677).  Taken only when an adversary caption follows, so the
+# cut can never leave a caption with no parties.
+_CERTIFICATION_PREAMBLE_RE = re.compile(
+    r"^\s*(?:(?:on|upon)\s+)?"
+    r"(?:certification|certified\s+questions?|questions?\s+certified)"
+    r"\b[^()]{0,200}?\s+in\s*[:,]?\s+(?=\S.*\s(?:v|vs)\.\s)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def strip_certification_preamble(text: str) -> str:
+    """Drop a certified question's "Certification from <court> in" lead,
+    leaving the case's own caption; others pass through unchanged."""
+    return _CERTIFICATION_PREAMBLE_RE.sub("", text or "", count=1)
+
+
 def strip_related_case_note(text: str) -> str:
     """Remove a "(Re <underlying case>)" caption cross-reference, leaving
     the case's own name: "Ex parte MURPHY. (Re Murphy v. State)." ->
-    "Ex parte MURPHY.".  Captions without one pass through unchanged."""
-    return _RELATED_CASE_NOTE_RE.sub("", text or "").strip()
+    "Ex parte MURPHY.".  A certified question's "Certification from <court>
+    in" lead goes too (:func:`strip_certification_preamble`).  Captions
+    without either pass through unchanged."""
+    text = strip_certification_preamble(text or "")
+    return _RELATED_CASE_NOTE_RE.sub("", text).strip()
 
 
 # Abbreviations whose period never ends a listed case: honorifics,

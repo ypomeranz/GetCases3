@@ -29,6 +29,7 @@ from citation_overrides import (
 )
 from court_catalog import bluebook_federal_trial_court, state_of_court
 from courtlistener_gui import (
+    detect_brief_links,
     _bluebook_display_name,
     _scholar_item_from_blocks,
     CourtListenerGUI,
@@ -110,6 +111,64 @@ class SmartQuoteTests(unittest.TestCase):
         self.assertEqual(
             educate_quotes('One "quotation" and another "quotation".'), expected,
         )
+
+
+class WashingtonCertificationTests(unittest.TestCase):
+    """Bradley v. Am. Smelting & Refin. Co., 104 Wash. 2d 677 (1985), and
+    the passage citing Garratt v. Dailey that turned up the problems."""
+
+    BRADLEY = (
+        '<div id="gs_opinion"><center><b>104 Wn.2d 677 (1985)</b></center>'
+        "<center><b>709 P.2d 782</b></center>"
+        '<center><h3 id="gsl_case_name">CERTIFICATION FROM THE UNITED STATES '
+        "DISTRICT COURT FOR THE WESTERN DISTRICT OF WASHINGTON IN<br/> "
+        "MICHAEL O. BRADLEY, ET AL, Plaintiffs,<br/> v.<br/> AMERICAN "
+        "SMELTING AND REFINING COMPANY, Defendant.</h3></center>"
+        "<center>No. 51094-6.</center><center><p><b>The Supreme Court of "
+        "Washington, En Banc.</b></p></center><center>November 14, 1985."
+        "</center><p>Michael Bradley owns land. American Smelting and "
+        "Refining Company operates a smelter.</p></div>"
+    )
+
+    def test_a_sentence_ending_in_state_is_not_part_of_the_next_name(self):
+        text = ("This has been the reasoning of the decisions of this State. "
+                "Garratt v. Dailey, 46 Wn.2d 197, 279 P.2d 1091 (1955) "
+                "involved a 5-year-old boy.")
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(spans[0], "Garratt v. Dailey, 46 Wn.2d 197")
+
+    def test_nor_is_a_spelled_out_table_word(self):
+        text = "So held this Court. Roe v. Wade, 410 U.S. 113 (1973)."
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(spans[0], "Roe v. Wade, 410 U.S. 113 (1973)")
+
+    def test_but_a_name_s_own_abbreviations_still_belong_to_it(self):
+        text = "See Palsgraf v. Long Island R.R. Co., 248 N.Y. 339 (1928)."
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(
+            spans[0], "Palsgraf v. Long Island R.R. Co., 248 N.Y. 339 (1928)")
+
+    def test_the_certifying_court_is_not_part_of_the_name(self):
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import extract_record
+        blocks = parse_opinion_blocks(self.BRADLEY)
+        self.assertEqual(
+            _bluebook_display_name(_scholar_item_from_blocks(blocks)),
+            "Bradley v. Am. Smelting & Refin. Co., 104 Wash. 2d 677 (1985)")
+        self.assertEqual(
+            extract_record("https://scholar.google.com/scholar_case?case=1",
+                           self.BRADLEY)["name"],
+            "Bradley v. Am. Smelting & Refin. Co.")
+
+    def test_a_certification_lead_needs_a_case_after_it(self):
+        self.assertEqual(abbreviate_case_name("Certification Bd. v. Smith"),
+                         "Certification Bd. v. Smith")
+
+    def test_wn_2d_is_cited_as_the_official_wash_2d(self):
+        item = {"caseName": "Garratt v. Dailey", "citation": ["46 Wn.2d 197"],
+                "dateFiled": "1955-01-27", "court_id": "wash"}
+        self.assertEqual(_bluebook_display_name(item),
+                         "Garratt v. Dailey, 46 Wash. 2d 197 (1955)")
 
 
 class CaptionCapitalizationTests(unittest.TestCase):

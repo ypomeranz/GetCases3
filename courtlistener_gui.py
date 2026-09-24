@@ -990,6 +990,7 @@ from citations import (
     case_law_reporter_slug as _case_law_reporter_slug,
     reporter_citation_variants as _reporter_citation_variants,
     reporter_key as _canonical_reporter_key,
+    reporter_family as _reporter_family,
     case_match_text as _case_match_text,
     build_short_cite_index as _build_short_cite_index,
     cite_target_from_text as _cite_target_from_text,
@@ -1845,6 +1846,19 @@ def _court_for_paren(citation: str, court_id: str, fallback: str = "") -> str:
     return abbr
 
 
+def _bluebook_reporter_spelling(cite: str) -> str:
+    """*cite* with its reporter spelled the Bluebook way where the app knows
+    that reporter by another name: Washington's courts, and Google Scholar
+    after them, write "104 Wn.2d 677", which the Bluebook cites as "104 Wash.
+    2d 677" — and, being that state's official reporter, without the court in
+    the parenthetical.  Reporters with no such alias pass through as given."""
+    m = re.fullmatch(r"\s*(\d{1,4})\s+(.+?)\s+(\d{1,6})\s*", cite or "")
+    family = _reporter_family(m.group(2)) if m else None
+    if family is None:
+        return cite
+    return f"{m.group(1)} {family.canonical} {m.group(3)}"
+
+
 def _bluebook_display_name(item: dict) -> str:
     """
     The opinion's Bluebook citation as a line of text.
@@ -1875,7 +1889,7 @@ def _bluebook_display_name(item: dict) -> str:
     # ``_scan_cite`` says the same thing for a scan of any other reporter:
     # a Supreme Court Reporter file prints S. Ct. pages, and calling it by the
     # U.S. Reports pages it does not print misdescribes what is on screen.
-    citation_str = (
+    citation_str = _bluebook_reporter_spelling(
         item.get("_us_reports_cite")
         or item.get("_scan_cite")
         or _pick_citation(item.get("citation", []))

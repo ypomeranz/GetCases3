@@ -22,6 +22,7 @@ import json
 import re
 from dataclasses import dataclass
 
+import bluebook_names
 import constitution
 import court_catalog
 import ecfr
@@ -409,6 +410,30 @@ _NAME_STOPPERS = frozenset({
 # "reversed." — is the end of the previous sentence, and stops the scan.
 _NAME_ABBREV_RE = re.compile(r"^(?:[A-Z][A-Za-z'’]{0,6}\.|(?:[A-Z]\.){1,4})$")
 
+# Short words that pass for an abbreviation by their shape ("State." is a
+# capital and four letters, like "Corp.") but are always spelled out in a case
+# name, so a period after one ends a sentence: "…the decisions of this State.
+# Garratt v. Dailey, 46 Wn.2d 197" names Garratt, not "State. Garratt".
+_SPELLED_OUT_NAME_WORDS = frozenset("""
+    state states people city town nation union government act law laws case
+    cases rule rules code title clause statute section article record here
+    there trial jury
+""".split())
+
+
+def _is_name_abbreviation(core: str) -> bool:
+    """Whether a period-terminated word *core* ("Corp.", "U.S.") can sit
+    inside a case name, rather than ending the sentence before it."""
+    if not _NAME_ABBREV_RE.match(core):
+        return False
+    word = core.rstrip(".").replace("’", "'").lower()
+    if "." in word:
+        return True  # an initialism: "U.S.", "R.R."
+    # A word the Bluebook tables abbreviate, written out in full ("Court.",
+    # "County.", "Texas."), is not an abbreviation of anything.
+    return (word not in _SPELLED_OUT_NAME_WORDS
+            and word not in bluebook_names._WORD_MAP)
+
 # Punctuation that can trail a word without being part of it.  Stripped before
 # the sentence-end test, so a quotation's closing mark cannot hide the period
 # that ends it — 'Amendment."' is still the end of a sentence.
@@ -533,7 +558,7 @@ def _case_name_start(
             # A period ends the previous sentence unless it is an abbreviation
             # a name could contain.
             core = tok.rstrip(_NAME_TRAIL)
-            if core.endswith(".") and not _NAME_ABBREV_RE.match(core):
+            if core.endswith(".") and not _is_name_abbreviation(core):
                 break
             i -= 1
             continue
