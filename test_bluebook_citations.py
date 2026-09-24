@@ -29,6 +29,8 @@ from citation_overrides import (
 )
 from court_catalog import bluebook_federal_trial_court, state_of_court
 from courtlistener_gui import (
+    _bluebook_display_name,
+    _scholar_item_from_blocks,
     CourtListenerGUI,
     _CasePdfTextSource,
     _PdfWindow,
@@ -111,6 +113,47 @@ class SmartQuoteTests(unittest.TestCase):
 
 
 class CaptionCapitalizationTests(unittest.TestCase):
+    def test_a_generational_suffix_is_not_the_surname(self):
+        # State v. McKelvey, 544 P.3d 632 (Alaska 2024): Scholar's caption
+        # "John William McKELVEY III" cited as "State v. I.I.I." — the
+        # all-caps "III" read as the surname, "McKELVEY" missed for its "c".
+        self.assertEqual(
+            collapse_personal_all_caps_run("John William McKELVEY III"),
+            "McKELVEY")
+        self.assertEqual(collapse_personal_all_caps_run("John SMITH, Jr."),
+                         "SMITH")
+        self.assertEqual(collapse_personal_all_caps_run("Angus MacDONALD"),
+                         "MacDONALD")
+        # An entity numbering itself keeps its numeral.
+        self.assertEqual(collapse_personal_all_caps_run("ACME FUND II"),
+                         "ACME FUND II")
+        self.assertEqual(
+            collapse_personal_all_caps_run("Blackstone Fund III"),
+            "Blackstone Fund III")
+
+    def test_a_surname_standing_before_its_suffix_cites_alone(self):
+        self.assertEqual(
+            abbreviate_case_name("State v. McKelvey III",
+                                 court_state="alaska"),
+            "State v. McKelvey")
+        self.assertEqual(abbreviate_case_name("Acme Fund III v. Jones"),
+                         "Acme Fund III v. Jones")
+
+    def test_mckelvey_is_cited_by_his_surname(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(
+            '<div id="gs_opinion"><center><b>544 P.3d 632 (2024)</b>'
+            '</center><center><h3 id="gsl_case_name">STATE of Alaska, '
+            "Petitioner,<br/> v.<br/> John William McKELVEY III, "
+            "Respondent.</h3></center><center>Supreme Court No. S-17910."
+            "</center><center><p><b>Supreme Court of Alaska.</b></p>"
+            "</center><center>March 8, 2024.</center><p>John William "
+            "McKelvey III lived on a property. McKelvey grew marijuana.</p>"
+            "</div>")
+        item = _scholar_item_from_blocks(blocks)
+        self.assertEqual(_bluebook_display_name(item),
+                         "State v. McKelvey, 544 P.3d 632 (Alaska 2024)")
+
     def test_apostrophe_and_mc_names_from_all_caps(self):
         self.assertEqual(
             normal_case_caption("O'BRIEN v. MCFADDEN"),

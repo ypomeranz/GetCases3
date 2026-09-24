@@ -672,16 +672,47 @@ _CAPS_ENTITY_SUFFIX_RE = re.compile(
 )
 
 
+# A generational suffix closing a personal name: "… McKELVEY III", "…, Jr.".
+_GENERATIONAL_SUFFIX_RE = re.compile(
+    r"(?:jr|sr|ii|iii|iv)\.?,?", re.IGNORECASE)
+
+# A "Mc"/"Mac" surname as Scholar capitalizes it: "McKELVEY", "MacDONALD".
+_MC_CAPS_SURNAME_RE = re.compile(r"Ma?c[A-Z][A-Z'’-]+[.,]?")
+
+
+def _caps_name_token(token: str) -> bool:
+    """Whether *token* is set in capitals the way Scholar marks a surname —
+    wholly ("THOMAS", "O'CONNOR") or after a "Mc"/"Mac" ("McKELVEY"), whose
+    small "c" keeps it from reading as upper case."""
+    if len(token.strip(".,'")) <= 1 or _GENERATIONAL_SUFFIX_RE.fullmatch(token):
+        return False  # "III" is capitals, but never anyone's surname
+    return token.isupper() or bool(_MC_CAPS_SURNAME_RE.fullmatch(token))
+
+
 def collapse_personal_all_caps_run(text: str) -> str:
     """Keep only an all-caps personal-name run in a mixed-case caption.
 
     Scholar commonly renders a person as ``Corrine Morgan THOMAS``.  Entity
     captions can look similar (``McDonald's USA, LLC``), so organizational
     words and initialisms must not serve as evidence of a surname.
+
+    A generational suffix is no part of the surname and is dropped with the
+    given names: "John William McKELVEY III" is McKelvey.  (Left in, the
+    all-caps "III" was the only run it could find, and the case was cited
+    as "State v. I.I.I.")
     """
     tokens = text.split()
+    if (len(tokens) >= 2
+            and _GENERATIONAL_SUFFIX_RE.fullmatch(tokens[-1])
+            and any(_caps_name_token(t) for t in tokens[:-1])
+            # A given name in ordinary case marks a person; a caption all
+            # in capitals ("ACME FUND II") may be an entity numbering itself.
+            and not all(_caps_name_token(t) for t in tokens[:-1])):
+        tokens = tokens[:-1]
+        tokens[-1] = tokens[-1].rstrip(",")
+        text = " ".join(tokens)
     kept_flags = [
-        (token.isupper() and len(token.strip(".,'")) > 1)
+        _caps_name_token(token)
         or token == "&"
         or token.rstrip(".,").isdigit()
         or bool(_CAPS_ENTITY_SUFFIX_RE.fullmatch(token.rstrip(",")))
@@ -690,8 +721,7 @@ def collapse_personal_all_caps_run(text: str) -> str:
     kept = [token for token, keep in zip(tokens, kept_flags) if keep]
     namey = [
         token for token in kept
-        if token.isupper()
-        and len(token.strip(".,'")) > 1
+        if _caps_name_token(token)
         and not _CAPS_ENTITY_SUFFIX_RE.fullmatch(token.strip(",."))
     ]
     dropped = [token for token, keep in zip(tokens, kept_flags) if not keep]
@@ -1306,6 +1336,13 @@ def _strip_given_names(p: str) -> str | None:
     if (tokens and len(tokens[-1]) > 2 and tokens[-1].endswith(".")
             and "." not in tokens[-1][:-1]):
         tokens[-1] = tokens[-1][:-1]
+    # A surname standing alone before its suffix ("McKelvey III") is a
+    # person all the same — the suffix proves it — and cites as the surname.
+    if (suffixed and len(tokens) == 1 and not titled
+            and re.fullmatch(r"[A-Z][A-Za-z'’-]+", tokens[0])
+            and tokens[0].lower() not in _T6_WORDS
+            and tokens[0].lower() not in _ORG_WORDS):
+        return tokens[0]
     if not 2 <= len(tokens) <= 4:
         return None
     low = [t.replace("’", "'").lower().rstrip(".") for t in tokens]
