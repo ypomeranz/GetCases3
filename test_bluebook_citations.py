@@ -2655,7 +2655,7 @@ class CaseWindowTests(unittest.TestCase):
                 parent, ("usc", "42:1983:"), status, app=app,
             )
         fetch.assert_called_once_with(
-            parent, "usc", "42:1983:", status, app=app,
+            parent, "usc", "42:1983:", status, app=app, on_missing=None,
         )
 
         with patch("courtlistener_gui._open_statute_pdf") as open_pdf:

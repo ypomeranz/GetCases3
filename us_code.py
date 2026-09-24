@@ -237,6 +237,12 @@ _cache: dict[tuple[str, str], UscSection] = {}
 _cache_lock = threading.Lock()
 
 
+class SectionNotFound(RuntimeError, LookupError):
+    """The Code has no such section — as against the site failing to answer,
+    which stays a plain RuntimeError.  A LookupError, so a caller can tell the
+    two apart without knowing which source it asked."""
+
+
 def load_section(title: str, section: str) -> UscSection:
     """Fetch and parse a section, with an in-memory cache.  For a range or
     hyphenated section that the OLRC does not know ("78a-78pp"), falls back
@@ -258,6 +264,9 @@ def load_section(title: str, section: str) -> UscSection:
         url = section_url(title, cand)
         try:
             resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
+            if resp.status_code == 404:
+                last_err = f"no such section {title} U.S.C. § {cand}"
+                continue
             resp.raise_for_status()
         except Exception as exc:
             raise RuntimeError(f"uscode.house.gov: {exc}") from exc
@@ -272,7 +281,7 @@ def load_section(title: str, section: str) -> UscSection:
                 _cache[key] = doc
             return doc
         last_err = f"no text found for {title} U.S.C. § {cand}"
-    raise RuntimeError(f"uscode.house.gov: {last_err}")
+    raise SectionNotFound(f"uscode.house.gov: {last_err}")
 
 
 # Previous/next navigation.  The OLRC viewer's own prev/next controls are

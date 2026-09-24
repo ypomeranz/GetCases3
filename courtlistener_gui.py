@@ -7452,6 +7452,7 @@ class CourtListenerGUI:
                 self._close_quick_popup()
                 _open_statute_action(
                     self.root, statute, self._status_var.set, app=self,
+                    on_missing=self._notify_lookup_miss,
                 )
                 return
 
@@ -7527,8 +7528,8 @@ class CourtListenerGUI:
                             name, cite, pin, fetcher, client, year=year,
                         ):
                             label = f"{name}, {cite}" if name else cite
-                            self._post_root(self._spotlight_notify,
-                                            f"Nothing found for {label}")
+                            self._post_root(self._notify_lookup_miss,
+                                            f"No case found for {label}.")
                     threading.Thread(target=run, daemon=True).start()
                     return
 
@@ -7598,7 +7599,32 @@ class CourtListenerGUI:
             self._query_var.set(query)
             self._do_search()
 
-    def _spotlight_notify(self, message: str) -> None:
+    def _notify_lookup_miss(self, message: str, parent=None) -> None:
+        """Tell the reader that a citation they typed found nothing — "No
+        case found for 145 S. Ct. 9999.", "No such provision found: 42 U.S.C.
+        § 99999." — rather than leaving the lookup to end in silence.
+
+        Asked from a window still on screen (Quick Look Up, the statute
+        dialog), a message box over it.  Asked from Spotlight, whose popup is
+        long closed and whose main window is often hidden, a box would have
+        nothing to sit on — so the toast in Spotlight's place, held long
+        enough to read."""
+        self._status_var.set(message)
+        try:
+            shown = parent is not None and bool(parent.winfo_exists()) \
+                and bool(parent.winfo_viewable())
+        except (tk.TclError, AttributeError):
+            shown = False
+        if shown:
+            try:
+                messagebox.showinfo("Not Found", message, parent=parent)
+                return
+            except tk.TclError:
+                pass
+        self._spotlight_notify(message, duration_ms=8000)
+
+    def _spotlight_notify(self, message: str,
+                          duration_ms: int = 4000) -> None:
         """Transient toast in the spotlight's spot, for a spotlight lookup
         that ends with nothing to open.  By then the popup is long closed
         and the main window is often hidden, so a status-bar note would go
@@ -7645,7 +7671,7 @@ class CourtListenerGUI:
                 self._mac_return_focus()
 
             _bind_recursive(toast, "<Button-1>", dismiss)
-            toast.after(4000, dismiss)
+            toast.after(duration_ms, dismiss)
         except tk.TclError:
             pass
 
@@ -9730,7 +9756,8 @@ class CourtListenerGUI:
             statute = _parse_statute_query(q)
             if statute:
                 _open_statute_action(
-                    self.root, statute, set_status, app=self
+                    self.root, statute, set_status, app=self,
+                    on_missing=lambda m: self._notify_lookup_miss(m, dlg),
                 )
                 return
             parsed = _parse_citation_line(q)
@@ -9763,6 +9790,10 @@ class CourtListenerGUI:
                         return
                     set_status(f"Opened {cite}." if ok
                                else f"Not found: {cite}")
+                    if not ok:
+                        label = f"{name}, {cite}" if name else cite
+                        self._notify_lookup_miss(
+                            f"No case found for {label}.", dlg)
 
                 self._post_root(finish)
 
@@ -9805,7 +9836,8 @@ class CourtListenerGUI:
             # Parent on the root so the statute window outlives the dialog.
             # (A state we only link out to opens in the browser instead.)
             _open_statute_action(
-                self.root, parsed, status_var.set, app=self
+                self.root, parsed, status_var.set, app=self,
+                on_missing=lambda m: self._notify_lookup_miss(m, dlg),
             )
 
         ttk.Button(frame, text="Look Up", command=go).grid(row=0, column=2)
@@ -28907,9 +28939,15 @@ _SOURCE_HOST: dict[str, str] = {
 
 
 def _fetch_statute_window(parent: tk.Misc, kind: str, spec: str,
-                          status=lambda _s: None, *, app=None) -> None:
+                          status=lambda _s: None, *, app=None,
+                          on_missing=None) -> None:
     """Fetch a statute, regulation or federal rule section in a background
-    thread and open a _StatuteWindow over `parent` when it arrives."""
+    thread and open a _StatuteWindow over `parent` when it arrives.
+
+    ``on_missing`` receives a message for the reader when the section can't
+    be opened — "No such provision found: 42 U.S.C. § 99999." when the
+    source has no such section, or what went wrong when the source itself
+    failed — so a citation typed in by hand never ends in silence."""
     mod = _STATUTE_SOURCES[kind]
     host = _SOURCE_HOST.get(kind, "the source")
     title, section, subs = spec.split(":", 2)
@@ -28933,7 +28971,14 @@ def _fetch_statute_window(parent: tk.Misc, kind: str, spec: str,
         try:
             doc = mod.load_section(title, section)
         except Exception as exc:
-            post(safe_status, str(exc))
+            # A LookupError is the source saying there is no such section;
+            # anything else is the source (or the network) failing.
+            message = (f"No such provision found: {label}."
+                       if isinstance(exc, LookupError)
+                       else f"Couldn't open {label}: {exc}")
+            post(safe_status, message)
+            if on_missing is not None:
+                post(on_missing, message)
             return
 
         def show() -> None:
@@ -28949,10 +28994,12 @@ def _fetch_statute_window(parent: tk.Misc, kind: str, spec: str,
 
 
 def _open_statute_action(parent: tk.Misc, action: tuple[str, str],
-                         status=lambda _s: None, *, app=None) -> None:
+                         status=lambda _s: None, *, app=None,
+                         on_missing=None) -> None:
     """Carry out a parsed statute-lookup action: open the in-app viewer, or —
     for a state we only link out to (N.Y., Tex., other states) — open the
-    official source in the browser."""
+    official source in the browser.  ``on_missing``: see
+    :func:`_fetch_statute_window`."""
     kind, value = action
     if kind == "browse":
         webbrowser.open(value)
@@ -28961,7 +29008,8 @@ def _open_statute_action(parent: tk.Misc, action: tuple[str, str],
     if kind in ("statpdf", "frpdf"):
         _open_statute_pdf(parent, value, status, app=app)
         return
-    _fetch_statute_window(parent, kind, value, status, app=app)
+    _fetch_statute_window(parent, kind, value, status, app=app,
+                          on_missing=on_missing)
 
 
 def _stat_cite_from_url(url: str) -> str:
