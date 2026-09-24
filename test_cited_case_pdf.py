@@ -285,9 +285,9 @@ APP_NS = _load(
          "5 U.S. 137" if "Cranch" in cite else ""),
      # The official-series form: the same stand-in for the early Supreme
      # Court reporters, and the real Massachusetts mapping.
-     "_official_series_cite": lambda cite: (
-         "5 U.S. 137" if "Cranch" in cite
-         else citations.mass_reports_cite(cite)),
+     "_official_series_cites": lambda cite: (
+         ["5 U.S. 137"] if "Cranch" in cite
+         else citations.state_nominative_cites(cite)),
      "_pin_display": lambda pin: pin,
      "_is_us_reports_pdf": lambda url: "usrep" in (url or "").lower(),
      "_PdfPane": type("_PdfPane", (), {"_MARGIN": 18}),

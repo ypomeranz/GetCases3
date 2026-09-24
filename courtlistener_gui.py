@@ -977,8 +977,8 @@ from citations import (
     NOMINATIVE_PARALLEL_RE as _NOMINATIVE_PARALLEL_RE,
     US_NOMINATIVE_PARALLEL_RE as _US_NOMINATIVE_PARALLEL_RE,
     NOMINATIVE_CITE_RE as _NOMINATIVE_TEXT_CITE_RE,
-    MASS_NOMINATIVE_CITE_RE as _MASS_NOMINATIVE_CITE_RE,
-    mass_reports_cite as _mass_reports_cite,
+    STATE_NOMINATIVE_CITE_RE as _STATE_NOMINATIVE_CITE_RE,
+    state_nominative_cites as _state_nominative_cites,
     EARLY_FED_CITE_RE as _EARLY_FED_CITE_RE,
     early_fed_cite_text as _early_fed_cite_text,
     SHORT_CITE_RE as _SHORT_CITE_RE,
@@ -2662,14 +2662,21 @@ def _us_reports_cite(cite: str) -> str:
     return f"{int(m.group(1)) + off} U.S. {m.group(3)}" if off is not None else ""
 
 
-def _official_series_cite(cite: str) -> str:
+def _official_series_cites(cite: str) -> list[str]:
     """A nominative citation in the numbered official series it was folded
     into — the U.S. Reports for the early Supreme Court reporters ("1 Cranch
-    137" → "5 U.S. 137"), the Massachusetts Reports for Tyng, Pickering,
-    Metcalf, Cushing, Gray and Allen ("19 Pick. 234" → "36 Mass. 234") —
-    which is how CourtListener and static.case.law mostly index them; ""
-    for any other citation."""
-    return _us_reports_cite(cite) or _mass_reports_cite(cite)
+    137" → "5 U.S. 137"), a state's own Reports for its early reporters ("19
+    Pick. 234" → "36 Mass. 234", "4 Heisk. 20" → "51 Tenn. 20") — which is
+    how CourtListener and static.case.law mostly index them.  More than one
+    where an abbreviation names two states' reporters ("4 Met." is 45 Mass.
+    or 61 Ky.); [] for any other citation."""
+    us = _us_reports_cite(cite)
+    return [us] if us else _state_nominative_cites(cite)
+
+
+def _official_series_cite(cite: str) -> str:
+    """The first of :func:`_official_series_cites`, or ""."""
+    return next(iter(_official_series_cites(cite)), "")
 
 
 # The docket line a report prints under the caption: "No. 25-52.",
@@ -2743,10 +2750,9 @@ def _citation_search_variants(query: str) -> tuple[str, ...]:
     if not query:
         return ()
     variants = list(_reporter_citation_variants(query))
-    for pattern in (_NOMINATIVE_CITE_RE, _MASS_NOMINATIVE_CITE_RE):
+    for pattern in (_NOMINATIVE_CITE_RE, _STATE_NOMINATIVE_CITE_RE):
         m = pattern.search(query)
-        official = _official_series_cite(m.group(0)) if m else ""
-        if official:
+        for official in (_official_series_cites(m.group(0)) if m else ()):
             expanded = query[:m.start()] + official + query[m.end():]
             if expanded not in variants:
                 variants.append(expanded)
@@ -2777,7 +2783,7 @@ def _case_law_pdf_for_cite(cite: str) -> Optional[str]:
     modern U.S.-Reports form for an old nominative SCOTUS cite — or None when
     case.law has neither."""
     choices = _case_law_pdf_choices_for_cites(
-        [cite, _official_series_cite(cite)])
+        [cite, *_official_series_cites(cite)])
     return choices[0].url if choices else None
 
 
@@ -5980,7 +5986,7 @@ def _case_law_text_source(
     for raw in list(cites) + [prefer]:
         for cite in (
             re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str(raw or ""))).strip(),
-            _official_series_cite(str(raw or "")),
+            *_official_series_cites(str(raw or "")),
         ):
             key = re.sub(r"\s+", "", cite).lower()
             if not cite or key in seen:
@@ -8965,7 +8971,7 @@ class CourtListenerGUI:
         cites = [str(c) for c in (item.get("citation") or [])]
         # The cite as printed, and — for an old nominative cite — its modern
         # U.S. or Mass. Reports form, which is what the scans are filed under.
-        for extra in (cite, _official_series_cite(cite) or ""):
+        for extra in (cite, *_official_series_cites(cite)):
             if extra and extra not in cites:
                 cites.append(extra)
         item["citation"] = cites
@@ -26949,10 +26955,11 @@ class _ScholarTextWindow:
                 # (fuzzy) case name.
                 target = (_cl_item_for_citation(client, cite, name=name)
                           if cite else None)
-                if target is None and cite:
-                    alt = _official_series_cite(cite)
-                    if alt:
-                        target = _cl_item_for_citation(client, alt, name=name)
+                for alt in (_official_series_cites(cite)
+                            if target is None and cite else ()):
+                    target = _cl_item_for_citation(client, alt, name=name)
+                    if target is not None:
+                        break
                 if target is None and cite:
                     # CourtListener has no cluster at this exact citation.
                     # Prefer the citation-keyed static.case.law PDF — the

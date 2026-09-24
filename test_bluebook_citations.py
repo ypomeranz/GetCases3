@@ -176,6 +176,93 @@ class MassachusettsNominativeTests(unittest.TestCase):
                          [call("19 Pick. 234"), call("36 Mass. 234")])
 
 
+class RenamedAndRenumberedReporterTests(unittest.TestCase):
+    """Reporters known by more than one name: state nominative reports
+    renumbered into the official series, series renamed partway through,
+    and one series written several ways."""
+
+    def test_each_state_s_nominative_reports_map_onto_its_official_series(self):
+        from citations import state_nominative_cites
+        for cite, official in (
+            # Illinois
+            ("1 Breese 5", "1 Ill. 5"), ("4 Scam. 5", "5 Ill. 5"),
+            ("1 Gilm. 5", "6 Ill. 5"), ("5 Gilm. 5", "10 Ill. 5"),
+            # Kentucky
+            ("1 Bibb 5", "4 Ky. 5"), ("3 A.K. Marsh. 5", "10 Ky. 5"),
+            ("3 A. K. Marsh. 5", "10 Ky. 5"),
+            ("1 Litt. Sel. Cas. 5", "16 Ky. 5"), ("7 T.B. Mon. 5", "23 Ky. 5"),
+            ("1 J.J. Marsh. 5", "24 Ky. 5"), ("9 Dana 5", "39 Ky. 5"),
+            ("18 B. Mon. 5", "57 Ky. 5"), ("2 Duv. 5", "63 Ky. 5"),
+            ("14 Bush 5", "77 Ky. 5"),
+            # Tennessee
+            ("2 Overt. 5", "2 Tenn. 5"), ("10 Yer. 5", "18 Tenn. 5"),
+            ("1 Hum. 5", "20 Tenn. 5"), ("3 Head 5", "40 Tenn. 5"),
+            ("12 Heisk. 5", "59 Tenn. 5"), ("16 Lea 5", "84 Tenn. 5"),
+            # Virginia
+            ("1 Va. Cas. 5", "3 Va. 5"), ("6 Call 5", "10 Va. 5"),
+            ("1 Hen. & M. 5", "11 Va. 5"), ("12 Leigh 5", "39 Va. 5"),
+            ("33 Gratt. 5", "74 Va. 5"),
+            # Delaware
+            ("5 Harr. 5", "5 Del. 5"), ("1 W.W. Harr. 5", "31 Del. 5"),
+            ("20 Terry 5", "59 Del. 5"),
+            # Mississippi, Pennsylvania, New York
+            ("1 S. & M. 5", "9 Miss. 5"), ("10 George 5", "39 Miss. 5"),
+            ("10 Barr 5", "10 Pa. 5"), ("14 Wright 5", "50 Pa. 5"),
+            ("1 Seld. 5", "5 N.Y. 5"), ("4 Kern. 5", "14 N.Y. 5"),
+        ):
+            with self.subTest(cite=cite):
+                self.assertEqual(state_nominative_cites(cite), [official])
+
+    def test_an_abbreviation_two_states_used_tries_both(self):
+        from citations import state_nominative_cites
+        self.assertEqual(state_nominative_cites("4 Met. 111"),
+                         ["45 Mass. 111", "61 Ky. 111"])
+        self.assertEqual(state_nominative_cites("1 Sneed 5"),
+                         ["2 Ky. 5", "33 Tenn. 5"])
+        # Only Massachusetts' Metcalf ran past four volumes.
+        self.assertEqual(state_nominative_cites("9 Met. 5"), ["50 Mass. 5"])
+
+    def test_a_bare_name_links_only_where_a_citation_stands(self):
+        text = "He sold 3 Head 5 times; see Doe v. Roe, 3 Head 5 (1859)."
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(spans, ["Doe v. Roe, 3 Head 5 (1859)"])
+
+    def test_the_bluebook_parallel_form_links_as_the_official_cite(self):
+        links = detect_brief_links("Doe v. Roe, 61 Ky. (4 Met.) 1 (1862).")
+        self.assertEqual(links[0][2], ("cite", "61 Ky. 1"))
+
+    def test_a_lookup_tries_every_official_series_it_could_be(self):
+        from courtlistener_gui import _citation_search_variants
+        self.assertEqual(_citation_search_variants("4 Met. 111"),
+                         ("4 Met. 111", "45 Mass. 111", "61 Ky. 111"))
+
+    def test_a_renamed_series_is_tried_under_its_other_name(self):
+        from citations import reporter_citation_variants
+        self.assertEqual(reporter_citation_variants("80 App. D.C. 12"),
+                         ("80 App. D.C. 12", "80 U.S. App. D.C. 12"))
+        self.assertEqual(reporter_citation_variants("20 Fed. Cl. 5"),
+                         ("20 Fed. Cl. 5", "20 Cl. Ct. 5"))
+        self.assertEqual(reporter_citation_variants("30 Fed. Cl. 5"),
+                         ("30 Fed. Cl. 5",))
+
+    def test_another_spelling_of_a_series_is_tried_and_cited_as_bluebook(self):
+        from citations import reporter_citation_variants
+        for typed, bluebook in (
+            ("250 Ore. 12", "250 Or. 12"), ("12 Maine 45", "12 Me. 45"),
+            ("120 Okl. Cr. 5", "120 Okla. Crim. 5"),
+            ("140 Tex. Cr. R. 3", "140 Tex. Crim. 3"),
+            ("95 Sup. Ct. 1", "95 S. Ct. 1"),
+            ("250 A.D. 5", "250 App. Div. 5"),
+            ("5 Johnson 10", "5 Johns. 10"),
+        ):
+            with self.subTest(typed=typed):
+                self.assertIn(bluebook, reporter_citation_variants(typed))
+        item = {"caseName": "Doe v. Roe", "citation": ["250 Ore. 12"],
+                "dateFiled": "1968-01-01", "court_id": "or"}
+        self.assertEqual(_bluebook_display_name(item),
+                         "Doe v. Roe, 250 Or. 12 (1968)")
+
+
 class WashingtonCertificationTests(unittest.TestCase):
     """Bradley v. Am. Smelting & Refin. Co., 104 Wash. 2d 677 (1985), and
     the passage citing Garratt v. Dailey that turned up the problems."""
