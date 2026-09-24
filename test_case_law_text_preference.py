@@ -82,6 +82,9 @@ ITEM_CASE_LAW_KEY = _load_function(
 #: test exercises it rather than a restatement of it.
 CASE_LAW_PDF_FOR_JSON_URL = _load_function("_case_law_pdf_for_json_url")
 CITES_LED_BY = _load_function("_cites_led_by")
+#: The real reading of the name and year a Scholar lookup by citation is
+#: given, to pick the case out from any other beginning on the same page.
+CASE_NAME_AND_YEAR = _load_function("_case_name_and_year")
 CASE_LAW_REPORTER_CITE = _load_function(
     "_case_law_reporter_cite",
     {"_CASE_LAW_URL_RE": re.compile(
@@ -183,6 +186,7 @@ APP_NS = _load(
      "_cites_led_by": CITES_LED_BY,
      "_case_law_pdf_for_json_url": CASE_LAW_PDF_FOR_JSON_URL,
      "_case_law_reporter_cite": CASE_LAW_REPORTER_CITE,
+     "_case_name_and_year": CASE_NAME_AND_YEAR,
      })
 
 
@@ -218,6 +222,7 @@ class _Fetcher:
     def __init__(self, result=None, error=False):
         self.result, self.error = result, error
         self.asked: list = []
+        self.named: list = []   # (case_name, year) each lookup was given
 
     def get_cached(self, key):
         return None
@@ -225,8 +230,9 @@ class _Fetcher:
     def put_cached(self, key, url, html):
         pass
 
-    def fetch_by_citation(self, cite):
+    def fetch_by_citation(self, cite, case_name="", year=""):
         self.asked.append(cite)
+        self.named.append((case_name, year))
         if self.error:
             raise RuntimeError("blocked")
         return self.result
@@ -280,6 +286,14 @@ class SourcePreferenceTests(unittest.TestCase):
             # A verified Scholar match: neither other source is consulted.
             self.app._scholar_first_worker(dict(CLUSTER), fetcher, "client")
         self.assertEqual(CAP_LOOKUPS, [])
+
+    def test_scholar_is_told_which_case_at_the_page_is_meant(self):
+        # Another case can begin on the same reporter page; the cluster's own
+        # caption and year are what pick this one out of Scholar's results.
+        fetcher = _Fetcher()
+        self._open(fetcher=fetcher)
+        self.assertEqual(fetcher.asked, ["410 F.2d 701"])
+        self.assertEqual(fetcher.named, [("Pearson v. Dodd", "1969")])
 
     def test_a_scholar_error_still_reaches_static_case_law(self):
         CAP_ANSWER[0] = CAP

@@ -7491,6 +7491,9 @@ class CourtListenerGUI:
                 parsed = name, cite, pin
             if parsed:
                 name, cite, pin = parsed
+                # "(2025)" after the cite: with the name, what picks the case
+                # when more than one begins on the cited page.
+                year = _citation_line_year(query)
                 fetcher = (
                     self._get_scholar() if _SCHOLAR_AVAILABLE else None
                 )
@@ -7506,7 +7509,7 @@ class CourtListenerGUI:
                         # resolves nowhere would otherwise end in silence,
                         # which reads as the app having hung.
                         if not self._try_open_citation(
-                            name, cite, pin, fetcher, client,
+                            name, cite, pin, fetcher, client, year=year,
                         ):
                             label = f"{name}, {cite}" if name else cite
                             self._post_root(self._spotlight_notify,
@@ -8781,9 +8784,16 @@ class CourtListenerGUI:
 
     def open_cited_case_pdf(self, parent: tk.Misc, action: tuple,
                             snippet: str = "",
-                            status=lambda _s: None, fallback=None) -> bool:
+                            status=lambda _s: None, fallback=None,
+                            name: str = "") -> bool:
         """Follow a citation clicked *inside a PDF* to the cited case's own
         PDF, in a viewer window of its own.
+
+        The case's name is read off ``snippet`` — the highlighted citation,
+        "NetChoice, LLC v. Fitch, 145 S. Ct. 2658" — unless the caller already
+        has it on its own (a search result's caption, the name a Google
+        Scholar link carries), in which case it comes as ``name``.  It is what
+        picks the case when more than one begins on the cited page.
 
         Reading a scan and clicking through it, the reader is after the cited
         opinion as it was printed — so the scan is looked for first, by the
@@ -8806,7 +8816,9 @@ class CourtListenerGUI:
         cite = cite.strip()
         if not cite:
             return False
-        name = _citation_link_name(snippet, cite)
+        # A search result's caption can carry the search's <mark> highlights.
+        name = (re.sub(r"<[^>]+>", "", name or "").strip()
+                or _citation_link_name(snippet, cite))
         client = self._get_client() if self._token_var.get().strip() else None
 
         def safe_status(text: str) -> None:
@@ -8876,7 +8888,7 @@ class CourtListenerGUI:
             return False
         return self.open_cited_case_pdf(
             parent if parent is not None else self.root, ("cite", cite),
-            name, self._safe_root_status, fallback=fallback)
+            name, self._safe_root_status, fallback=fallback, name=name)
 
     def _safe_root_status(self, text: str) -> None:
         try:
@@ -9161,6 +9173,10 @@ class CourtListenerGUI:
                     client = self._get_client()
             except Exception as exc:
                 print(f"[cite-pdf] no CourtListener client for {cite!r}: {exc}")
+        # Two cases can begin on the cited page; the name picks the one the
+        # link means.  With none on the link, the cluster the scan was found
+        # through names it — so the text is of the case whose pages are shown.
+        case_name, year = _case_name_and_year(cl_item, name)
 
         def scholar() -> bool:
             """Whether Google Scholar answered with a copy of the case."""
@@ -9168,7 +9184,8 @@ class CourtListenerGUI:
                 return False
             try:
                 for lookup_cite in _citation_search_variants(cite):
-                    fetched = fetcher.fetch_by_citation(lookup_cite)
+                    fetched = fetcher.fetch_by_citation(
+                        lookup_cite, case_name=case_name, year=year)
                     if not fetched:
                         continue
                     if on_page is not None:
@@ -9405,13 +9422,18 @@ class CourtListenerGUI:
 
     def _try_open_citation(self, name: str, cite: str, pin: str,
                            fetcher, client, prefetch_pdf: bool = True,
-                           view_parent: "Optional[tk.Misc]" = None) -> bool:
+                           view_parent: "Optional[tk.Misc]" = None,
+                           year: str = "") -> bool:
         """Resolve one case citation and open its window (call from a
         worker thread).  Google Scholar by citation first — retrying as a
         name+citation search — with a pin-cite jump; then static.case.law's
         text of the printed report, which is paginated to the very reporter
         the citation names; then the CourtListener text.  Returns False when
         nothing was found.
+
+        ``name`` (however much of the case name came with the citation) and
+        ``year`` (from its parenthetical) pick the case when more than one
+        begins on the cited page.
 
         ``prefetch_pdf=False`` opens the text without warming the official PDF
         in the background — used by the PDF brief viewer, where a second PDF
@@ -9433,22 +9455,30 @@ class CourtListenerGUI:
             result = None
             try:
                 for lookup_cite in _citation_search_variants(cite):
-                    result = fetcher.fetch_by_citation(lookup_cite)
+                    result = fetcher.fetch_by_citation(
+                        lookup_cite, case_name=name, year=year)
                     if not result and name:
                         # Accept a name+cite search hit only when the *result*
                         # itself is this case — bearing an equivalent cite in
-                        # its title/byline, or matching the case name — never
-                        # merely because another opinion quotes the query.
+                        # its title/byline (and, of several cases beginning on
+                        # that page, the one answering to the name), or else
+                        # matching the case name — never merely because
+                        # another opinion quotes the query, nor because it is
+                        # the other case printed on the same page.
                         hits = fetcher.search_cases(
                             f"{name} {lookup_cite}", limit=3,
                         )
-                        for hit in hits:
-                            if _scholar_bears_citation(hit, lookup_cite) or (
-                                _name_match_score(name, hit.title or "")
-                                >= _NAME_MATCH_MIN
-                            ):
-                                result = fetcher.fetch_by_url(hit.url)
-                                break
+                        hit = fetcher.pick_cited_result(
+                            hits, lookup_cite, name, year)
+                        if hit is None:
+                            hit = next(
+                                (h for h in hits
+                                 if _name_match_score(name, h.title or "")
+                                 >= _NAME_MATCH_MIN),
+                                None,
+                            )
+                        if hit is not None:
+                            result = fetcher.fetch_by_url(hit.url)
                     if result:
                         break
             except Exception as exc:
@@ -9618,8 +9648,9 @@ class CourtListenerGUI:
             def run() -> None:
                 for i, (ln, name, cite, pin) in enumerate(entries, 1):
                     post(set_status, f"({i}/{n}) Searching {cite}…")
-                    if self._try_open_citation(name, cite, pin,
-                                               fetcher, client):
+                    if self._try_open_citation(
+                            name, cite, pin, fetcher, client,
+                            year=_citation_line_year(ln)):
                         opened[0] += 1
                     else:
                         failures.append(ln)
@@ -9707,7 +9738,8 @@ class CourtListenerGUI:
 
             def run() -> None:
                 ok = self._try_open_citation(name, cite, pin,
-                                             fetcher, client)
+                                             fetcher, client,
+                                             year=_citation_line_year(q))
 
                 def finish() -> None:
                     try:
@@ -12030,8 +12062,12 @@ class CourtListenerGUI:
             if primary:
                 if status:
                     status("Searching Google Scholar…")
+                # The cluster's own name and year pick it out from any other
+                # case beginning on the same page.
+                case_name, year = _case_name_and_year(item)
                 try:
-                    quick_result = fetcher.fetch_by_citation(primary)
+                    quick_result = fetcher.fetch_by_citation(
+                        primary, case_name=case_name, year=year)
                 except Exception as exc:
                     print(f"[scholar] first-case fetch error for {primary!r}: {exc}")
                     quick_error = True
@@ -26671,6 +26707,7 @@ class _ScholarTextWindow:
                     self._live_parent(),
                     ("cite", f"{cite}@{pin}" if pin else cite),
                     snippet or name, self._safe_status, fallback=as_text,
+                    name=name,
                 ):
                     return
             except Exception as exc:
@@ -26713,7 +26750,9 @@ class _ScholarTextWindow:
                 if kind == "url":
                     result = fetcher.fetch_by_url(url_val)
                 else:
-                    result = fetcher.fetch_by_citation(cite)
+                    # The caption highlighted with the cite picks the case
+                    # when more than one begins on the cited page.
+                    result = fetcher.fetch_by_citation(cite, case_name=name)
             except Exception as exc:
                 print(f"[scholar] link fetch failed: {exc}")
                 result = None
@@ -27280,13 +27319,15 @@ class _ScholarTextWindow:
         Scholar Text" button.  Failing that, retry the original fetch
         ``attempts`` more times, ``delay`` seconds apart.
 
-        (``name`` is unused — it's accepted so the shared ``retry`` tuple
-        ``(cite, pin, url, name)`` unpacks cleanly.)"""
+        ``name`` — the link's own caption, else this window's case — goes
+        with every citation lookup: a parallel cite can open a page on which
+        another case begins as well, and the name is what tells them apart."""
         fetcher = self._app._get_scholar()
         if fetcher is None or not (url_val or cite):
             return
         client = self._app._get_client()
         item = dict(self._item) if self._item else {}
+        case_name, year = _case_name_and_year(item, name)
 
         def attach(url: str, html: str, note: str) -> None:
             cluster_id = item.get("cluster_id") or item.get("id")
@@ -27301,7 +27342,8 @@ class _ScholarTextWindow:
         def run() -> None:
             for alt in _scholar_parallel_cites(client, item, cite):
                 try:
-                    result = fetcher.fetch_by_citation(alt)
+                    result = fetcher.fetch_by_citation(
+                        alt, case_name=case_name, year=year)
                 except Exception:
                     result = None
                 if result:
@@ -27312,7 +27354,8 @@ class _ScholarTextWindow:
                 time.sleep(delay)
                 try:
                     result = (fetcher.fetch_by_url(url_val) if url_val
-                              else fetcher.fetch_by_citation(cite))
+                              else fetcher.fetch_by_citation(
+                                  cite, case_name=case_name, year=year))
                 except Exception:
                     result = None
                 if result:
@@ -27344,7 +27387,8 @@ class _ScholarTextWindow:
                 time.sleep(delay)
                 try:
                     result = (fetcher.fetch_by_url(url_val) if url_val
-                              else fetcher.fetch_by_citation(cite))
+                              else fetcher.fetch_by_citation(
+                                  cite, case_name=name))
                 except Exception:
                     result = None
                 if result:
@@ -28760,6 +28804,30 @@ def _citation_link_name(snippet: str, cite: str = "") -> str:
         if parsed_keys and wanted_keys and not (parsed_keys & wanted_keys):
             return ""
     return name
+
+
+def _case_name_and_year(item: "Optional[dict]",
+                        name: str = "") -> tuple[str, str]:
+    """What a Google Scholar lookup by citation can tell apart the cases that
+    begin on one reporter page by: the case's name — *name* when the caller
+    has one (the caption a link or a typed citation came with), else the
+    CourtListener *item*'s — and the year the item was decided."""
+    item = item or {}
+    caption = name or item.get("caseName") or item.get("case_name") or ""
+    caption = re.sub(r"<[^>]+>", "", str(caption)).strip()
+    filed = str(item.get("dateFiled") or item.get("date_filed") or "").strip()
+    return caption, (filed[:4] if re.match(r"\d{4}", filed) else "")
+
+
+def _citation_line_year(line: str) -> str:
+    """The decision year in a typed citation's parenthetical — the "2025" of
+    "NetChoice, LLC v. Fitch, 145 S. Ct. 2658 (2025)", or of "(5th Cir.
+    2019)" — or "" when none follows the citation."""
+    m = _LINE_CITE_RE.search(line or "")
+    if not m:
+        return ""
+    year = re.search(r"\([^()]*?\b(1[6-9]\d\d|20\d\d)\s*\)", line[m.end():])
+    return year.group(1) if year else ""
 
 
 # A hand-typed statute/regulation lookup: "42 USC 1983(b)", "29 cfr
@@ -31166,7 +31234,8 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
             try:
                 ok = app._try_open_citation(name, cite, "", fetcher, client,
                                             prefetch_pdf=False,
-                                            view_parent=parent)
+                                            view_parent=parent,
+                                            year=(spec.get("date") or "")[:4])
             except Exception as exc:
                 print(f"[recap] scholar fallback failed for {label!r}: {exc}")
         elif name and fetcher is not None:
@@ -31652,10 +31721,11 @@ class _BriefCompileResolver:
         blocks = None
         item = None
         source = ""
-        # 1) Saved Google Scholar copy (cache only — no network).
+        # 1) Saved Google Scholar copy (cache only — no network) — the case
+        # the name picks when another case begins on the same page.
         if self._fetcher is not None:
             try:
-                cached = self._fetcher.get_cached(f"cite2:{cite.strip()}")
+                cached = self._fetcher.cached_by_citation(cite, name)
             except Exception:
                 cached = None
             if cached:
@@ -31677,7 +31747,7 @@ class _BriefCompileResolver:
         # 3) Fresh Google Scholar search — the last resort.
         if not blocks and self._fetcher is not None:
             try:
-                result = self._fetcher.fetch_by_citation(cite)
+                result = self._fetcher.fetch_by_citation(cite, case_name=name)
                 if not result and name:
                     result = self._fetcher.fetch_by_name(name)
             except Exception as exc:

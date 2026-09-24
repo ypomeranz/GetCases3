@@ -316,6 +316,8 @@ APP_NS = _load(
      "_case_law_print_citation": lambda *a, **kw: "HEADER",
      "filedialog": mock.Mock(),
      "messagebox": mock.Mock(),
+     # The real reading of the name and year the text lookup is given.
+     "_case_name_and_year": _load_function("_case_name_and_year"),
      },
 )
 
@@ -374,6 +376,7 @@ class _App:
         self._resolves = resolves
         self._scholar_has_it = scholar   # whether Scholar carries the case
         self.scholar_calls = []
+        self.scholar_names = []          # (case_name, year) each call had
         self._describe_warmed_case = APP_NS["_describe_warmed_case"]
         for name in ("open_cited_case_pdf", "_cited_case_pdf_item",
                      "_show_cited_case_pdf", "_cited_pdf_window_closed",
@@ -400,8 +403,9 @@ class _App:
         fn()
 
     def _get_scholar(self):
-        def fetch(cite):
+        def fetch(cite, case_name="", year=""):
             self.scholar_calls.append(cite)
+            self.scholar_names.append((case_name, year))
             if not self._scholar_has_it:
                 return None
             return (f"https://scholar.test/{cite}", "<html>")
@@ -496,6 +500,41 @@ class CitedCasePdfTests(unittest.TestCase):
         # So the case name on the strip opens a page already in hand.
         self._click()
         self.assertEqual(self.app.scholar_calls, ["410 U.S. 113"])
+
+    # --- which case at the page the text lookup asks for ----------------
+    # Two cases can begin on one reporter page (NetChoice, LLC v. Fitch shares
+    # 145 S. Ct. 2658 with another case); the name is what tells Google
+    # Scholar which is meant.
+
+    def test_the_text_lookup_is_told_the_name_the_link_carries(self):
+        self._click()
+        self.assertEqual(self.app.scholar_names, [("Roe v. Wade", "")])
+
+    def test_a_bare_cite_is_named_by_the_cluster_its_scan_came_from(self):
+        # No caption on the link: the case whose pages are shown names it, so
+        # the text beside the scan is of that case and not its page-mate.
+        CL_ITEMS["410 U.S. 113"] = {
+            "cluster_id": 1, "caseName": "Roe v. Wade",
+            "citation": ["410 U.S. 113"], "dateFiled": "1973-01-22"}
+        self._click(snippet="")
+        self.assertEqual(self.app.scholar_names, [("Roe v. Wade", "1973")])
+
+    def test_a_name_the_caller_has_on_its_own_is_used(self):
+        # A Google Scholar link, or a search result, has the caption already —
+        # not a highlighted "Name, cite" to read it from.
+        CL_LOOKUPS.clear()
+        RESOLVED["145 S. Ct. 2658"] = "https://loc.test/sct2658.pdf"
+        FETCHED["https://loc.test/sct2658.pdf"] = (
+            b"%PDF-3", "https://loc.test/sct2658.pdf")
+        self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", "145 S. Ct. 2658"), "", self.status.append,
+            name="<mark>NetChoice</mark>, LLC v. Fitch")
+        self.assertEqual(CL_LOOKUPS,
+                         [("145 S. Ct. 2658", "NetChoice, LLC v. Fitch")])
+        self.assertEqual(self.app.scholar_names,
+                         [("NetChoice, LLC v. Fitch", "")])
+        self.assertEqual(_FakeViewer.opened[0].title,
+                         "NetChoice, LLC v. Fitch — 145 S. Ct. 2658")
 
     def test_a_citation_inside_that_scan_opens_its_case_too(self):
         # Following citations from scan to scan, not just the first hop.

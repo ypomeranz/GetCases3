@@ -1427,7 +1427,8 @@ class NominativeCitationSearchTests(unittest.TestCase):
         )
         self.assertEqual(
             fetcher.fetch_by_citation.call_args_list,
-            [call("8 Wall 168"), call("75 U.S. 168")],
+            [call("8 Wall 168", case_name="", year=""),
+             call("75 U.S. 168", case_name="", year="")],
         )
 
     def test_direct_lookup_retries_federal_cases_alias_after_scholar_miss(self):
@@ -1442,7 +1443,8 @@ class NominativeCitationSearchTests(unittest.TestCase):
         )
         self.assertEqual(
             fetcher.fetch_by_citation.call_args_list,
-            [call("18 Fed. Cas. 9"), call("18 F. Cas. 9")],
+            [call("18 Fed. Cas. 9", case_name="", year=""),
+             call("18 F. Cas. 9", case_name="", year="")],
         )
 
 

@@ -37,6 +37,7 @@ Requires:
 
 from __future__ import annotations
 
+import html as _html
 import json
 import random
 import re
@@ -48,6 +49,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote_plus
 
+import bluebook_names
 import citations
 
 try:
@@ -439,6 +441,104 @@ def bears_citation(result: "ScholarResult", citation: str) -> bool:
         return False
     head = f"{result.title} ; {result.source}"
     return bool(keys & _cite_keys(head))
+
+
+# ---------------------------------------------------------------------------
+# Telling apart the cases that begin on one reporter page
+# ---------------------------------------------------------------------------
+# A reporter page can open more than one case — a one-line order and the next
+# order printed after it, or a short per curiam and the opinion that follows —
+# so "145 S. Ct. 2658" alone does not say whether NetChoice, LLC v. Fitch is
+# meant or its neighbour on that page.  The case name the citation came with
+# (however much of it there is) is what tells them apart.
+
+_PARTY_SPLIT_RE = re.compile(r"\s+vs?\.\s+", re.IGNORECASE)
+_APOSTROPHE_RE = re.compile(r"['’]")
+_BYLINE_YEAR_RE = re.compile(r"\b(1[6-9]\d\d|20\d\d)\b")
+
+# Business-form words carry nothing about which case is meant: "NetChoice,
+# LLC" and "NetChoice" are the same party.
+_ENTITY_WORDS = frozenset(
+    "llc llp lp plc inc co cos corp ltd company corporation incorporated"
+    .split()
+)
+
+# How closely a copy already on hand (cached, or in the opinion database) must
+# answer to the name to be served without asking Scholar again: more than one
+# side of a two-party name.  A lone matching side — the "United States" of
+# "United States v. Smith" against "United States v. Jones" — scores 0.5, and
+# leaves the copy only as a fallback for when Scholar cannot be reached.
+_NAME_CONFIRM = 0.6
+
+# How surely a caption is the named case (see GoogleScholarFetcher._verdict).
+_NAME_MATCH, _NAME_DOUBT, _NAME_OTHER = "match", "doubt", "other"
+
+
+def _party_overlap_score(query: str, candidate: str) -> float:
+    """Closeness (0..1) of a *candidate* case name to the *query* name when no
+    scorer is injected: the mean, over the query's parties, of the share of
+    each party's words found in the candidate's best-matching party — and 0
+    when no party of the query is even 60% there.  "United States v. Smith"
+    scores 0.5 against "United States v. Jones" and 1.0 against itself;
+    "Fitch" alone scores 1.0 against "NetChoice, LLC v. Fitch"."""
+    def parties(name: str) -> list[set[str]]:
+        sides = _PARTY_SPLIT_RE.split(name or "", maxsplit=1)
+        return [t for t in (_name_tokens(s) - _ENTITY_WORDS for s in sides)
+                if t]
+
+    q_parties, c_parties = parties(query), parties(candidate)
+    if not q_parties or not c_parties:
+        return 0.0
+    per_side = [max(len(q & c) / len(q) for c in c_parties)
+                for q in q_parties]
+    if max(per_side) < 0.6:
+        return 0.0
+    return sum(per_side) / len(per_side)
+
+
+def _name_variants(name: str) -> tuple[str, str, str]:
+    """*name* as written, in its Bluebook short form, and in the short form of
+    its normal-cased spelling, each without apostrophes — the forms two names
+    for one case are compared in.  "Nat'l Insts. of Health v. Am. Pub. Health
+    Ass'n" shares no word with "National Institutes of Health v. American
+    Public Health Assn." as written, but both abbreviate to the same words; an
+    ALL-CAPS Scholar caption ("NETCHOICE, LLC v. LYNN FITCH, ATTORNEY GENERAL
+    OF MISSISSIPPI") abbreviates properly only once normal-cased."""
+    raw = _WS_RE.sub(" ", name or "").strip()
+    forms = [raw]
+    for normal_case in (False, True):
+        try:
+            text = bluebook_names.normal_case_caption(raw) if normal_case else raw
+            forms.append(bluebook_names.abbreviate_case_name(text))
+        except Exception:
+            forms.append(raw)
+    return tuple(_APOSTROPHE_RE.sub("", f) for f in forms)
+
+
+def _byline_year(source: str) -> str:
+    """The year at the end of a Scholar byline ("145 S. Ct. 2658 - Supreme
+    Court, 2025" → "2025"), or "".  The last year-like number is taken, so a
+    page number in the citation ahead of it ("93 S. Ct. 1973") is passed by."""
+    years = _BYLINE_YEAR_RE.findall(source or "")
+    return years[-1] if years else ""
+
+
+_CASE_NAME_H3_RE = re.compile(
+    r"<h3\b[^>]*\bid\s*=\s*[\"']?gsl_case_name\b[^>]*>(.*?)</h3>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def opinion_caption(html: str) -> str:
+    """The caption at the head of a Scholar opinion page — "ROE ET AL. v.
+    WADE, DISTRICT ATTORNEY OF DALLAS COUNTY." — or "" when the page has
+    none.  Read straight off the markup, without parsing the opinion, so a
+    cached copy can be checked against the case a citation names cheaply."""
+    m = _CASE_NAME_H3_RE.search(html or "")
+    if not m:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", m.group(1))
+    return _WS_RE.sub(" ", _html.unescape(text)).strip()
 
 
 @dataclass
@@ -1801,38 +1901,63 @@ class GoogleScholarFetcher:
     # Public API
     # ------------------------------------------------------------------
 
-    def fetch_by_citation(self, citation: str) -> Optional[tuple[str, str]]:
+    def fetch_by_citation(
+        self, citation: str, case_name: str = "", year: str = "",
+    ) -> Optional[tuple[str, str]]:
         """
         Fetch opinion HTML by citation string (e.g. "410 U.S. 113").
+
+        A citation does not always name one opinion: two cases can begin on
+        the same reporter page, as NetChoice, LLC v. Fitch and another case
+        do at 145 S. Ct. 2658.  *case_name* — whatever of the name
+        the citation came with, "NetChoice, LLC v. Fitch" or just "Fitch" —
+        and the decision *year* then pick the case among those Scholar lists
+        at the citation, and keep a page-mate already on hand (cached, or in
+        the opinion database, from an earlier lookup) from being served in
+        its place.  Without them the first result bearing the citation is
+        taken, as it always was.
 
         Returns (scholar_url, opinion_html) or None if not found / blocked.
         Result is cached permanently on success.
         """
         self._post_search_failure = None
+        citation = citation.strip()
+        case_name = self._usable_name(case_name)
+        year = str(year or "").strip()[:4]
         # "cite2:" (not the old "cite:"): earlier versions accepted the first
         # scholar_case link on the results page without checking it was the
         # cited case, so old "cite:" entries can hold an opinion that merely
         # cites the query.  A new prefix sidelines them rather than serving
         # them forever.
-        key = f"cite2:{citation.strip()}"
-        cached = self._cache_get(key)
-        if cached:
-            print(f"[scholar] cache hit for {key!r}")
+        key = f"cite2:{citation}"
+        named_key = self._named_cite_key(citation, case_name)
+
+        # A copy on hand is served only when its caption answers to the name
+        # (with no name to go on, any copy does).  One that half answers —
+        # just one side of a two-party name — is kept back as the answer for
+        # when Scholar can't be reached; one naming a different case entirely
+        # is the page-mate, and is passed over.
+        cached, verdict = self._cached_cited(citation, case_name)
+        if cached and verdict == _NAME_MATCH:
             self._store_opinion(*cached)  # back the cached opinion up in the DB
             return cached
+        fallback = cached if verdict == _NAME_DOUBT else None
 
-        # Search the database before Google Scholar: a unique opinion bearing
-        # this citation is served from there, no network.  (An ambiguous match
-        # falls through so Scholar can disambiguate.)
-        db_one = self._db_single(citation)
-        if db_one:
+        # Search the database before Google Scholar: an opinion bearing this
+        # citation is served from there, no network — when it is the only one
+        # there, or the name picks it out from the others.  (Otherwise the
+        # lookup falls through so Scholar can disambiguate.)
+        db_one, verdict = self._db_cited(citation, case_name, year)
+        if db_one and verdict == _NAME_MATCH:
             return db_one
+        if fallback is None and verdict == _NAME_DOUBT:
+            fallback = db_one
 
         # Wrap the citation in double quotes so Scholar treats it as an exact
         # phrase. (repr() here produced *single* quotes, which Scholar does not
         # treat as a phrase operator -- that returned arbitrary cases from the
         # same reporter volume, many of which 404/500 or lack an opinion div.)
-        phrase = f'"{citation.strip()}"'
+        phrase = f'"{citation}"'
         search_url = (
             f"{SCHOLAR_BASE}/scholar?q={quote_plus(phrase)}&as_sdt=4"
         )
@@ -1842,35 +1967,73 @@ class GoogleScholarFetcher:
             self._last_search_url = search_url
         except Exception as exc:
             print(f"[scholar] search request failed: {exc}")
-            return None
+            return fallback
 
-        # Take the first result that itself bears the citation — never just
-        # the first scholar_case link on the page.  A quoted-phrase search
-        # also returns every opinion *citing* the phrase, so when Scholar
-        # lacks the case the top link is some other case that quotes it;
-        # returning None instead lets the caller fall back to CourtListener,
-        # which resolves by citation exactly.
-        case_url = self._matching_case_url(resp.text, citation)
-        if not case_url:
-            print("[scholar] no result bearing this citation on results page")
-            return None
+        # Take the result that itself bears the citation — never just the
+        # first scholar_case link on the page.  A quoted-phrase search also
+        # returns every opinion *citing* the phrase, so when Scholar lacks the
+        # case the top link is some other case that quotes it; returning None
+        # instead lets the caller fall back to CourtListener, which resolves
+        # by citation exactly.  When several results bear it, several cases
+        # begin on that page, and the name decides which is meant.
+        bearing = self._cited_results(resp.text, citation)
+        pick = self._pick_cited(bearing, case_name, year)
+        if pick is None:
+            if not bearing:
+                print("[scholar] no result bearing this citation on "
+                      "results page")
+            return fallback
+        case_url = pick.url
+        print(f"[scholar] found case url: {case_url} ({pick.title!r})")
+
+        # A pick the name had to make among cases sharing the page is cached
+        # under that name: the citation alone is no key to it.
+        keys = [named_key] if named_key else []
+        if len(bearing) == 1 or not case_name:
+            keys.append(key)
 
         # Even after searching Scholar, prefer the database copy if we already
         # have this exact opinion (skip re-downloading the case page).
         db_hit = self._db_by_url(case_url)
         if db_hit:
-            self._cache_put(key, *db_hit)
+            self._cache_put_keys(keys, *db_hit)
             return db_hit
 
         result = self._fetch_case_page(case_url)
         if result:
-            self._cache_put(key, *result)
+            self._cache_put_keys(keys, *result)
             return result
         # The search found the case but the opinion page didn't load (Google is
         # flaky) — record it so the caller can show CourtListener now and retry
         # this exact opinion in the background.
         self._post_search_failure = case_url
         return None
+
+    def cached_by_citation(
+        self, citation: str, case_name: str = "",
+    ) -> Optional[tuple[str, str]]:
+        """The cached (url, opinion_html) for *citation* — from the cache only,
+        never the network — or None.  With *case_name*, only a copy that
+        answers to the name: one chosen by this very name when the lookup had
+        to choose among cases sharing the page, or the citation's own copy
+        when its caption is that case."""
+        cached, verdict = self._cached_cited(
+            citation.strip(), self._usable_name(case_name))
+        return cached if verdict == _NAME_MATCH else None
+
+    def pick_cited_result(
+        self, results: list["ScholarResult"], citation: str,
+        case_name: str = "", year: str = "",
+    ) -> Optional["ScholarResult"]:
+        """The result among *results* (say, from :meth:`search_cases`) that is
+        the case cited as *citation*: one bearing the citation itself (see
+        ``bears_citation``) and, when several do because several cases begin
+        on that page, the one best answering to *case_name* and *year*.  None
+        when none bears the citation, or the name answers to none of those
+        that do."""
+        return self._pick_cited(
+            [r for r in results if bears_citation(r, citation)],
+            self._usable_name(case_name), str(year or "")[:4])
 
     def fetch_by_name(
         self, case_name: str, year: Optional[str] = None
@@ -2226,6 +2389,51 @@ class GoogleScholarFetcher:
             print(f"[scholar] opinion-DB search failed: {exc}")
         return None
 
+    def _db_cited(
+        self, citation: str, case_name: str = "", year: str = "",
+    ) -> tuple[Optional[tuple[str, str]], str]:
+        """The opinion database's copy of the case at *citation*, with its
+        :meth:`_verdict` against *case_name*, or ``(None, "")``.
+
+        Without a name, :meth:`_db_single`'s rule: only an opinion that is
+        alone at the citation.  With one, the stored opinion whose name best
+        answers to it — so a database already holding both cases that begin
+        on a page answers without the network — unless the name (and *year*)
+        can't tell the best from the next, which Scholar is left to settle.
+        A stored opinion naming another case entirely — the page-mate of the
+        case wanted — is never returned."""
+        if self._opinion_db is None or not citation:
+            return None, ""
+        if not case_name:
+            one = self._db_single(citation)
+            return (one, _NAME_MATCH) if one else (None, "")
+        try:
+            hits = self._opinion_db.find(citation)
+            if not hits:
+                return None, ""
+            ranked = self._rank_named(
+                hits, case_name, year,
+                name_of=lambda h: h.get("name") or "",
+                year_of=lambda h: str(h.get("year") or "")[:4],
+            )
+            score, year_hit, best = ranked[0]
+            if len(ranked) > 1 and ranked[1][:2] == (score, year_hit):
+                return None, ""  # the name doesn't choose — Scholar may
+            verdict = self._verdict(score)
+            if verdict == _NAME_OTHER:
+                print(f"[scholar] opinion-DB holds {citation!r} only as "
+                      f"{', '.join(repr(h.get('name')) for h in hits)} — "
+                      f"not {case_name!r}")
+                return None, ""
+            rec = self._opinion_db.get_by_scholar_id(best["scholar_id"])
+            if rec and rec.get("html"):
+                print(f"[scholar] opinion-DB hit for {citation!r}: "
+                      f"{best.get('name')!r} ({verdict})")
+                return (rec.get("url") or "", rec["html"]), verdict
+        except Exception as exc:
+            print(f"[scholar] opinion-DB search failed: {exc}")
+        return None, ""
+
     def _store_opinion(self, url: str, html: str) -> None:
         if self._opinion_db is None:
             return
@@ -2454,15 +2662,162 @@ class GoogleScholarFetcher:
         self._browser_first_wall = time.time() + _BROWSER_FIRST_TTL
         self._save_state()
 
-    def _matching_case_url(self, html: str, citation: str) -> Optional[str]:
-        """The scholar_case URL of the first result on a results page that
-        itself bears *citation* (title or byline — see ``bears_citation``),
-        or None when no result is verifiably the cited case."""
-        for r in self._parse_results(html):
-            if bears_citation(r, citation):
-                print(f"[scholar] found case url: {r.url} ({r.title!r})")
-                return r.url
-        return None
+    def _matching_case_url(
+        self, html: str, citation: str, case_name: str = "", year: str = "",
+    ) -> Optional[str]:
+        """The scholar_case URL of the result on a results page that itself
+        bears *citation* (title or byline — see ``bears_citation``) and, when
+        several do, best answers to *case_name* and *year* (see
+        :meth:`_pick_cited`); None when no result is verifiably the cited
+        case."""
+        pick = self._pick_cited(
+            self._cited_results(html, citation),
+            self._usable_name(case_name), str(year or "")[:4])
+        if pick is None:
+            return None
+        print(f"[scholar] found case url: {pick.url} ({pick.title!r})")
+        return pick.url
+
+    def _cited_results(self, html: str, citation: str) -> list[ScholarResult]:
+        """The results on a results page that bear *citation* themselves, in
+        Scholar's order — more than one when several cases begin on the cited
+        page (or Scholar lists one case twice)."""
+        return [r for r in self._parse_results(html)
+                if bears_citation(r, citation)]
+
+    def _pick_cited(
+        self, bearing: list[ScholarResult], case_name: str = "",
+        year: str = "",
+    ) -> Optional[ScholarResult]:
+        """The cited case among *bearing* — results that each bear the cited
+        citation, in Scholar's order.
+
+        With one, that one; with several, the one whose title best answers to
+        *case_name*, the decision *year* breaking a tie, Scholar's order the
+        next.  Without a name or year to go on, Scholar's first, as before.
+        None when nothing bears the citation, or when the name matches no
+        side of any of them: then Scholar lists only other cases at that page
+        — not the one wanted — and the caller does better to look elsewhere
+        than to open a stranger."""
+        if not bearing:
+            return None
+        if not case_name and not year:
+            return bearing[0]
+        ranked = self._rank_named(
+            bearing, case_name, year,
+            name_of=lambda r: r.title, year_of=lambda r: _byline_year(r.source),
+        )
+        score, _year_hit, best = ranked[0]
+        if case_name and self._verdict(score) == _NAME_OTHER:
+            print(f"[scholar] no result at this citation is {case_name!r}: "
+                  + "; ".join(repr(r.title) for r in bearing))
+            return None
+        if len(bearing) > 1:
+            print(f"[scholar] {len(bearing)} results bear this citation; "
+                  f"{best.title!r} best answers to {case_name or year!r}")
+        return best
+
+    def _rank_named(self, cands: list, case_name: str, year: str, *,
+                    name_of, year_of) -> list[tuple[float, bool, object]]:
+        """*cands* as ``(name score, year matches, candidate)``, best first:
+        by how closely ``name_of(candidate)`` answers to *case_name*, then by
+        whether ``year_of(candidate)`` is *year*, then in the order given."""
+        year = str(year or "")[:4]
+        scored = []
+        for i, cand in enumerate(cands):
+            score = (self._name_closeness(case_name, name_of(cand) or "")
+                     if case_name else 0.0)
+            year_hit = bool(year) and year_of(cand) == year
+            scored.append((score, year_hit, -i, cand))
+        scored.sort(key=lambda t: t[:3], reverse=True)
+        return [(score, year_hit, cand) for score, year_hit, _i, cand in scored]
+
+    def _name_closeness(self, case_name: str, caption: str) -> float:
+        """How closely *caption* — a result's title, an opinion's caption, a
+        stored record's name — answers to *case_name*, 0..1.  Scored by the
+        injected name scorer (else :func:`_party_overlap_score`) on the names
+        as written and on their Bluebook short forms (see
+        :func:`_name_variants`), the best of them counting."""
+        if not (case_name or "").strip() or not (caption or "").strip():
+            return 0.0
+        scorer = self._name_scorer or _party_overlap_score
+        best = 0.0
+        for query, cand in zip(_name_variants(case_name),
+                               _name_variants(caption)):
+            if not query or not cand:
+                continue
+            try:
+                best = max(best, float(scorer(query, cand) or 0.0))
+            except Exception:
+                continue
+        return best
+
+    def _usable_name(self, case_name: str) -> str:
+        """*case_name* with its spacing tidied — or "" when there is nothing in
+        it to tell one case from another ("In re", "et al."): a name that
+        cannot even answer to itself would only turn every result away."""
+        name = _WS_RE.sub(" ", case_name or "").strip()
+        if name and self._name_closeness(name, name) <= 0:
+            return ""
+        return name
+
+    @staticmethod
+    def _verdict(score: float) -> str:
+        """How surely a caption scoring *score* is the named case: a match
+        (served as is), in doubt (only one side of the name answers — kept as
+        a fallback), or another case (no side answers)."""
+        if score >= _NAME_CONFIRM:
+            return _NAME_MATCH
+        return _NAME_DOUBT if score > 0 else _NAME_OTHER
+
+    def _caption_verdict(self, case_name: str, html: str) -> str:
+        """:meth:`_verdict` for an opinion page against *case_name* — a match
+        when there is no name to check.  A page whose caption can't be read
+        is in doubt: nothing says it is another case, nothing that it isn't."""
+        if not case_name:
+            return _NAME_MATCH
+        caption = opinion_caption(html)
+        if not caption:
+            return _NAME_DOUBT
+        return self._verdict(self._name_closeness(case_name, caption))
+
+    @staticmethod
+    def _named_cite_key(citation: str, case_name: str) -> str:
+        """The cache key for the case *case_name* names at *citation* — where
+        a lookup that had to choose among cases sharing the page keeps its
+        pick — or "" without a name."""
+        words = re.findall(
+            r"[a-z0-9]+", _APOSTROPHE_RE.sub("", (case_name or "").lower()))
+        if not words:
+            return ""
+        return f"cite2:{citation.strip()} | {' '.join(words)}"
+
+    def _cached_cited(
+        self, citation: str, case_name: str,
+    ) -> tuple[Optional[tuple[str, str]], str]:
+        """The cached copy for *citation* with its :meth:`_verdict` against
+        *case_name*: the pick made under this very name (a match by
+        construction), else the citation's own copy, checked against the
+        name — so a page-mate cached by an earlier lookup is not served for
+        the case named now.  ``(None, "")`` when nothing is cached."""
+        named_key = self._named_cite_key(citation, case_name)
+        if named_key:
+            cached = self._cache_get(named_key)
+            if cached:
+                print(f"[scholar] cache hit for {named_key!r}")
+                return cached, _NAME_MATCH
+        key = f"cite2:{citation}"
+        cached = self._cache_get(key)
+        if not cached:
+            return None, ""
+        verdict = self._caption_verdict(case_name, cached[1])
+        if verdict == _NAME_MATCH:
+            print(f"[scholar] cache hit for {key!r}")
+        else:
+            print(f"[scholar] cached copy for {key!r} "
+                  f"({opinion_caption(cached[1])!r}) may not be "
+                  f"{case_name!r} — asking Scholar")
+        return cached, verdict
 
     def _matching_name_url(self, html: str, case_name: str) -> Optional[str]:
         """The scholar_case URL of the first result on a results page whose
@@ -2562,11 +2917,19 @@ class GoogleScholarFetcher:
         return row  # (url, html) or None
 
     def _cache_put(self, key: str, url: str, html: str) -> None:
+        self._cache_put_keys([key], url, html)
+
+    def _cache_put_keys(self, keys: list[str], url: str, html: str) -> None:
+        """Store (url, html) under each of *keys*, parsing the opinion once."""
+        keys = [k for k in keys if k]
+        if not keys:
+            return
         text = blocks_to_text(parse_opinion_blocks(html))
-        self._db.execute(
+        now = time.time()
+        self._db.executemany(
             "INSERT OR REPLACE INTO opinions "
             "(cache_key, case_url, text, html, fetched_at) VALUES (?, ?, ?, ?, ?)",
-            (key, url, text, html, time.time()),
+            [(k, url, text, html, now) for k in keys],
         )
         self._db.commit()
 
