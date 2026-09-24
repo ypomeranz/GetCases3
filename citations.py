@@ -1005,6 +1005,49 @@ for _family in _REPORTER_FAMILIES:
     for _form in (_family.canonical, *_family.aliases):
         _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_form)] = _family
 
+# A state's official reports written with the state's name in full, as older
+# opinions often cite them: "1 Massachusetts 15" is 1 Mass. 15, "12 North
+# Carolina 30" is 12 N.C. 30.  Each name joins the family of its Bluebook
+# abbreviation (Bluebook table T1) — the existing one where there is one
+# (Wash., Or., Me., …) — so the lookup tries the abbreviation and the
+# citation prints it.  Alaska, Idaho, Iowa, Ohio and Utah are cited by their
+# full names already.
+_STATE_REPORTER_NAMES = {
+    "Alabama": "Ala.", "Arizona": "Ariz.", "Arkansas": "Ark.",
+    "California": "Cal.", "Colorado": "Colo.", "Connecticut": "Conn.",
+    "Delaware": "Del.", "Florida": "Fla.", "Georgia": "Ga.",
+    "Hawaii": "Haw.", "Illinois": "Ill.", "Indiana": "Ind.",
+    "Kansas": "Kan.", "Kentucky": "Ky.", "Louisiana": "La.",
+    "Maine": "Me.", "Maryland": "Md.", "Massachusetts": "Mass.",
+    "Michigan": "Mich.", "Minnesota": "Minn.", "Mississippi": "Miss.",
+    "Missouri": "Mo.", "Montana": "Mont.", "Nebraska": "Neb.",
+    "Nevada": "Nev.", "New Hampshire": "N.H.", "New Jersey": "N.J.",
+    "New Mexico": "N.M.", "New York": "N.Y.", "North Carolina": "N.C.",
+    "North Dakota": "N.D.", "Oklahoma": "Okla.", "Oregon": "Or.",
+    "Pennsylvania": "Pa.", "Rhode Island": "R.I.",
+    "South Carolina": "S.C.", "South Dakota": "S.D.",
+    "Tennessee": "Tenn.", "Texas": "Tex.", "Vermont": "Vt.",
+    "Virginia": "Va.", "Washington": "Wash.", "West Virginia": "W. Va.",
+    "Wisconsin": "Wis.", "Wyoming": "Wyo.",
+}
+for _full, _abbr in _STATE_REPORTER_NAMES.items():
+    _family = _REPORTER_FAMILY_BY_KEY.get(_loose_reporter_key(_abbr))
+    if _family is None:
+        # static.case.law's own slug rule: spaces become hyphens, other
+        # punctuation goes ("N.C." → "nc", "W. Va." → "w-va").
+        _family = _ReporterFamily(
+            _abbr, (_full,), (_abbr,),
+            re.sub(r"-+", "-", re.sub(
+                r"[^a-z0-9-]", "", _abbr.lower().replace(" ", "-"))).strip("-"))
+        _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_abbr)] = _family
+    _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_full)] = _family
+
+#: The full state names above as reporter keys ("northcarolina"): accepted as a
+#: reporter in running text, but only where a citation's volume stands (see
+#: _iter_case_cites) — "about 3 Texas 12 counties" is prose.
+_FULL_STATE_REPORTER_KEYS = frozenset(
+    _loose_reporter_key(n) for n in _STATE_REPORTER_NAMES)
+
 
 def reporter_family(rep: str) -> "_ReporterFamily | None":
     """The known same-reporter family for *rep*, if any."""
@@ -1074,7 +1117,8 @@ def _valid_case_reporter(rep: str) -> bool:
     family = reporter_family(rep)
     if family is not None and family.canonical == "Johns. Ch.":
         return True
-    if key in _PLAIN_CASE_REPORTERS or key.endswith("lexis"):
+    if (key in _PLAIN_CASE_REPORTERS or key in _FULL_STATE_REPORTER_KEYS
+            or key.endswith("lexis")):
         return True
     return "." in (rep or "")
 
@@ -1129,6 +1173,12 @@ def _iter_case_cites(text: str) -> list[re.Match]:
         if not _valid_case_reporter(m.group(2)):
             continue
         if any(m.start() < km.end() and km.start() < m.end() for km in matches):
+            continue
+        # A state's name in full reads as a reporter only where a citation's
+        # volume stands, after the comma closing a case name.
+        if (_loose_reporter_key(m.group(2)) in _FULL_STATE_REPORTER_KEYS
+                and not re.search(r"(?:^|[,;(\[])\s*$",
+                                  (text or "")[:m.start()])):
             continue
         matches.append(m)
     matches.sort(key=lambda m: (m.start(), -(m.end() - m.start())))

@@ -263,6 +263,51 @@ class RenamedAndRenumberedReporterTests(unittest.TestCase):
                          "Doe v. Roe, 250 Or. 12 (1968)")
 
 
+class FullStateNameReporterTests(unittest.TestCase):
+    """A state's reports cited by the state's name in full."""
+
+    def test_the_full_name_is_tried_as_the_bluebook_abbreviation(self):
+        from citations import reporter_citation_variants
+        for typed, bluebook in (
+            ("1 Massachusetts 15", "1 Mass. 15"),
+            ("12 North Carolina 30", "12 N.C. 30"),
+            ("5 West Virginia 7", "5 W. Va. 7"),
+            ("200 Washington 5", "200 Wash. 5"),
+            ("3 Maine 4", "3 Me. 4"),
+        ):
+            with self.subTest(typed=typed):
+                self.assertIn(bluebook, reporter_citation_variants(typed))
+
+    def test_and_finds_the_same_folder_on_static_case_law(self):
+        from courtlistener_gui import _static_case_law_url
+        self.assertEqual(_static_case_law_url("12 North Carolina 30"),
+                         _static_case_law_url("12 N.C. 30"))
+        self.assertIn("/nc/12/", _static_case_law_url("12 N.C. 30"))
+
+    def test_every_state_keeps_static_case_law_s_own_folder_name(self):
+        import re
+        from citations import _STATE_REPORTER_NAMES, case_law_reporter_slug
+        for full, abbr in _STATE_REPORTER_NAMES.items():
+            mechanical = re.sub(r"-+", "-", re.sub(
+                r"[^a-z0-9-]", "", abbr.lower().replace(" ", "-"))).strip("-")
+            with self.subTest(state=full):
+                self.assertEqual(case_law_reporter_slug(full), mechanical)
+
+    def test_it_links_in_a_citation_but_not_in_prose(self):
+        text = "Commonwealth v. Smith, 1 Massachusetts 15 (1804)."
+        self.assertEqual(detect_brief_links(text)[0][2],
+                         ("cite", "1 Massachusetts 15"))
+        self.assertEqual(detect_brief_links("in about 3 Texas 12 counties"),
+                         [])
+
+    def test_it_is_cited_by_the_abbreviation(self):
+        item = {"caseName": "Commonwealth v. Smith",
+                "citation": ["1 Massachusetts 15"],
+                "dateFiled": "1804-01-01", "court_id": "mass"}
+        self.assertEqual(_bluebook_display_name(item),
+                         "Commonwealth v. Smith, 1 Mass. 15 (1804)")
+
+
 class WashingtonCertificationTests(unittest.TestCase):
     """Bradley v. Am. Smelting & Refin. Co., 104 Wash. 2d 677 (1985), and
     the passage citing Garratt v. Dailey that turned up the problems."""
