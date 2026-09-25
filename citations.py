@@ -395,6 +395,24 @@ BROAD_CITE_CAPTURE_RE = re.compile(
     + r"\s+(\d{1,6})(?=[\s,;.)(]|$)"
 )
 
+# Older opinions — the U.S. Reports among them, into the twentieth century —
+# set a comma between the reporter and the page: "Commonwealth v. Pierce, 138
+# Massachusetts, 165, 178" (Nash v. United States, 229 U.S. 373), "Marbury v.
+# Madison, 1 Cranch, 137", "Ex parte Crouch, 112 U.S., 178".  The comma lets a
+# count in prose take the same shape ("in 1990, 3 Bush, 5 Clinton
+# appointees"), so _iter_case_cites reads this form only for a reporter known
+# by name, where a citation's volume stands, and with no capitalized word
+# following the page.
+COMMA_CITE_CAPTURE_RE = re.compile(
+    r"\b(\d{1,4})\s+("
+    + _REPORTER_TOKEN
+    + r"(?:\s+"
+    + _REPORTER_TOKEN
+    + r"){0,5}?)"
+    + _COURT_PAREN
+    + r"\s*,\s*(\d{1,6})(?=[\s,;.:)(\]\-–—]|$)"
+)
+
 # A reporter citation entered on its own line (Spotlight, an edited citation,
 # or a database query) can safely be more permissive than running-text
 # detection.  This accepts official state reporters and unpunctuated aliases
@@ -1130,21 +1148,101 @@ def case_match_text(m: re.Match) -> str:
     (N.Y.) 37" -> "5 Johns. 37") and the parallel volume of an early-SCOTUS
     dual cite ("4 Wheat. [17 U. S.] 438" -> "4 Wheat. 438", "5 U.S. (1
     Cranch) 137" -> "5 U.S. 137"), plus the OCR hyphen sometimes glued to
-    the page ("21 Wall. (88 U. S.)-597" -> "21 Wall. 597")."""
+    the page ("21 Wall. (88 U. S.)-597" -> "21 Wall. 597") and the comma
+    older reports set before it ("138 Massachusetts, 165" -> "138
+    Massachusetts 165")."""
     if canonical_reporter(m.group(2)) == "Johns. Ch.":
         return f"{m.group(1)} Johns. Ch. {m.group(3)}"
     s = re.sub(r"\s+", " ", m.group(0)).replace("U. S.", "U.S.").replace("’", "'")
     s = re.sub(r"\s*[\[(][^\])]*[\])]\s*", " ", s)
     s = re.sub(r"\s[-–—]\s*(?=\d)", " ", s)
     s = re.sub(r"(?<=\.)\s+Rep\.(?=\s+\d)", "", s)  # "10 Wheat. Rep. 472"
+    s = re.sub(r"\s*,\s*(?=\d+$)", " ", s)  # "138 Massachusetts, 165"
     return re.sub(r"\s+", " ", s).strip()
 
 
 _case_match_text = case_match_text  # older internal name
 
 
+def _at_citation_start(text: str, pos: int) -> bool:
+    """Whether *pos* is where a citation's volume stands: the start of the
+    text, or just after the comma closing a case name — or a semicolon, or an
+    opening parenthesis or bracket — whitespace aside."""
+    while pos > 0 and text[pos - 1].isspace():
+        pos -= 1
+    return pos == 0 or text[pos - 1] in ",;(["
+
+
+# The reporters named in the running-text patterns: the national and federal
+# series of REPORTER_ALT and the early Supreme Court reporters.
+_NAMED_REPORTER_RE = re.compile(
+    r"(?:" + REPORTER_ALT + r"|" + _NOM_SCOTUS_ALT + r"\.?)")
+_CAPITALIZED_WORD_RE = re.compile(r"\s*[A-Z]")
+
+
+def _comma_form_reporter(vol: str, rep: str, page: str) -> bool:
+    """Whether *rep* is a reporter known by name, which the comma form of a
+    citation ("138 Massachusetts, 165") requires: one the running-text
+    patterns name, one with a family (each state's reports, by abbreviation
+    or by the state's name in full, and the other spellings of a series), a
+    state nominative in a volume it published ("5 Allen, 431"), or a state
+    cited by its plain name ("12 Iowa, 44")."""
+    rep = re.sub(r"\s+", " ", rep).strip()
+    return bool(
+        _NAMED_REPORTER_RE.fullmatch(rep)
+        or reporter_family(rep) is not None
+        or _loose_reporter_key(rep) in _PLAIN_CASE_REPORTERS
+        or state_nominative_cites(f"{vol} {rep} {page}"))
+
+
+def _index_first_pages(
+    matches: "list[re.Match]",
+) -> dict[tuple[str, str], list[int]]:
+    """(volume, reporter key) → sorted first pages of *matches*."""
+    idx: dict[tuple[str, str], set] = {}
+    for m in matches:
+        idx.setdefault((m.group(1), reporter_key(m.group(2))),
+                       set()).add(int(m.group(3)))
+    return {k: sorted(v) for k, v in idx.items()}
+
+
+def _pinned_without_at(
+    text: str, m: re.Match, index: dict[tuple[str, str], list[int]],
+) -> "int | None":
+    """The first page of the case a comma-form match *m* is a pin into, its
+    "at" left out — "Bryant, supra, at 361, 131 S.Ct., 1157", "Wilson, 501 U.
+    S., 306-309" — or None when *m* cites a case in full.
+
+    A pin is read only where *index* (see :func:`build_short_cite_index`)
+    holds the volume cited in full a few pages before — within
+    :data:`ID_PIN_WINDOW` — and no whole case name introduces *m*: a short
+    form names one party, and "Jackson v. Ashton, (8 Peters, 148" is a case
+    of its own whatever else that volume holds."""
+    page = int(m.group(3))
+    firsts = [first for first in (index or {}).get(
+                  (m.group(1), reporter_key(m.group(2))), ())
+              if first < page <= first + ID_PIN_WINDOW]
+    if not firsts:
+        return None
+    # The name ends at the comma before the volume, or before the parenthesis
+    # the citation opens: "Jackson v. Ashton, (8 Peters, 148;)".
+    pos = m.start()
+    while pos > 0 and text[pos - 1].isspace():
+        pos -= 1
+    if pos > 0 and text[pos - 1] in "([":
+        pos -= 1
+    name_start = _case_name_start(text, pos, 0)
+    if name_start is not None:
+        name = re.sub(r"[\s,]+$", "", text[name_start:pos])
+        if (_NAME_NO_V_RE.match(name)
+                or re.search(r"(?<=[\w.'’)\]])\s+vs?\.\s+", name)):
+            return None
+    return max(firsts)
+
+
 def _iter_case_cites(text: str) -> list[re.Match]:
-    matches: list[re.Match] = list(CITE_CAPTURE_RE.finditer(text or ""))
+    text = text or ""
+    matches: list[re.Match] = list(CITE_CAPTURE_RE.finditer(text))
     # Early-SCOTUS nominative cites — the parallel-interpolated forms first
     # (longer spans), then the bare form — all with (vol, reporter, page)
     # groups, so the short-cite index and case_match_text treat them like
@@ -1152,7 +1250,7 @@ def _iter_case_cites(text: str) -> list[re.Match]:
     for pat in (NOMINATIVE_PARALLEL_RE, US_NOMINATIVE_PARALLEL_RE,
                 STATE_NOMINATIVE_PARALLEL_RE, NOMINATIVE_CITE_RE,
                 STATE_NOMINATIVE_CITE_RE):
-        for m in pat.finditer(text or ""):
+        for m in pat.finditer(text):
             if any(m.start() < km.end() and km.start() < m.end()
                    for km in matches):
                 continue
@@ -1164,12 +1262,10 @@ def _iter_case_cites(text: str) -> list[re.Match]:
                 # closing a case name — never in a run of prose: "He sold 3
                 # Head 5 times."
                 if ("." not in m.group(2)
-                        and not re.search(r"(?:^|[,;(\[])\s*$",
-                                          (text or "")[:m.start()])):
+                        and not _at_citation_start(text, m.start())):
                     continue
             matches.append(m)
-            matches.append(m)
-    for m in BROAD_CITE_CAPTURE_RE.finditer(text or ""):
+    for m in BROAD_CITE_CAPTURE_RE.finditer(text):
         if not _valid_case_reporter(m.group(2)):
             continue
         if any(m.start() < km.end() and km.start() < m.end() for km in matches):
@@ -1177,8 +1273,23 @@ def _iter_case_cites(text: str) -> list[re.Match]:
         # A state's name in full reads as a reporter only where a citation's
         # volume stands, after the comma closing a case name.
         if (_loose_reporter_key(m.group(2)) in _FULL_STATE_REPORTER_KEYS
-                and not re.search(r"(?:^|[,;(\[])\s*$",
-                                  (text or "")[:m.start()])):
+                and not _at_citation_start(text, m.start())):
+            continue
+        matches.append(m)
+    # The older comma form, "138 Massachusetts, 165" (COMMA_CITE_CAPTURE_RE),
+    # yields to every other reading: a known reporter, where a citation's
+    # volume stands, and no capitalized word after the page — "in 1990, 3
+    # Bush, 5 Clinton appointees" is prose.  Nor is it a case beginning at the
+    # page when it is a pin into one the text cites in full: "Bryant, supra,
+    # at 361, 131 S.Ct., 1157" is 131 S.Ct. 1143 with the "at" left out.
+    cited = _index_first_pages(matches)
+    for m in COMMA_CITE_CAPTURE_RE.finditer(text):
+        if any(m.start() < km.end() and km.start() < m.end() for km in matches):
+            continue
+        if (not _comma_form_reporter(m.group(1), m.group(2), m.group(3))
+                or not _at_citation_start(text, m.start())
+                or _CAPITALIZED_WORD_RE.match(text, m.end())
+                or _pinned_without_at(text, m, cited) is not None):
             continue
         matches.append(m)
     matches.sort(key=lambda m: (m.start(), -(m.end() - m.start())))
@@ -1300,11 +1411,7 @@ def build_short_cite_index(text: str) -> dict[tuple[str, str], list[int]]:
     """Map (volume, reporter) → sorted first-pages of every full citation in
     `text`, so a short form ('410 U.S. at 152') can be resolved to the case's
     first page (and thence opened and pin-jumped)."""
-    idx: dict[tuple[str, str], set] = {}
-    for m in _iter_case_cites(text or ""):
-        idx.setdefault((m.group(1), reporter_key(m.group(2))),
-                       set()).add(int(m.group(3)))
-    return {k: sorted(v) for k, v in idx.items()}
+    return _index_first_pages(_iter_case_cites(text or ""))
 
 
 def cite_target_from_text(
@@ -1319,6 +1426,17 @@ def cite_target_from_text(
     case_matches = _iter_case_cites(text)
     if case_matches:
         cm = case_matches[0]
+        if cm.re is COMMA_CITE_CAPTURE_RE:
+            # "Wilson, 501 U. S., 306-309" — a pin into a case cited in full
+            # elsewhere in the document, its "at" left out — as
+            # _iter_case_cites reads the form in running text.
+            first = _pinned_without_at(text, cm, index)
+            if first is not None:
+                rep = re.sub(r"\s+", " ", cm.group(2)).strip().replace(
+                    "U. S.", "U.S.")
+                notes, _end = note_pin_after_page(text, cm.end())
+                return (f"{cm.group(1)} {rep} {first}",
+                        join_note_pin(cm.group(3), notes))
         base = _case_match_text(cm)
         pin, _end = pin_after(text, cm.end())
         return base, pin

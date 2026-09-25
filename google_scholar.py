@@ -356,6 +356,27 @@ class ScholarError(Exception):
     """Raised when a Scholar fetch fails unrecoverably."""
 
 
+def is_how_cited_url(url: str) -> bool:
+    """Whether *url* is a ``scholar_case?about=`` link — the "How cited" page
+    Scholar links a citation to when it has not matched the citation to an
+    opinion it holds.  The page gives the case's name and citation and the
+    passages citing it, never the opinion.  Scholar may still hold the case
+    under another record, which a search by its citation finds, or may not
+    hold it at all (a state case older than its collection)."""
+    return bool(re.search(r"scholar_case\?(?:[^#]*&)?about=\d", url or ""))
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    """The HTTP status an ``HTTPError`` (requests' or curl_cffi's) carries."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+# A results page carries its results column even when nothing matched; a
+# CAPTCHA or other interstitial served with a 200 does not.
+_RESULTS_PAGE_RE = re.compile(r"""\bid=["']?gs_res_ccl\b""")
+
+
 # ---------------------------------------------------------------------------
 # Structured opinion document
 # ---------------------------------------------------------------------------
@@ -1829,6 +1850,15 @@ class GoogleScholarFetcher:
         # CourtListener and retry this exact opinion in the background.
         self._post_search_failure: Optional[str] = None
 
+        # Why this thread's last lookup came back empty (see
+        # last_fetch_absent) — kept per thread, as every window fetches on a
+        # worker of its own.
+        self._miss = threading.local()
+
+        # "How cited" page headings already read, by Scholar's about= id (see
+        # how_cited_heading).
+        self._how_cited: dict[str, str] = {}
+
         # The most recent results-page URL, sent as the Referer when a case
         # page is fetched — the way a browser navigates from a search.
         self._last_search_url: str = ""
@@ -1917,10 +1947,12 @@ class GoogleScholarFetcher:
         its place.  Without them the first result bearing the citation is
         taken, as it always was.
 
-        Returns (scholar_url, opinion_html) or None if not found / blocked.
-        Result is cached permanently on success.
+        Returns (scholar_url, opinion_html) or None if not found / blocked —
+        :meth:`last_fetch_absent` tells the two apart.  Result is cached
+        permanently on success.
         """
         self._post_search_failure = None
+        self._note_absent(False)
         citation = citation.strip()
         case_name = self._usable_name(case_name)
         year = str(year or "").strip()[:4]
@@ -1982,6 +2014,9 @@ class GoogleScholarFetcher:
             if not bearing:
                 print("[scholar] no result bearing this citation on "
                       "results page")
+            # A results page with nothing on it that is the case is Scholar's
+            # answer; a page that is no results page at all is not.
+            self._note_absent(bool(_RESULTS_PAGE_RE.search(resp.text)))
             return fallback
         case_url = pick.url
         print(f"[scholar] found case url: {case_url} ({pick.title!r})")
@@ -2005,8 +2040,10 @@ class GoogleScholarFetcher:
             return result
         # The search found the case but the opinion page didn't load (Google is
         # flaky) — record it so the caller can show CourtListener now and retry
-        # this exact opinion in the background.
-        self._post_search_failure = case_url
+        # this exact opinion in the background.  Not when the page answered
+        # that there is no opinion there: asking again gets the same answer.
+        if not self.last_fetch_absent():
+            self._post_search_failure = case_url
         return None
 
     def cached_by_citation(
@@ -2041,9 +2078,11 @@ class GoogleScholarFetcher:
         """
         Fetch opinion HTML by case name, optionally scoped to a year.
 
-        Returns (scholar_url, opinion_html) or None.
+        Returns (scholar_url, opinion_html) or None (see
+        :meth:`last_fetch_absent`).
         """
         self._post_search_failure = None
+        self._note_absent(False)
         q = f"{case_name} {year}".strip() if year else case_name
         # "name2:" — see fetch_by_citation: the old "name:" entries predate
         # result verification and may hold the wrong case.
@@ -2075,6 +2114,7 @@ class GoogleScholarFetcher:
         case_url = self._matching_name_url(resp.text, case_name)
         if not case_url:
             print("[scholar] no result titled like this case on results page")
+            self._note_absent(bool(_RESULTS_PAGE_RE.search(resp.text)))
             return None
 
         db_hit = self._db_by_url(case_url)
@@ -2086,7 +2126,8 @@ class GoogleScholarFetcher:
         if result:
             self._cache_put(key, *result)
             return result
-        self._post_search_failure = case_url
+        if not self.last_fetch_absent():
+            self._post_search_failure = case_url
         return None
 
     def take_post_search_failure(self) -> Optional[str]:
@@ -2098,6 +2139,45 @@ class GoogleScholarFetcher:
         url = self._post_search_failure
         self._post_search_failure = None
         return url
+
+    def last_fetch_absent(self) -> bool:
+        """Whether the last lookup on this thread came back empty because
+        Google Scholar answered that it has no copy of the case — a "How
+        cited" page where the opinion would be, a page not found, a results
+        page with nothing on it bearing the citation or answering to the name
+        — rather than because Scholar could not be asked: blocked, cooling
+        down, a network failure, a page that is no answer of Scholar's at
+        all.  Asking again can only help the second kind."""
+        return bool(getattr(self._miss, "absent", False))
+
+    def _note_absent(self, absent: bool) -> None:
+        self._miss.absent = absent
+
+    def how_cited_heading(self, url: str) -> str:
+        """The heading of a "How cited" page (see :func:`is_how_cited_url`):
+        the case as Scholar records it, "Commonwealth v. Pierce, 138 Mass.
+        165 - 1884" — name, citation and year — or "" when the page can't be
+        had.  Kept for the session, by the page's about= id."""
+        m = re.search(r"[?&]about=(\d+)", url or "")
+        if not m:
+            return ""
+        if m.group(1) in self._how_cited:
+            return self._how_cited[m.group(1)]
+        print(f"[scholar] reading the \"How cited\" page {url}")
+        try:
+            resp = self._get(url, referer=self._last_search_url)
+        except Exception as exc:
+            print(f"[scholar] \"How cited\" page request failed: {exc}")
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
+        h1 = soup.find("h1")
+        if soup.find(id="gs_howcited_ccl") is None or h1 is None:
+            print("[scholar] not a \"How cited\" page")
+            return ""
+        heading = _WS_RE.sub(" ", h1.get_text()).strip()
+        if heading:
+            self._how_cited[m.group(1)] = heading
+        return heading
 
     def search_cases(
         self, query: str, limit: int = 10, courts=None, *,
@@ -2329,8 +2409,14 @@ class GoogleScholarFetcher:
         Fetch a scholar_case page directly by URL — e.g. a citation link
         embedded in another opinion's text.
 
-        Returns (scholar_url, opinion_html) or None.
+        Returns (scholar_url, opinion_html) or None (see
+        :meth:`last_fetch_absent`).  A "How cited" link (see
+        :func:`is_how_cited_url`) is None at once: the page holds no opinion.
         """
+        self._note_absent(False)
+        if is_how_cited_url(url):
+            self._note_absent(True)
+            return None
         db_hit = self._db_by_url(url)
         if db_hit:
             return db_hit
@@ -2841,12 +2927,16 @@ class GoogleScholarFetcher:
     def _fetch_case_page(self, url: str) -> Optional[tuple[str, str]]:
         """Fetch a scholar_case page and extract the opinion HTML."""
         print(f"[scholar] fetching case page {url}")
+        self._note_absent(False)
         try:
             # A browser reaches a case page from a results page — send that
             # Referer when we have one.
             resp = self._get(url, referer=self._last_search_url)
         except Exception as exc:
             print(f"[scholar] case page request failed: {exc}")
+            # A page Scholar says is not there is an answer; a block or a
+            # timeout is not.
+            self._note_absent(_http_status(exc) == 404)
             return None
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -2855,7 +2945,12 @@ class GoogleScholarFetcher:
             "div", class_="gs_opinion"
         )
         if not opinion_div:
-            print("[scholar] #gs_opinion div not found on page")
+            if soup.find(id="gs_howcited_ccl") is not None:
+                # Scholar knows the case only from the opinions citing it.
+                print("[scholar] a \"How cited\" page — no opinion text")
+                self._note_absent(True)
+            else:
+                print("[scholar] #gs_opinion div not found on page")
             return None
 
         html = str(opinion_div)
