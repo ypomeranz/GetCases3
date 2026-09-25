@@ -303,7 +303,9 @@ class LinkPipelineTests(unittest.TestCase):
             "_citation_links_from_visible_pdf_text",
             "_detect_pdf_citation_links",
             consts=("_FONT_FLAG_ITALIC",),
-            extra={"brief_reader": brief_reader},
+            extra={"brief_reader": brief_reader,
+                   "_scan_text": citations.scan_text,
+                   "_page_furniture": citations.page_furniture},
         )
         cls.ns["detect_brief_links"] = citations.detect_links
         cls.pdf = _minimal_pdf("See Roe v. Wade, 410 U.S. 113, 152 (1973).")
@@ -352,7 +354,9 @@ class GovInfoHiddenTextTests(unittest.TestCase):
             "_citation_links_from_pages", "_page_has_scan_background",
             "_pdf_ocr_scan_pages", "_citation_links_from_visible_pdf_text",
             consts=("_FONT_FLAG_ITALIC",),
-            extra={"brief_reader": brief_reader},
+            extra={"brief_reader": brief_reader,
+                   "_scan_text": citations.scan_text,
+                   "_page_furniture": citations.page_furniture},
         )
         cls.ns["detect_brief_links"] = citations.detect_links
         cls.pdf = _govinfo_ocr_pdf()

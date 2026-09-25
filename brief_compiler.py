@@ -114,9 +114,10 @@ def collect_authorities(text: str) -> list[Authority]:
     looks the case up by, and the fallback file name's."""
     out: list[Authority] = []
     by_key: dict[tuple, Authority] = {}
-    # Read as the detector reads it, footnote marks as spaces ("183⁵"), with
-    # the offsets unchanged.
-    text = citations.without_footnote_marks(text)
+    # Read as the detector reads it — footnote marks ("183⁵") and page
+    # furniture (e-filing stamps, page numbers) as spaces, the offsets
+    # unchanged.
+    text = citations.scan_text(text)
     # The case just cited and the parallel citations that follow it, which
     # name no case of their own: "Roe v. Wade, 410 U.S. 113, 93 S. Ct. 705,
     # 35 L. Ed. 2d 147 (1973)" is one case, dated by the year at the end.
@@ -152,10 +153,11 @@ def collect_authorities(text: str) -> list[Authority]:
         run = []
         if kind == "recap":
             key = ("recap", str(value))
-            if key not in by_key:
-                by_key[key] = Authority("recap", str(value),
-                                        name=_name_before(text, start))
-                out.append(by_key[key])
+            auth = by_key.get(key)
+            if auth is None:
+                auth = by_key[key] = Authority("recap", str(value))
+                out.append(auth)
+            _adopt_name(auth, _recap_name(str(value), text[start:end]))
             continue
         # Statute-like sources: one file per section, so the same section cited
         # with different pin-cited subsections isn't downloaded twice.  The spec
@@ -171,30 +173,6 @@ def collect_authorities(text: str) -> list[Authority]:
         by_key[key] = auth
         out.append(auth)
     return out
-
-
-# Lowercase words that legitimately sit inside a party name ("Board of
-# Education", "Jones & Laughlin", "State ex rel. Doe").
-_NAME_PARTICLES = frozenset({
-    "of", "the", "and", "ex", "rel", "rel.", "et", "al", "al.", "&",
-    "de", "la", "le", "van", "von", "der", "den", "del", "dos", "du", "da",
-})
-# Capitalized words that lead *into* a citation (a signal or sentence start)
-# but are never the first word of a party name.
-_NAME_LEAD_INS = frozenset({
-    "in", "see", "cf", "cf.", "e.g.", "eg", "but", "accord", "compare",
-    "contra", "citing", "quoting", "following", "also", "cited", "under",
-    "quoted", "id.", "id", "here", "thus",
-})
-_INRE_RE = re.compile(r"(?i)\b(in re|ex parte|matter of)\b")
-
-
-def _looks_like_name_token(tok: str) -> bool:
-    if not tok:
-        return False
-    if tok[0].isupper() or tok[0].isdigit():
-        return True
-    return tok.strip(".,").lower() in _NAME_PARTICLES
 
 
 def _name_in_link(link: str, cite: str) -> str:
@@ -266,60 +244,19 @@ def _year_in_link(link: str) -> str:
     return m.group(1) if m else ""
 
 
-def _name_before(text: str, start: int) -> str:
-    """The case caption printed immediately before the citation at *start*, or
-    "" — for a RECAP cite, whose link begins at its docket or WL number rather
-    than the name (a reporter cite's link carries its own name: see
-    :func:`_name_in_link`).  Works outward from the "v." nearest the citation
-    so "The Court relied on Roe v. Wade, No. 12-6371" yields "Roe v. Wade"."""
-    window = text[max(0, start - 160):start].replace("\n", " ")
-    window = re.sub(r"[\s,;]+$", "", window)
-    tokens = window.split()
-    if not tokens:
-        return ""
-
-    inre = list(_INRE_RE.finditer(window))
-    if inre:
-        tail = window[inre[-1].start():].split()
-        prefix_len = len(inre[-1].group(0).split())
-        name_toks = [tail[0].title()] + list(tail[1:prefix_len])
-        for tok in tail[prefix_len:]:
-            if _looks_like_name_token(tok):
-                name_toks.append(tok)
-            else:
-                break
-        name = re.sub(r"\s+", " ", " ".join(name_toks)).strip(" ,;.")
-        if len(name) >= 6:
-            return name
-
-    sep = None
-    for i in range(len(tokens) - 1, -1, -1):
-        if tokens[i].strip(".,").lower() in ("v", "vs"):
-            sep = i
-            break
-    if sep is None or sep == 0 or sep == len(tokens) - 1:
-        return ""
-
-    left: list[str] = []
-    for tok in reversed(tokens[:sep]):
-        if _looks_like_name_token(tok) and len(left) < 8:
-            left.append(tok)
-        else:
-            break
-    left.reverse()
-    while left and left[0].strip(".,").lower() in _NAME_LEAD_INS:
-        left.pop(0)
-    right: list[str] = []
-    for tok in tokens[sep + 1:]:
-        if _looks_like_name_token(tok) and len(right) < 8:
-            right.append(tok)
-        else:
-            break
-    if not left or not right:
-        return ""
-    name = re.sub(r"\s+", " ",
-                  f"{' '.join(left)} v. {' '.join(right)}").strip(" ,;.")
-    return name if len(name) >= 4 else ""
+def _recap_name(spec: str, link: str) -> str:
+    """The name of the case an unpublished-opinion (RECAP) link cites: the
+    caption its spec carries — the one the detector read where the brief
+    cites the case in full — or else the name the link itself opens with
+    ("Hoffman" out of "Hoffman, 2025 WL 1504376, at *4")."""
+    try:
+        fields = json.loads(spec)
+    except ValueError:
+        fields = {}
+    if not isinstance(fields, dict):
+        fields = {}
+    return str(fields.get("name") or "") or _name_in_link(
+        link, str(fields.get("cite") or ""))
 
 
 def _year_after(text: str, end: int) -> str:

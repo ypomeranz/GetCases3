@@ -224,7 +224,16 @@ def superscript_digits(textpage, chars) -> set:
 def _clean_pdf_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # De-hyphenate words split across a line break ("evi-\ndence" → "evidence").
-    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+    # A hyphen with a digit on either side is no break in a word but part of
+    # what is written — a page range ("573 U.S. at 232-\n33"), a section or
+    # docket number ("§ 2000e-\n3", "No. 24-\ncv-161") — so it stays: the
+    # range is "232-33", not page 23233.
+    text = re.sub(
+        r"(\w)-\n(\w)",
+        lambda m: (m.group(1) + "-" + m.group(2)
+                   if m.group(1).isdigit() or m.group(2).isdigit()
+                   else m.group(1) + m.group(2)),
+        text)
     # Collapse runs of blank lines (page joins, sparse layouts) to one gap.
     text = re.sub(r"\n[ \t]*\n[ \t]*(\n[ \t]*)+", "\n\n", text)
     return text.strip()

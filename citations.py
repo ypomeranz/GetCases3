@@ -499,6 +499,16 @@ _JOURNAL_REPORTER_RE = re.compile(
 # case-law source can open it.
 _AG_OPINION_RE = re.compile(r"Att(?:orne)?y?\.?\s*'?y?\.?\s*Gen", re.IGNORECASE)
 
+# A court rule read as a reporter: a table of authorities sets each entry's
+# page number before the next entry, so "…Fed. R. App. P. 43 ... 23 / Fed. R.
+# Civ. P. 25" joins into "23 Fed. R. Civ. P. 25" — and a heading between them
+# ("23 Other Authorities Fed. R. App. P. 43") reads as part of the reporter.
+# Rules of procedure and evidence are never case reporters (the Federal Rules
+# *Service* reporters, "Fed. R. Serv." and "Fed. R. Evid. Serv.", are, and do
+# not match).
+_COURT_RULE_REPORTER_RE = re.compile(
+    r"\bR\.\s?(?:(?:App|Bankr|Civ|Crim)\.\s?P\.|Evid\.(?!\s?Serv\.))")
+
 # Short-form citation: "Roe, 410 U.S., at 152" → volume, reporter, pin page.
 SHORT_CITE_RE = re.compile(
     r"\b(\d{1,4})\s+(" + REPORTER_ALT + r")\s*,?\s+at\s+(\d{1,5})\b")
@@ -626,9 +636,14 @@ _SPELLED_OUT_NAME_WORDS = frozenset("""
 def _is_name_abbreviation(core: str) -> bool:
     """Whether a period-terminated word *core* ("Corp.", "U.S.") can sit
     inside a case name, rather than ending the sentence before it."""
-    if not _NAME_ABBREV_RE.match(core):
-        return False
     word = core.rstrip(".").replace("’", "'").lower()
+    if not _NAME_ABBREV_RE.match(core):
+        # Longer than an abbreviation usually runs, but one the Bluebook
+        # tables make all the same: "MCI Telecomms. Corp.", "Distribs.".
+        return (core[:1].isupper() and core.endswith(".")
+                and re.sub(r"[^a-z]", "", word)
+                in bluebook_names._TABLE_ABBREVIATIONS
+                and word not in bluebook_names._WORD_MAP)
     if "." in word:
         return True  # an initialism: "U.S.", "R.R."
     # A word the Bluebook tables abbreviate, written out in full ("Court.",
@@ -641,10 +656,16 @@ def _is_name_abbreviation(core: str) -> bool:
 # that ends it — 'Amendment."' is still the end of a sentence.
 _NAME_TRAIL = ",;:”\"’')]}"
 
-# A token that can sit inside a party name: capitalized, quoted, or a company
-# designation like "3M".  A bare number is not — that is a page number from a
-# running head or the tail of an earlier citation.
-_NAME_TOKEN_RE = re.compile(r"^[\"“'(]?(?:[A-Z]|\d+[A-Za-z])")
+# A token that can sit inside a party name: capitalized, quoted, a company
+# designation like "3M", or a name whose particle is set in lower case
+# ("Ashcroft v. al-Kidd", "Idaho v. Coeur d’Alene Tribe").  A bare number is
+# not — that is a page number from a running head or the tail of an earlier
+# citation.  The particles are named, so a prefix of prose ("pre-Miranda",
+# "non-Indian") stays prose.
+_NAME_TOKEN_RE = re.compile(
+    r"^[\"“'(]?(?:[A-Z]|\d+[A-Za-z]"
+    r"|(?:al|el|ad|ul|bin|ibn|abu|d|l|de|di|da|du|del|della|van|von|ter|ten"
+    r"|dos|das)[-'’][A-Z])")
 
 # How much text before a citation can hold its name.  Long enough for the
 # worst real caption ("Liverpool, New York & Philadelphia S. S. Co. v.
@@ -813,7 +834,10 @@ def _case_name_start(
     left_end = None
     for split in reversed(list(re.finditer(r"(?<=[\w.'’)\]])\s+v[s]?\.\s+", head))):
         right = head[split.end():]
-        if right and len(right) <= 70 and all(_name_token_ok(t) for t in right.split()):
+        # Measured in words, not in the line breaks (or the page furniture
+        # read as spaces) a name broken across a page carries between them.
+        if (right and len(" ".join(right.split())) <= 70
+                and _party_ok(right.split())):
             left_end = split.start()
         break
     # No "v." immediately before the cite: read the shortened one-party form.
@@ -870,7 +894,7 @@ def _case_name_start(
     start = toks[i].start()
     if head[start] in "([":
         start += 1  # "(Hollingsworth v. Perry, …)": the name is inside
-    if left_end - start > 90:
+    if len(" ".join(head[start:left_end].split())) > 90:
         return None  # implausibly long for a case name — leave it alone
     if italic is not None and not _mostly_italic(
             text, italic, base + start, cite_start):
@@ -940,6 +964,19 @@ def _name_token_ok(tok: str) -> bool:
     if low in _NAME_STOPPERS:
         return False
     return bool(_NAME_TOKEN_RE.match(tok)) or low in _NAME_CONNECTORS
+
+
+def _party_ok(words: list) -> bool:
+    """Whether *words* — what follows a caption's "v." up to the comma
+    closing the name — can all sit in the second party's name.  An "at"
+    can too, set between capitalized words the way a campus is named:
+    "Reinebold v. Ind. Univ. at S. Bend"."""
+    return all(
+        _name_token_ok(w)
+        or (w == "at" and 0 < k < len(words) - 1
+            and bool(_NAME_TOKEN_RE.match(words[k - 1]))
+            and bool(_NAME_TOKEN_RE.match(words[k + 1])))
+        for k, w in enumerate(words))
 
 
 def _case_cite_spans(
@@ -1365,6 +1402,8 @@ def _valid_case_reporter(rep: str) -> bool:
         return False  # a law review, not a reporter — no case to open
     if _AG_OPINION_RE.search(rep):
         return False  # an Attorney General opinion, not a decided case
+    if _COURT_RULE_REPORTER_RE.search(rep):
+        return False  # "Fed. R. Civ. P.", a rule — the rule pass links it
     if _FIRM_RE.search(rep):
         return False  # "Smith & Co.", a firm
     family = reporter_family(rep)
@@ -1886,24 +1925,56 @@ _RECAP_AFTER_RE = re.compile(
     r"(\d{1,2}),\s+(\d{4})\)"
 )
 
-# The case name before the citation — for the viewer's window title, and,
-# when the citation prints no docket number, as the RECAP search key itself.
-_RECAP_NAME_BODY = (
-    r"([A-Z][\w.,'’&()/ -]{1,180}?\sv\.?\s"
-    r"[\w.,'’&()/ -]{1,140}?|"
-    r"In\s+re\s+[\w.,'’&()/ -]{2,140}?)"
-)
-# … followed by the docket number ("Care One …, No. 12-6371, 2024 WL …"):
-_RECAP_NAME_RE = re.compile(
-    _RECAP_NAME_BODY + r",\s*(?:Nos?\.|Civ|Case\s+No\.)")
-# … or running right up to the cite ("Pecos River Talc LLC v. Emory,
-# 2025 WL 1249947 …") — anchored to the end of the before-window.
-_RECAP_NAME_END_RE = re.compile(_RECAP_NAME_BODY + r",\s*$")
+# What closes a WL/LEXIS citation after its number: a pin cite to its star
+# pages (", at *4", " at *4–*5", ", at *2-3") and then the court/date
+# parenthetical — both part of the link, as a reporter cite's are.
+_RECAP_PIN_RE = re.compile(
+    r",?\s*at\s+\*{1,2}\d{1,6}(?:\s*[-–—]\s*\*{0,2}\d{1,6})?"
+    r"(?:\s*,\s*\*{1,2}\d{1,6}(?:\s*[-–—]\s*\*{0,2}\d{1,6})?)*")
+
+# A case's whole caption — "X v. Y", "In re X" — as against the one party a
+# short form keeps ("Hoffman, 2025 WL 1504376").
+_CAPTION_RE = re.compile(
+    r"\svs?\.?\s|^(?:In\s+re|In\s+the\s+Matter\s+of|Ex\s+parte|Matter\s+of)"
+    r"\s")
 
 # Signal words a name grab may drag along ("See Peninsula Pathology …").
 _NAME_SIGNAL_RE = re.compile(
     r"^(?:But\s+see|See\s+also|See|Accord|Cf|Compare|Contra|Citing|Quoting|"
     r"E\.g)\W+\s*")
+
+
+def _recap_end(text: str, end: int) -> int:
+    """Where the WL/LEXIS citation whose number ends at *end* ends: past its
+    star-page pin cite and its court/date parenthetical, when it has them."""
+    pin = _RECAP_PIN_RE.match(text, end)
+    if pin:
+        end = pin.end()
+    paren = _COURT_YEAR_PAREN_RE.match(text, end)
+    return paren.end() if paren else end
+
+
+def _recap_name(text: str, cite_start: int, italic=None) -> str:
+    """The caption of the case whose unpublished opinion is cited at
+    *cite_start* — the WL number, or the "No." of a docket-only cite — for
+    the viewer's window title and, when the citation prints no docket, as the
+    RECAP search key itself; ``""`` when none is printed there.
+
+    Read back from the citation the way a reporter cite's name is (see
+    :func:`_case_name_start`), past any docket number between them: "…in
+    Hoffman v. Board of Regents …, No. 23-cv-853-jdp, 2025 WL 1504376" names
+    Hoffman v. Board of Regents, not the prose before it or the case cited
+    before it in a string cite.  Only a whole caption is a name here: a short
+    form's lone party ("Hoffman, 2025 WL 1504376") keys no search."""
+    start = _case_name_start(text, cite_start, 0, italic)
+    if start is None:
+        return ""
+    head = re.sub(r",\s*$", "", text[start:cite_start])
+    docket = _DOCKET_AFTER_NAME_RE.search(head)
+    if docket:
+        head = head[:docket.start()]
+    name = _clean_case_name(re.sub(r"\s+", " ", head))
+    return name if _CAPTION_RE.search(name) else ""
 
 
 def _clean_case_name(raw: str) -> str:
@@ -1955,7 +2026,9 @@ for _map in (court_catalog.CIRCUIT_COURTS, court_catalog.DISTRICT_COURTS,
         _FED_COURT_IDS[re.sub(r"[^a-z0-9]", "", _abbr.lower())] = _cid
 
 
-def iter_recap_cites(text: str) -> list[tuple[int, int, "str | None"]]:
+def iter_recap_cites(
+    text: str, italic=None,
+) -> list[tuple[int, int, "str | None"]]:
     """Every WL / LEXIS citation in *text* as ``(start, end, spec)``.
 
     ``spec`` is a JSON string with the fields a RECAP lookup needs —
@@ -1966,7 +2039,9 @@ def iter_recap_cites(text: str) -> list[tuple[int, int, "str | None"]]:
     an ordinary case citation.  A docket number is the preferred key, but
     a citation printing none at all — "Pecos River Talc LLC v. Emory,
     2025 WL 1249947 (E.D. Va. Apr. 30, 2025)" — still resolves when the
-    case name, federal court and date are all present."""
+    case name, federal court and date are all present.  The name is the
+    first whole caption printed before any occurrence (see
+    :func:`_recap_name`; *italic* as for :func:`detect_links`)."""
     index: dict = {}
     occurrences: list = []
     for m in WL_CITE_RE.finditer(text or ""):
@@ -1977,15 +2052,10 @@ def iter_recap_cites(text: str) -> list[tuple[int, int, "str | None"]]:
         dm = _RECAP_DOCKET_RE.search(before)
         if dm:
             info.setdefault("docket", dm.group(1).strip())
-            nm = _RECAP_NAME_RE.search(before)
-        else:
-            # No docket printed — the case name running right up to the
-            # cite can key the RECAP lookup instead.
-            nm = _RECAP_NAME_END_RE.search(before)
-        if nm:
-            name = _clean_case_name(nm.group(1))
+        if "name" not in info:
+            name = _recap_name(text, m.start(), italic)
             if name:
-                info.setdefault("name", name)
+                info["name"] = name
         am = _RECAP_AFTER_RE.match(
             re.sub(r"\s+", " ", text[m.end():m.end() + 180]))
         if am:
@@ -2056,7 +2126,9 @@ def docket_numbers_in(text: str) -> list[str]:
     return out
 
 
-def iter_docket_cites(text: str) -> list[tuple[int, int, str]]:
+def iter_docket_cites(
+    text: str, italic=None,
+) -> list[tuple[int, int, str]]:
     """Slip opinions cited by docket number with no WL/LEXIS number at all —
     "Peninsula Pathology Assocs. v. Am. Int'l Indus., No. 23-1971 (4th Cir.
     Feb. 12, 2024)" — as ``(start, end, spec)`` RECAP actions, spanning the
@@ -2075,12 +2147,9 @@ def iter_docket_cites(text: str) -> list[tuple[int, int, str]]:
         fields = {"docket": m.group(1).strip(),
                   "date": f"{m.group(6)}-{mon:02d}-{int(m.group(5)):02d}",
                   "court": court_id}
-        before = re.sub(r"\s+", " ", text[max(0, m.start() - 260):m.start()])
-        nm = _RECAP_NAME_END_RE.search(before)
-        if nm:
-            name = _clean_case_name(nm.group(1))
-            if name:
-                fields["name"] = name
+        name = _recap_name(text, m.start(), italic)
+        if name:
+            fields["name"] = name
         out.append((m.start(), m.end(), json.dumps(fields)))
     return out
 
@@ -2267,6 +2336,108 @@ def without_footnote_marks(text: str) -> str:
     return (text or "").translate(_FOOTNOTE_MARKS_AS_SPACES)
 
 
+# ---------------------------------------------------------------------------
+# Page furniture
+# ---------------------------------------------------------------------------
+# A filed brief carries the court's e-filing stamp on every page — "Case:
+# 26-1507 Document: 11 Filed: 05/01/2026 Pages: 87", "Case: 3:24-cv-00161-jdp
+# Document #: 73 Filed: 02/20/26 Page 1 of 8" — besides its own page number.
+# Text read page by page runs both into whatever sentence crosses the page
+# break, so a citation broken there reads "Luder v. Endicott, 253 Case: 26-1507
+# Document: 11 Filed: 05/01/2026 Pages: 87 20 F.3d 1020": the volume cut off
+# from its reporter, and the page number taken for the volume.  Detection
+# reads the furniture as spaces.
+
+# The fields after "Case … Document …", in whatever order a court prints them:
+# the filing date, the page ("Page 1 of 8", "Pages: 87", "Page: 3"), a PageID
+# or Entry ID, a bare date or a long document number (the Second Circuit's).
+_ECF_FIELD = (
+    r"(?:(?:Date\s+)?Filed\s*:?\s*\d{1,2}/\d{1,2}/\d{2,4}"
+    r"|Pages?\s*:?\s*\d{1,5}(?:\s+of\s+\d{1,5})?"
+    r"|Page\s*ID\s*#?\s*:?\s*\d{1,9}"
+    r"|Entry\s+ID\s*:?\s*\d{1,12}"
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{6,14})")
+_ECF_STAMP_RE = re.compile(
+    r"(?:USCA\d{0,2}[ \t]+|Appellate[ \t]+)?Case[ \t]*[:#]?[ \t]*#?[ \t]*"
+    r"[\w:.\-]{2,40},?[ \t]+Document[ \t]*[:#]?[ \t]*#?[ \t]*:?[ \t]*"
+    r"[\w\-]{1,20},?(?:[ \t]*,?[ \t]*" + _ECF_FIELD + r",?)+"
+    # The Ninth Circuit's names no document: "Case: 19-35678, 07/10/2020,
+    # ID: 11747321, DktEntry: 25, Page 3 of 40".
+    r"|Case:[ \t]*\d{2}-\d{3,6},[ \t]*\d{1,2}/\d{1,2}/\d{4},[ \t]*"
+    r"ID:[ \t]*\d{4,12},[ \t]*DktEntry:[ \t]*[\d.\-]{1,10},[ \t]*"
+    r"Page[ \t]*\d{1,5}(?:[ \t]+of[ \t]+\d{1,5})?")
+
+# A page number standing alone on its line: "20", "iv", "- 7 -".
+_PAGE_NUMBER_LINE_RE = re.compile(
+    r"[ \t]*[-–—]?[ \t]*"
+    r"(?:\d{1,4}|(?=[ivxlc])c{0,3}(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))"
+    r"[ \t]*[-–—]?[ \t]*\r?")
+
+
+def _blank(text: str, spans) -> str:
+    """*text* with the characters in *spans* read as spaces, its line breaks
+    kept."""
+    if not spans:
+        return text
+    chars = list(text)
+    for start, end in spans:
+        for i in range(start, end):
+            if not chars[i].isspace():
+                chars[i] = " "
+    return "".join(chars)
+
+
+def _lines(text: str) -> "list[tuple[int, int]]":
+    """``(start, end)`` of each line of *text*, its "\\n" left out."""
+    out: list = []
+    start = 0
+    for m in re.finditer(r"\n", text):
+        out.append((start, m.start()))
+        start = m.end()
+    out.append((start, len(text)))
+    return out
+
+
+def page_furniture(page: str) -> "list[tuple[int, int]]":
+    """Spans of one page's text that are its furniture rather than its
+    matter: an e-filing stamp wherever it stands, and a page number standing
+    alone on the page's first or last line of text."""
+    spans = [(m.start(), m.end()) for m in _ECF_STAMP_RE.finditer(page)]
+    plain = _blank(page, spans)
+    lines = [(s, e) for s, e in _lines(plain) if plain[s:e].strip()]
+    for s, e in lines[:1] + lines[-1:]:
+        if _PAGE_NUMBER_LINE_RE.fullmatch(plain, s, e):
+            spans.append((s, e))
+    return spans
+
+
+def without_page_furniture(text: str) -> str:
+    """*text* — a whole document, its pages run together — with its page
+    furniture read as spaces, one character for one: every e-filing stamp,
+    and each page number standing alone on a line beside a blank line or a
+    stamp, which is where a page break falls in text read page by page."""
+    if "Case" not in text and not re.search(r"\n[ \t\r]*\n", text):
+        return text
+    spans = [(m.start(), m.end()) for m in _ECF_STAMP_RE.finditer(text)]
+    plain = _blank(text, spans)
+    lines = _lines(plain)
+    blank_line = [not plain[s:e].strip() for s, e in lines]
+    for i, (s, e) in enumerate(lines):
+        if blank_line[i] or not _PAGE_NUMBER_LINE_RE.fullmatch(plain, s, e):
+            continue
+        if ((i > 0 and blank_line[i - 1])
+                or (i + 1 < len(lines) and blank_line[i + 1])):
+            spans.append((s, e))
+    return _blank(text, spans)
+
+
+def scan_text(text: str) -> str:
+    """*text* as citation detection reads it: footnote marks and page
+    furniture as spaces, one character for one, so offsets into the result
+    are offsets into *text*."""
+    return without_page_furniture(without_footnote_marks(text))
+
+
 def detect_links(
     text: str, *, italic=None,
 ) -> list[tuple[int, int, tuple[str, str]]]:
@@ -2293,7 +2464,7 @@ def detect_links(
     """
     if not text:
         return []
-    text = without_footnote_marks(text)
+    text = scan_text(text)
     # Only usable when the document actually carries styling: a scan's OCR
     # layer has none, and gating on it would then drop every case name.
     if italic is not None and not any(italic):
@@ -2331,7 +2502,7 @@ def detect_links(
     # the rest become ordinary case cites (Scholar), including the 7-digit
     # WL numbers the broad reporter regex's page group won't match.
     recap_spans: list[tuple[int, int]] = []
-    for start, end, spec in iter_recap_cites(text):
+    for start, end, spec in iter_recap_cites(text, italic):
         recap_spans.append((start, end))
         if spec is not None:
             matches.append((start, end, "recap", spec))
@@ -2340,7 +2511,7 @@ def detect_links(
             matches.append((start, end, "cite", cite))
     # Slip opinions cited by docket number alone (no WL/LEXIS number) are
     # RECAP lookups too — "No. 23-1971 (4th Cir. Feb. 12, 2024)".
-    for start, end, spec in iter_docket_cites(text):
+    for start, end, spec in iter_docket_cites(text, italic):
         if any(start < e and s < end for s, e in recap_spans):
             continue
         recap_spans.append((start, end))
@@ -2582,13 +2753,17 @@ def detect_links(
                 recent.append((("cite", base), span_end))
             else:
                 span_start = start
-                if kind == "scotus":
-                    # A decision cited by docket number is named like any
-                    # other: "Trump v. California, No. 26A139 (…)".
+                if kind in ("scotus", "recap"):
+                    # A decision cited by docket or WL number is named like
+                    # any other — "Trump v. California, No. 26A139 (…)",
+                    # "Hoffman, 2025 WL 1504376, at *4" — and the link takes
+                    # the name in, and a WL cite's pin and parenthetical.
                     name_start = _case_name_start(text, start, floor, italic)
                     if name_start is not None:
                         span_start = name_start
-                out.append((span_start, end, action))
+                    if kind == "recap":
+                        span_end = _recap_end(text, end)
+                out.append((span_start, span_end, action))
                 # Non-case Id. chains (to a statute, rule, or regulation) are
                 # safe too: their action has no pin suffix to accumulate.
                 recent.append((action, span_end))

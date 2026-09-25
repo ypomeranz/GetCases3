@@ -104,11 +104,12 @@ def pretty_number(no: str) -> str:
 # — where OCR may turn the comma into a period and/or push a hyphen into the
 # digits ("2,976", "2,-976", "7.030", "2, 976") — or a plain run of digits
 # (numbers under 1,000, and OCR that dropped the separator), plus an optional
-# letter suffix ("6,082a").  The lookahead refuses a docket-number tail
+# letter suffix ("6,082a").  The lookaheads refuse a docket-number tail
 # ("Case No. 2:13-cv-7779", "Case No. 12-6371"), whose next character run
-# would continue with more digits.
+# would continue with more digits, or with a case-type code and then digits
+# ("Case No. 24-cv-00161-jdp").
 _NO_BLOB = (r"(\d{1,2}\s?[.,]\s?-?\s?\d{3}|\d{1,5})([a-z])?\b"
-            r"(?!\s?[:\-–—]\s?\d)")
+            r"(?!\s?[:\-–—]\s?\d)(?![\-–—][A-Za-z]{2,4}[\-–—]?\d)")
 
 # "Case No. 10,126" (OCR may slip punctuation between the words: "Case; No.
 # 14.074"); "Case Nos." lists match their first number.

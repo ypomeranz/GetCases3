@@ -720,6 +720,12 @@ def _misdated(text: str, m: "re.Match", cases: "list[ERCase]") -> bool:
                for year in years)
 
 
+# A reporter and its page, following a number: that number is their volume.
+_VOLUME_OF_NEXT_RE = re.compile(
+    r"\s+(?:[A-Z][A-Za-z0-9.'’]*|\d+(?:d|th))"
+    r"(?:\s+(?:[A-Z][A-Za-z0-9.'’]*|\d+(?:d|th))){0,4}\s+\d")
+
+
 def _at_cite_start(text: str, pos: int) -> bool:
     """Whether *pos* is where a citation stands: the start of the text, or
     just after a comma, semicolon or opening parenthesis/bracket."""
@@ -781,6 +787,12 @@ def iter_nominate_cites(text: str) -> "list[tuple[int, int, str, list[ERCase]]]"
             # an opening parenthesis ("(Lord Raym. 576.)").
             if (not vol and (not dotted or key in _NOM_ALIAS_KEYS)
                     and not _at_cite_start(text, m.start())):
+                pos = m.start(3)
+                continue
+            # A "page" with a reporter and a page of its own after it is the
+            # volume of that citation: "Adebiyi v. S. Suburban Coll., 98 F.4th
+            # 886" names a college, not Collyer's page 98.
+            if _VOLUME_OF_NEXT_RE.match(text, m.end(3)):
                 pos = m.start(3)
                 continue
             resume = m.start(3)

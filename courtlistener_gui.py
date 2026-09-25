@@ -997,7 +997,8 @@ from citations import (
     build_short_cite_index as _build_short_cite_index,
     cite_target_from_text as _cite_target_from_text,
     detect_links as detect_brief_links,
-    without_footnote_marks as _without_footnote_marks,
+    scan_text as _scan_text,
+    page_furniture as _page_furniture,
     docket_numbers_in as _docket_numbers_in,
     iter_docket_cites as _iter_docket_cites,
     iter_recap_cites as _iter_recap_cites,
@@ -16591,16 +16592,23 @@ def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) ->
         page_italics = italics[pi] if italics and pi < len(italics) else ()
         # A footnote mark is scanned as a space: in front of a record cite it
         # would be a volume ("injury.⁴ Appl. 6" as 4 Appl. 6), after a page
-        # more of the page ("183⁴" as 1834).  The page keeps its digit.
-        marks = getattr(page_italics, "superscripts", ())
+        # more of the page ("183⁴" as 1834).  So is the page's furniture — its
+        # e-filing stamp, and its number on the first or last line — which a
+        # citation broken across the page would otherwise run through ("253
+        # [stamp] 20 F.3d 1020" as 20 F.3d 1020).  The page keeps both.
+        blank = set(getattr(page_italics, "superscripts", ()))
+        page_text = "".join(ch for ch, _bx in chars)
+        if len(page_text) == len(chars):
+            for s, e in _page_furniture(page_text):
+                blank.update(range(s, e))
         for li, (ch, _bx) in enumerate(chars):
-            parts.append(" " if li in marks else ch)
+            parts.append(" " if li in blank and not ch.isspace() else ch)
             gmap.append((pi, li))
             slants.append(li < len(page_italics) and bool(page_italics[li]))
         parts.append("\n")          # page separator (keeps words from fusing)
         gmap.append((None, None))
         slants.append(False)
-    text = "".join(parts)
+    text = _scan_text("".join(parts))
     try:
         links = detect_brief_links(
             text, italic=slants if italics is not None else None)
@@ -16612,8 +16620,8 @@ def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) ->
         per_page: dict = {}
         for g in range(start, end):
             pi, li = gmap[g]
-            if pi is None:
-                continue
+            if pi is None or text[g].isspace():
+                continue    # a mark or furniture read as a space draws no link
             bx = pages[pi][li][1]
             if bx is not None:
                 per_page.setdefault(pi, []).append(bx)
@@ -31910,8 +31918,7 @@ class _BriefTextWindow:
                 txt.insert("end", src[pos:start])
             self._link_n += 1
             tag = f"lnk{self._link_n}"
-            seg = re.sub(r"\s+", " ",
-                         _without_footnote_marks(src[start:end])).strip()
+            seg = re.sub(r"\s+", " ", _scan_text(src[start:end])).strip()
             self._link_actions[tag] = (action, seg)
             cat = _brief_action_category(action[0])
             txt.insert("end", src[start:end], (cat, "brieflink", tag))

@@ -364,7 +364,9 @@ def _load_gui(*names, consts=()):
     tree = ast.parse(src)
     ns = {"re": re, "_PDFIUM_LOCK": threading.RLock(),
           "brief_reader": brief_reader,
-          "detect_brief_links": citations.detect_links}
+          "detect_brief_links": citations.detect_links,
+          "_scan_text": citations.scan_text,
+          "_page_furniture": citations.page_furniture}
     for node in tree.body:
         if (isinstance(node, (ast.FunctionDef, ast.ClassDef))
                 and node.name in names):
