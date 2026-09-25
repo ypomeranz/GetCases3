@@ -20,6 +20,7 @@ import typing
 import unittest
 from types import SimpleNamespace
 
+import brief_reader
 from court_catalog import STATE_COURTS
 
 try:
@@ -295,13 +296,14 @@ class LinkPipelineTests(unittest.TestCase):
         import citations
         cls.ns = _load(
             "_degenerate_ocr_metrics", "_page_has_repairable_ocr_text",
-            "_repair_degenerate_ocr_page",
+            "_repair_degenerate_ocr_page", "_PageSlants",
             "_union_line_runs", "_extract_pdf_text_and_style",
             "_extract_pdf_text_pages", "_citation_links_from_pages",
             "_page_has_scan_background", "_pdf_ocr_scan_pages",
             "_citation_links_from_visible_pdf_text",
             "_detect_pdf_citation_links",
             consts=("_FONT_FLAG_ITALIC",),
+            extra={"brief_reader": brief_reader},
         )
         cls.ns["detect_brief_links"] = citations.detect_links
         cls.pdf = _minimal_pdf("See Roe v. Wade, 410 U.S. 113, 152 (1973).")
@@ -345,11 +347,12 @@ class GovInfoHiddenTextTests(unittest.TestCase):
         import citations
         cls.ns = _load(
             "_degenerate_ocr_metrics", "_page_has_repairable_ocr_text",
-            "_repair_degenerate_ocr_page",
+            "_repair_degenerate_ocr_page", "_PageSlants",
             "_union_line_runs", "_extract_pdf_text_and_style",
             "_citation_links_from_pages", "_page_has_scan_background",
             "_pdf_ocr_scan_pages", "_citation_links_from_visible_pdf_text",
             consts=("_FONT_FLAG_ITALIC",),
+            extra={"brief_reader": brief_reader},
         )
         cls.ns["detect_brief_links"] = citations.detect_links
         cls.pdf = _govinfo_ocr_pdf()

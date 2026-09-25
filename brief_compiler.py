@@ -28,6 +28,7 @@ too big), and names come from authoritative data, never the brief's own prose:
 
 from __future__ import annotations
 
+import json
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -78,6 +79,13 @@ class Authority:
                 or self.value
         if self.kind == "recap":
             return "unpublished opinion"
+        if self.kind == "scotus":
+            try:
+                spec = json.loads(self.value)
+            except ValueError:
+                return self.value
+            docket = f"No. {spec.get('docket', '')}"
+            return f"{spec['name']}, {docket}" if spec.get("name") else docket
         return self.value
 
 
@@ -87,6 +95,7 @@ _TEXT_STATUTE_KINDS = frozenset({"usc", "cfr", "rule", "const", "statestat"})
 _NOTE_ONLY = {
     "browse": "state statute — official source is link-only",
     "engrep": "English Reports — CommonLII scan not bundled",
+    "scotus": "Supreme Court decision cited by docket number — not bundled",
     "url": "external link",
 }
 

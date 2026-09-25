@@ -29,7 +29,7 @@ import subprocess
 import zipfile
 from xml.etree import ElementTree as ET
 
-__all__ = ["extract_text", "SUPPORTED_EXTS"]
+__all__ = ["extract_text", "superscript_digits", "SUPPORTED_EXTS"]
 
 SUPPORTED_EXTS = (".pdf", ".docx", ".rtf", ".doc", ".txt")
 
@@ -94,7 +94,7 @@ def _pdf_text(path: str) -> str:
                 try:
                     tp = page.get_textpage()
                     try:
-                        pages.append(tp.get_text_range())
+                        pages.append(_page_text(tp))
                     finally:
                         tp.close()
                 except Exception:
@@ -105,6 +105,120 @@ def _pdf_text(path: str) -> str:
         with PDFIUM_LOCK:
             doc.close()
     return _clean_pdf_text("\n\n".join(pages))
+
+
+_SUPERSCRIPT_DIGITS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def _page_text(tp) -> str:
+    """A text page's characters, its footnote marks written as the
+    superscript digits they are printed as ("injury.⁴") — so the reader shows
+    them as marks, and the citation scan cannot take one for a volume."""
+    n = tp.count_chars()
+    whole = tp.get_text_range()
+    chars = (list(whole) if len(whole) == n
+             else [tp.get_text_range(i, 1) for i in range(n)])
+    try:
+        marks = superscript_digits(tp, chars)
+    except Exception:
+        marks = set()
+    if not marks:
+        return whole
+    return "".join(ch.translate(_SUPERSCRIPT_DIGITS) if i in marks else ch
+                   for i, ch in enumerate(chars))
+
+
+_ASCII_DIGITS = frozenset("0123456789")
+
+
+def superscript_digits(textpage, chars) -> set:
+    """Indexes of the digits on a PDF text page that are set as superscripts:
+    the footnote marks in the running text ("…irreparable injury.⁴") and the
+    numbers that head the notes themselves.
+
+    A text layer gives a mark as a plain digit, which the citation scan then
+    reads as part of a citation — the mark in front of a record cite
+    ("injury.⁴ Appl. 6, 31") as its volume, one set right after a page
+    ("183⁴") as more of the page.  What sets a mark apart is how it is set: a
+    run of digits smaller than the type beside it and lifted off that type's
+    baseline.  Size is read from the loose character box — the font's full
+    height at the size it is drawn, whatever the text matrix did to it — and
+    the baseline from the character's origin, both through PDFium, so neither
+    depends on how the fonts are named or sized in the file.
+
+    *textpage* is a pypdfium2 text page; *chars* holds its characters one per
+    character index (a string, or a list when the page's text range does not
+    line up with its indexes).  The caller holds the PDFium lock.  A PDFium
+    build without either measurement finds no marks, which is how things
+    stood before this was read at all.
+    """
+    import ctypes
+
+    try:
+        import pypdfium2.raw as pdfium_c
+        loose_box = pdfium_c.FPDFText_GetLooseCharBox
+        char_origin = pdfium_c.FPDFText_GetCharOrigin
+        rect = pdfium_c.FS_RECTF()
+    except (ImportError, AttributeError):
+        return set()
+    raw = textpage.raw
+    ox, oy = ctypes.c_double(), ctypes.c_double()
+    n = len(chars)
+    seen: dict = {}
+
+    def metrics(i: int):
+        """(left, right, size, baseline) of character *i*, or None."""
+        if i not in seen:
+            got = None
+            if (loose_box(raw, i, ctypes.byref(rect))
+                    and char_origin(raw, i, ctypes.byref(ox), ctypes.byref(oy))
+                    and rect.top > rect.bottom and rect.right > rect.left):
+                got = (rect.left, rect.right, rect.top - rect.bottom, oy.value)
+            seen[i] = got
+        return seen[i]
+
+    def neighbour(i: int, step: int):
+        """The nearest glyph from *i* in the direction *step*: past the spaces
+        and line breaks the text layer puts around a mark, and no further."""
+        for _ in range(4):
+            if not 0 <= i < n:
+                return None
+            if not chars[i].isspace():
+                return metrics(i)
+            i += step
+        return None
+
+    marks: set = set()
+    i = 0
+    while i < n:
+        first = metrics(i) if chars[i] in _ASCII_DIGITS else None
+        if first is None:
+            i += 1
+            continue
+        # A run of digits set alike: "183" and the "4" glued on after it are
+        # two runs, however the text layer ran them together.
+        j = i + 1
+        while j < n and chars[j] in _ASCII_DIGITS:
+            m = metrics(j)
+            if (m is None or abs(m[2] - first[2]) > 0.1 * first[2]
+                    or abs(m[3] - first[3]) > 0.1 * first[2]):
+                break
+            j += 1
+        last = metrics(j - 1)
+        size, base = first[2], first[3]
+        for other, gap in ((neighbour(i - 1, -1), lambda o: first[0] - o[1]),
+                           (neighbour(j, +1), lambda o: o[0] - last[1])):
+            if other is None:
+                continue
+            o_size = other[2]
+            lift = base - other[3]
+            if (size <= 0.85 * o_size
+                    and 0.12 * o_size <= lift <= 0.6 * o_size
+                    and -0.5 * o_size <= gap(other) <= 1.2 * o_size):
+                marks.update(range(i, j))
+                break
+        i = j
+    return marks
 
 
 def _clean_pdf_text(text: str) -> str:

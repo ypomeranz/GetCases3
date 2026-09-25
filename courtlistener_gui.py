@@ -997,6 +997,7 @@ from citations import (
     build_short_cite_index as _build_short_cite_index,
     cite_target_from_text as _cite_target_from_text,
     detect_links as detect_brief_links,
+    without_footnote_marks as _without_footnote_marks,
     docket_numbers_in as _docket_numbers_in,
     iter_docket_cites as _iter_docket_cites,
     iter_recap_cites as _iter_recap_cites,
@@ -16466,6 +16467,19 @@ def _repair_degenerate_ocr_page(
     return out_chars, out_slants
 
 
+class _PageSlants(list):
+    """One page's italic flags — a bool per character, as ever — carrying the
+    page's superscript digits beside them: ``superscripts``, the indexes of
+    its footnote marks (see :func:`brief_reader.superscript_digits`), which the
+    citation scan must not read as a volume or a page.  They ride on the flags
+    so the extractor keeps the two-value return every PDF viewer unpacks and
+    hands on unchanged; a plain list of flags simply has none."""
+
+    def __init__(self, flags=(), superscripts=()) -> None:
+        super().__init__(flags)
+        self.superscripts = frozenset(superscripts)
+
+
 def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
     """Extract a PDF's text layer, as ``(pages, italics)``.
 
@@ -16475,7 +16489,8 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
     break).  ``italics`` is the same shape with a bool per character, true where
     the glyph is set in an italic face: case names are italicised and the prose
     around them is not, which is what tells a citation from a sentence that
-    merely ends in a capitalised word.
+    merely ends in a capitalised word.  Each page's flags are a
+    :class:`_PageSlants`, which also names the page's footnote marks.
 
     Runs on a background thread: it loads its *own* pdfium document (never the
     pane's), touches no tk objects, and returns plain data.  Every PDFium call is
@@ -16505,6 +16520,7 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
         for pi in range(n_pages):
             chars: list = []
             slants: list = []
+            marks: set = set()
             with _PDFIUM_LOCK:
                 page = doc[pi]
                 try:
@@ -16534,6 +16550,11 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
                                     bool(font_flags.value & _FONT_FLAG_ITALIC))
                             except Exception:
                                 slants.append(False)
+                        try:
+                            marks = brief_reader.superscript_digits(
+                                tp, [ch for ch, _bx in chars])
+                        except Exception:
+                            marks = set()
                     finally:
                         tp.close()
                 except Exception:
@@ -16541,9 +16562,11 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
                     slants = []
                 finally:
                     page.close()
-            chars, slants = _repair_degenerate_ocr_page(chars, slants)
-            pages.append(chars)
-            italics.append(slants)
+            repaired, slants = _repair_degenerate_ocr_page(chars, slants)
+            if repaired is not chars:
+                marks = set()   # the repair renumbers the characters
+            pages.append(repaired)
+            italics.append(_PageSlants(slants, marks))
         return pages, italics
     finally:
         with _PDFIUM_LOCK:
@@ -16566,8 +16589,12 @@ def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) ->
     slants: list = []              # global index -> is the glyph italic
     for pi, chars in enumerate(pages):
         page_italics = italics[pi] if italics and pi < len(italics) else ()
+        # A footnote mark is scanned as a space: in front of a record cite it
+        # would be a volume ("injury.⁴ Appl. 6" as 4 Appl. 6), after a page
+        # more of the page ("183⁴" as 1834).  The page keeps its digit.
+        marks = getattr(page_italics, "superscripts", ())
         for li, (ch, _bx) in enumerate(chars):
-            parts.append(ch)
+            parts.append(" " if li in marks else ch)
             gmap.append((pi, li))
             slants.append(li < len(page_italics) and bool(page_italics[li]))
         parts.append("\n")          # page separator (keeps words from fusing)
@@ -26716,6 +26743,10 @@ class _ScholarTextWindow:
             _open_fedcas_citation(
                 self._app, self._win, value, self._status_var.set)
             return
+        if kind == "scotus":
+            _open_scotus_citation(
+                self._app, self._win, value, self._status_var.set)
+            return
         # A Scholar case URL may carry a pincite, a reporter cite, and the case
         # name ("<url>\tpin=565\tcite=…\tname=…") so a failed/blocked fetch can
         # still be located on CourtListener.
@@ -31371,7 +31402,7 @@ def _open_eng_rep_case(parent: tk.Misc, case: "eng_rep.ERCase",
 
 #: Categories used to colour-code highlights by what the citation points at.
 def _brief_action_category(kind: str) -> str:
-    if kind in ("cite", "url", "engrep", "recap", "fedcas"):
+    if kind in ("cite", "url", "engrep", "recap", "fedcas", "scotus"):
         return "case"  # English Reports, RECAP and Federal Cases too
     if kind == "const":
         return "const"
@@ -31386,6 +31417,10 @@ def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
     kind, value = action
     if kind in ("browse", "statpdf", "frpdf"):
         url = value
+    elif kind == "scotus":
+        url = _scotus_docket_page_url(value)
+        if not url:
+            return
     elif kind == "recap":
         # The RECAP search on CourtListener, pre-filtered to the docket (or,
         # for a citation printing none, the case name), court and opinion
@@ -31629,6 +31664,77 @@ def _open_fedcas_citation(app: "CourtListenerGUI", parent: tk.Misc,
     threading.Thread(target=run, daemon=True).start()
 
 
+def _scotus_docket_page_url(spec_json: str) -> str:
+    """The supremecourt.gov docket page for a Supreme Court decision cited by
+    docket number (a ``("scotus", spec)`` action), or ""."""
+    try:
+        docket = json.loads(spec_json).get("docket") or ""
+        import scotus_docket
+        return scotus_docket.official_docket_url(docket)
+    except Exception:
+        return ""
+
+
+def _open_scotus_citation(app: "CourtListenerGUI", parent: tk.Misc,
+                          spec_json: str, status=lambda _s: None) -> None:
+    """Open a Supreme Court decision cited by docket number — "Trump v.
+    California, No. 26A139, slip op. at 4 (U.S. Aug. 24, 2026)".  The Court's
+    own slip opinion comes first, found in its opinion archive by the docket
+    and the decision date (:func:`scotus_recent.find_slip_opinion`) and shown
+    in the slip-opinion viewer.  An order on an application is filed on the
+    docket rather than in that archive, so failing it the case's docket page
+    on supremecourt.gov — which lists every order and opinion in the case —
+    opens in the browser."""
+    try:
+        spec = json.loads(spec_json)
+    except Exception:
+        status("Couldn't read that citation.")
+        return
+    docket = spec.get("docket") or ""
+    name = spec.get("name") or ""
+    label = f"{name}, No. {docket}" if name else f"No. {docket}"
+
+    def safe_status(s: str) -> None:
+        try:
+            status(s)
+        except tk.TclError:
+            pass
+
+    safe_status(f"Looking up {label} at the Supreme Court…")
+
+    def run() -> None:
+        match = None
+        try:
+            import scotus_recent
+            match = scotus_recent.find_slip_opinion(
+                name=name, docket=docket, date_filed=spec.get("date") or "",
+                session=_anon_session, name_scorer=_name_match_score,
+            )
+        except Exception as exc:
+            print(f"[scotus] slip-opinion lookup failed for {label!r}: {exc}")
+        if match is not None and match.opinion_url:
+            def open_slip(url=match.opinion_url,
+                          title=match.name or name or label) -> None:
+                try:
+                    _SlipOpinionWindow(parent, url, title, safe_status,
+                                       app=app)
+                except tk.TclError:
+                    pass
+
+            app._post_root(open_slip)
+            return
+        url = _scotus_docket_page_url(spec_json)
+        if url:
+            webbrowser.open(url)
+            app._post_root(lambda: safe_status(
+                f"{label}: no slip opinion in the Court's archive — opened "
+                "its docket in your browser."))
+        else:
+            app._post_root(lambda: safe_status(f"Not found: {label}"))
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
                          action: tuple[str, str],
                          status=lambda _s: None,
@@ -31656,6 +31762,9 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
         return
     if kind == "fedcas":
         _open_fedcas_citation(app, parent, value, status)
+        return
+    if kind == "scotus":
+        _open_scotus_citation(app, parent, value, status)
         return
     if kind != "cite":
         status("Don't know how to open that citation.")
@@ -31801,7 +31910,8 @@ class _BriefTextWindow:
                 txt.insert("end", src[pos:start])
             self._link_n += 1
             tag = f"lnk{self._link_n}"
-            seg = re.sub(r"\s+", " ", src[start:end]).strip()
+            seg = re.sub(r"\s+", " ",
+                         _without_footnote_marks(src[start:end])).strip()
             self._link_actions[tag] = (action, seg)
             cat = _brief_action_category(action[0])
             txt.insert("end", src[start:end], (cat, "brieflink", tag))
