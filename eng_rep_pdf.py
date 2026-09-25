@@ -629,6 +629,15 @@ def _firefox_clearances() -> "list[Clearance]":
     return out
 
 
+def clearance_mark() -> tuple:
+    """The CommonLII clearances Firefox holds now — each profile's, with
+    when it was set — as a token that changes the moment the reader passes
+    CloudFlare's check in Firefox, so the viewer waiting on it can try again
+    without being told to."""
+    return tuple(sorted(
+        (str(c.db), c.value, c.obtained) for c in _firefox_clearances()))
+
+
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
@@ -755,6 +764,71 @@ def fetch_pdf(year: int, num: int, web_url: str) -> bytes:
     # Every clearance refused: cookie expired server-side, or fingerprint
     # mismatch -> the user must re-clear in Firefox.
     raise CloudflareChallenge(web_url)
+
+
+# ---------------------------------------------------------------------------
+# Pin pages
+# ---------------------------------------------------------------------------
+
+# The reprint marks where each page of the original report begins with its
+# number in brackets, "[354]", which the scans' text layer mostly keeps.
+_NOMINATE_PAGE_MARK_RE = re.compile(r"\[\s*(\d{1,5})\s*\]")
+
+#: How far from the pin a bracketed number may be and still place it: a
+#: year in square brackets ("[1896]") or a stray is well beyond this.
+_MARK_REACH = 10
+
+
+def pin_page(data: bytes, start_page: int, pin: str,
+             nominate: bool = False) -> Optional[int]:
+    """The page of a case's scan (0-based) a pin cite names, or None.
+
+    A CommonLII scan runs from the case's first page in the reprint to the
+    page where the next case begins, one PDF page to a page, so a pin to the
+    English Reports ("156 Eng. Rep. 145, 151") is its distance from the
+    first page.  A pin to the original report ("9 Exch. 341, 354") is found
+    by the reprint's "[354]" for that page — or, where the text layer lost
+    it, placed between the nearest marks either side."""
+    m = re.match(r"\d+", str(pin or ""))
+    if not m or not data:
+        return None
+    wanted = int(m.group(0))
+    try:
+        import pypdfium2 as pdfium
+        from pdfium_lock import PDFIUM_LOCK
+        with PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(data)
+            count = len(doc)
+    except Exception as exc:
+        print(f"[eng_rep_pdf] could not read the scan for its pin: {exc}")
+        return None
+    try:
+        if not nominate:
+            page = wanted - int(start_page)
+            return page if 0 <= page < count else None
+        marks: list[tuple[int, int]] = []   # (original page, scan page)
+        for i in range(count):
+            with PDFIUM_LOCK:
+                text = doc[i].get_textpage().get_text_range()
+            marks.extend((int(n), i)
+                         for n in _NOMINATE_PAGE_MARK_RE.findall(text))
+    except Exception as exc:
+        print(f"[eng_rep_pdf] reading the scan's text failed: {exc}")
+        return None
+    finally:
+        with PDFIUM_LOCK:
+            doc.close()
+    exact = [i for n, i in marks if n == wanted]
+    if exact:
+        return min(exact)
+    below = max(((n, i) for n, i in marks
+                 if wanted - _MARK_REACH <= n < wanted), default=None)
+    above = min(((n, i) for n, i in marks
+                 if wanted < n <= wanted + _MARK_REACH), default=None)
+    if below and above:
+        (bn, bi), (an, ai) = below, above
+        return bi + round((wanted - bn) / (an - bn) * (ai - bi))
+    return below[1] if below else None
 
 
 # ---------------------------------------------------------------------------

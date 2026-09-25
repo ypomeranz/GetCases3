@@ -234,13 +234,14 @@ _STATE_NOMINATIVE_SERIES: tuple[tuple[tuple[str, ...], str, int, int], ...] = (
     (("Sneed",), "Ky.", 1, 1),
     (("Hard.", "Hardin"), "Ky.", 2, 1),
     (("Bibb",), "Ky.", 3, 4),
-    (("A.K. Marsh.",), "Ky.", 7, 3),
+    (("A.K. Marsh.", "A.K. Marshall"), "Ky.", 7, 3),
     (("Litt. Sel. Cas.",), "Ky.", 15, 1),
     (("Litt.", "Littell"), "Ky.", 10, 5),
-    (("T.B. Mon.",), "Ky.", 16, 7),
-    (("J.J. Marsh.",), "Ky.", 23, 7),
+    (("T.B. Mon.", "T.B. Monroe"), "Ky.", 16, 7),
+    (("J.J. Marsh.", "J.J. Marshall"), "Ky.", 23, 7),
     (("Dana",), "Ky.", 30, 9),
-    (("B. Mon.",), "Ky.", 39, 18),
+    # "B. Munroe" is how Dred Scott v. Sandford spells Ben Monroe.
+    (("B. Mon.", "B. Monroe", "Ben Monroe", "B. Munroe"), "Ky.", 39, 18),
     (("Met.", "Metc.", "Metcalf"), "Ky.", 57, 4),
     (("Duv.", "Duvall"), "Ky.", 61, 2),
     (("Bush",), "Ky.", 63, 14),
@@ -260,7 +261,7 @@ _STATE_NOMINATIVE_SERIES: tuple[tuple[tuple[str, ...], str, int, int], ...] = (
     (("Baxt.", "Baxter"), "Tenn.", 59, 9),
     (("Lea",), "Tenn.", 68, 16),
     # Virginia: 3–74 Va.
-    (("Va. Cas.",), "Va.", 2, 2),
+    (("Va. Cas.", "Virg. Cas."), "Va.", 2, 2),
     (("Call",), "Va.", 4, 6),
     (("Hen. & M.",), "Va.", 10, 4),
     (("Munf.", "Munford"), "Va.", 14, 6),
@@ -291,6 +292,16 @@ _STATE_NOMINATIVE_SERIES: tuple[tuple[tuple[str, ...], str, int, int], ...] = (
     (("Comst.", "Comstock"), "N.Y.", 0, 4),
     (("Seld.", "Selden"), "N.Y.", 4, 6),
     (("Kern.", "Kernan"), "N.Y.", 10, 4),
+    # North Carolina: Iredell's Law 1–13 is 23–35 N.C., his Equity 1–8 is
+    # 36–43 N.C. (static.case.law's own volumes carry both citations: 23 N.C.
+    # opens with 1 Ired., 36 N.C. with 1 Ired. Eq.).
+    (("Ired. Eq.", "Iredell Eq."), "N.C.", 35, 8),
+    (("Ired.", "Iredell", "Ired. Law"), "N.C.", 22, 13),
+    # Maine: Greenleaf's nine volumes (1820–1832) are 1–9 Me.
+    (("Greenl.", "Greenleaf"), "Me.", 0, 9),
+    # New Jersey: Dutcher 1–5 is 25–29 N.J.L. ("State v. Roe, 2 Dutcher,
+    # 215" is 26 N.J.L. 215).
+    (("Dutch.", "Dutcher"), "N.J.L.", 24, 5),
 )
 
 
@@ -335,8 +346,8 @@ STATE_NOMINATIVE_CITE_RE = re.compile(
 # read as the official cite it leads with.
 STATE_NOMINATIVE_PARALLEL_RE = re.compile(
     r"\b(\d{1,3})\s+(Mass\.|Ill\.|Ky\.|Tenn\.|Va\.|Del\.|Miss\.|Pa\.|"
-    r"N\.\s?Y\.)\s*[\[(]\s*\d{1,2}\s+" + _STATE_NOM_ALT +
-    r"\s*[\])]\s*[-–—]?\s*(\d{1,4})\b")
+    r"N\.\s?Y\.|N\.\s?C\.|Me\.|N\.\s?J\.\s?L\.)\s*[\[(]\s*\d{1,2}\s+"
+    + _STATE_NOM_ALT + r"\s*[\])]\s*[-–—]?\s*(\d{1,4})\b")
 
 
 def state_nominative_cites(cite: str) -> list[str]:
@@ -385,10 +396,13 @@ def early_fed_cite_text(m: re.Match) -> str:
 # fallback is intentionally broad but excludes statute/regulation abbreviations
 # before they can become case links.
 _REPORTER_TOKEN = r"(?:[A-Z][A-Za-z0-9.'’]*|\d+d|\d+th)"
+# Its words are joined by spaces — or by an ampersand, in the reporters named
+# for two men: "3 H. & McH. 554", "10 Serg. & Rawle 240", "1 Woodb. & M. 401".
+_REPORTER_JOIN = r"(?:\s+|\s*&\s*)"
 BROAD_CITE_CAPTURE_RE = re.compile(
     r"\b(\d{1,4})\s+("
     + _REPORTER_TOKEN
-    + r"(?:\s+"
+    + r"(?:" + _REPORTER_JOIN
     + _REPORTER_TOKEN
     + r"){0,5}?)"
     + _COURT_PAREN
@@ -406,7 +420,7 @@ BROAD_CITE_CAPTURE_RE = re.compile(
 COMMA_CITE_CAPTURE_RE = re.compile(
     r"\b(\d{1,4})\s+("
     + _REPORTER_TOKEN
-    + r"(?:\s+"
+    + r"(?:" + _REPORTER_JOIN
     + _REPORTER_TOKEN
     + r"){0,5}?)"
     + _COURT_PAREN
@@ -419,7 +433,7 @@ COMMA_CITE_CAPTURE_RE = re.compile(
 # such as "81 Wash 2d 788"; callers scanning prose should use
 # :func:`iter_case_citations` instead.
 HAND_TYPED_CITE_RE = re.compile(
-    r"(\d{1,4})\s+([A-Z][A-Za-z0-9.'’ ]{0,24}?)\s+"
+    r"(\d{1,4})\s+([A-Z][A-Za-z0-9.'’ &]{0,24}?)\s+"
     r"(\d{1,6})(?=[\s,;.)(]|$)"
 )
 _NONCASE_REPORTERS = {
@@ -462,10 +476,12 @@ _PLAIN_CASE_REPORTERS = {
 # the character before the J — a period or letter there means reporter, a space
 # or nothing means journal — so the standalone alternative is written with a
 # lookbehind, and the "L. J." family is matched explicitly since its own J does
-# follow a period.  Case-sensitive: journal abbreviations are capitalized, and
-# the broad regex only ever hands us a capitalized token.
+# follow a period.  A J. after an ampersand is the second man of a reporter
+# named for two — Maryland's "Gill & J.", "Har. & J." — not a journal.
+# Case-sensitive: journal abbreviations are capitalized, and the broad regex
+# only ever hands us a capitalized token.
 _JOURNAL_REPORTER_RE = re.compile(
-    r"L\.\s?J\.|L\.\s?Rev\.|L\.\s?Q\.|\bRev\.|(?<![A-Za-z.])J\."
+    r"L\.\s?J\.|L\.\s?Rev\.|L\.\s?Q\.|\bRev\.|(?<![A-Za-z.&])(?<!&\s)J\."
 )
 
 # "10 Op. Atty Gen. 382" — an opinion of the Attorney General.  Cited in a
@@ -479,7 +495,7 @@ SHORT_CITE_RE = re.compile(
 BROAD_SHORT_CITE_RE = re.compile(
     r"\b(\d{1,4})\s+("
     + _REPORTER_TOKEN
-    + r"(?:\s+"
+    + r"(?:" + _REPORTER_JOIN
     + _REPORTER_TOKEN
     + r"){0,5}?)\s*,?\s+at\s+\*?(\d{1,6})\b",
     re.IGNORECASE,
@@ -1016,6 +1032,72 @@ _REPORTER_FAMILIES = (
         "Gall.", ("Gallis.", "Gallison"),
         ("Gall.", "Gallison"),
     ),
+    # The other U.S. circuit and district reporters of the nineteenth
+    # century, reprinted in Federal Cases, by the name and abbreviations the
+    # Free Law Project's reporters database records for each.  CourtListener
+    # files each case under its Federal Cases citation *and* this one, so the
+    # abbreviation finds it ("5 Sawy. 155" is In re Ah Yup, 1 F. Cas. 223);
+    # the name as old opinions print it ("5 Sawyer, 155") finds nothing until
+    # it is abbreviated.
+    _ReporterFamily("Story", (), ("Story",)),
+    _ReporterFamily("Sprague", ("Spr.",), ("Sprague",)),
+    _ReporterFamily("Sawy.", ("Sawyer", "Saw."), ("Sawy.",)),
+    _ReporterFamily("Dill.", ("Dillon",), ("Dill.",)),
+    _ReporterFamily("McLean", ("Mc Lean",), ("McLean",)),
+    _ReporterFamily("Woods", ("Woods C.C.",), ("Woods",)),
+    _ReporterFamily("Biss.", ("Bissell",), ("Biss.",)),
+    _ReporterFamily("Blatchf.", ("Blatchford",), ("Blatchf.",)),
+    _ReporterFamily("Cliff.", ("Clifford",), ("Cliff.",)),
+    _ReporterFamily("Flip.", ("Flippin", "Flipp."), ("Flip.",)),
+    _ReporterFamily("Woolw.", ("Woolworth",), ("Woolw.",)),
+    _ReporterFamily("Mason", ("Mason C.C.",), ("Mason",)),
+    _ReporterFamily("Paine", ("Paine C.C.",), ("Paine",)),
+    _ReporterFamily("Bond", (), ("Bond",)),
+    _ReporterFamily(
+        "Woodb. & M.",
+        ("Woodbury & Minot", "Wood. & Minot", "Wood. & M.", "Woodb. & Min."),
+        ("Woodb. & M.",)),
+    # CourtListener knows it only spaced: "4 Wash. C. C. 371" (Corfield v.
+    # Coryell) resolves, "4 Wash. C.C. 371" is refused.
+    _ReporterFamily(
+        "Wash. C.C.",
+        ("Wash. C. C.", "Washington C.C.", "Washington Circuit Court"),
+        ("Wash. C. C.",)),
+    _ReporterFamily(
+        "Abb.",
+        ("Abb. U.S.", "Abbott U.S.", "Abbott United States"),
+        ("Abb.",)),
+    # Nineteenth-century state reports published under their reporters'
+    # names and never renumbered into an official series; static.case.law
+    # files each under a folder of its own.
+    _ReporterFamily("Paige Ch.", ("Paige", "Pai. Ch."), ("Paige Ch.",),
+                    "paige-ch"),
+    _ReporterFamily("Denio", (), ("Denio",), "denio"),
+    _ReporterFamily("Keyes", (), ("Keyes",), "keyes"),
+    _ReporterFamily("Cai.", ("Caines", "Cai. R."), ("Cai.",), "cai"),
+    _ReporterFamily("E.D. Smith", ("E. D. Smith",), ("E.D. Smith",),
+                    "ed-smith"),
+    _ReporterFamily(
+        "H. & McH.", ("Harris & McHenry", "Har. & McH."), ("H. & McH.",),
+        "h-mch"),
+    _ReporterFamily(
+        "Serg. & Rawle", ("Sergeant & Rawle", "Serg. & R.", "Serg. & Rawl."),
+        ("Serg. & Rawle",), "serg-rawl"),
+    _ReporterFamily(
+        "La. Ann.", ("Louisiana Annual", "La. An.", "Louis. Ann."),
+        ("La. Ann.",), "la-ann"),
+    _ReporterFamily("Phila.", ("Philadelphia",), ("Phila.",)),
+    # Official reports under the names they went by before the Bluebook's:
+    # the Pennsylvania State Reports as "Pa. St." or "Penn. State", the New
+    # Jersey Law Reports as "N.J. Law", the Missouri Reports as Dred Scott
+    # prints them ("15 Misso., 576").
+    _ReporterFamily(
+        "Pa.",
+        ("Pa. St.", "Penn. St.", "Pa. State", "Penn. State",
+         "Pennsylvania State", "Penn."),
+        ("Pa.",), "pa"),
+    _ReporterFamily("N.J.L.", ("N.J. Law",), ("N.J.L.",), "njl"),
+    _ReporterFamily("Mo.", ("Misso.",), ("Mo.",), "mo"),
 )
 
 _REPORTER_FAMILY_BY_KEY: dict[str, _ReporterFamily] = {}
@@ -1060,11 +1142,15 @@ for _full, _abbr in _STATE_REPORTER_NAMES.items():
         _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_abbr)] = _family
     _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_full)] = _family
 
-#: The full state names above as reporter keys ("northcarolina"): accepted as a
-#: reporter in running text, but only where a citation's volume stands (see
-#: _iter_case_cites) — "about 3 Texas 12 counties" is prose.
-_FULL_STATE_REPORTER_KEYS = frozenset(
-    _loose_reporter_key(n) for n in _STATE_REPORTER_NAMES)
+#: Reporters named by a word or two with no period to mark them — a state's
+#: name in full ("northcarolina"), a reporter's own name ("sawyer", "paige",
+#: "harrismchenry") — as reporter keys: accepted as a reporter in running
+#: text, but only where a citation's volume stands (see _iter_case_cites) —
+#: "about 3 Texas 12 counties" is prose.
+_WORD_REPORTER_KEYS = frozenset(
+    [_loose_reporter_key(name) for name in _STATE_REPORTER_NAMES]
+    + [_loose_reporter_key(form) for family in _REPORTER_FAMILIES
+       for form in (family.canonical, *family.aliases) if "." not in form])
 
 
 def reporter_family(rep: str) -> "_ReporterFamily | None":
@@ -1124,21 +1210,65 @@ def case_law_reporter_slug(rep: str) -> str:
     return family.case_law_slug if family is not None else ""
 
 
+# "Reports" written after a reporter's name, whole or cut short: "18 Pick. R.,
+# 210", "10 Leigh Rep., 697", "15 Missouri Reports, 576".
+_REPORTS_SUFFIX_RE = re.compile(r"\s+(?:R|Rep|Reps|Reports)\.?$")
+
+
+def _reports_suffix_start(rep: str) -> "int | None":
+    """Where a trailing "R." / "Rep." / "Reports" begins in *rep*, when the
+    words before it name a reporter and the whole does not — "Pick. R." is
+    Pickering, but "Fed. Rep." is a reporter of its own name — else None.
+
+    A bare "R." after initials is part of them ("1 S. C. R. 30" is Canada's
+    Supreme Court Reports), and after an edition it is a rule ("188 Ill. 2d
+    R. 307" is Illinois Supreme Court Rule 307), so neither is dropped."""
+    m = _REPORTS_SUFFIX_RE.search(rep or "")
+    if m is None or reporter_family(rep) is not None:
+        return None
+    base = rep[:m.start()]
+    if re.fullmatch(r"\s*R\.?", rep[m.start():]) and (
+            re.fullmatch(r"(?:[A-Z]\.\s?){1,3}", base.strip())
+            or re.search(r"\d(?:d|th)\.?$", base.strip())):
+        return None
+    known = (reporter_family(base) is not None
+             or _NAMED_REPORTER_RE.fullmatch(base.strip())
+             or _loose_reporter_key(base) in _WORD_REPORTER_KEYS
+             or _STATE_NOMINATIVE.get(_nominative_key(base)))
+    return m.start() if known else None
+
+
+def reporter_without_suffix(rep: str) -> str:
+    """*rep* without a "Reports" suffix it merely carries (see
+    :func:`_reports_suffix_start`): "Missouri Reports" → "Missouri"."""
+    start = _reports_suffix_start(rep)
+    return rep[:start] if start is not None else rep
+
+
+# A firm is written like a two-man reporter — "5 Smith & Co. 12" reads like
+# "3 H. & McH. 554" — but ends with its trade.
+_FIRM_RE = re.compile(r"&.*\b(?:Co|Cos|Inc|Corp|Ltd|Bros|Sons)\.?$")
+
+
 def _valid_case_reporter(rep: str) -> bool:
+    written = rep or ""
+    rep = reporter_without_suffix(written)
     key = _loose_reporter_key(rep)
     if not key or key in _NONCASE_REPORTERS:
         return False
-    if _JOURNAL_REPORTER_RE.search(rep or ""):
+    if _JOURNAL_REPORTER_RE.search(rep):
         return False  # a law review, not a reporter — no case to open
-    if _AG_OPINION_RE.search(rep or ""):
+    if _AG_OPINION_RE.search(rep):
         return False  # an Attorney General opinion, not a decided case
+    if _FIRM_RE.search(rep):
+        return False  # "Smith & Co.", a firm
     family = reporter_family(rep)
     if family is not None and family.canonical == "Johns. Ch.":
         return True
-    if (key in _PLAIN_CASE_REPORTERS or key in _FULL_STATE_REPORTER_KEYS
+    if (key in _PLAIN_CASE_REPORTERS or key in _WORD_REPORTER_KEYS
             or key.endswith("lexis")):
         return True
-    return "." in (rep or "")
+    return "." in written   # "Gallis R.": the abbreviated "Reports" counts
 
 
 def case_match_text(m: re.Match) -> str:
@@ -1148,11 +1278,16 @@ def case_match_text(m: re.Match) -> str:
     (N.Y.) 37" -> "5 Johns. 37") and the parallel volume of an early-SCOTUS
     dual cite ("4 Wheat. [17 U. S.] 438" -> "4 Wheat. 438", "5 U.S. (1
     Cranch) 137" -> "5 U.S. 137"), plus the OCR hyphen sometimes glued to
-    the page ("21 Wall. (88 U. S.)-597" -> "21 Wall. 597") and the comma
+    the page ("21 Wall. (88 U. S.)-597" -> "21 Wall. 597"), the comma
     older reports set before it ("138 Massachusetts, 165" -> "138
-    Massachusetts 165")."""
+    Massachusetts 165"), and a "Reports" written after the reporter's name
+    ("18 Pick. R., 210" -> "18 Pick. 210")."""
     if canonical_reporter(m.group(2)) == "Johns. Ch.":
         return f"{m.group(1)} Johns. Ch. {m.group(3)}"
+    suffix = _reports_suffix_start(m.group(2))
+    if suffix is not None:
+        return re.sub(r"\s+", " ", " ".join(
+            (m.group(1), m.group(2)[:suffix], m.group(3)))).strip()
     s = re.sub(r"\s+", " ", m.group(0)).replace("U. S.", "U.S.").replace("’", "'")
     s = re.sub(r"\s*[\[(][^\])]*[\])]\s*", " ", s)
     s = re.sub(r"\s[-–—]\s*(?=\d)", " ", s)
@@ -1166,11 +1301,16 @@ _case_match_text = case_match_text  # older internal name
 
 def _at_citation_start(text: str, pos: int) -> bool:
     """Whether *pos* is where a citation's volume stands: the start of the
-    text, or just after the comma closing a case name — or a semicolon, or an
-    opening parenthesis or bracket — whitespace aside."""
+    text, or just after the comma closing a case name — or a semicolon, an
+    opening parenthesis or bracket, or the year the English style writes
+    first ("In re Ah Yup, (1878) 5 Sawyer, 155") — whitespace aside."""
     while pos > 0 and text[pos - 1].isspace():
         pos -= 1
-    return pos == 0 or text[pos - 1] in ",;(["
+    return (pos == 0 or text[pos - 1] in ",;(["
+            or bool(_YEAR_FIRST_RE.search(text, max(0, pos - 8), pos)))
+
+
+_YEAR_FIRST_RE = re.compile(r"\(\s*(?:1[5-9]|20)\d{2}\s*\)$")
 
 
 # The reporters named in the running-text patterns: the national and federal
@@ -1186,13 +1326,46 @@ def _comma_form_reporter(vol: str, rep: str, page: str) -> bool:
     patterns name, one with a family (each state's reports, by abbreviation
     or by the state's name in full, and the other spellings of a series), a
     state nominative in a volume it published ("5 Allen, 431"), or a state
-    cited by its plain name ("12 Iowa, 44")."""
-    rep = re.sub(r"\s+", " ", rep).strip()
+    cited by its plain name ("12 Iowa, 44") — with or without a "Reports"
+    after it ("15 Missouri Reports, 576")."""
+    rep = re.sub(r"\s+", " ", reporter_without_suffix(rep)).strip()
     return bool(
         _NAMED_REPORTER_RE.fullmatch(rep)
         or reporter_family(rep) is not None
         or _loose_reporter_key(rep) in _PLAIN_CASE_REPORTERS
         or state_nominative_cites(f"{vol} {rep} {page}"))
+
+
+def _bare_word_reporter(rep: str) -> bool:
+    """Whether *rep*, as written, names its reporter by a word or two with
+    no period ("Massachusetts", "Sawyer", "Harris & McHenry") — the form
+    that must stand where a citation does to be read as one.  "Wash. 2d"
+    is dotted, whatever its unpunctuated alias "Wash 2d" shares its key, and
+    so is "4 Cowen R. 528": the abbreviated "Reports" marks it a citation."""
+    return "." not in rep and (_loose_reporter_key(reporter_without_suffix(rep))
+                               in _WORD_REPORTER_KEYS)
+
+
+# A reporter's name that means more than one series in the volumes both ran
+# to: "4 Washington, 380" in an 1850s opinion is Washington's Circuit Court
+# Reports (four volumes, 1803–1827), not the state's Washington Reports
+# (from 1889) that the name in full otherwise stands for, and its first two
+# volumes are also Bushrod Washington's Virginia Reports.  Such a citation
+# is left unread rather than sent to the wrong series.
+_AMBIGUOUS_NAME_VOLUMES = {"washington": 4}
+
+
+def _ambiguous_name(vol: str, rep: str) -> bool:
+    """Whether *vol* *rep* is a volume :data:`_AMBIGUOUS_NAME_VOLUMES` says
+    two series share."""
+    last = _AMBIGUOUS_NAME_VOLUMES.get(
+        _loose_reporter_key(reporter_without_suffix(rep)))
+    return last is not None and int(vol) <= last
+
+
+def _match_reporter_key(m: re.Match) -> str:
+    """The reporter key of a case-cite match, a "Reports" suffix aside."""
+    return reporter_key(reporter_without_suffix(m.group(2)))
 
 
 def _index_first_pages(
@@ -1201,7 +1374,7 @@ def _index_first_pages(
     """(volume, reporter key) → sorted first pages of *matches*."""
     idx: dict[tuple[str, str], set] = {}
     for m in matches:
-        idx.setdefault((m.group(1), reporter_key(m.group(2))),
+        idx.setdefault((m.group(1), _match_reporter_key(m)),
                        set()).add(int(m.group(3)))
     return {k: sorted(v) for k, v in idx.items()}
 
@@ -1220,7 +1393,7 @@ def _pinned_without_at(
     of its own whatever else that volume holds."""
     page = int(m.group(3))
     firsts = [first for first in (index or {}).get(
-                  (m.group(1), reporter_key(m.group(2))), ())
+                  (m.group(1), _match_reporter_key(m)), ())
               if first < page <= first + ID_PIN_WINDOW]
     if not firsts:
         return None
@@ -1270,10 +1443,13 @@ def _iter_case_cites(text: str) -> list[re.Match]:
             continue
         if any(m.start() < km.end() and km.start() < m.end() for km in matches):
             continue
-        # A state's name in full reads as a reporter only where a citation's
-        # volume stands, after the comma closing a case name.
-        if (_loose_reporter_key(m.group(2)) in _FULL_STATE_REPORTER_KEYS
+        # A reporter named by a bare word — a state's name in full, a
+        # reporter's own ("Sawyer", "Paige") — reads as one only where a
+        # citation's volume stands, after the comma closing a case name.
+        if (_bare_word_reporter(m.group(2))
                 and not _at_citation_start(text, m.start())):
+            continue
+        if _ambiguous_name(m.group(1), m.group(2)):
             continue
         matches.append(m)
     # The older comma form, "138 Massachusetts, 165" (COMMA_CITE_CAPTURE_RE),
@@ -1289,6 +1465,7 @@ def _iter_case_cites(text: str) -> list[re.Match]:
         if (not _comma_form_reporter(m.group(1), m.group(2), m.group(3))
                 or not _at_citation_start(text, m.start())
                 or _CAPITALIZED_WORD_RE.match(text, m.end())
+                or _ambiguous_name(m.group(1), m.group(2))
                 or _pinned_without_at(text, m, cited) is not None):
             continue
         matches.append(m)
@@ -1827,21 +2004,23 @@ def detect_links(
     # Authorities recognised in a reporter's shape but deliberately not linked
     # — a law review, an Attorney General opinion, the joint appendix.  They
     # are still authorities, so an "Id." following one must stop there.
+    # Not one whose name joins two words with "&" ("12 J.L. & Pol'y 1"): the
+    # reporters named that way are read, but the journals were never counted
+    # here, and the one in a "(quoting …)" parenthetical is not the authority
+    # a following "id." means.
     unlinkable = [
         (m.start(), m.end()) for m in BROAD_CITE_CAPTURE_RE.finditer(text)
-        if not _valid_case_reporter(m.group(2))
+        if not _valid_case_reporter(m.group(2)) and "&" not in m.group(2)
     ]
     index = build_short_cite_index(text)
     matches: list[tuple[int, int, str, object]] = []
-    # English Reports citations first — both the reprint form ("156 Eng. Rep.
-    # 145") and the original nominate cites ("9 Exch. 341", resolution-gated in
-    # eng_rep) — so the broad case-reporter fallback below can yield to them:
-    # a Scholar lookup by an English cite lands on an unrelated case.
+    # English Reports citations first — the reprint form ("156 Eng. Rep.
+    # 145"), its short form ("156 Eng. Rep., at 151") and the original
+    # nominate cites ("9 Exch. 341", resolution-gated in eng_rep), each with
+    # its pin page — so the broad case-reporter fallback below can yield to
+    # them: a Scholar lookup by an English cite lands on an unrelated case.
     engrep_spans: list[tuple[int, int]] = []
-    for m in eng_rep.ER_CITE_RE.finditer(text):
-        engrep_spans.append((m.start(), m.end()))
-        matches.append((m.start(), m.end(), "engrep", eng_rep.cite_spec(m)))
-    for start, end, spec, _cases in eng_rep.iter_nominate_cites(text):
+    for start, end, spec in eng_rep.iter_cites(text):
         engrep_spans.append((start, end))
         matches.append((start, end, "engrep", spec))
     # Unpublished opinions cited by WL/LEXIS number: RECAP-resolvable ones

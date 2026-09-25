@@ -3501,12 +3501,9 @@ def _special_citation_ranges(
     # The cites we link ourselves, as (start, end, action).
     targets: list[tuple[int, int, tuple[str, str]]] = []
     targets.extend(_recap_citation_ranges(text, recap_spec_index))
-    for m in eng_rep.ER_CITE_RE.finditer(text):
-        spec = eng_rep.cite_spec(m)
+    for s, e, spec in eng_rep.iter_cites(text):
         if eng_rep.resolve(spec):  # only cases we actually have
-            targets.append((m.start(), m.end(), ("engrep", spec)))
-    for s, e, spec, _cases in eng_rep.iter_nominate_cites(text):
-        targets.append((s, e, ("engrep", spec)))  # gated on the index already
+            targets.append((s, e, ("engrep", spec)))
     if _FED_APPX_RE.search(text):  # cheap guard before the full reporter scan
         for m in _TEXT_CITE_RE.finditer(text):
             cite = re.sub(r"\s+", " ", m.group(0)).strip()
@@ -22257,20 +22254,16 @@ class _ScholarTextWindow:
             self._last_cite_action = ("cite", ref)
             return ("cite", ref + (f"@{pin}" if pin else ""))
         # An English Reports cite we hold → our CommonLII scan (Scholar's copy
-        # of these old English cases is usually missing or a poor scan).  Only
-        # override on a real index match, so unknown E.R. cites keep the link.
-        er_m = eng_rep.ER_CITE_RE.search(full_text)
-        if er_m:
-            er_spec = eng_rep.cite_spec(er_m)
+        # of these old English cases is usually missing or a poor scan) —
+        # the reprint's own cite or the nominate report's ("9 Exch. 341"),
+        # opened at the pin page it gives.  Only on a real index match, so
+        # an unknown E.R. cite keeps Scholar's link, and a U.S. cite that
+        # merely looks nominate is never claimed.
+        for _s, _e, er_spec in eng_rep.iter_cites(
+                re.sub(r"<[^>]+>", "", full_text)):
             if eng_rep.resolve(er_spec):
                 self._last_cite_action = ("engrep", er_spec)
                 return ("engrep", er_spec)
-        # Same for a link citing only the nominate form ("9 Exch. 341" with no
-        # E.R. parallel) — resolution-gated, so U.S. cites are never claimed.
-        nom = eng_rep.iter_nominate_cites(re.sub(r"<[^>]+>", "", full_text))
-        if nom:
-            self._last_cite_action = ("engrep", nom[0][2])
-            return ("engrep", nom[0][2])
         # A CourtListener opinion link whose reporter cite we recognize: prefer
         # our own citation handling (Google Scholar first, then CourtListener /
         # case.law) over CourtListener's bare /opinion/N/ link, so where CL's
@@ -22403,10 +22396,8 @@ class _ScholarTextWindow:
         for m in federal_register.FR_CITE_RE.finditer(text):
             if federal_register.url_for(m):
                 matches.append((m.start(), m.end(), "fr", m))
-        for m in eng_rep.ER_CITE_RE.finditer(text):
-            matches.append((m.start(), m.end(), "engrep", m))
-        for s, e, spec, _cases in eng_rep.iter_nominate_cites(text):
-            matches.append((s, e, "engrepn", spec))
+        for s, e, spec in eng_rep.iter_cites(text):
+            matches.append((s, e, "engrep", spec))
         # Federal Cases cited by case number ("Cole v. The Atlantic, Case
         # No. 2,976"; chained "The Chusan, Id. 2,717") — resolved at click
         # time via the CourtListener API from the printed name and number.
@@ -22482,11 +22473,8 @@ class _ScholarTextWindow:
             elif kind == "fr":
                 action = ("frpdf", federal_register.url_for(m))
             elif kind == "engrep":
-                # English Reports cite ("156 Eng. Rep. 145") → CommonLII scan.
-                action = ("engrep", eng_rep.cite_spec(m))
-            elif kind == "engrepn":
-                # Nominate-report cite ("9 Exch. 341") → same viewer; m is the
-                # pre-built, resolution-gated spec ("n:exch:9:341").
+                # English Reports cite ("156 Eng. Rep. 145", "9 Exch. 341") →
+                # the CommonLII scan; m is eng_rep's spec, pin page and all.
                 action = ("engrep", m)
             elif kind == "fedcas":
                 # Federal Cases case number → CourtListener lookup at click
@@ -30487,8 +30475,13 @@ class _EngRepPdfWindow(_PdfWindow):
     shows a hand-off panel that opens the case in Firefox and offers Retry."""
 
     def __init__(self, parent: tk.Misc, case: "eng_rep.ERCase",
-                 status=lambda _s: None, *, app=None) -> None:
+                 status=lambda _s: None, *, app=None, pin: str = "",
+                 nominate: bool = False) -> None:
         self._case = case
+        # The page a pin cite named — of the reprint, or (*nominate*) of the
+        # original report the reprint marks in its margins.
+        self._pin = pin
+        self._pin_nominate = nominate
         name = case.name if len(case.name) <= 60 else case.name[:57] + "…"
         super().__init__(parent, case.pdf_url, f"{name} — {case.er_cite}",
                          status, app=app, is_case=True)
@@ -30570,12 +30563,47 @@ class _EngRepPdfWindow(_PdfWindow):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _show(self, data: bytes) -> None:  # overrides _PdfWindow._show
+        super()._show(data)
+        if self._pin:
+            self._open_at_pin(data)
+
+    def _open_at_pin(self, data: bytes) -> None:
+        """Turn to the page the pin cite names: straight away for a page of
+        the reprint, after reading the scan's margin marks for a page of the
+        original report (see :func:`eng_rep_pdf.pin_page`)."""
+        case, pin, nominate = self._case, self._pin, self._pin_nominate
+
+        def run() -> None:
+            page = eng_rep_pdf.pin_page(data, case.page, pin, nominate)
+            self._post(self._turn_to_pin, page)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _turn_to_pin(self, page: "Optional[int]") -> None:
+        pin = self._pin
+        if page is None:
+            self._say(f"Page {pin} isn't marked in this scan — it opens at "
+                      "the start of the case.")
+            return
+        target = self._float if self._float is not None else self._pane
+        if target is None:
+            return
+        try:
+            # After the pages are laid out: a pane scrolled before its first
+            # layout has nowhere to go.
+            self._win.after(150, lambda: target.scroll_to_page(page))
+        except tk.TclError:
+            return
+        self._say(f"Opened at page {pin}.")
+
     def _clear_body(self) -> None:
         for child in self._body.winfo_children():
             child.destroy()
 
     def _need_clearance(self, web_url: str) -> None:
-        """Show the CloudFlare hand-off panel (open in Firefox, then Retry)."""
+        """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
+        and try again by itself the moment Firefox holds a new clearance."""
         self._reveal()
         self._clear_body()
         self._status_var.set("CommonLII needs a CloudFlare check.")
@@ -30584,29 +30612,84 @@ class _EngRepPdfWindow(_PdfWindow):
         ttk.Label(
             frame, wraplength=560, justify="left",
             text=("CommonLII is behind a CloudFlare check.\n\n"
-                  "To view this scan in the app, click “Open in Firefox”, pass "
-                  "the “Just a moment…” check there, then click “Retry”.  Once "
-                  "cleared, this and other English Reports cases load straight "
-                  "in the app (and are cached so you won't be asked again)."),
+                  "To view this scan in the app, click “Open in Firefox” and "
+                  "pass the “Just a moment…” check there — the scan loads here "
+                  "as soon as you have (or click “Retry”).  Once cleared, this "
+                  "and other English Reports cases load straight in the app "
+                  "(and are cached so you won't be asked again)."),
         ).pack(anchor="w", pady=(0, 16))
         row = ttk.Frame(frame)
         row.pack(anchor="w")
 
         def open_ff() -> None:
             if eng_rep_pdf.open_in_firefox(web_url):
-                self._status_var.set("Pass the check in Firefox, then Retry.")
+                self._status_var.set(
+                    "Pass the check in Firefox — the scan loads here then.")
             else:
                 eng_rep_pdf.open_in_browser(web_url)
 
         def retry() -> None:
+            self._clearance_watch = None
             self._clear_body()
             self._fetch()
+
+        self._watch_for_clearance(retry)
 
         ttk.Button(row, text="Open in Firefox", command=open_ff).pack(side="left")
         ttk.Button(row, text="Retry", command=retry).pack(side="left", padx=8)
         ttk.Button(row, text="Open in browser instead",
                    command=lambda: (eng_rep_pdf.open_in_browser(self._case.web_url),
                                     self._win.destroy())).pack(side="left")
+
+    #: How long the hand-off panel waits for a new clearance before leaving it
+    #: to the Retry button, and how often it looks.
+    _CLEARANCE_WAIT = 600.0
+    _CLEARANCE_POLL = 3.0
+
+    def _watch_for_clearance(self, retry) -> None:
+        """Call *retry* once Firefox holds a CommonLII clearance it did not
+        hold when the panel went up — the reader has passed the check — for
+        as long as the panel is showing (up to ten minutes).  Only the
+        clearance the reader obtains is used; nothing here answers the
+        check."""
+        token = object()
+        self._clearance_watch = token
+
+        def watching() -> bool:
+            return getattr(self, "_clearance_watch", None) is token
+
+        def stop(event) -> None:
+            if event.widget is self._win:
+                self._clearance_watch = None
+
+        try:
+            self._win.bind("<Destroy>", stop, add="+")
+        except tk.TclError:
+            return
+
+        def load() -> None:
+            if watching():
+                self._say("CloudFlare check passed — loading the scan…")
+                retry()
+
+        def run() -> None:
+            try:
+                mark = eng_rep_pdf.clearance_mark()
+            except Exception as exc:
+                print(f"[eng_rep_pdf] can't watch Firefox's cookies: {exc}")
+                return
+            deadline = time.monotonic() + self._CLEARANCE_WAIT
+            while watching() and time.monotonic() < deadline:
+                time.sleep(self._CLEARANCE_POLL)
+                try:
+                    changed = eng_rep_pdf.clearance_mark() != mark
+                except Exception:
+                    return
+                if changed:
+                    self._post(load)
+                    return
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _link_out(self) -> None:
         """In-app fetch isn't possible here (Firefox or a dependency missing).
@@ -31239,14 +31322,17 @@ def _eng_rep_name_search(query: str, cap: int = 250) -> "list[eng_rep.ERCase]":
 
 def _open_eng_rep(parent: tk.Misc, spec: str,
                   status=lambda _s: None, app=None) -> None:
-    """Open an English Reports citation ("<vol>:<page>" spec): resolve it to the
-    CommonLII case(s), let the user pick when a page holds several, and show the
-    scan in-app (cached, with the CloudFlare hand-off) — or, when in-app fetching
-    isn't available and it isn't cached, open it in the browser.  ``app`` (when
-    the caller has one) enables the History dropdown on the viewer."""
-    cases = eng_rep.resolve(spec)
+    """Open an English Reports citation ("<vol>:<page>" spec, or a nominate
+    one, either with the "@<pin>" a pin cite adds): resolve it to the
+    CommonLII case(s), let the user pick when a page holds several, and show
+    the scan in-app (cached, with the CloudFlare hand-off), open at the pin
+    page — or, when in-app fetching isn't available and it isn't cached, open
+    it in the browser.  ``app`` (when the caller has one) enables the History
+    dropdown on the viewer."""
+    base, pin = eng_rep.split_pin(spec)
+    cases = eng_rep.resolve(base)
     if not cases:
-        vp = eng_rep.parse_spec(spec)
+        vp = eng_rep.parse_spec(base)
         if vp:
             status(f"{vp[0]} Eng. Rep. {vp[1]} isn't in the index — "
                    "searching CommonLII…")
@@ -31257,19 +31343,23 @@ def _open_eng_rep(parent: tk.Misc, spec: str,
     case = cases[0] if len(cases) == 1 else _choose_eng_rep_case(parent, cases)
     if case is None:
         return
-    _open_eng_rep_case(parent, case, status, app=app)
+    _open_eng_rep_case(parent, case, status, app=app, pin=pin,
+                       nominate=base.startswith("n:"))
 
 
 def _open_eng_rep_case(parent: tk.Misc, case: "eng_rep.ERCase",
-                       status=lambda _s: None, app=None) -> None:
+                       status=lambda _s: None, app=None, pin: str = "",
+                       nominate: bool = False) -> None:
     """Show one already-resolved English Reports case in the in-app scan viewer.
     Used when the exact case is known (a name-search hit from the spotlight, or
     a citation link), so it skips the same-page chooser :func:`_open_eng_rep`
     runs.  The viewer handles every outcome itself — disk cache, the in-app
     fetch, the CloudFlare/Firefox hand-off, and the browser fall-back — so the
-    spotlight and a clicked link reach English Reports exactly the same way."""
+    spotlight and a clicked link reach English Reports exactly the same way.
+    ``pin`` is the page to open at, of the reprint or (``nominate``) of the
+    original report."""
     status(f"Opening {case.name[:40]} ({case.er_cite})…")
-    _EngRepPdfWindow(parent, case, status, app=app)
+    _EngRepPdfWindow(parent, case, status, app=app, pin=pin, nominate=nominate)
 
 
 # ---------------------------------------------------------------------------

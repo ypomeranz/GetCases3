@@ -66,13 +66,26 @@ from dataclasses import dataclass
 # Detection
 # ---------------------------------------------------------------------------
 
-# The reporter token: "Eng. Rep." (and Eng Rep / Eng.Rep.) or "E.R." (E. R. / ER).
-_REPORTER = r"(?:Eng\.?\s?Rep\.?|E\.?\s?R\.?)"
+# The reporter token: "Eng. Rep." (and Eng Rep / Eng.Rep., and the "Eng. Rep. R."
+# some opinions give the reprint) or "E.R." (E. R. / ER).
+_REPORTER = r"(?:Eng\.?\s?Rep\.?(?:\s?R\.)?|E\.?\s?R\.?)"
 
 # "<vol> Eng. Rep. <page>" -- volume 1-176, page up to five digits.  The leading
 # year sometimes written before it ("(1854) 156 Eng. Rep. 145") is not needed:
 # volume + page identify the case uniquely (modulo same-page collisions).
 ER_CITE_RE = re.compile(r"\b(\d{1,3})\s+" + _REPORTER + r"\s+(\d{1,5})\b")
+
+# The short form, "<vol> Eng. Rep., at <page>" ("103 Eng. Rep., at 658"): a
+# page of a case cited in full nearby, or at least of the one printed there.
+ER_SHORT_CITE_RE = re.compile(
+    r"\b(\d{1,3})\s+" + _REPORTER + r"\s*,?\s+at\s+\*?(\d{1,5})\b")
+
+# A pin page written after a citation: ", 151", ", at 151", ", 39 b" (the
+# folio side old reports number by), or a range, which opens at its first
+# page.  Not a following citation's volume: ", 5 East 10".
+_PIN_RE = re.compile(
+    r"\s*,\s*(?:at\s+)?\*?(\d{1,5})(?:\s?[ab]\b)?"
+    r"(?:\s*[-–—]\s*\d{1,5}(?:\s?[ab]\b)?)?(?!\d|\s*[A-Z])")
 
 INDEX_FILENAME = "eng_rep_index.tsv.gz"
 NOMINATE_FILENAME = "eng_rep_nominate.tsv.gz"
@@ -307,6 +320,158 @@ _NOM_ALIASES: "dict[str, tuple[str, ...]]" = {
     "Kay & J": ("K & J",),
     "John & H": ("J & H",),
     "Johns & H": ("J & H",),
+    # The reporters by their own names, as American opinions print them —
+    # "Rex v. Burton, 1 Strange, 481" (Nash v. United States), "Mitchel v.
+    # Reynolds, 1 P. Williams, 181", "Dobree v. Schroder, 2 Mylne & Craig,
+    # 489" — each name as the English Reports' own table of contents gives
+    # it (Wikisource, Portal:The English Reports).  A surname common enough
+    # to stand in prose with numbers on either side (Campbell, Moore,
+    # Wilson, Russell, Jones, Freeman, Robinson, Phillips, Saunders alone) is
+    # left out; resolution-gating keeps the rest honest.
+    "Strange": ("Str",),
+    "Burrow": ("Burr",),
+    "Douglas": ("Doug",),
+    "Cowper": ("Cowp",),
+    "Salkeld": ("Salk",),
+    "Ld Raymond": ("Ld Raym",),
+    "Lord Raymond": ("Ld Raym",),
+    "T Raymond": ("T Raym",),
+    "Atkyns": ("Atk",),
+    "Peere Williams": ("P Wms",),
+    "P Williams": ("P Wms",),
+    "Williams' Saunders": ("Wms Saund",),
+    "Williams's Saunders": ("Wms Saund",),
+    "Wms Saunders": ("Wms Saund",),
+    "Saund": ("Wms Saund",),
+    "Vesey Sen": ("Ves Sen",),
+    "Vesey Senior": ("Ves Sen",),
+    "Vesey Jun": ("Ves Jun",),
+    "Vesey Junior": ("Ves Jun",),
+    "Vesey & Beames": ("Ves & Bea",),
+    "Ves & B": ("Ves & Bea",),
+    "Swanston": ("Swans",),
+    "Merivale": ("Mer",),
+    "Maddock": ("Madd",),
+    "Jacob & Walker": ("Jac & W",),
+    "Turner & Russell": ("Turn & R",),
+    "Russell & Mylne": ("Russ & My",),
+    "Mylne & Keen": ("My & K",),
+    "Mylne & Craig": ("My & Cr",),
+    "Craig & Phillips": ("Cr & Ph",),
+    "Simons & Stuart": ("Sim & St",),
+    "Beavan": ("Beav",),
+    "Drewry": ("Drew",),
+    "Drewry & Smale": ("Dr & Sm",),
+    "Collyer": ("Coll",),
+    "Giffard": ("Giff",),
+    "Younge & Collyer": ("Y & C Ex", "Y & CCC"),
+    "Y & C": ("Y & C Ex", "Y & CCC"),
+    "Younge & Jervis": ("Y & J",),
+    "Clark & Finnelly": ("Cl & Fin",),
+    "Cl & F": ("Cl & Fin",),
+    "House of Lords Cases": ("HLC",),
+    "HL Cas": ("HLC",),
+    "Dow": ("Dow PC",),
+    "Bligh": ("Bligh PC",),
+    "Bligh NS": ("Bligh NS PC",),
+    "Bro Parl Cas": ("Bro PC",),
+    "Bro Ch": ("Bro CC",),
+    "Ambler": ("Amb",),
+    "Coke": ("Co Rep",),
+    "Plowd": ("Plowden",),
+    "Dyer": ("Dy",),
+    "Leon": ("Leo",),
+    "Hobart": ("Hob",),
+    "Popham": ("Pop",),
+    "Bulstrode": ("Bulst",),
+    "Yelv": ("Yel",),
+    "Yelverton": ("Yel",),
+    "Hutton": ("Hut",),
+    "Hetley": ("Het",),
+    "Siderfin": ("Sid",),
+    "Keble": ("Keb",),
+    "Ventris": ("Vent",),
+    "Modern": ("Mod",),
+    "Mod Rep": ("Mod",),
+    "Shower": ("Show KB",),
+    "Carthew": ("Carth",),
+    "Comberbach": ("Comb",),
+    "Skinner": ("Skin",),
+    "Fortescue": ("Fort",),
+    "Comyns": ("Com",),
+    "Barnardiston": ("Barn KB", "Barn C"),
+    "Fitzgibbon": ("Fitzg",),
+    "Kenyon": ("Keny",),
+    "Wilmot": ("Wilm",),
+    "Durnford & East": ("TR",),
+    "D & E": ("TR",),
+    "Term Reports": ("TR",),
+    "Term": ("TR",),
+    "Maule & Selwyn": ("M & S",),
+    "Barnewall & Alderson": ("B & A",),
+    "B & Ald": ("B & A",),
+    "Barnewall & Cresswell": ("B & C",),
+    "Barnewall & Adolphus": ("B & Ad",),
+    "B & Adol": ("B & Ad",),
+    # Adolphus & Ellis's New Series is the Queen's Bench Reports.
+    "Adolphus & Ellis": ("Ad & E",),
+    "A & E": ("Ad & E",),
+    "Adolphus & Ellis NS": ("QB",),
+    "Adolphus & Ellis, New Series": ("QB",),
+    "Ad & E NS": ("QB",),
+    "A & E NS": ("QB",),
+    "Ellis & Blackburn": ("El & Bl",),
+    "E & B": ("El & Bl",),
+    "Ellis & Ellis": ("El & El",),
+    "E & E": ("El & El",),
+    "Best & Smith": ("B & S",),
+    "Taunton": ("Taunt",),
+    "Broderip & Bingham": ("Br & B",),
+    "Brod & Bing": ("Br & B",),
+    "Bosanquet & Puller": ("Bos & Pul",),
+    "Bos & P": ("Bos & Pul",),
+    "B & P": ("Bos & Pul",),
+    "Bingham": ("Bing",),
+    "Manning & Granger": ("Man & G",),
+    # "M. & G." is Manning & Granger at law, Macnaghten & Gordon in equity.
+    "M & G": ("Man & G", "Mac & G"),
+    "Common Bench": ("CB",),
+    "Meeson & Welsby": ("M & W",),
+    "Crompton & Jervis": ("Cr & J",),
+    "C & J": ("Cr & J",),
+    "Crompton & Meeson": ("Cr & M",),
+    "Crompton Meeson & Roscoe": ("CrM & R",),
+    "Cr M & R": ("CrM & R",),
+    "C M & R": ("CrM & R",),
+    "Cromp Mees & Rosc": ("CrM & R",),
+    "Exchequer": ("Exch",),
+    "Hurlstone & Norman": ("H & N",),
+    "Hurlstone & Coltman": ("H & C",),
+    "Anstruther": ("Anst",),
+    "Bunbury": ("Bunb",),
+    "Haggard": ("Hag Adm", "Hag Ecc", "Hag Con", "Hag Ecc App"),
+    "Addams": ("Add",),
+    "Phillimore": ("Phill",),
+    "Swabey": ("Swab",),
+    "Lushington": ("Lush",),
+    "Dearsly": ("Dears",),
+    "Dearsly & Bell": ("Dears & B",),
+    "Russell & Ryan": ("Russ & Ry",),
+    "Ryan & Moody": ("Ry & Mood",),
+    "Moody & Malkin": ("M & M",),
+    "Moody & Robinson": ("M & Rob",),
+    "Espinasse": ("Esp",),
+    "Starkie": ("Stark",),
+    "Carrington & Payne": ("Car & P",),
+    "C & P": ("Car & P",),
+    "Carrington & Kirwan": ("Car & K",),
+    "C & K": ("Car & K",),
+    # "C. & M." is Carrington & Marshman at nisi prius, Crompton & Meeson
+    # in the Exchequer; the volume and page decide.
+    "Carrington & Marshman": ("Car & M",),
+    "C & M": ("Car & M", "Cr & M"),
+    "Foster & Finlason": ("F & F",),
+    "Dowling & Ryland": ("Dowl & Ry NP",),
 }
 
 
@@ -325,7 +490,9 @@ def _nom_token_pattern(tok: str) -> str:
         return r"&"
     if re.fullmatch(r"[A-Z]{2,5}", tok):
         return r"\.?\s?".join(tok) + r"\.?"
-    esc = re.escape(tok).replace("'", "['’]").replace("’", "['’]")
+    # Either apostrophe, in one pass: replacing "'" and then "’" would rewrite
+    # the class the first replacement just wrote ("M'Cle" never matched).
+    esc = re.sub(r"['’]", "['’]", re.escape(tok))
     return esc + r"\.?"
 
 
@@ -514,6 +681,53 @@ _NOM_ID_GAP = 160
 _NOM_ID_BREAK_RE = re.compile(r"\d\s+[A-Z]")
 
 
+# The year a citation gives: in a parenthetical closing it — "(1875)",
+# "(K.B. 1765)", "(Ch. 1803)" — or, as the English style writes it, before the
+# volume: "(1834) 2 Knapp, 295", "[1891] 1 Q.B. 1".
+_YEAR_AFTER_RE = re.compile(r"\s*\((?:[^()]{0,40}?[\s.])?((?:1[1-9]|20)\d\d)\)")
+_YEAR_BEFORE_RE = re.compile(r"[\[(]((?:1[1-9]|20)\d\d)[\])]\s*$")
+# The Law Reports (from 1865), which no page of the reprint is: "L.R. 10 Q.B.
+# 453".
+_LAW_REPORTS_BEFORE_RE = re.compile(r"L\.\s?R\.\s*$")
+
+#: How far past the year CommonLII files a case under the year a citation
+#: gives may run — decided one year, reported the next.
+_YEAR_SLACK = 3
+
+
+def _misdated(text: str, m: "re.Match", cases: "list[ERCase]") -> bool:
+    """Whether citation *m* is dated later than any of *cases* — or marked
+    as the Law Reports — so is some other series of the same name: "Cattle
+    v. Stockton Waterworks Co., 10 Q.B. 453 (1875)" and "[1891] 1 Q.B. 1"
+    are the Law Reports' Queen's Bench, not the one the reprint holds
+    (1841–1852), and "Harlan v. People, 1 Doug. 207 (Mich. 1843)" is
+    Michigan's Douglass, not Douglas's King's Bench.  Only a later date
+    counts: CommonLII files some cases under the year of the edition it
+    reprints — Lane v. Cotton, decided in 1701, under 1796 — never under an
+    earlier one."""
+    head = text[max(0, m.start() - 12):m.start()]
+    if _LAW_REPORTS_BEFORE_RE.search(head):
+        return True
+    years = []
+    before = _YEAR_BEFORE_RE.search(head)
+    if before:
+        years.append(int(before.group(1)))
+    _pin, end = pin_after(text, m.end())
+    after = _YEAR_AFTER_RE.match(text, end)
+    if after:
+        years.append(int(after.group(1)))
+    return any(all(year > c.year + _YEAR_SLACK for c in cases)
+               for year in years)
+
+
+def _at_cite_start(text: str, pos: int) -> bool:
+    """Whether *pos* is where a citation stands: the start of the text, or
+    just after a comma, semicolon or opening parenthesis/bracket."""
+    while pos > 0 and text[pos - 1].isspace():
+        pos -= 1
+    return pos == 0 or text[pos - 1] in ",;(["
+
+
 def _cases_for(targets: "list[tuple[int, int]]") -> "list[ERCase]":
     return [c for c in (_BY_NEUTRAL.get(t) for t in targets) if c is not None]
 
@@ -525,7 +739,8 @@ def iter_nominate_cites(text: str) -> "list[tuple[int, int, str, list[ERCase]]]"
     carries the canonical reporter key and the case's indexed volume and
     first page.  A following old-style "<vol> id. <page>" continues the
     reporter last cited.  Unresolvable look-alikes (a U.S. "5 Johns. 37",
-    prose) are simply not reported."""
+    prose) are simply not reported, nor is a citation dated to a series of
+    the same name the reprint does not hold (see :func:`_misdated`)."""
     if not text:
         return []
     _load_nominate()
@@ -533,18 +748,42 @@ def iter_nominate_cites(text: str) -> "list[tuple[int, int, str, list[ERCase]]]"
         return []
     assert _BY_NEUTRAL is not None
     out: list[tuple[int, int, str, list[ERCase]]] = []
-    nom = list(_NOM_RE.finditer(text))
     ids = list(_NOM_ID_RE.finditer(text))
     last: "tuple[int, str] | None" = None   # (end, canonical key) last resolved
-    i = j = 0
-    while i < len(nom) or j < len(ids):
-        if j >= len(ids) or (i < len(nom)
-                             and nom[i].start() <= ids[j].start()):
-            m, i = nom[i], i + 1
+    # Where reading resumes.  After a citation read, past it; after a match
+    # turned away, at its page, which can be the volume of the citation that
+    # follows — "Ripon v. Hobart, 3 Mylne & Keen, 169" once "Hobart, 3" is
+    # turned away — but never inside its name, which would read an
+    # unresolved "12 Johns. 220" (New York's) again as a volumeless "Johns.
+    # 220".
+    pos = 0
+    nom = _NOM_RE.search(text)
+    j = 0
+    while nom is not None or j < len(ids):
+        if nom is not None and nom.start() < pos:
+            nom = _NOM_RE.search(text, pos)
+            continue
+        if j < len(ids) and ids[j].start() < pos:
+            j += 1
+            continue
+        if j >= len(ids) or (nom is not None and nom.start() <= ids[j].start()):
+            m = nom
             vol = int(m.group(1) or 0)
             key = _nom_key(m.group(2))
             page = int(m.group(3))
             dotted = bool(re.search(r"[.&]", m.group(2)))
+            # A reporter named with neither a volume nor a period ("Skinner,
+            # 120", "Lane, 3") has the shape of prose and of a case name too
+            # ("B. F. Skinner 120", "Fisher v. Lane, 3 Wils. 297"), and so has
+            # a name the reporter goes by, period or no, when it gives no
+            # volume ("this Term. 369 U. S. 833"): each reads as a citation
+            # only where one stands — after the comma closing a case name, or
+            # an opening parenthesis ("(Lord Raym. 576.)").
+            if (not vol and (not dotted or key in _NOM_ALIAS_KEYS)
+                    and not _at_cite_start(text, m.start())):
+                pos = m.start(3)
+                continue
+            resume = m.start(3)
         else:
             m, j = ids[j], j + 1
             if last is None or m.start() < last[0]:
@@ -557,18 +796,23 @@ def iter_nominate_cites(text: str) -> "list[tuple[int, int, str, list[ERCase]]]"
             key = last[1]
             page = int(m.group(2))
             dotted = True       # the id-form always carries a volume
+            resume = m.start(2)
         hit = _nom_resolve(key, vol, page, dotted)
         if hit is None:
             # An unresolved citation-shaped match still stands between a
             # resolved cite and a later "id." — the id. refers to *it* (the
             # "Holt 715" the gap regex cannot see), so the chain breaks.
             last = None
+            pos = resume
             continue
         ckey, rvol, start, targets = hit
         cases = _cases_for(targets)
-        if cases:
+        if cases and not _misdated(text, m, cases):
             out.append((m.start(), m.end(), f"n:{ckey}:{rvol}:{start}", cases))
             last = (m.end(), ckey)
+            pos = m.end()
+        else:
+            pos = resume
     return out
 
 
@@ -709,10 +953,85 @@ def cite_spec(m: "re.Match") -> str:
     return f"{m.group(1)}:{m.group(2)}"
 
 
+def split_pin(spec: str) -> "tuple[str, str]":
+    """A spec and the pin page it carries: '156:145@151' → ('156:145',
+    '151'), 'n:exch:9:341@354' → ('n:exch:9:341', '354'); no pin → ''."""
+    base, _, pin = (spec or "").strip().partition("@")
+    return base, pin
+
+
+def with_pin(spec: str, pin: str) -> str:
+    """*spec* carrying *pin* (see :func:`split_pin`), or *spec* when none."""
+    return f"{spec}@{pin}" if pin else spec
+
+
+def pin_after(text: str, pos: int) -> "tuple[str, int]":
+    """The pin page written after a citation ending at *pos* — ", 151",
+    ", at 151", ", 39 b" — as ``(page, end)``, or ``("", pos)``."""
+    m = _PIN_RE.match(text or "", pos)
+    return (m.group(1), m.end()) if m else ("", pos)
+
+
 def parse_spec(spec: str) -> tuple[int, int] | None:
-    """Inverse of :func:`cite_spec`."""
-    m = re.fullmatch(r"(\d+):(\d+)", spec.strip())
+    """Inverse of :func:`cite_spec` (a pin, if any, aside)."""
+    m = re.fullmatch(r"(\d+):(\d+)", split_pin(spec)[0])
     return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+#: How far past a case's first page a short form ("<vol> Eng. Rep., at <p>")
+#: is still read as a page of that case.
+_SHORT_SPAN = 100
+
+
+def _short_cite_start(vol: int, page: int, cited: "dict[int, list[int]]"
+                      ) -> "int | None":
+    """The first page of the case a short form's *page* falls in: one the
+    text cites in full in that volume a few pages before, when it does — a
+    page two cases share goes to the one being discussed — else the case
+    printed nearest before it."""
+    near = [s for s in cited.get(vol, ()) if s <= page <= s + _SHORT_SPAN]
+    if near:
+        return max(near)
+    cases = lookup_nearest(vol, page)
+    return cases[0].page if cases else None
+
+
+def iter_cites(text: str) -> "list[tuple[int, int, str]]":
+    """Every English Reports citation in *text* as ``(start, end, spec)``, in
+    document order, each span running on over its pin page and the spec
+    carrying it (see :func:`split_pin`):
+
+      * the reprint's own, "156 Eng. Rep. 145, 151" → '156:145@151' —
+        reported whether or not the index holds it (the viewer searches
+        CommonLII for one it lacks);
+      * its short form, "156 Eng. Rep., at 151" → '156:145@151', the case
+        the page belongs to — when the index has one there;
+      * the original nominate reports, "9 Exch. 341, 354" →
+        'n:exch:9:341@354' — resolution-gated like :func:`iter_nominate_cites`.
+
+    Overlaps go to whichever starts first (then the longer)."""
+    text = text or ""
+    found: list[tuple[int, int, str]] = []
+    cited: dict[int, list[int]] = {}
+    for m in ER_CITE_RE.finditer(text):
+        cited.setdefault(int(m.group(1)), []).append(int(m.group(2)))
+        pin, end = pin_after(text, m.end())
+        found.append((m.start(), end, with_pin(cite_spec(m), pin)))
+    for m in ER_SHORT_CITE_RE.finditer(text):
+        vol, page = int(m.group(1)), int(m.group(2))
+        start = _short_cite_start(vol, page, cited)
+        if start is not None:
+            found.append((m.start(), m.end(), f"{vol}:{start}@{page}"))
+    for s, e, spec, _cases in iter_nominate_cites(text):
+        pin, end = pin_after(text, e)
+        found.append((s, end, with_pin(spec, pin)))
+    found.sort(key=lambda t: (t[0], -t[1]))
+    out: list[tuple[int, int, str]] = []
+    for s, e, spec in found:
+        if out and s < out[-1][1]:
+            continue
+        out.append((s, e, spec))
+    return out
 
 
 def cite_label(m: "re.Match") -> str:
@@ -722,8 +1041,9 @@ def cite_label(m: "re.Match") -> str:
 
 def resolve(spec: str) -> list[ERCase]:
     """Candidates for a spec: '<vol>:<page>' (E.R. start page) or
-    'n:<reporter-key>:<vol>:<page>' (a nominate citation, exact)."""
-    s = (spec or "").strip()
+    'n:<reporter-key>:<vol>:<page>' (a nominate citation, exact) — either
+    with or without the '@<pin>' a citation's pin page adds."""
+    s = split_pin(spec)[0]
     nm = re.fullmatch(r"n:([a-z0-9]+):(\d+):(\d+)", s)
     if nm:
         _load_nominate()

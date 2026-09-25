@@ -177,9 +177,10 @@ class OlderCommaFormTests(unittest.TestCase):
                 self.assertEqual(citations.iter_case_citations(text), ())
 
     def test_only_a_reporter_known_by_name(self):
-        # "Sawyer" is a reporter too, but not one the reader knows by name.
+        # A treatise is cited in the same shape, but is no reporter.
         self.assertEqual(
-            citations.cite_target_from_text("In re Ah Yup, 5 Sawyer, 155", {}),
+            citations.cite_target_from_text(
+                "Mitchel v. Reynolds, 1 Smith's Leading Cases, 705", {}),
             ("", ""))
 
     def test_each_nominative_cite_is_found_once(self):
