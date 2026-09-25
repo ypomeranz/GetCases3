@@ -266,11 +266,6 @@ _FULL_DATE_RE = re.compile(
     rf"\b({_MONTHS})\s+(\d{{1,2}}),?\s+((?:1[6-9]|20)\d{{2}})\b",
     re.IGNORECASE,
 )
-_DOCKET_TOKEN_RE = re.compile(
-    r"\b(?:\d{1,3}[-\u2010-\u2015\u2212]\d{1,5}|"
-    r"\d{1,3}[A-Z]\d{1,5})\b",
-    re.IGNORECASE,
-)
 
 
 def _block_text_without_markers(block) -> str:
@@ -335,17 +330,10 @@ def decision_date_from_blocks(blocks: list) -> str:
 
 
 def _header_dockets(blocks: list) -> list[str]:
-    """Normalized Supreme Court docket tokens from the front matter."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for match in _DOCKET_TOKEN_RE.finditer(_front_matter_text(blocks)):
-        docket = re.sub(
-            r"[-\u2010-\u2015\u2212]", "-", match.group(0)
-        ).upper()
-        if docket not in seen:
-            seen.add(docket)
-            out.append(docket)
-    return out
+    """Normalized Supreme Court docket tokens from the front matter's docket
+    line \u2014 never an argument date like "October 18-19" (see
+    :func:`citations.docket_numbers_in`)."""
+    return citations.docket_numbers_in(_front_matter_text(blocks))
 
 
 def _court_from_header(blocks: list) -> str:

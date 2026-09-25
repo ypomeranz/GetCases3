@@ -29,6 +29,9 @@ from citation_overrides import (
 )
 from court_catalog import bluebook_federal_trial_court, state_of_court
 from courtlistener_gui import (
+    detect_brief_links,
+    _bluebook_display_name,
+    _scholar_item_from_blocks,
     CourtListenerGUI,
     _CasePdfTextSource,
     _PdfWindow,
@@ -110,7 +113,301 @@ class SmartQuoteTests(unittest.TestCase):
         )
 
 
+class MassachusettsNominativeTests(unittest.TestCase):
+    """Tyng, Pickering, Metcalf, Cushing, Gray and Allen are volumes of the
+    Massachusetts Reports under their reporters' names: same pages, the
+    volume offset by the series before them."""
+
+    def test_each_reporter_maps_onto_its_mass_volumes(self):
+        from citations import mass_reports_cite
+        for cite, mass in (
+            ("1 Tyng 1", "2 Mass. 1"), ("16 Tyng 1", "17 Mass. 1"),
+            ("1 Pick. 1", "18 Mass. 1"), ("19 Pick. 234", "36 Mass. 234"),
+            ("24 Pick. 1", "41 Mass. 1"),
+            ("4 Met. 111", "45 Mass. 111"), ("13 Met. 1", "54 Mass. 1"),
+            ("5 Cush. 198", "59 Mass. 198"), ("12 Cush. 1", "66 Mass. 1"),
+            ("1 Gray 1", "67 Mass. 1"), ("16 Gray 1", "82 Mass. 1"),
+            ("1 Allen 1", "83 Mass. 1"), ("14 Allen 1", "96 Mass. 1"),
+            ("1 Pickering 5", "18 Mass. 5"), ("19 Pick 234", "36 Mass. 234"),
+        ):
+            with self.subTest(cite=cite):
+                self.assertEqual(mass_reports_cite(cite), mass)
+
+    def test_a_volume_past_the_series_is_no_citation(self):
+        from citations import mass_reports_cite
+        self.assertEqual(mass_reports_cite("25 Pick. 1"), "")
+        self.assertEqual(mass_reports_cite("17 Gray 1"), "")
+        self.assertEqual(mass_reports_cite("8 Wall. 168"), "")
+
+    def test_the_names_link_in_running_text(self):
+        for text, action in (
+            ("Commonwealth v. Hunt, 45 Mass. (4 Met.) 111 (1842).",
+             ("cite", "45 Mass. 111")),
+            ("Brown v. Kendall, 6 Cush. 292, 295 (1850).",
+             ("cite", "6 Cush. 292@295")),
+            ("Doe v. Roe, 1 Gray 1 (1854).", ("cite", "1 Gray 1")),
+            ("Doe v. Roe, 4 Allen 5 (1862).", ("cite", "4 Allen 5")),
+        ):
+            with self.subTest(text=text):
+                links = detect_brief_links(text)
+                self.assertEqual(links[0][2], action)
+        self.assertEqual(detect_brief_links("He had 30 Gray 5 hairs."), [])
+
+    def test_a_lookup_tries_the_mass_cite_after_the_one_typed(self):
+        from courtlistener_gui import _citation_search_variants
+        self.assertEqual(_citation_search_variants("19 Pick. 234"),
+                         ("19 Pick. 234", "36 Mass. 234"))
+        self.assertEqual(
+            _citation_search_variants("Smith v. Jones, 5 Cush. 198, 200"),
+            ("Smith v. Jones, 5 Cush. 198, 200",
+             "Smith v. Jones, 59 Mass. 198, 200"))
+
+    def test_courtlistener_is_asked_for_the_mass_cite_too(self):
+        client = Mock()
+        client.lookup_citation.side_effect = [
+            [],
+            [{"status": 200, "clusters": [{
+                "id": 36, "case_name": "Smith v. Jones",
+                "citations": ["36 Mass. 234"], "court_id": "mass"}]}],
+        ]
+        item = _cl_item_for_citation(client, "19 Pick. 234")
+        self.assertEqual(item["cluster_id"], 36)
+        self.assertEqual(client.lookup_citation.call_args_list,
+                         [call("19 Pick. 234"), call("36 Mass. 234")])
+
+
+class RenamedAndRenumberedReporterTests(unittest.TestCase):
+    """Reporters known by more than one name: state nominative reports
+    renumbered into the official series, series renamed partway through,
+    and one series written several ways."""
+
+    def test_each_state_s_nominative_reports_map_onto_its_official_series(self):
+        from citations import state_nominative_cites
+        for cite, official in (
+            # Illinois
+            ("1 Breese 5", "1 Ill. 5"), ("4 Scam. 5", "5 Ill. 5"),
+            ("1 Gilm. 5", "6 Ill. 5"), ("5 Gilm. 5", "10 Ill. 5"),
+            # Kentucky
+            ("1 Bibb 5", "4 Ky. 5"), ("3 A.K. Marsh. 5", "10 Ky. 5"),
+            ("3 A. K. Marsh. 5", "10 Ky. 5"),
+            ("1 Litt. Sel. Cas. 5", "16 Ky. 5"), ("7 T.B. Mon. 5", "23 Ky. 5"),
+            ("1 J.J. Marsh. 5", "24 Ky. 5"), ("9 Dana 5", "39 Ky. 5"),
+            ("18 B. Mon. 5", "57 Ky. 5"), ("2 Duv. 5", "63 Ky. 5"),
+            ("14 Bush 5", "77 Ky. 5"),
+            # Tennessee
+            ("2 Overt. 5", "2 Tenn. 5"), ("10 Yer. 5", "18 Tenn. 5"),
+            ("1 Hum. 5", "20 Tenn. 5"), ("3 Head 5", "40 Tenn. 5"),
+            ("12 Heisk. 5", "59 Tenn. 5"), ("16 Lea 5", "84 Tenn. 5"),
+            # Virginia
+            ("1 Va. Cas. 5", "3 Va. 5"), ("6 Call 5", "10 Va. 5"),
+            ("1 Hen. & M. 5", "11 Va. 5"), ("12 Leigh 5", "39 Va. 5"),
+            ("33 Gratt. 5", "74 Va. 5"),
+            # Delaware
+            ("5 Harr. 5", "5 Del. 5"), ("1 W.W. Harr. 5", "31 Del. 5"),
+            ("20 Terry 5", "59 Del. 5"),
+            # Mississippi, Pennsylvania, New York
+            ("1 S. & M. 5", "9 Miss. 5"), ("10 George 5", "39 Miss. 5"),
+            ("10 Barr 5", "10 Pa. 5"), ("14 Wright 5", "50 Pa. 5"),
+            ("1 Seld. 5", "5 N.Y. 5"), ("4 Kern. 5", "14 N.Y. 5"),
+        ):
+            with self.subTest(cite=cite):
+                self.assertEqual(state_nominative_cites(cite), [official])
+
+    def test_an_abbreviation_two_states_used_tries_both(self):
+        from citations import state_nominative_cites
+        self.assertEqual(state_nominative_cites("4 Met. 111"),
+                         ["45 Mass. 111", "61 Ky. 111"])
+        self.assertEqual(state_nominative_cites("1 Sneed 5"),
+                         ["2 Ky. 5", "33 Tenn. 5"])
+        # Only Massachusetts' Metcalf ran past four volumes.
+        self.assertEqual(state_nominative_cites("9 Met. 5"), ["50 Mass. 5"])
+
+    def test_a_bare_name_links_only_where_a_citation_stands(self):
+        text = "He sold 3 Head 5 times; see Doe v. Roe, 3 Head 5 (1859)."
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(spans, ["Doe v. Roe, 3 Head 5 (1859)"])
+
+    def test_the_bluebook_parallel_form_links_as_the_official_cite(self):
+        links = detect_brief_links("Doe v. Roe, 61 Ky. (4 Met.) 1 (1862).")
+        self.assertEqual(links[0][2], ("cite", "61 Ky. 1"))
+
+    def test_a_lookup_tries_every_official_series_it_could_be(self):
+        from courtlistener_gui import _citation_search_variants
+        self.assertEqual(_citation_search_variants("4 Met. 111"),
+                         ("4 Met. 111", "45 Mass. 111", "61 Ky. 111"))
+
+    def test_a_renamed_series_is_tried_under_its_other_name(self):
+        from citations import reporter_citation_variants
+        self.assertEqual(reporter_citation_variants("80 App. D.C. 12"),
+                         ("80 App. D.C. 12", "80 U.S. App. D.C. 12"))
+        self.assertEqual(reporter_citation_variants("20 Fed. Cl. 5"),
+                         ("20 Fed. Cl. 5", "20 Cl. Ct. 5"))
+        self.assertEqual(reporter_citation_variants("30 Fed. Cl. 5"),
+                         ("30 Fed. Cl. 5",))
+
+    def test_another_spelling_of_a_series_is_tried_and_cited_as_bluebook(self):
+        from citations import reporter_citation_variants
+        for typed, bluebook in (
+            ("250 Ore. 12", "250 Or. 12"), ("12 Maine 45", "12 Me. 45"),
+            ("120 Okl. Cr. 5", "120 Okla. Crim. 5"),
+            ("140 Tex. Cr. R. 3", "140 Tex. Crim. 3"),
+            ("95 Sup. Ct. 1", "95 S. Ct. 1"),
+            ("250 A.D. 5", "250 App. Div. 5"),
+            ("5 Johnson 10", "5 Johns. 10"),
+        ):
+            with self.subTest(typed=typed):
+                self.assertIn(bluebook, reporter_citation_variants(typed))
+        item = {"caseName": "Doe v. Roe", "citation": ["250 Ore. 12"],
+                "dateFiled": "1968-01-01", "court_id": "or"}
+        self.assertEqual(_bluebook_display_name(item),
+                         "Doe v. Roe, 250 Or. 12 (1968)")
+
+
+class FullStateNameReporterTests(unittest.TestCase):
+    """A state's reports cited by the state's name in full."""
+
+    def test_the_full_name_is_tried_as_the_bluebook_abbreviation(self):
+        from citations import reporter_citation_variants
+        for typed, bluebook in (
+            ("1 Massachusetts 15", "1 Mass. 15"),
+            ("12 North Carolina 30", "12 N.C. 30"),
+            ("5 West Virginia 7", "5 W. Va. 7"),
+            ("200 Washington 5", "200 Wash. 5"),
+            ("3 Maine 4", "3 Me. 4"),
+        ):
+            with self.subTest(typed=typed):
+                self.assertIn(bluebook, reporter_citation_variants(typed))
+
+    def test_and_finds_the_same_folder_on_static_case_law(self):
+        from courtlistener_gui import _static_case_law_url
+        self.assertEqual(_static_case_law_url("12 North Carolina 30"),
+                         _static_case_law_url("12 N.C. 30"))
+        self.assertIn("/nc/12/", _static_case_law_url("12 N.C. 30"))
+
+    def test_every_state_keeps_static_case_law_s_own_folder_name(self):
+        import re
+        from citations import _STATE_REPORTER_NAMES, case_law_reporter_slug
+        for full, abbr in _STATE_REPORTER_NAMES.items():
+            mechanical = re.sub(r"-+", "-", re.sub(
+                r"[^a-z0-9-]", "", abbr.lower().replace(" ", "-"))).strip("-")
+            with self.subTest(state=full):
+                self.assertEqual(case_law_reporter_slug(full), mechanical)
+
+    def test_it_links_in_a_citation_but_not_in_prose(self):
+        text = "Commonwealth v. Smith, 1 Massachusetts 15 (1804)."
+        self.assertEqual(detect_brief_links(text)[0][2],
+                         ("cite", "1 Massachusetts 15"))
+        self.assertEqual(detect_brief_links("in about 3 Texas 12 counties"),
+                         [])
+
+    def test_it_is_cited_by_the_abbreviation(self):
+        item = {"caseName": "Commonwealth v. Smith",
+                "citation": ["1 Massachusetts 15"],
+                "dateFiled": "1804-01-01", "court_id": "mass"}
+        self.assertEqual(_bluebook_display_name(item),
+                         "Commonwealth v. Smith, 1 Mass. 15 (1804)")
+
+
+class WashingtonCertificationTests(unittest.TestCase):
+    """Bradley v. Am. Smelting & Refin. Co., 104 Wash. 2d 677 (1985), and
+    the passage citing Garratt v. Dailey that turned up the problems."""
+
+    BRADLEY = (
+        '<div id="gs_opinion"><center><b>104 Wn.2d 677 (1985)</b></center>'
+        "<center><b>709 P.2d 782</b></center>"
+        '<center><h3 id="gsl_case_name">CERTIFICATION FROM THE UNITED STATES '
+        "DISTRICT COURT FOR THE WESTERN DISTRICT OF WASHINGTON IN<br/> "
+        "MICHAEL O. BRADLEY, ET AL, Plaintiffs,<br/> v.<br/> AMERICAN "
+        "SMELTING AND REFINING COMPANY, Defendant.</h3></center>"
+        "<center>No. 51094-6.</center><center><p><b>The Supreme Court of "
+        "Washington, En Banc.</b></p></center><center>November 14, 1985."
+        "</center><p>Michael Bradley owns land. American Smelting and "
+        "Refining Company operates a smelter.</p></div>"
+    )
+
+    def test_a_sentence_ending_in_state_is_not_part_of_the_next_name(self):
+        text = ("This has been the reasoning of the decisions of this State. "
+                "Garratt v. Dailey, 46 Wn.2d 197, 279 P.2d 1091 (1955) "
+                "involved a 5-year-old boy.")
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(spans[0], "Garratt v. Dailey, 46 Wn.2d 197")
+
+    def test_nor_is_a_spelled_out_table_word(self):
+        text = "So held this Court. Roe v. Wade, 410 U.S. 113 (1973)."
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(spans[0], "Roe v. Wade, 410 U.S. 113 (1973)")
+
+    def test_but_a_name_s_own_abbreviations_still_belong_to_it(self):
+        text = "See Palsgraf v. Long Island R.R. Co., 248 N.Y. 339 (1928)."
+        spans = [text[s:e] for s, e, _a in detect_brief_links(text)]
+        self.assertEqual(
+            spans[0], "Palsgraf v. Long Island R.R. Co., 248 N.Y. 339 (1928)")
+
+    def test_the_certifying_court_is_not_part_of_the_name(self):
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import extract_record
+        blocks = parse_opinion_blocks(self.BRADLEY)
+        self.assertEqual(
+            _bluebook_display_name(_scholar_item_from_blocks(blocks)),
+            "Bradley v. Am. Smelting & Refin. Co., 104 Wash. 2d 677 (1985)")
+        self.assertEqual(
+            extract_record("https://scholar.google.com/scholar_case?case=1",
+                           self.BRADLEY)["name"],
+            "Bradley v. Am. Smelting & Refin. Co.")
+
+    def test_a_certification_lead_needs_a_case_after_it(self):
+        self.assertEqual(abbreviate_case_name("Certification Bd. v. Smith"),
+                         "Certification Bd. v. Smith")
+
+    def test_wn_2d_is_cited_as_the_official_wash_2d(self):
+        item = {"caseName": "Garratt v. Dailey", "citation": ["46 Wn.2d 197"],
+                "dateFiled": "1955-01-27", "court_id": "wash"}
+        self.assertEqual(_bluebook_display_name(item),
+                         "Garratt v. Dailey, 46 Wash. 2d 197 (1955)")
+
+
 class CaptionCapitalizationTests(unittest.TestCase):
+    def test_a_generational_suffix_is_not_the_surname(self):
+        # State v. McKelvey, 544 P.3d 632 (Alaska 2024): Scholar's caption
+        # "John William McKELVEY III" cited as "State v. I.I.I." — the
+        # all-caps "III" read as the surname, "McKELVEY" missed for its "c".
+        self.assertEqual(
+            collapse_personal_all_caps_run("John William McKELVEY III"),
+            "McKELVEY")
+        self.assertEqual(collapse_personal_all_caps_run("John SMITH, Jr."),
+                         "SMITH")
+        self.assertEqual(collapse_personal_all_caps_run("Angus MacDONALD"),
+                         "MacDONALD")
+        # An entity numbering itself keeps its numeral.
+        self.assertEqual(collapse_personal_all_caps_run("ACME FUND II"),
+                         "ACME FUND II")
+        self.assertEqual(
+            collapse_personal_all_caps_run("Blackstone Fund III"),
+            "Blackstone Fund III")
+
+    def test_a_surname_standing_before_its_suffix_cites_alone(self):
+        self.assertEqual(
+            abbreviate_case_name("State v. McKelvey III",
+                                 court_state="alaska"),
+            "State v. McKelvey")
+        self.assertEqual(abbreviate_case_name("Acme Fund III v. Jones"),
+                         "Acme Fund III v. Jones")
+
+    def test_mckelvey_is_cited_by_his_surname(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(
+            '<div id="gs_opinion"><center><b>544 P.3d 632 (2024)</b>'
+            '</center><center><h3 id="gsl_case_name">STATE of Alaska, '
+            "Petitioner,<br/> v.<br/> John William McKELVEY III, "
+            "Respondent.</h3></center><center>Supreme Court No. S-17910."
+            "</center><center><p><b>Supreme Court of Alaska.</b></p>"
+            "</center><center>March 8, 2024.</center><p>John William "
+            "McKelvey III lived on a property. McKelvey grew marijuana.</p>"
+            "</div>")
+        item = _scholar_item_from_blocks(blocks)
+        self.assertEqual(_bluebook_display_name(item),
+                         "State v. McKelvey, 544 P.3d 632 (Alaska 2024)")
+
     def test_apostrophe_and_mc_names_from_all_caps(self):
         self.assertEqual(
             normal_case_caption("O'BRIEN v. MCFADDEN"),
@@ -1427,7 +1724,8 @@ class NominativeCitationSearchTests(unittest.TestCase):
         )
         self.assertEqual(
             fetcher.fetch_by_citation.call_args_list,
-            [call("8 Wall 168"), call("75 U.S. 168")],
+            [call("8 Wall 168", case_name="", year=""),
+             call("75 U.S. 168", case_name="", year="")],
         )
 
     def test_direct_lookup_retries_federal_cases_alias_after_scholar_miss(self):
@@ -1442,7 +1740,8 @@ class NominativeCitationSearchTests(unittest.TestCase):
         )
         self.assertEqual(
             fetcher.fetch_by_citation.call_args_list,
-            [call("18 Fed. Cas. 9"), call("18 F. Cas. 9")],
+            [call("18 Fed. Cas. 9", case_name="", year=""),
+             call("18 F. Cas. 9", case_name="", year="")],
         )
 
 
@@ -2551,7 +2850,7 @@ class CaseWindowTests(unittest.TestCase):
                 parent, ("usc", "42:1983:"), status, app=app,
             )
         fetch.assert_called_once_with(
-            parent, "usc", "42:1983:", status, app=app,
+            parent, "usc", "42:1983:", status, app=app, on_missing=None,
         )
 
         with patch("courtlistener_gui._open_statute_pdf") as open_pdf:

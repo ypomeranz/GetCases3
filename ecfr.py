@@ -153,6 +153,11 @@ def _issue_date(title: str) -> str:
     return date
 
 
+class SectionNotFound(RuntimeError, LookupError):
+    """The CFR has no such section — as against eCFR failing to answer,
+    which stays a plain RuntimeError."""
+
+
 def load_section(title: str, section: str) -> CfrSection:
     """Fetch and parse a CFR section, cached.  For a range ("1.1-1.5"),
     falls back to the first section.  Raises RuntimeError on failure."""
@@ -169,6 +174,7 @@ def load_section(title: str, section: str) -> CfrSection:
         candidates.append(section.split("-", 1)[0])
     date = _issue_date(title)
     last_err = "section not found"
+    unreachable = False   # a failure that says nothing about the section
     for cand in candidates:
         part = cand.split(".", 1)[0]
         human_url = (
@@ -187,6 +193,7 @@ def load_section(title: str, section: str) -> CfrSection:
                 )
         except Exception as exc:
             last_err = str(exc)
+            unreachable = True
 
         api_url = (f"{_API}/full/{date}/title-{title}.xml"
                    f"?part={part}&section={cand}")
@@ -206,6 +213,7 @@ def load_section(title: str, section: str) -> CfrSection:
             if not site_paras:
                 raise RuntimeError(f"ecfr.gov: {exc}") from exc
             last_err = str(exc)
+            unreachable = True
 
         if site_paras:
             # The website supplies authoritative indentation and inline
@@ -230,7 +238,9 @@ def load_section(title: str, section: str) -> CfrSection:
             with _lock:
                 _cache[key] = doc
             return doc
-    raise RuntimeError(f"ecfr.gov: {last_err}")
+    if unreachable:
+        raise RuntimeError(f"ecfr.gov: {last_err}")
+    raise SectionNotFound(f"ecfr.gov: {last_err}")
 
 
 _order_cache: dict[str, list[str]] = {}

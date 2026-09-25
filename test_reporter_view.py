@@ -174,8 +174,9 @@ class _App:
             setattr(self, name, APP_NS[name].__get__(self))
 
     def open_cited_case_pdf(self, parent, action, snippet="",
-                            status=lambda _s: None, fallback=None):
+                            status=lambda _s: None, fallback=None, name=""):
         self.asked.append((parent, action, snippet, fallback))
+        self.names = getattr(self, "names", []) + [name]
         return self.opens
 
 
@@ -189,6 +190,16 @@ class ReporterOpenCaseTests(unittest.TestCase):
         _parent, action, snippet, _fb = app.asked[0]
         self.assertEqual(action, ("cite", "410 U.S. 113"))
         self.assertEqual(snippet, "Roe v. Wade")
+
+    def test_the_result_s_caption_goes_as_the_case_s_name(self):
+        # A bare caption is no "Name, cite" snippet to read a name out of, so
+        # it is handed over as the name itself — what picks the case when
+        # another begins on the same reporter page.
+        app = _App()
+        item = {"citation": ["145 S. Ct. 2658"],
+                "caseName": "NetChoice, LLC v. Fitch"}
+        app.reporter_open_case(app.root, item)
+        self.assertEqual(app.names, ["NetChoice, LLC v. Fitch"])
 
     def test_an_explicit_citation_wins_over_the_item_s(self):
         app = _App()
