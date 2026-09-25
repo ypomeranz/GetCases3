@@ -652,6 +652,12 @@ _NAME_TOKEN_RE = re.compile(r"^[\"“'(]?(?:[A-Z]|\d+[A-Za-z])")
 # never reaches the running head of the page above.
 _NAME_LOOKBEHIND = 200
 
+# The docket number a citation may carry between the case name and the cite:
+# ", No. A-61210-05T3", ", Nos. 12-6371, 12-6372", ", Civ. A. No. 96-3837".
+_DOCKET_AFTER_NAME_RE = re.compile(
+    r",\s*(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+)?Nos?\.\s*"
+    r"[\w:().-]{2,30}(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
+
 # "In re Winship", "Ex parte Young", "Matter of Doe" — a case name with no
 # "v." in it, anchored to the end of the window before the citation.
 _NAME_NO_V_RE = re.compile(
@@ -785,6 +791,13 @@ def _case_name_start(
     if not tail:
         return None
     head = head[:tail.start()]
+    # A docket number set between the name and the citation belongs to the
+    # citation — "Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3,
+    # 2008 WL 465653" — and the name is read from before it, not taken to be
+    # the number.
+    docket = _DOCKET_AFTER_NAME_RE.search(head)
+    if docket:
+        head = head[:docket.start()]
     if not head.strip():
         return None
 

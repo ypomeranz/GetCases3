@@ -107,28 +107,49 @@ def collect_authorities(text: str) -> list[Authority]:
     so a case cited a dozen times — including short forms and ``Id.``s, which
     :func:`citations.detect_links` resolves to the same base — is compiled once.
     Unpublished (RECAP) citations key on their spec, statute-like sources on
-    ``(kind, title, section)`` so different pin cites collapse to one file."""
+    ``(kind, title, section)`` so different pin cites collapse to one file.
+
+    Each case keeps the name and year its citation prints, read from the
+    citation's own link (see :func:`_name_in_link`) — the name the resolver
+    looks the case up by, and the fallback file name's."""
     out: list[Authority] = []
     by_key: dict[tuple, Authority] = {}
-    for start, end, action in citations.detect_links(text or ""):
+    # Read as the detector reads it, footnote marks as spaces ("183⁵"), with
+    # the offsets unchanged.
+    text = citations.without_footnote_marks(text)
+    # The case just cited and the parallel citations that follow it, which
+    # name no case of their own: "Roe v. Wade, 410 U.S. 113, 93 S. Ct. 705,
+    # 35 L. Ed. 2d 147 (1973)" is one case, dated by the year at the end.
+    run: list[Authority] = []
+    run_end = 0
+    for start, end, action in citations.detect_links(text):
         kind, value = action
         if kind == "cite":
             base = str(value).split("@", 1)[0].strip()
             if not base:
                 continue
             key = ("cite", base)
-            name = _name_before(text, start)
-            year = _year_after(text, end)
-            existing = by_key.get(key)
-            if existing is None:
-                by_key[key] = Authority("cite", base, name=name, year=year)
-                out.append(by_key[key])
+            link = text[start:end]
+            name = _name_in_link(link, base)
+            year = _year_in_link(link) or _year_after(text, end)
+            auth = by_key.get(key)
+            if auth is None:
+                auth = by_key[key] = Authority("cite", base)
+                out.append(auth)
+            _adopt_name(auth, name)
+            if (run and not name and _cites_in_full(link, base)
+                    and re.fullmatch(r"[\s,]*", text[run_end:start])):
+                _adopt_name(auth, run[0].name)
+                run.append(auth)
             else:
-                if not existing.name and name:
-                    existing.name = name
-                if not existing.year and year:
-                    existing.year = year
+                run = [auth]
+            run_end = end
+            if year:
+                for cited in run:
+                    if not cited.year:
+                        cited.year = year
             continue
+        run = []
         if kind == "recap":
             key = ("recap", str(value))
             if key not in by_key:
@@ -176,12 +197,81 @@ def _looks_like_name_token(tok: str) -> bool:
     return tok.strip(".,").lower() in _NAME_PARTICLES
 
 
+def _name_in_link(link: str, cite: str) -> str:
+    """The case name a case citation's link opens with — "Hollingsworth v.
+    Perry" out of "Hollingsworth v. Perry, 558 U.S. 183, 190 (2010)", "Nken"
+    out of "Nken, 556 U.S. at 432" or "Nken, at 433-34" — or "" when the link
+    opens with the citation itself ("410 U.S. at 164", "Id. at 26").
+
+    :func:`citations.detect_links` grows each case link back over the name
+    that introduces it, and only over that, so the name is read from the link
+    and never from the text before it: there, in a table of authorities, is
+    the entry above, and in running text whatever the brief cited last.  The
+    name runs to the comma before *cite*'s volume, before the "at" of a short
+    form that gives no volume, or before a docket number ("Foxtons, Inc. v.
+    Cirri Germain Realty, No. A-61210-05T3, 2008 WL 465653").  This is the
+    name the resolver looks the case up by, so it is the one a lookup must be
+    able to trust.
+    """
+    volume = re.escape(cite.split(" ", 1)[0])
+    m = re.search(r",\s+(?=" + volume + r"\s|(?:supra\s*,\s*)?at\s|"
+                  r"(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+)?"
+                  r"Nos?\.\s)", link)
+    if not m:
+        return ""
+    name = re.sub(r"\s+", " ", link[:m.start()]).strip(" ,;")
+    if name.lower().rstrip(".") in ("id", "ibid"):
+        return ""
+    return name if re.search(r"[A-Za-z]{2}", name) else ""
+
+
+_CAPTION_RE = re.compile(r"\svs?\.\s|^(?:in re|ex parte|matter of)\b",
+                         re.IGNORECASE)
+
+
+def _is_caption(name: str) -> bool:
+    """Whether *name* is a case's whole caption ("Nken v. Holder", "In re
+    Gault") rather than the one party a short form keeps ("Nken")."""
+    return bool(_CAPTION_RE.search(name or ""))
+
+
+def _adopt_name(auth: Authority, name: str) -> None:
+    """Give *auth* the case name *name* when it has none yet, or has only the
+    one party a short form keeps and *name* is the whole caption — "Nken v.
+    Holder", wherever the brief cites it so, over "Nken"."""
+    if name and (not auth.name
+                 or (_is_caption(name) and not _is_caption(auth.name))):
+        auth.name = name
+
+
+def _cites_in_full(link: str, cite: str) -> bool:
+    """Whether a link's text holds the citation *cite* itself ("93 S. Ct.
+    705"), rather than a short form or a further pin cite of it."""
+    def squeeze(s: str) -> str:
+        return re.sub(r"\s+", "", s or "")
+    return bool(cite) and squeeze(cite) in squeeze(link)
+
+
+# The court/year parenthetical closing a citation's link: "(2010)", "(2d Cir.
+# 2019)", "(U.S., Sept. 4, 2026)".
+_LINK_YEAR_RE = re.compile(
+    r"\((?:[^()]*?[\s.,])?((?:1[6-9]|20)\d{2})[a-z]?\)\s*$")
+
+
+def _year_in_link(link: str) -> str:
+    """The decision year in the court/year parenthetical a citation's link
+    ends with ("Roe v. Wade, 410 U.S. 113, 152 (1973)" → "1973"), or "".  The
+    link takes the parenthetical in, so the year is read there, not after."""
+    m = _LINK_YEAR_RE.search(link or "")
+    return m.group(1) if m else ""
+
+
 def _name_before(text: str, start: int) -> str:
     """The case caption printed immediately before the citation at *start*, or
-    "" — a last-resort file-name fallback, used only when neither the opinion
-    nor CourtListener yields the caption.  Works outward from the "v." nearest
-    the citation so "The Court relied on Roe v. Wade, 410 U.S. 113" yields
-    "Roe v. Wade"."""
+    "" — for a RECAP cite, whose link begins at its docket or WL number rather
+    than the name (a reporter cite's link carries its own name: see
+    :func:`_name_in_link`).  Works outward from the "v." nearest the citation
+    so "The Court relied on Roe v. Wade, No. 12-6371" yields "Roe v. Wade"."""
     window = text[max(0, start - 160):start].replace("\n", " ")
     window = re.sub(r"[\s,;]+$", "", window)
     tokens = window.split()
