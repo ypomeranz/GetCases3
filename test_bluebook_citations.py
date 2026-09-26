@@ -537,11 +537,12 @@ class CaptionCapitalizationTests(unittest.TestCase):
 
     def test_single_letter_initials_keep_their_capitals(self):
         # R.A.V. v. City of St. Paul, 505 U.S. 377 (1992): the spaced
-        # initials "R. A. V." collide with the small words "a" and "v".
+        # initials "R. A. V." collide with the small words "a" and "v".  (The
+        # caption's trailing ", Minnesota" goes under rule 10.2.1(f).)
         self.assertEqual(
             abbreviate_case_name(normal_case_caption(
                 "R. A. V., PETITIONER v. CITY OF ST. PAUL, MINNESOTA")),
-            "R.A.V. v. City of St. Paul, Minnesota",
+            "R.A.V. v. City of St. Paul",
         )
         self.assertEqual(
             normal_case_caption("SAMUEL A. WORCESTER v. GEORGIA"),
@@ -559,8 +560,17 @@ class CaptionCapitalizationTests(unittest.TestCase):
             "District of Columbia v. Heller",
         )
         self.assertEqual(
-            abbreviate_case_name("Walz v. Tax Comm'n OF N.Y."),
-            "Walz v. Tax Comm'n of N.Y.",
+            abbreviate_case_name(
+                "Sec'y OF State of Md. v. Joseph H. Munson Co."),
+            "Sec'y of State of Md. v. Joseph H. Munson Co.",
+        )
+        # An abbreviation that spells a small word is not one: "Or." is
+        # Oregon.
+        self.assertEqual(
+            abbreviate_case_name(
+                "Employment Division, Department of Human Resources of "
+                "Oregon v. Smith"),
+            "Emp. Div., Dep't of Hum. Res. of Or. v. Smith",
         )
         # Small words inside an all-caps run carry no casing signal and
         # keep their caps (T6 word abbreviation applies as before).
@@ -628,15 +638,22 @@ class CaptionCapitalizationTests(unittest.TestCase):
             self.assertEqual(abbreviate_case_name(name), name)
 
     def test_mid_name_municipal_unit_is_omitted(self):
-        # Doremus v. Bd. of Educ. of Hawthorne, 342 U.S. 429 (1952): rule
-        # 10.2.1(f) omits "city of"/"borough of" and like expressions unless
-        # they begin the party name.
+        # Doremus v. Bd. of Educ., 342 U.S. 429 (1952): rule 10.2.1(f) omits
+        # the phrase of location "of the Borough of Hawthorne" whole, as it
+        # does "of the Township of Ewing" in Everson v. Bd. of Educ.
         self.assertEqual(
             abbreviate_case_name(normal_case_caption(
                 "DOREMUS ET AL. v. BOARD OF EDUCATION OF THE BOROUGH OF "
                 "HAWTHORNE ET AL.")),
-            "Doremus v. Bd. of Educ. of Hawthorne",
+            "Doremus v. Bd. of Educ.",
         )
+        # Where that would leave a single word the place stays, and only the
+        # "city of" expression drops — the Bluebook's own example.
+        self.assertEqual(
+            abbreviate_case_name("Mayor of the City of New York v. Clark"),
+            "Mayor of N.Y. v. Clark",
+        )
+        # A party that begins with the expression keeps it.
         self.assertEqual(
             abbreviate_case_name("City of New York v. Doe"),
             "City of New York v. Doe",
@@ -665,6 +682,134 @@ class CaptionCapitalizationTests(unittest.TestCase):
                 "Standard Oil Co., Defendant-Appellant v. United States"),
             "Standard Oil Co. v. United States",
         )
+
+
+class GeographicTermTests(unittest.TestCase):
+    """Rule 10.2.1(f): "Omit all prepositional phrases of location not
+    following 'City,' or like expressions, unless the omission would leave
+    only one word in the name of a party or the location is part of a
+    business name."""
+
+    def assertNames(self, cases):
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                got = abbreviate_case_name(raw)
+                self.assertEqual(got, want)
+                # Safe to call twice.
+                self.assertEqual(abbreviate_case_name(got), got)
+
+    def test_a_phrase_of_location_is_omitted(self):
+        self.assertNames([
+            ("Brown v. Board of Education of Topeka", "Brown v. Bd. of Educ."),
+            # The rule's own example.
+            ("Surrick v. Board of Wardens of the Port of Philadelphia",
+             "Surrick v. Bd. of Wardens"),
+            ("Planned Parenthood of Southeastern Pennsylvania v. Casey",
+             "Planned Parenthood v. Casey"),
+            ("Florence v. Board of Chosen Freeholders of Burlington",
+             "Florence v. Bd. of Chosen Freeholders"),
+        ])
+
+    def test_a_city_or_township_phrase_goes_whole(self):
+        # The place follows "City", but the phrase itself follows the
+        # party's own name — so it is omitted, "City of" and all.
+        self.assertNames([
+            ("Everson v. Board of Education of the Township of Ewing",
+             "Everson v. Bd. of Educ."),
+            ("Monell v. Department of Social Services of the City of "
+             "New York", "Monell v. Dep't of Soc. Servs."),
+            ("Walz v. Tax Commission of the City of New York",
+             "Walz v. Tax Comm'n"),
+        ])
+
+    def test_the_full_supreme_court_caption_reads_the_same(self):
+        self.assertEqual(
+            abbreviate_case_name(normal_case_caption(
+                "OLIVER BROWN, ET AL. v. BOARD OF EDUCATION OF TOPEKA, "
+                "SHAWNEE COUNTY, KANSAS, ET AL.")),
+            "Brown v. Bd. of Educ.",
+        )
+
+    def test_only_the_place_goes_where_the_name_goes_on(self):
+        # The school district is the board's own name, not a place.
+        self.assertNames([
+            ("Board of Education of Independent School District No. 92 of "
+             "Pottawatomie County v. Earls",
+             "Bd. of Educ. of Indep. Sch. Dist. No. 92 v. Earls"),
+            ("Board of Education of Westside Community Schools v. Mergens",
+             "Bd. of Educ. of Westside Cmty. Schs. v. Mergens"),
+            ("Board of Regents of State Colleges v. Roth",
+             "Bd. of Regents of State Colls. v. Roth"),
+        ])
+
+    def test_a_trailing_designation_after_a_comma_goes(self):
+        self.assertNames([
+            ("Bostock v. Clayton County, Georgia",
+             "Bostock v. Clayton County"),
+            ("Kelo v. City of New London, Connecticut",
+             "Kelo v. City of New London"),
+            ("Town of Castle Rock, Colorado v. Gonzales",
+             "Town of Castle Rock v. Gonzales"),
+            ("Haycraft v. Board of Education of Jefferson County, Kentucky",
+             "Haycraft v. Bd. of Educ."),
+            # A court's own place stays; the county after it does not.
+            ("Bristol-Myers Squibb Co. v. Superior Court of California, "
+             "San Francisco County",
+             "Bristol-Myers Squibb Co. v. Superior Ct. of Cal."),
+        ])
+
+    def test_a_name_left_one_word_long_keeps_its_place(self):
+        self.assertNames([
+            ("Shapiro v. Bank of Harrisburg", "Shapiro v. Bank of Harrisburg"),
+            # Widely recognized initials count as one word, and are then what
+            # the party is called.
+            ("McCreary County, Kentucky v. American Civil Liberties Union "
+             "of Kentucky", "McCreary County v. ACLU of Ky."),
+        ])
+
+    def test_a_business_keeps_its_place(self):
+        self.assertNames([
+            ("Standard Oil Co. of New Jersey v. United States",
+             "Standard Oil Co. of N.J. v. United States"),
+            ("Riley v. National Federation of the Blind of North Carolina, "
+             "Inc.", "Riley v. Nat'l Fed'n of the Blind of N.C., Inc."),
+            ("Hackner v. Federal Reserve Bank of New York",
+             "Hackner v. Fed. Rsrv. Bank of N.Y."),
+        ])
+
+    def test_a_place_that_names_an_office_or_institution_stays(self):
+        self.assertNames([
+            ("Attorney General of New York v. Soto-Lopez",
+             "Att'y Gen. of N.Y. v. Soto-Lopez"),
+            ("Personnel Administrator of Massachusetts v. Feeney",
+             "Pers. Adm'r of Mass. v. Feeney"),
+            ("Secretary of State of Maryland v. Joseph H. Munson Co.",
+             "Sec'y of State of Md. v. Joseph H. Munson Co."),
+            ("Regents of the University of California v. Bakke",
+             "Regents of the Univ. of Cal. v. Bakke"),
+            ("School District of Abington Township v. Schempp",
+             "Sch. Dist. of Abington Twp. v. Schempp"),
+            ("Roman Catholic Archdiocese of San Juan v. Acevedo Feliciano",
+             "Roman Cath. Archdiocese of San Juan v. Acevedo Feliciano"),
+        ])
+
+    def test_a_national_designation_stays(self):
+        self.assertNames([
+            ("Boy Scouts of America v. Dale", "Boy Scouts of Am. v. Dale"),
+            ("Communist Party of the United States v. Subversive Activities "
+             "Control Board",
+             "Communist Party of the U.S. v. Subversive Activities Control "
+             "Bd."),
+        ])
+
+    def test_an_already_abbreviated_name_reads_the_same(self):
+        self.assertNames([
+            ("Planned Parenthood of Se. Pa. v. Casey",
+             "Planned Parenthood v. Casey"),
+            ("Atl. Refin. Co. v. Pub. Serv. Comm'n of N.Y.",
+             "Atl. Refin. Co. v. Pub. Serv. Comm'n"),
+            ("Soldal v. Cook Cnty., Ill.", "Soldal v. Cook Cnty."),
+        ])
 
 
 class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):

@@ -439,6 +439,283 @@ _GEO_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Rule 10.2.1(f), last part: "Omit all prepositional phrases of location not
+# following 'City,' or like expressions, unless the omission would leave only
+# one word in the name of a party or the location is part of a business name."
+# So "Brown v. Bd. of Educ.", not "… of Topeka"; "Surrick v. Bd. of Wardens",
+# not "… of the Port of Philadelphia"; "Planned Parenthood v. Casey"; but
+# "Shapiro v. Bank of Harrisburg" (not "Bank") and "Standard Oil Co. of N.J."
+# Designations of national or larger areas stay ("Boy Scouts of Am."), so no
+# country is ever recognized as a place below.
+# ---------------------------------------------------------------------------
+
+# The states, the District of Columbia and the territories, spelled out...
+_STATE_NAMES = frozenset(
+    set(_T10_WORDS)
+    | {p for p, a in _PHRASES
+       if _norm_geo(a) in _GEO_EXPANSIONS and p != "united states"}
+    | {"alaska", "idaho", "iowa", "ohio", "utah", "guam", "virgin islands",
+       "american samoa", "northern mariana islands"}
+)
+
+# ...and abbreviated, as table T10 does it and as captions commonly do.  An
+# abbreviation is only ever read with its periods, so a word that happens to
+# spell one ("Me", "Or", "Mass") is never taken for a state, nor is a
+# professional association's "P.A." for Pennsylvania's "Pa.".
+_STATE_ABBREVIATIONS = frozenset(
+    re.sub(r"\s+", "", a.lower())
+    for a in list(_T10_WORDS.values())
+    + [a for p, a in _PHRASES if p in _STATE_NAMES]
+) | {"calif.", "ore.", "kans.", "nebr.", "wisc."}
+
+# A part of a state named ahead of it: "Southeastern Pennsylvania", "Se. Pa."
+_REGION_WORDS = frozenset({
+    "north", "south", "east", "west", "northern", "southern", "eastern",
+    "western", "central", "northeast", "northwest", "southeast",
+    "southwest", "northeastern", "northwestern", "southeastern",
+    "southwestern", "upstate", "downstate", "greater", "upper", "lower",
+    "middle", "n", "s", "e", "w", "ne", "nw", "se", "sw", "cent",
+})
+
+# Municipal units, spelled out or as table T6 abbreviates them, that make a
+# place of the name beside them: "Bryan County", "the Borough of Hawthorne".
+_UNIT_WORDS = frozenset({
+    "city", "town", "township", "twp", "village", "vill", "borough",
+    "county", "cnty", "parish", "par",
+})
+
+# Cities known by name alone, for a phrase that names no unit ("of Topeka"):
+# table T10's cities, the state capitals, and the country's larger cities.
+# Names that are also given names (Austin, Madison, Charlotte) or ordinary
+# words (Providence, Concord, Mobile) are left out — a phrase naming one of
+# those is kept, which is the safe way to be wrong.
+_CITY_NAMES = frozenset({
+    "akron", "albany", "albuquerque", "alexandria", "allentown", "anaheim",
+    "anchorage", "ann arbor", "annapolis", "arlington", "atlanta", "augusta",
+    "bakersfield", "baltimore", "baton rouge", "berkeley", "bethlehem",
+    "binghamton", "birmingham", "bismarck", "boise", "boston", "bridgeport",
+    "buffalo", "burlington", "cambridge", "camden", "charleston",
+    "chattanooga", "cheyenne", "chicago", "chula vista", "cincinnati",
+    "cleveland", "colorado springs", "columbus", "corpus christi", "dallas",
+    "dayton", "denver", "des moines", "detroit", "dover", "duluth", "durham",
+    "el paso", "evanston", "evansville", "fargo", "fort wayne", "fort worth",
+    "frankfort", "fresno", "galveston", "glendale", "grand rapids",
+    "greensboro", "harrisburg", "hartford", "hoboken", "honolulu", "houston",
+    "huntsville", "indianapolis", "jackson", "jacksonville", "juneau",
+    "knoxville", "lancaster", "lansing", "laredo", "las vegas", "lexington",
+    "lincoln", "little rock", "long beach", "los angeles", "louisville",
+    "lowell", "lubbock", "memphis", "mesa", "miami", "milwaukee",
+    "minneapolis", "modesto", "montgomery", "montpelier", "nashville",
+    "new haven", "new orleans", "newark", "norfolk", "oakland", "olympia",
+    "omaha", "orlando", "pasadena", "paterson", "peoria", "philadelphia",
+    "phoenix", "pittsburgh", "plano", "portland", "raleigh", "reno",
+    "richmond", "rochester", "sacramento", "saint louis", "saint paul",
+    "saint petersburg", "salem", "san antonio", "san diego",
+    "san francisco", "san jose", "santa ana", "santa fe", "savannah",
+    "schenectady", "scottsdale", "scranton", "seattle", "shreveport",
+    "sioux falls", "south bend", "spokane", "springfield", "st louis",
+    "st paul", "st petersburg", "stamford", "stockton", "syracuse",
+    "tacoma", "tallahassee", "tampa", "toledo", "topeka", "trenton",
+    "tucson", "tulsa", "utica", "virginia beach", "wichita", "wilkes-barre",
+    "wilmington", "winston-salem", "worcester", "yonkers", "youngstown",
+})
+_CITY_ABBREVIATIONS = frozenset({
+    "balt.", "bos.", "chi.", "dall.", "l.a.", "mia.", "phila.", "phx.",
+    "s.f.",
+})
+
+# One word of a place's proper name: capitalized ("Prince George's",
+# "Miami-Dade", "St."), or a particle ("Isle de France", "Coeur d'Alene").
+_PLACE_NAME_TOKEN_RE = re.compile(
+    r"[A-Z][A-Za-z'’.\-]*|de|la|le|du|del|des|di|da|van|von"
+    r"|d['’][A-Z][A-Za-z'’\-]*"
+)
+
+# The word right before "of <place>" that makes the place part of a name
+# rather than a location added to one: a unit or district, whose place is the
+# thing it names ("City of New York", "Sch. Dist. of Abington Twp.", "S.
+# Dist. of N.Y."), and an institution named for where it is ("Regents of
+# Univ. of Cal.", "Sup. Ct. of Va.", "Roman Cath. Archdiocese of San Juan").
+_INSTITUTION_WORDS = frozenset({
+    "university", "univ", "college", "coll", "institute", "inst",
+    "seminary", "academy", "acad", "hospital", "hosp", "court", "ct",
+    "church", "diocese", "archdiocese",
+})
+_PLACE_NAMING_WORDS = (
+    _UNIT_WORDS | _INSTITUTION_WORDS
+    | {"port", "district", "dist", "division", "div"}
+)
+
+# An officer is named for the place whose office it is — "Att'y Gen. of
+# N.Y.", "Sec'y of State of Md.", "Pers. Adm'r of Mass.", the Bluebook's own
+# "Mayor of New York" — so an office heading the party keeps its place too,
+# as does a court or a church whose place follows another word of its name.
+_OFFICE_WORDS = frozenset({
+    "attorney", "atty", "secretary", "secy", "administrator", "admr",
+    "administratrix", "admx", "commissioner", "commr", "director", "dir",
+    "superintendent", "supt", "governor", "gov", "mayor", "treasurer",
+    "comptroller", "controller", "auditor", "assessor", "collector",
+    "sheriff", "clerk", "registrar", "recorder", "warden", "prosecutor",
+    "solicitor", "judge", "magistrate", "marshal", "coroner", "surveyor",
+    "chief", "lieutenant",
+})
+_PLACE_KEEPING_HEADS = _OFFICE_WORDS | _INSTITUTION_WORDS
+
+# Words that make a party a business, whose location is part of its name.
+_BUSINESS_WORDS = frozenset({
+    "co", "cos", "company", "companies", "corp", "corporation", "inc",
+    "incorporated", "ltd", "limited", "llc", "llp", "lllp", "lp", "plc",
+    "pllc", "na", "fsb", "bank", "banks", "bancorp", "banking", "trust",
+    "insurance", "ins", "assurance", "mutual", "mut", "railroad", "rr",
+    "railway", "ry", "telephone", "tel", "telegraph", "savings", "sav",
+    "bros", "brothers", "mfg", "manufacturing", "exchange", "exch",
+})
+
+# "of" or "in" opening a phrase of location: "… of Topeka", "Sailor's Snug
+# Harbour in the City of New York".
+_LOCATION_PREP_RE = re.compile(r"\s+(?:of|in)\s+", re.IGNORECASE)
+
+
+def _word_key(word: str) -> str:
+    """A word's letters, lowercased: "Att'y" -> "atty", "Cnty." -> "cnty"."""
+    return re.sub(r"[^a-z]", "", word.lower())
+
+
+def _place_words(text: str) -> list[str]:
+    """The words of a would-be place, less edge punctuation and a leading
+    "the" ("the Port of Philadelphia")."""
+    words = re.sub(r"\.{2,}$", ".", (text or "").strip(" ,;")).split()
+    if words and words[0].lower() == "the":
+        words = words[1:]
+    return words
+
+
+def _is_state(words: list[str]) -> bool:
+    """A state, the District of Columbia or a territory, spelled out or
+    abbreviated: "Kansas", "North Carolina", "Ky.", "W. Va."."""
+    text = " ".join(words)
+    if text.lower().rstrip(".") in _STATE_NAMES:
+        return True
+    return ("." in text
+            and re.sub(r"\s+", "", text.lower()) in _STATE_ABBREVIATIONS)
+
+
+def _is_place_name(words: list[str]) -> bool:
+    """One to four words that can be a place's own proper name — the part
+    beside a unit word ("Bryan" County, City of "New York")."""
+    return (1 <= len(words) <= 4
+            and all(_PLACE_NAME_TOKEN_RE.fullmatch(w) for w in words)
+            and _is_bare_place(" ".join(words)))
+
+
+def _is_place(text: str) -> bool:
+    """Whether *text* names a place smaller than a nation: a state (or a part
+    of one), a county, city, town, township, village, borough, parish or
+    port, or a city known by name."""
+    words = _place_words(text)
+    if not words:
+        return False
+    if _is_state(words):
+        return True
+    lead = _word_key(words[0])
+    if len(words) >= 2 and lead in _REGION_WORDS and _is_place(
+            " ".join(words[1:])):
+        return True     # "Southeastern Pennsylvania", "Greater Kansas City"
+    if len(words) >= 3 and words[1].lower() == "of":
+        if lead in ("state", "commonwealth", "territory"):
+            return _is_state(words[2:])
+        if lead in _UNIT_WORDS or lead == "port":
+            return _is_state(words[2:]) or _is_place_name(words[2:])
+    if (len(words) >= 2 and _word_key(words[-1]) in _UNIT_WORDS
+            and _is_place_name(words[:-1])):
+        return True     # "Bryan County", "Abington Township", "Kansas City"
+    name = " ".join(words).lower()
+    return (name in _CITY_ABBREVIATIONS
+            or name.replace(".", "") in _CITY_NAMES)
+
+
+def _strip_trailing_places(p: str) -> str:
+    """Drop the geographic designations a caption appends after a comma —
+    "City of Arlington, Texas" -> "City of Arlington", "Board of Education
+    of Topeka, Shawnee County, Kansas" -> "Board of Education of Topeka"."""
+    while True:
+        head, sep, tail = p.rpartition(",")
+        if not sep or not head.strip() or not _is_place(tail):
+            return p
+        if (_norm_geo(tail) == "DC"
+                and head.strip(" ,").lower() == "washington"):
+            return p    # "Washington, D.C." is the city's own name
+        p = head.rstrip(" ,")
+
+
+def _location_phrase_start(name: str) -> int | None:
+    """Where the phrase of location that ends *name* begins — the first
+    "of"/"in" whose remainder is a place — or None when the name ends in no
+    such phrase, or the one it ends in follows a unit or institution word
+    that makes the place part of the name ("City of New York", "Regents of
+    the University of California")."""
+    for m in _LOCATION_PREP_RE.finditer(name):
+        if not _is_place(name[m.end():]):
+            continue
+        before = name[:m.start()].split()
+        if before and _word_key(before[-1]) in _PLACE_NAMING_WORDS:
+            return None
+        return m.start()
+    return None
+
+
+def _is_business_name(party: str) -> bool:
+    """Whether a party is a business, whose location is part of its name
+    ("Standard Oil Co. of N.J.", "Fed. Rsrv. Bank of N.Y.")."""
+    if re.search(r"\b(?:board|bd\.)\s+of\s+trade\b", party, re.IGNORECASE):
+        return True
+    return any(_word_key(w) in _BUSINESS_WORDS for w in party.split())
+
+
+def _omit_location(p: str, *, recognize_initials: bool) -> str:
+    """Apply rule 10.2.1(f)'s omission of a phrase of location to one party.
+
+    Only the party's own name — the part before any comma — is shortened;
+    what a caption adds after a comma describes it and is left for the rules
+    that deal with such matter, apart from trailing geographic designations,
+    which go (:func:`_strip_trailing_places`).  An office or court at the head
+    of the name keeps its place ("Att'y Gen. of N.Y.", "Sup. Ct. of Va."), as
+    does a business ("Standard Oil Co. of N.J."), and so does a name that
+    would otherwise be left one word long ("Bank of Harrisburg", "Mayor of
+    New York") — a widely recognized institution's initials counting as one
+    word, which is then what the party is called: "ACLU of Ky."."""
+    # A caption can interleave the two kinds of trailing matter ("…, State of
+    # R.I., Plaintiffs-Appellees, State of Haw., Plaintiff"), so peel them
+    # off in turn until neither is left, as a second pass would.
+    while True:
+        q = _strip_party_designations(_strip_trailing_places(p))
+        if q == p:
+            break
+        p = q
+    name, comma, rest = p.partition(",")
+    start = _location_phrase_start(name)
+    if start is None:
+        return p
+    head = name[:start].strip()
+    governing = re.split(r"\s+of\s+", head, maxsplit=1, flags=re.IGNORECASE)[0]
+    if any(_word_key(w) in _PLACE_KEEPING_HEADS for w in governing.split()):
+        return p
+    # The name is a business's by its own words or by the designator set off
+    # after it ("Nat'l Fed'n of the Blind of N.C., Inc."), not by another
+    # party a caption lists after a comma.
+    designator = rest.split(",", 1)[0].split()
+    if _is_business_name(name) or (designator and all(
+            _word_key(w) in _BUSINESS_WORDS for w in designator)):
+        return p
+    if recognize_initials:
+        initials = _recognized_initialism(head)
+        if initials:
+            return initials + name[start:] + comma + rest
+    if len(head.split()) <= 1:
+        return p
+    return head + comma + rest
+
 # Personal-name suffixes, dropped along with the given name
 _NAME_SUFFIX_RE = re.compile(r",?\s+(?:jr|sr|ii|iii|iv)\.?\s*$", re.IGNORECASE)
 
@@ -1646,11 +1923,6 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
                 return f"{designation} ex rel. " + _abbreviate_party(
                     relator, recognize_initials=recognize_initials)
             return designation
-    # Rule 10.2.1(f): "city of," "county of," and like expressions are
-    # omitted unless they begin the party name — "Bd. of Educ. of the
-    # Borough of Hawthorne" -> "Bd. of Educ. of Hawthorne", while "City of
-    # New York" as the whole party keeps its prefix (handled below).
-    p = _MID_GEO_UNIT_RE.sub(r"\1", p)
 
     # Relator construction (rule 10.2.1(b)): split "<party> ex rel. <relator>".
     # The named party keeps its full geographic name (rule 10.2.2) — restored
@@ -1677,6 +1949,16 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     procedural = _format_procedural(p, recognize_initials=recognize_initials)
     if procedural is not None:
         return procedural
+    # Rule 10.2.1(f): a phrase of location drops — "Bd. of Educ. of Topeka"
+    # -> "Bd. of Educ." — as do the designations a caption appends after a
+    # comma ("Clayton County, Georgia" -> "Clayton County").
+    p = _omit_location(p, recognize_initials=recognize_initials)
+    # Rule 10.2.1(f): "city of," "county of," and like expressions are
+    # omitted unless they begin the party name — "Mayor of the City of New
+    # York" -> "Mayor of New York", while "City of New York" as the whole
+    # party keeps its prefix (handled below).  After the phrase of location
+    # above, which has to see the unit word to leave the place it names.
+    p = _MID_GEO_UNIT_RE.sub(r"\1", p)
     if p.strip(" ,.").lower() in _GEO_PARTIES:
         return p
 
@@ -1690,8 +1972,10 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     # — a T6 word among them ("Atlantic", "Central") belongs to that name, not
     # to an institution — and the whole party stays whole.  A larger entity puts
     # the unit word mid-name ("Cook County Bd. of Review"), where the '$' anchor
-    # no longer matches and normal abbreviation applies.
-    if _GEO_SUFFIX_RE.match(p):
+    # no longer matches and normal abbreviation applies — as it does when the
+    # unit ends an institution's name instead ("Sch. Dist. of Abington Twp.").
+    suffix = _GEO_SUFFIX_RE.match(p)
+    if suffix and _is_bare_place(suffix.group(1)):
         return p
 
     # Rule 10.2.1(a): only the first-listed party on a side is kept.  The
@@ -1749,8 +2033,16 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     def _sub(m: re.Match) -> str:
         if m.start() in protected:
             return m.group(0)
-        return _WORD_MAP.get(m.group(0).replace("’", "'").lower(),
-                             m.group(0))
+        word = m.group(0).replace("’", "'").lower()
+        abbr = _WORD_MAP.get(word)
+        if (abbr is None and m.end() == len(p) and word.endswith(".")
+                and "." not in word[:-1]):
+            # A caption's closing period rides on its last word ("Dallas
+            # County.", "Magnavox Co. of Tennessee.") and would otherwise
+            # keep the word from its abbreviation until a second pass,
+            # once the period is gone.
+            abbr = _WORD_MAP.get(word[:-1])
+        return m.group(0) if abbr is None else abbr
 
     return _TOKEN_RE.sub(_sub, p)
 
@@ -1846,7 +2138,8 @@ def _lowercase_small_words(name: str) -> str:
     Of Columbia", "Tax Comm'n OF N.Y.") — a partially mixed-case caption
     bypasses ``normal_case_caption``'s all-caps handling, so these survive
     it.  A party-leading "The" ("v. The Boeing Co.") and words inside an
-    all-caps run ("CITIZENS FOR A BETTER ENVIRONMENT") stay untouched."""
+    all-caps run ("CITIZENS FOR A BETTER ENVIRONMENT") stay untouched, as
+    does an abbreviation that spells one of the words: "Or." is Oregon."""
     tokens = name.split(" ")
     out: list[str] = []
     for i, tok in enumerate(tokens):
@@ -1855,6 +2148,7 @@ def _lowercase_small_words(name: str) -> str:
         if (i > 0
                 and core.lower() in _SMALL_MIDWORD
                 and core[:1].isupper()
+                and not tok.rstrip(",;:").endswith(".")
                 and prev_core.lower() not in ("v", "vs", "re", "parte")
                 and any(c.islower() for c in prev_core)):
             out.append(tok.replace(core, core.lower(), 1))
@@ -2016,7 +2310,7 @@ if __name__ == "__main__":
         ("Burwell v. Hobby Lobby Stores, Inc.",
          "Burwell v. Hobby Lobby Stores, Inc."),
         ("Planned Parenthood of Southeastern Pennsylvania v. Robert Casey",
-         "Planned Parenthood of Se. Pa. v. Casey"),
+         "Planned Parenthood v. Casey"),
         ("George Washington University v. Violet Aldridge",
          "George Washington Univ. v. Aldridge"),
         ("Chase Bank v. Mary McCoy", "Chase Bank v. McCoy"),
@@ -2036,16 +2330,34 @@ if __name__ == "__main__":
         ("Township of Willingboro v. Doe", "Township of Willingboro v. Doe"),
         ("Parish of Jefferson v. Doe", "Parish of Jefferson v. Doe"),
         ("Town of Greece v. Susan Galloway", "Town of Greece v. Galloway"),
-        # Mid-name "city of"/"borough of" expressions are omitted (rule
-        # 10.2.1(f)); the same expression *beginning* a party name is kept
+        # Rule 10.2.1(f): a prepositional phrase of location is omitted —
+        # a "borough of" or "township of" phrase along with the rest — unless
+        # that leaves the party one word, or the place is part of a business,
+        # office or institution's name.  A "city of" expression that survives
+        # drops ("Mayor of New York"), and one *beginning* a party is kept
         # (see the City/Village/Township cases above).
+        ("Brown v. Board of Education of Topeka", "Brown v. Bd. of Educ."),
+        ("Surrick v. Board of Wardens of the Port of Philadelphia",
+         "Surrick v. Bd. of Wardens"),
+        ("Shapiro v. Bank of Harrisburg", "Shapiro v. Bank of Harrisburg"),
+        ("Mayor of the City of New York v. Clark", "Mayor of N.Y. v. Clark"),
         ("Doremus v. Board of Education of the Borough of Hawthorne",
-         "Doremus v. Bd. of Educ. of Hawthorne"),
+         "Doremus v. Bd. of Educ."),
         ("Board of Education of Township of Piscataway v. Taxman",
-         "Bd. of Educ. of Piscataway v. Taxman"),
+         "Bd. of Educ. v. Taxman"),
         ("Board of Education of Kiryas Joel Village School District "
          "v. Grumet",
          "Bd. of Educ. of Kiryas Joel Vill. Sch. Dist. v. Grumet"),
+        ("Standard Oil Co. of New Jersey v. United States",
+         "Standard Oil Co. of N.J. v. United States"),
+        ("School District of Abington Township v. Schempp",
+         "Sch. Dist. of Abington Twp. v. Schempp"),
+        # …and a caption's trailing ", <State>" goes the same way.
+        ("Kelo v. City of New London, Connecticut",
+         "Kelo v. City of New London"),
+        ("McCreary County, Kentucky v. "
+         "American Civil Liberties Union of Kentucky",
+         "McCreary County v. ACLU of Ky."),
         ("Soldal v. Cook County", "Soldal v. Cook County"),
         ("Los Angeles County v. Humphries", "Los Angeles County v. Humphries"),
         ("Washington County v. Gunther", "Washington County v. Gunther"),
