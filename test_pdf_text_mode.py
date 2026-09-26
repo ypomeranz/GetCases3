@@ -103,6 +103,7 @@ def _class_attr(cls: str, name: str):
 
 RAIL_W = _class_attr("_PdfPane", "_RAIL_W")
 RAIL_TICK_H = _class_attr("_PdfPane", "_RAIL_TICK_H")
+RAIL_MIN_BAND_H = _class_attr("_PdfPane", "_RAIL_MIN_BAND_H")
 RAIL_EDGE = _class_attr("_PdfPane", "_RAIL_EDGE")
 RAIL_BAND_WASH = _class_attr("_PdfPane", "_RAIL_BAND_WASH")
 PAGECOL_W = _class_attr("_ScholarTextWindow", "_PAGECOL_W")
@@ -1268,8 +1269,10 @@ RAIL_NS = _load(
     {"_part_author": PART_AUTHOR, "_part_tip_text": PART_TIP_TEXT,
      "_PdfPane": type("_PdfPane", (), {
         "_RAIL_W": RAIL_W, "_RAIL_TICK_H": RAIL_TICK_H,
+        "_RAIL_MIN_BAND_H": RAIL_MIN_BAND_H,
         "_RAIL_EDGE": RAIL_EDGE, "_RAIL_BAND_WASH": RAIL_BAND_WASH}),
      "_wash_hex": lambda color, toward: f"wash({color})",
+     "_rail_bands": _load_function("_rail_bands"),
      "_PARTMAP_COLORS": PART_COLORS},
 )
 
@@ -1404,6 +1407,35 @@ class PartRailTests(unittest.TestCase):
         reader._current_part = 1
         reader._draw_part_map()
         self.assertEqual(reader._partmap.width_set, 0)
+
+    def test_a_short_writing_at_the_end_is_given_room_to_click(self):
+        # A few lines of dissent after a long opinion are a sliver of the
+        # rail at its own scale; its band is drawn tall enough to aim at.
+        reader = _RailReader(["majority", "concurrence", "dissent"],
+                             [0, 5000, 9990])
+        reader._draw_part_map()
+        top, bottom = reader._partmap_rows[2][:2]
+        self.assertGreaterEqual(bottom - top, RAIL_MIN_BAND_H)
+        self.assertEqual(bottom, 600)
+        reader._on_partmap_click(mock.Mock(y=top + 1))
+        reader._text.yview.assert_called_once_with("s2")
+
+    def test_so_is_one_between_two_long_opinions(self):
+        reader = _RailReader(["majority", "concurrence", "dissent"],
+                             [0, 5000, 5010])
+        reader._draw_part_map()
+        top, bottom = reader._partmap_rows[1][:2]
+        self.assertGreaterEqual(bottom - top, RAIL_MIN_BAND_H)
+        reader._on_partmap_click(mock.Mock(y=bottom - 1))
+        reader._text.yview.assert_called_once_with("s1")
+
+    def test_the_top_of_a_band_belongs_to_that_band(self):
+        # Bands: majority 0-300, concurrence 300-480, dissent 480-600.  The
+        # slack the labelled strip allows round its markers must not hand the
+        # first pixels of a band to the one above it.
+        reader = _rail()
+        reader._on_partmap_click(mock.Mock(y=301))
+        reader._text.yview.assert_called_once_with("s1")
 
 # ---------------------------------------------------------------------------
 # Resting on a part names it

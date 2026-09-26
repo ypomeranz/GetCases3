@@ -844,6 +844,7 @@ class SectionRailGateTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 WASH_NS = _load_functions(["_wash_hex"])
+RAIL_BANDS = _load_functions(["_rail_bands"])["_rail_bands"]
 
 _PART_COLORS = {
     "syllabus": "#555555", "majority": "#1a3e72", "concurrence": "#1a7a3c",
@@ -996,7 +997,8 @@ PANE_NS = _load(
      "_shift_wheel", "_wheel", "_scroll_x_into_view", "_notify_zoom",
      "zoom_percent"],
     {"_PDF_PART_COLORS": _PART_COLORS,
-     "_wash_hex": WASH_NS["_wash_hex"]},
+     "_wash_hex": WASH_NS["_wash_hex"],
+     "_rail_bands": RAIL_BANDS},
 )
 
 
@@ -1007,6 +1009,7 @@ class _Pane:
     _PAD = 12
     _RAIL_W = 13
     _RAIL_TICK_H = 3
+    _RAIL_MIN_BAND_H = _class_attr("_PdfPane", "_RAIL_MIN_BAND_H")
     _RAIL_BG = "#f0f1f3"
     _RAIL_EDGE = "#cdd0d5"
     _RAIL_BAND_WASH = 0.80
@@ -1266,6 +1269,95 @@ class RailNavigationTests(unittest.TestCase):
         self.assertNotIn("_HoverTip", _source_of("_PdfPane",
                                                  "set_section_marks"))
         self.assertFalse(hasattr(self.pane, "_rail_tip_text"))
+
+
+MIN_BAND_H = _Pane._RAIL_MIN_BAND_H
+
+
+class RailBandLayoutTests(unittest.TestCase):
+    """_rail_bands: where each part's band runs, given where it begins."""
+
+    def _heights(self, bands):
+        return [round(bottom - top, 6) for top, bottom in bands]
+
+    def test_parts_with_room_keep_their_places(self):
+        self.assertEqual(RAIL_BANDS([0, 310, 470], 800, 14),
+                         [(0, 310), (310, 470), (470, 800)])
+
+    def test_a_short_last_part_takes_its_room_from_the_one_above(self):
+        self.assertEqual(RAIL_BANDS([0, 795], 800, 14),
+                         [(0, 786), (786, 800)])
+
+    def test_a_short_part_in_the_middle_keeps_its_start_and_grows_down(self):
+        # Its marker still sits on the line where it begins.
+        self.assertEqual(RAIL_BANDS([0, 400, 403], 800, 14),
+                         [(0, 400), (400, 414), (414, 800)])
+
+    def test_a_short_first_part_grows_down_too(self):
+        self.assertEqual(RAIL_BANDS([0, 4, 500], 800, 14),
+                         [(0, 14), (14, 500), (500, 800)])
+
+    def test_a_run_of_short_parts_each_gets_its_own_room(self):
+        # Four one-page writings at the end of a long opinion.
+        bands = RAIL_BANDS([0, 780, 785, 790, 795], 800, 14)
+        self.assertEqual(self._heights(bands)[1:], [14] * 4)
+        self.assertEqual(bands[-1][1], 800)
+
+    def test_the_bands_still_tile_the_rail(self):
+        bands = RAIL_BANDS([0, 100, 101, 102, 600, 799], 800, 14)
+        self.assertEqual(bands[0][0], 0)
+        self.assertEqual(bands[-1][1], 800)
+        for above, below in zip(bands, bands[1:]):
+            self.assertEqual(above[1], below[0])
+        self.assertGreaterEqual(min(self._heights(bands)), 14)
+
+    def test_a_rail_too_short_for_them_all_shares_it_evenly(self):
+        self.assertEqual(RAIL_BANDS([0, 1, 2, 3], 40, 14),
+                         [(0, 10), (10, 20), (20, 30), (30, 40)])
+
+    def test_starts_off_either_end_are_kept_on_the_rail(self):
+        self.assertEqual(RAIL_BANDS([-5, 900], 800, 14),
+                         [(0, 786), (786, 800)])
+
+    def test_no_parts_no_bands(self):
+        self.assertEqual(RAIL_BANDS([], 800, 14), [])
+
+
+class ShortPartRailTests(unittest.TestCase):
+    """A writing of a page in a long opinion is a sliver at the rail's scale;
+    it is drawn tall enough to click wherever it falls."""
+
+    def setUp(self):
+        # A hundred pages on an 800px rail: a page is 8px of it.
+        self.pane = _Pane(pages=100)
+
+    def _band(self, kind):
+        return next((y0, y1) for y0, y1, sec in self.pane._rail_spans
+                    if sec.kind == kind)
+
+    def test_a_one_page_writing_at_the_end_is_given_room(self):
+        self.pane.set_section_marks([_sec("majority", 0),
+                                     _sec("dissent", 99)])
+        y0, y1 = self._band("dissent")
+        self.assertGreaterEqual(y1 - y0, MIN_BAND_H)
+        self.assertEqual(y1, self.pane._rail.height)
+        self.pane._on_rail_click(mock.Mock(y=y0 + 1))
+        self.assertEqual(self.pane.scrolled, [(99, None)])
+
+    def test_so_is_one_between_two_long_opinions(self):
+        self.pane.set_section_marks([_sec("majority", 0),
+                                     _sec("concurrence", 50),
+                                     _sec("dissent", 51)])
+        y0, y1 = self._band("concurrence")
+        self.assertGreaterEqual(y1 - y0, MIN_BAND_H)
+        self.pane._on_rail_click(mock.Mock(y=y1 - 1))
+        self.assertEqual(self.pane.scrolled, [(50, None)])
+
+    def test_the_band_drawn_is_the_band_that_is_clicked(self):
+        self.pane.set_section_marks([_sec("majority", 0),
+                                     _sec("dissent", 99)])
+        band = self.pane._rail.rects()[-2]      # the dissent's wash
+        self.assertEqual((band[0][1], band[0][3]), self._band("dissent"))
 
 
 class FitToViewTests(unittest.TestCase):

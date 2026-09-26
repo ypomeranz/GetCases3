@@ -17261,6 +17261,33 @@ def _wash_hex(color: str, toward_white: float) -> str:
     )
 
 
+def _rail_bands(tops, height: float, min_h: float) -> list:
+    """``[(top, bottom), …]`` for the bands of a parts rail *height* px tall:
+    each writing's band runs from where it begins (*tops*, in rail px) to
+    where the next one does, and the last to the foot of the rail.
+
+    None is left thinner than *min_h*, so a short writing — a paragraph of
+    concurrence between two long opinions, or a dissent of a page at the very
+    end — still gives the pointer something to land on.  The room comes out
+    of its neighbours: the bands are pushed apart down the rail, then packed
+    back up from its foot where that has carried the last of them off the
+    end.  A rail too short to give every band *min_h* shares it out evenly."""
+    count = len(tops)
+    if not count:
+        return []
+    height = float(height)
+    first = max(0.0, min(height, float(tops[0])))
+    min_h = max(0.0, min(float(min_h), (height - first) / count))
+    edges = [first]
+    edges += [max(first, min(height, float(top))) for top in tops[1:]]
+    edges.append(height)
+    for i in range(1, count):
+        edges[i] = max(edges[i], edges[i - 1] + min_h)
+    for i in range(count - 1, 0, -1):
+        edges[i] = min(edges[i], edges[i + 1] - min_h)
+    return list(zip(edges, edges[1:]))
+
+
 def _part_author(label: str, loose: bool = False) -> str:
     """The writer named in a part's heading — "MR. JUSTICE REHNQUIST,
     dissenting" → "Rehnquist" — or "per curiam" for an opinion issued in the
@@ -17744,6 +17771,7 @@ class _PdfPane(ttk.Frame):
     # The opinion-parts rail beside the scrollbar (see set_section_marks).
     _RAIL_W = 13        # rail width (px)
     _RAIL_TICK_H = 3    # solid marker drawn at a part's first line (px)
+    _RAIL_MIN_BAND_H = 14   # thinnest band, so a short part can be clicked (px)
     _RAIL_BG = "#f0f1f3"
     _RAIL_EDGE = "#cdd0d5"
     _RAIL_BAND_WASH = 0.80   # how far a part's band is blended toward white
@@ -18522,7 +18550,8 @@ class _PdfPane(ttk.Frame):
 
         ``sections`` is what :func:`slip_opinion.detect_sections` returned: each
         part contributes a washed band covering the stretch of the document it
-        occupies, with its kind's color, and a solid marker on its first line.
+        occupies — widened to ``_RAIL_MIN_BAND_H`` where that is too short to
+        click — with its kind's color, and a solid marker on its first line.
         Fewer than two parts is nothing to navigate between, and takes an
         existing rail away again.  Deciding *which* documents deserve a rail is
         the caller's: a PDF with no separate writing does not need one.
@@ -18589,13 +18618,11 @@ class _PdfPane(ttk.Frame):
         h = max(1, rail.winfo_height())
         w = self._RAIL_W
         rail.create_line(0, 0, 0, h, fill=self._RAIL_EDGE)
-        starts = [self._section_doc_y(sec) for sec in self._sections]
-        for i, sec in enumerate(self._sections):
-            top = starts[i] / self._content_h
-            bottom = (starts[i + 1] / self._content_h
-                      if i + 1 < len(starts) else 1.0)
-            y0 = max(0.0, min(1.0, top)) * h
-            y1 = max(y0 + 2, max(0.0, min(1.0, bottom)) * h)
+        bands = _rail_bands(
+            [self._section_doc_y(sec) / self._content_h * h
+             for sec in self._sections],
+            h, self._RAIL_MIN_BAND_H)
+        for (y0, y1), sec in zip(bands, self._sections):
             color = _PDF_PART_COLORS.get(getattr(sec, "kind", ""), "#666666")
             rail.create_rectangle(
                 2, y0, w, y1, width=0,
@@ -24148,7 +24175,8 @@ class _ScholarTextWindow:
     def _draw_part_rail(self, canvas) -> None:
         """The parts as washed bands on a slim rail, each covering the stretch
         of the opinion it occupies — the scrollbar's own companion, and all the
-        width the opinion can spare."""
+        width the opinion can spare.  A writing too short to click on at that
+        scale is given a band of ``_PdfPane._RAIL_MIN_BAND_H`` instead."""
         self._partmap_rows = []
         canvas.delete("all")
         parts = getattr(self, "_rendered_parts", None)
@@ -24174,13 +24202,11 @@ class _ScholarTextWindow:
         except tk.TclError:
             height = self._text.winfo_height()
         canvas.create_line(0, 0, 0, height, fill=_PdfPane._RAIL_EDGE)
-        starts = [max(0.0, self._ypixels(start) / total)
-                  for start, _k, _l in marks]
+        bands = _rail_bands(
+            [self._ypixels(start) / total * height for start, _k, _l in marks],
+            height, _PdfPane._RAIL_MIN_BAND_H)
         rows: list[tuple] = []
-        for i, (start, kind, label) in enumerate(marks):
-            top = starts[i] * height
-            bottom = (starts[i + 1] * height if i + 1 < len(starts) else height)
-            bottom = max(top + 2, bottom)
+        for (top, bottom), (start, kind, label) in zip(bands, marks):
             color = self._PARTMAP_COLORS.get(kind, "#666666")
             canvas.create_rectangle(
                 2, top, width, bottom, width=0,
@@ -24245,8 +24271,17 @@ class _ScholarTextWindow:
         return best
 
     def _partmap_row_at(self, y: float):
-        """The part whose band or marker covers strip height *y*."""
-        for row in getattr(self, "_partmap_rows", []):
+        """The part whose band or marker covers strip height *y*.
+
+        A part *y* falls inside wins outright.  The few pixels of slack around
+        each one only settle a click that lands between two of the labelled
+        strip's markers — on the rail, where the bands abut, the slack would
+        let the band above a short writing take clicks aimed at its top."""
+        rows = getattr(self, "_partmap_rows", [])
+        for row in rows:
+            if row[0] <= y < row[1]:
+                return row
+        for row in rows:
             if row[0] - 4 <= y <= row[1] + 4:
                 return row
         return None
