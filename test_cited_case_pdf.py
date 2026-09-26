@@ -121,6 +121,16 @@ def _load_function(name: str, extra=None):
 WRITE_OUTPUT_PDF = _load_function("_write_output_pdf")
 
 
+def _fake_static_case_law_url(cite: str):
+    """The static.case.law file a citation names, as the real one builds it."""
+    m = re.fullmatch(r"(\d+)\s+(.+?)\s+(\d+)", cite or "")
+    if not m:
+        return None
+    slug = re.sub(r"[^a-z0-9]", "", m.group(2).lower())
+    return (f"https://static.case.law/{slug}/{int(m.group(1))}/case-pdfs/"
+            f"{int(m.group(3)):04d}-01.pdf")
+
+
 def _fake_case_law_reporter_cite(url: str) -> str:
     """The reporter a static.case.law file names, as the real one reads it."""
     m = re.search(r"static\.case\.law/([a-z0-9-]+)/(\d+)/(\d+)", url or "")
@@ -311,6 +321,7 @@ APP_NS = _load(
      "parse_opinion_blocks": lambda html: html,
      "_scholar_caption_name": lambda blocks: CAPTIONS.get(blocks, ""),
      "_case_law_reporter_cite": _fake_case_law_reporter_cite,
+     "_static_case_law_url": _fake_static_case_law_url,
      "_cluster_citations_to_strings": lambda cites: [str(c) for c in cites],
      "_is_redacted_case_pdf": lambda url: "case.law" in (url or ""),
      "_build_default_filename": lambda item: FILENAMES.append(item) or "NAME",
@@ -480,6 +491,25 @@ class CitedCasePdfTests(unittest.TestCase):
         self._click(action=("cite", "93 S. Ct. 705@710"))
         self.assertEqual(_FakeViewer.opened[0].scrolled, [])
 
+    def test_a_pin_opens_its_page_of_a_reporter_the_slug_table_lacks(self):
+        # Wakely v. Hart, 6 Binn. 316, 318, followed out of Acevedo: the
+        # file's own name says nothing ("binn" is no reporter in the table),
+        # but it was found by the very citation clicked.
+        url = "https://static.case.law/binn/6/case-pdfs/0316-01.pdf"
+        RESOLVED["6 Binn. 316"] = url
+        FETCHED[url] = (b"%PDF-binn", url)
+        self._click(action=("cite", "6 Binn. 316@318"), snippet="Wakely v. Hart")
+        self.assertEqual(_FakeViewer.opened[0].scrolled[0], 2)
+
+    def test_but_not_a_parallel_reporter_s_pin_on_another_s_file(self):
+        # "142 N. E. 583, 585" found only in the New York Reports' file: its
+        # pages break elsewhere, so no page is guessed at.
+        url = "https://static.case.law/ny/237/case-pdfs/0193-01.pdf"
+        RESOLVED["142 N.E. 583"] = url
+        FETCHED[url] = (b"%PDF-ny", url)
+        self._click(action=("cite", "142 N.E. 583@585"), snippet="People v. Chiagles")
+        self.assertEqual(_FakeViewer.opened[0].scrolled, [])
+
     def test_no_scan_anywhere_falls_back_to_the_text(self):
         self.app._resolves = False
         fallback = mock.Mock()
@@ -593,6 +623,88 @@ class CitedCasePdfTests(unittest.TestCase):
         self.assertEqual(analysis["url"],
                          "https://loc.test/usrep410113.pdf")
         self.assertIn(0, analysis["links"])
+
+
+_ORDERS_PAGE_PDF = "https://static.case.law/us/498/case-pdfs/0807-01.pdf"
+
+
+class _OrdersApp(_App):
+    """The resolver meeting 498 U.S. 807, where eleven cases begin: showing
+    the page itself when it is all orders (``page=True``), else unable to
+    choose among them."""
+
+    def __init__(self, page=False, **kw):
+        super().__init__(**kw)
+        self.page = page
+        self.toasts: list = []
+
+    def _resolve_pdf_url(self, client, item):
+        self.resolved_items.append(dict(item))
+        if self.page:
+            item["_orders_page"] = True
+            return _ORDERS_PAGE_PDF
+        item["_page_mates"] = 11
+        return None
+
+    def _spotlight_notify(self, message, duration_ms=4000):
+        self.toasts.append(message)
+
+
+class OrdersPageTests(unittest.TestCase):
+    """A U.S. Reports page of orders names no one case.  Unless something
+    picks one out, the page opens as the page — never as the case whose order
+    happens to come first, which is how Acevedo's own grant opened Carnival
+    Cruise Lines — and a page that is not all orders opens nothing."""
+
+    def setUp(self):
+        RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
+        TEXT_OPENS.clear(); _FakeViewer.opened.clear(); _Thread.started.clear()
+        FETCHED[_ORDERS_PAGE_PDF] = (b"%PDF-orders", _ORDERS_PAGE_PDF)
+        self.app = _OrdersApp()
+        self.status: list = []
+        self.fell_back: list = []
+
+    def _click(self, snippet="", context_name=""):
+        return self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", "498 U.S. 807"), snippet,
+            self.status.append, fallback=lambda: self.fell_back.append(1),
+            context_name=context_name)
+
+    def test_a_page_of_orders_opens_named_for_no_case(self):
+        self.app = _OrdersApp(page=True)
+        self._click()
+        (viewer,) = _FakeViewer.opened
+        self.assertEqual(viewer.data, b"%PDF-orders")
+        self.assertEqual(viewer.title, "498 U.S. 807")
+        # No text behind it (any would be one order's), none fetched, and
+        # nothing to rename it later.
+        self.assertIsNone(viewer.kw["on_build_text"])
+        self.assertEqual(self.app.scholar_calls, [])
+        self.assertEqual(self.fell_back, [])
+
+    def test_nor_named_for_a_case_the_link_names_but_the_page_lacks(self):
+        self.app = _OrdersApp(page=True)
+        self._click(snippet="Doe v. Roe")
+        self.assertEqual(_FakeViewer.opened[0].title, "498 U.S. 807")
+
+    def test_a_page_not_all_orders_opens_nothing_and_says_why(self):
+        self.assertTrue(self._click())
+        self.assertEqual(self.fell_back, [])     # no text to guess with
+        self.assertEqual(_FakeViewer.opened, [])
+        self.assertEqual(
+            self.app.toasts,
+            ["11 cases begin at 498 U.S. 807 — can't tell which, so "
+             "nothing opened"])
+
+    def test_the_case_read_in_is_offered_when_the_link_names_none(self):
+        self._click(context_name="California v. Acevedo")
+        self.assertEqual(self.app.resolved_items[-1]["_context_name"],
+                         "California v. Acevedo")
+
+    def test_but_not_over_a_name_the_link_carries(self):
+        self._click(snippet="Carnival Cruise Lines, Inc. v. Shute",
+                    context_name="California v. Acevedo")
+        self.assertNotIn("_context_name", self.app.resolved_items[-1])
 
 
 class CitedCaseFilenameTests(unittest.TestCase):

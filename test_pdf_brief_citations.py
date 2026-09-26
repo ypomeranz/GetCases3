@@ -389,7 +389,7 @@ class FootnoteMarkTests(unittest.TestCase):
         cls.ns = _load_gui(
             "_degenerate_ocr_metrics", "_repair_degenerate_ocr_page",
             "_PageSlants", "_union_line_runs", "_extract_pdf_text_and_style",
-            "_citation_links_from_pages",
+            "_citation_links_from_pages", "_column_reading_order",
             consts=("_FONT_FLAG_ITALIC",))
 
     def _page(self):

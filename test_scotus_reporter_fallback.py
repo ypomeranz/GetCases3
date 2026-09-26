@@ -477,6 +477,125 @@ class ResolverIntegrationTests(unittest.TestCase):
         self.assertIn("590 U.S. 83", item["citation"])
         late_fallback.assert_not_called()
 
+    def test_a_govinfo_not_found_page_is_not_taken_for_the_scan(self):
+        # GovInfo redirects a PDF it does not hold to an HTML "page not found"
+        # that answers 200.  Taken for the scan, it kept a volume GovInfo is
+        # asked for first (502-542) from ever reaching the LOC copy.
+        app = object.__new__(gui.CourtListenerGUI)
+        link = "https://www.govinfo.gov/link/usreports/536/101"
+        direct = ("https://www.govinfo.gov/content/pkg/USREPORTS-536/pdf/"
+                  "USREPORTS-536-101.pdf")
+        loc = ("https://tile.loc.gov/storage-services/service/ll/usrep/"
+               "usrep536/usrep536101/usrep536101.pdf")
+        answers = {
+            link: SimpleNamespace(status_code=400, headers={}),
+            direct: SimpleNamespace(
+                status_code=200, headers={"Content-Type": "text/html"}),
+            loc: SimpleNamespace(
+                status_code=200, headers={"Content-Type": "application/pdf"}),
+        }
+
+        class Session:
+            headers = {}
+
+            def head(self, url, **_kwargs):
+                return answers.get(
+                    url, SimpleNamespace(status_code=404, headers={}))
+
+        item = {
+            "caseName": "National Railroad Passenger Corp. v. Morgan",
+            "court_id": "scotus",
+            "citation": ["536 U.S. 101"],
+        }
+        with (
+            mock.patch.object(gui, "_anon_session", Session()),
+            mock.patch.object(
+                gui, "_us_reports_govinfo_url", return_value=(link, direct),
+            ),
+            mock.patch.object(gui, "_us_reports_loc_url", return_value=loc),
+            mock.patch.object(
+                gui, "_us_reports_page_opinions", return_value=[],
+            ),
+        ):
+            url = gui.CourtListenerGUI._resolve_pdf_url(app, None, item)
+
+        self.assertEqual(url, loc)
+
+    def _resolve_order(self, item, pages=(1, 1, 1, 2)):
+        """Resolve *item* against 498 U.S. 807, a page of orders: no official
+        scan anywhere, and CAP's file for each order on it (*pages* long)."""
+        app = object.__new__(gui.CourtListenerGUI)
+        base = "https://static.case.law/us/498"
+        names = ("Hoffman v. Native Village of Noatak",
+                 "California v. Hodari D.", "California v. Acevedo",
+                 "Carnival Cruise Lines, Inc. v. Shute")
+        orders = [
+            gui._CaseLawPageOpinion(
+                f"{base}/case-pdfs/0807-{i:02d}.pdf",
+                f"{base}/cases/0807-{i:02d}.json", name, pages=length)
+            for i, (name, length) in enumerate(zip(names, pages), 1)
+        ]
+
+        class Session:
+            headers = {}
+
+            def head(self, url, **_kwargs):
+                ok = url.startswith(base)
+                return SimpleNamespace(
+                    status_code=200 if ok else 404,
+                    headers={"Content-Type": "application/pdf"} if ok else {})
+
+        loc = ("https://tile.loc.gov/storage-services/service/ll/usrep/"
+               "usrep498/usrep498807/usrep498807.pdf")
+        with (
+            mock.patch.object(gui, "_anon_session", Session()),
+            mock.patch.object(gui, "_us_reports_loc_url", return_value=loc),
+            mock.patch.object(
+                gui, "_us_reports_govinfo_url", return_value=None),
+            mock.patch.object(
+                gui.us_reports_pdf, "extract_citation", return_value=None),
+            mock.patch.object(
+                gui, "_case_law_page_cases", return_value=orders),
+            mock.patch.object(
+                gui, "_late_scotus_us_reports_cite") as late,
+        ):
+            url = gui.CourtListenerGUI._resolve_pdf_url(app, None, item)
+        late.assert_not_called()    # nothing below the orders is asked
+        return url
+
+    def test_a_page_of_orders_named_for_none_opens_as_the_page(self):
+        # Acevedo's own "We granted certiorari, 498 U. S. 807 (1990)", with
+        # nothing to say it is Acevedo's: any order's file shows the page.
+        item = {"citation": ["498 U.S. 807"]}
+        self.assertEqual(
+            self._resolve_order(item),
+            "https://static.case.law/us/498/case-pdfs/0807-01.pdf")
+        self.assertTrue(item["_orders_page"])
+        self.assertNotIn("_order_name", item)    # named for no case
+
+    def test_a_page_two_opinions_begin_on_is_not_guessed_at(self):
+        # Not orders: the second case runs forty pages.  Its file is its own
+        # pages, not the one they share, so neither is opened.
+        item = {"citation": ["498 U.S. 807"]}
+        self.assertIsNone(self._resolve_order(item, pages=(1, 40, 1, 1)))
+        self.assertEqual(item["_page_mates"], 4)
+
+    def test_the_case_it_is_cited_in_picks_its_own_order(self):
+        item = {"citation": ["498 U.S. 807"],
+                "_context_name": "California v. Acevedo"}
+        self.assertEqual(
+            self._resolve_order(item),
+            "https://static.case.law/us/498/case-pdfs/0807-03.pdf")
+        self.assertEqual(item["_order_name"], "California v. Acevedo")
+
+    def test_a_case_the_link_names_wins_over_the_one_it_is_cited_in(self):
+        item = {"citation": ["498 U.S. 807"],
+                "caseName": "Carnival Cruise Lines, Inc. v. Shute",
+                "_context_name": "California v. Acevedo"}
+        self.assertEqual(
+            self._resolve_order(item),
+            "https://static.case.law/us/498/case-pdfs/0807-04.pdf")
+
     def test_recovered_cite_is_saved_even_when_pdf_probe_fails(self):
         app = object.__new__(gui.CourtListenerGUI)
         app._get_scholar = lambda: object()

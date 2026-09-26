@@ -50,6 +50,8 @@ from courtlistener_gui import (
     _case_law_text_record,
     _case_law_text_source,
     _case_law_pdf_choices_for_cites,
+    _case_law_listed_url,
+    _CASE_LAW_VOLUMES,
     _case_pdf_text_source,
     _open_statute_action,
     _case_law_page_opinions,
@@ -1646,6 +1648,47 @@ class NominativeCitationSearchTests(unittest.TestCase):
 
         self.assertEqual(item["cluster_id"], 1)
 
+    @staticmethod
+    def _orders_client():
+        # 498 U.S. 807 grants certiorari in eleven cases, and CourtListener
+        # answers 300 with all of them, most twice (four records shown).
+        client = Mock()
+        client.lookup_citation.return_value = [{"status": 300, "clusters": [
+            {"id": 9099744, "case_name": "Carnival Cruise Lines, Inc. v. Shute",
+             "citations": ["498 U.S. 807"]},
+            {"id": 9099743, "case_name": "Carnival Cruise Lines, Inc. v. Shute",
+             "citations": ["498 U.S. 807", "111 S. Ct. 39"]},
+            {"id": 9099738, "case_name": "California v. Acevedo",
+             "citations": ["498 U.S. 807"]},
+            {"id": 9099737, "case_name": "California v. Acevedo",
+             "citations": ["498 U.S. 807", "111 S. Ct. 39"]},
+        ]}]
+        return client
+
+    def test_a_page_of_orders_with_no_name_is_not_guessed(self):
+        # Acevedo's "We granted certiorari, 498 U. S. 807" opened Carnival
+        # Cruise Lines, CourtListener's first record for the page.
+        client = self._orders_client()
+        self.assertIsNone(_cl_item_for_citation(client, "498 U.S. 807"))
+        client.search.assert_not_called()   # nor guessed by full-text search
+
+    def test_a_name_picks_its_order_off_the_page(self):
+        item = _cl_item_for_citation(
+            self._orders_client(), "498 U.S. 807",
+            name="California v. Acevedo")
+        self.assertEqual(item["cluster_id"], 9099737)   # the fuller record
+
+    def test_two_records_of_one_case_are_no_choice(self):
+        client = Mock()
+        client.lookup_citation.return_value = [{"status": 300, "clusters": [
+            {"id": 1, "case_name": "Carnival Cruise Lines, Inc. v. Shute",
+             "citations": ["498 U.S. 807"]},
+            {"id": 2, "case_name": "Carnival Cruise Lines v. Shute",
+             "citations": ["498 U.S. 807", "111 S. Ct. 39"]},
+        ]}]
+        self.assertEqual(
+            _cl_item_for_citation(client, "498 U.S. 807")["cluster_id"], 2)
+
     def test_highlighted_text_supplies_name_to_ambiguous_cite_dispatch(self):
         self.assertEqual(
             _citation_link_name(
@@ -2294,6 +2337,19 @@ class CaseLawSharedPageTests(unittest.TestCase):
             "https://static.case.law/f-appx/514/case-pdfs/0210-01.pdf",
         )
 
+    def test_initials_printed_apart_name_cap_s_folder(self):
+        # The U.S. Reports print "142 N. E. 583"; CAP's folder is "ne", and
+        # "n-e" was a 404 whenever CourtListener had no parallel cite to try.
+        for cite, folder in (("142 N. E. 583", "ne/142"),
+                             ("678 P. 2d 720", "p2d/678"),
+                             ("559 S. W. 2d 704", "sw2d/559"),
+                             ("500 U. S. 565", "us/500"),
+                             ("216 Cal. App. 3d 586", "cal-app-3d/216"),
+                             ("114 L. Ed. 2d 619", "l-ed-2d/114")):
+            with self.subTest(cite=cite):
+                self.assertIn(f"static.case.law/{folder}/case-pdfs/",
+                              _static_case_law_url(cite))
+
     def test_washington_text_cite_uses_cap_washington_reporter_slug(self):
         expected = (
             "https://static.case.law/wash-2d/81/"
@@ -2364,6 +2420,165 @@ class CaseLawSharedPageTests(unittest.TestCase):
         chosen = _match_page_opinion(opinions, "Beta v. Two")
         self.assertIsNotNone(chosen)
         self.assertEqual(chosen.url, "second.pdf")
+
+
+# static.case.law/johns/10/CasesMetadata.json, around the case cited in
+# California v. Acevedo, 500 U.S. 565, 583 (Scalia, J.).  CAP's page labels
+# run four ahead of the citations in this reprinted volume.
+_JOHNS_10 = [
+    {"name_abbreviation": "Sackrider v. M'Donald", "file_name": "0257-01",
+     "citations": [{"cite": "10 Johns. 253"}]},
+    {"name_abbreviation": "Spencer v. Southwick", "file_name": "0263-01",
+     "citations": [{"cite": "10 Johns. 259"}]},
+    {"name_abbreviation": "Bell v. Clapp", "file_name": "0267-01",
+     "citations": [{"cite": "10 Johns. 263"}]},
+    {"name_abbreviation": "Jones v. Gardner", "file_name": "0270-01",
+     "citations": [{"cite": "10 Johns. 266"}]},
+]
+
+
+class CaseLawPageLabelTests(unittest.TestCase):
+    """A CAP file is found by the citation it carries.  Page arithmetic
+    alone opened Spencer v. Southwick for "Bell v. Clapp, 10 Johns. 263"."""
+
+    PDF = "https://static.case.law/johns/10/case-pdfs/0263-01.pdf"
+    BELL = "https://static.case.law/johns/10/case-pdfs/0267-01.pdf"
+
+    def setUp(self):
+        _CASE_LAW_VOLUMES.clear()
+        self.addCleanup(_CASE_LAW_VOLUMES.clear)
+
+    @staticmethod
+    def _session(status=200, listing=_JOHNS_10):
+        session = Mock()
+        session.get.side_effect = lambda url, **_kwargs: SimpleNamespace(
+            status_code=(status if url.endswith("/CasesMetadata.json")
+                         else 404),
+            json=lambda: listing,
+        )
+        return session
+
+    def test_the_citation_is_found_in_its_own_file(self):
+        with patch("courtlistener_gui._anon_session", self._session()):
+            self.assertEqual(
+                _case_law_listed_url("10 Johns. 263", self.PDF), self.BELL)
+            self.assertEqual(
+                _case_law_listed_url(
+                    "10 Johns. 263",
+                    "https://static.case.law/johns/10/cases/0263-01.json"),
+                "https://static.case.law/johns/10/cases/0267-01.json")
+
+    def test_a_citation_listed_on_its_own_page_is_left_alone(self):
+        pdf = "https://static.case.law/cal-app-3d/216/case-pdfs/0586-01.pdf"
+        listing = [{"file_name": "0586-01",
+                    "citations": [{"cite": "216 Cal. App. 3d 586"}]}]
+        with patch("courtlistener_gui._anon_session",
+                   self._session(listing=listing)):
+            self.assertEqual(
+                _case_law_listed_url("216 Cal. App. 3d 586", pdf), pdf)
+
+    def test_an_unlisted_cite_or_unreadable_volume_goes_by_the_page(self):
+        other = "https://static.case.law/johns/10/case-pdfs/0999-01.pdf"
+        with patch("courtlistener_gui._anon_session", self._session()):
+            self.assertEqual(_case_law_listed_url("10 Johns. 999", other),
+                             other)
+        _CASE_LAW_VOLUMES.clear()
+        with patch("courtlistener_gui._anon_session",
+                   self._session(status=503)):
+            self.assertEqual(
+                _case_law_listed_url("10 Johns. 263", self.PDF), self.PDF)
+        # A server error is no answer about the volume: ask again next time.
+        self.assertEqual(_CASE_LAW_VOLUMES, {})
+
+    def test_the_scan_lookup_opens_the_case_cited(self):
+        session = self._session()
+        session.head.side_effect = lambda url, **_kwargs: SimpleNamespace(
+            status_code=200 if url in (self.PDF, self.BELL) else 404)
+        with patch("courtlistener_gui._anon_session", session):
+            choices = _case_law_pdf_choices_for_cites(["10 Johns. 263"])
+        self.assertEqual([c.url for c in choices], [self.BELL])
+
+    def test_a_page_of_orders_is_told_from_one_two_opinions_begin_on(self):
+        from courtlistener_gui import _case_law_page_cases, _orders_only
+
+        def listing(last_pages):
+            return [{"name_abbreviation": f"Case {i}",
+                     "file_name": f"0807-{i:02d}", "first_page": "807",
+                     "last_page": last, "citations": [{"cite": "498 U.S. 807"}]}
+                    for i, last in enumerate(last_pages, 1)]
+
+        with patch("courtlistener_gui._anon_session",
+                   self._session(listing=listing(["807", "807", "808"]))):
+            orders = _case_law_page_cases("498 U.S. 807")
+        self.assertEqual([c.pages for c in orders], [1, 1, 2])
+        self.assertEqual(orders[2].url,
+                         "https://static.case.law/us/498/case-pdfs/0807-03.pdf")
+        self.assertTrue(_orders_only(orders))
+        _CASE_LAW_VOLUMES.clear()
+        with patch("courtlistener_gui._anon_session",
+                   self._session(listing=listing(["807", "846"]))):
+            self.assertFalse(_orders_only(_case_law_page_cases("498 U.S. 807")))
+        self.assertFalse(_orders_only(orders[:1]))   # one case is no page of them
+
+    def test_page_mates_no_name_picks_are_offered_by_name(self):
+        # The PDF menu's labels once carried a mis-encoded dash (UTF-8 read
+        # as cp1252) where the em dash belongs.
+        first = "https://static.case.law/f/243/case-pdfs/0797-01.pdf"
+        second = "https://static.case.law/f/243/case-pdfs/0797-02.pdf"
+        siblings = [_CaseLawPageOpinion(first, "a.json", "In re Cooper"),
+                    _CaseLawPageOpinion(second, "b.json", "")]
+        session = Mock()
+        session.head.return_value = SimpleNamespace(status_code=200)
+        with (
+            patch("courtlistener_gui._anon_session", session),
+            patch("courtlistener_gui._case_law_page_opinions",
+                  return_value=siblings),
+            patch("courtlistener_gui._case_law_listed_url",
+                  side_effect=lambda cite, url: url),
+        ):
+            choices = _case_law_pdf_choices_for_cites(
+                ["243 F. 797"], expected_name="Gamma v. Three")
+        self.assertEqual([c.label for c in choices],
+                         ["243 F. 797 — In re Cooper", "243 F. 797 — Opinion 2"])
+
+    def test_a_us_page_of_orders_is_not_answered_by_its_first_order(self):
+        # A bare "498 U.S. 807" typed into Quick Look Up opened Hoffman v.
+        # Native Village of Noatak, the first of the page's eleven grants.
+        first = "https://static.case.law/us/498/case-pdfs/0807-01.pdf"
+        acevedo = "https://static.case.law/us/498/case-pdfs/0807-08.pdf"
+        siblings = [
+            _CaseLawPageOpinion(
+                first, "a.json", "Hoffman v. Native Village of Noatak"),
+            _CaseLawPageOpinion(acevedo, "b.json", "California v. Acevedo"),
+        ]
+        session = Mock()
+        session.head.return_value = SimpleNamespace(status_code=200)
+        with (
+            patch("courtlistener_gui._anon_session", session),
+            patch("courtlistener_gui._case_law_page_opinions",
+                  return_value=siblings),
+            patch("courtlistener_gui._case_law_listed_url",
+                  side_effect=lambda cite, url: url),
+        ):
+            self.assertEqual(
+                _case_law_pdf_choices_for_cites(["498 U.S. 807"]), [])
+            named = _case_law_pdf_choices_for_cites(
+                ["498 U.S. 807"], expected_name="California v. Acevedo")
+        self.assertEqual([c.url for c in named], [acevedo])
+
+    def test_the_scan_is_named_for_its_citation_not_its_file(self):
+        # Printed and saved, the file kept as "0267-01" is 10 Johns. 263.
+        from courtlistener_gui import _case_law_print_citation
+        meta = {"name_abbreviation": "Bell v. Clapp",
+                "decision_date": "1813-08",
+                "court": {"name_abbreviation": "N.Y. Sup. Ct.",
+                          "slug": "ny-sup-ct"},
+                "citations": [{"cite": "10 Johns. 263"}]}
+        with patch("courtlistener_gui._case_law_case_json",
+                   return_value=meta):
+            self.assertEqual(
+                _case_law_print_citation(b"", self.BELL),
+                "Bell v. Clapp, 10 Johns. 263 (N.Y. Sup. Ct. 1813)")
 
 
 class CaseLawPdfTextTests(unittest.TestCase):

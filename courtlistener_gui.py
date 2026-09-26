@@ -2314,6 +2314,11 @@ def _slugify_reporter(reporter: str) -> str:
     canonical = _case_law_reporter_slug(reporter)
     if canonical:
         return canonical
+    # Initials set apart the way the U.S. Reports print them — "N. E.",
+    # "S. W. 2d", "P. 2d" — are CAP's "ne", "sw2d", "p2d", not "n-e": close
+    # them up first.  A word ("F. Supp. 2d", "Cal. App. 3d") keeps its hyphen.
+    reporter = re.sub(r"(?<![A-Za-z])([A-Za-z]\.)\s+(?=[A-Za-z]\.|\d)",
+                      r"\1", reporter)
     s = reporter.lower()
     s = s.replace(" ", "-")
     s = re.sub(r"[^a-z0-9-]", "", s)
@@ -2341,6 +2346,132 @@ def _static_case_law_url(citation: str) -> Optional[str]:
     return f"https://static.case.law/{slug}/{vol}/case-pdfs/{int(page):04d}-01.pdf"
 
 
+_CASE_LAW_FILE_URL_RE = re.compile(
+    r"^(https://static\.case\.law/([^/]+)/([^/]+)/(?:case-pdfs|cases))/"
+    r"(\d+)-(\d+)\.(pdf|json)$", re.IGNORECASE)
+
+#: (reporter slug, volume) → ({citation key: file stems}, {file stem: case
+#: name}, {file stem: pages it runs}), filled as volumes are read — see
+#: :func:`_case_law_volume`.
+_CASE_LAW_VOLUMES: dict = {}
+
+
+def _case_law_cite_key(cite: str) -> str:
+    """A citation reduced to what CAP's spelling and a brief's agree on:
+    "237 N. Y. 193" and "237 N.Y. 193" are both "237ny193"."""
+    return re.sub(r"[\s.]", "", str(cite or "")).lower()
+
+
+def _case_law_volume(slug: str, vol: str) -> "tuple[dict, dict, dict]":
+    """One static.case.law volume's list of its cases, read once from its
+    CasesMetadata.json: each citation and the file(s) CAP keeps its case in —
+    ``{"10johns263": ("0267-01",), …}`` — and each file's case name and the
+    number of pages it runs (0 where the list doesn't say).  Empty when the
+    list can't be had, and then the caller goes by the citation's page, as it
+    always did; only a definite answer is kept, so a network hiccup is asked
+    again next time."""
+    key = (slug, vol)
+    if key in _CASE_LAW_VOLUMES:
+        return _CASE_LAW_VOLUMES[key]
+    url = f"https://static.case.law/{slug}/{vol}/CasesMetadata.json"
+    try:
+        resp = _anon_session.get(url, timeout=15)
+        status = resp.status_code
+        data = resp.json() if status == 200 else None
+    except Exception as exc:
+        print(f"[case.law] volume list failed {url}: {exc}")
+        return {}, {}, {}
+    files: dict = {}
+    names: dict = {}
+    lengths: dict = {}
+    if status == 200 and isinstance(data, list):
+        for case in data:
+            if not isinstance(case, dict):
+                continue
+            stem = str(case.get("file_name") or "").strip()
+            if not re.fullmatch(r"\d+-\d+", stem):
+                continue
+            name = str(case.get("name_abbreviation") or case.get("name") or "")
+            names[stem] = re.sub(r"\s+", " ", name).strip()
+            try:
+                lengths[stem] = (int(case.get("last_page"))
+                                 - int(case.get("first_page")) + 1)
+            except (TypeError, ValueError):
+                lengths[stem] = 0
+            for c in case.get("citations") or ():
+                ck = _case_law_cite_key(
+                    c.get("cite") if isinstance(c, dict) else "")
+                if ck and stem not in files.get(ck, ()):
+                    files[ck] = files.get(ck, ()) + (stem,)
+    elif status != 404:
+        print(f"[case.law] {status} for the volume list {url}")
+        return {}, {}, {}
+    _CASE_LAW_VOLUMES[key] = (files, names, lengths)
+    return files, names, lengths
+
+
+def _case_law_volume_files(slug: str, vol: str) -> "dict[str, tuple]":
+    """Each citation in one static.case.law volume, and the file(s) CAP keeps
+    its case in (see :func:`_case_law_volume`)."""
+    return _case_law_volume(slug, vol)[0]
+
+
+def _case_law_page_cases(cite: str) -> "list[_CaseLawPageOpinion]":
+    """Every case CAP's volume lists at *cite*, for telling apart the cases
+    that share one page.  A page of the U.S. Reports' orders begins a dozen of
+    them — 498 U.S. 807 lists eleven grants of certiorari, California v.
+    Acevedo's among them — each a file of its own.  Empty when the volume
+    can't be read or the citation isn't in it."""
+    url = _static_case_law_url(cite)
+    m = _CASE_LAW_FILE_URL_RE.match(url or "")
+    if not m:
+        return []
+    files, names, lengths = _case_law_volume(m.group(2), m.group(3))
+    base = f"https://static.case.law/{m.group(2)}/{m.group(3)}"
+    return [
+        _CaseLawPageOpinion(
+            f"{base}/case-pdfs/{stem}.pdf", f"{base}/cases/{stem}.json",
+            names.get(stem, ""), pages=lengths.get(stem, 0))
+        for stem in files.get(_case_law_cite_key(cite), ())
+    ]
+
+
+def _orders_only(page_cases: list) -> bool:
+    """Whether every case beginning on a page is an order — a page of the
+    U.S. Reports' orders, each entry a paragraph or two, rather than the rare
+    page two opinions begin on (71 U.S. 2, Brobst v. Brobst beside Ex parte
+    Milligan).  Any file of such a page shows the same page."""
+    return len(page_cases) > 1 and all(
+        1 <= getattr(c, "pages", 0) <= 2 for c in page_cases)
+
+
+def _case_law_listed_url(cite: str, url: str) -> str:
+    """*url* — a static.case.law file named from *cite*'s page — re-pointed
+    to the file CAP actually keeps that case in, where its volume says it is
+    somewhere else.
+
+    CAP names a case's files by the page labels of the book it scanned, and
+    in an early reporter reprinted with new pagination those are not the
+    pages the citations carry: every label in 10 Johns. runs four ahead, so
+    "0263-01" is Spencer v. Southwick, 10 Johns. 259, and Bell v. Clapp, 10
+    Johns. 263, is "0267-01" — built from the page, the link opened the wrong
+    case.  The volume's own list of its cases says which file each citation
+    is in.  A citation it does not list, or lists on the very page it names,
+    is left to the page as before (where the -02 of a shared page is chosen
+    by the case's name)."""
+    m = _CASE_LAW_FILE_URL_RE.match(url or "")
+    if not m:
+        return url
+    stems = _case_law_volume_files(m.group(2), m.group(3)).get(
+        _case_law_cite_key(cite), ())
+    pages = {int(s.split("-")[0]) for s in stems}
+    if len(pages) != 1 or pages == {int(m.group(4))}:
+        return url
+    stem = stems[0] if len(stems) == 1 else f"{min(pages):04d}-01"
+    print(f"[case.law] {cite!r} is filed as {stem}, not by its page")
+    return f"{m.group(1)}/{stem}.{m.group(6)}"
+
+
 @dataclass(frozen=True)
 class _CaseLawPdfChoice:
     cite: str
@@ -2357,6 +2488,8 @@ class _CaseLawPageOpinion:
     #: CAP's court slug, so the label can apply rule 10.2.1(f) to a
     #: "People of the State of …" caption.
     court_id: str = ""
+    #: How many pages it runs, where the volume's list says (0 where not).
+    pages: int = 0
 
 
 _CASE_LAW_NUMBERED_PDF_RE = re.compile(
@@ -2507,6 +2640,8 @@ def _case_law_pdf_choices_for_cites(
                 or _NONSTANDARD_CITE_RE.search(cite)):
             continue
         url = _static_case_law_url(cite)
+        if url:
+            url = _case_law_listed_url(cite, url)
         if not url or url in seen_urls:
             continue
         print(f"[case.law] checking static.case.law: {url}")
@@ -2519,15 +2654,25 @@ def _case_law_pdf_choices_for_cites(
             seen_urls.add(url)
             chosen_url = url
             page_opinions = _case_law_page_opinions(url)
-            if page_opinions and expected_name:
-                matched = _match_page_opinion(
-                    page_opinions, expected_name)
+            # A U.S. Reports page several cases begin on is a page of orders
+            # (498 U.S. 807 grants certiorari in eleven), each order a file
+            # of its own: one the name does not pick out is no answer at all,
+            # least of all the first.
+            orders = bool(page_opinions) and bool(_normalized_us_cite(cite))
+            if page_opinions and (expected_name or orders):
+                matched = (_match_page_opinion(page_opinions, expected_name)
+                           if expected_name else None)
                 if matched is not None:
                     chosen_url = matched.url
                     print(
                         f"[case.law] matched {expected_name!r} to "
                         f"{_case_law_opinion_name(matched) or matched.url!r}"
                     )
+                elif orders:
+                    print(f"[case.law] {cite!r} begins "
+                          f"{len(page_opinions)} orders, and "
+                          f"{expected_name or 'no name'!r} picks none")
+                    continue
                 else:
                     print(
                         f"[case.law] could not match {expected_name!r} among "
@@ -2537,8 +2682,8 @@ def _case_law_pdf_choices_for_cites(
                     # The source name could not safely choose, so the user must.
                     for i, opinion in enumerate(page_opinions, 1):
                         name = _case_law_opinion_name(opinion)
-                        label = f"{cite} â€” {name}" if name else (
-                            f"{cite} â€” Opinion {i}"
+                        label = f"{cite} — {name}" if name else (
+                            f"{cite} — Opinion {i}"
                         )
                         choices.append(_CaseLawPdfChoice(
                             cite=cite, url=opinion.url, label=label,
@@ -2840,14 +2985,16 @@ def _case_law_metadata(cite: str) -> "Optional[dict]":
     life of the app.  A citation-keyed URL cannot drift to a merely similar
     case, so its capitalization is safe to prefer over OCR/title-casing guesses.
 
-    A miss is simply a miss (CAP's earliest U.S. Reports scans are paginated
-    differently from the citations they carry, so early Supreme Court cases
-    404 here): the caller falls back to CourtListener like any other case
-    CAP does not hold.
+    A miss is simply a miss: the caller falls back to CourtListener like any
+    other case CAP does not hold.  Where CAP's page labels are not the pages
+    the citation carries — its earliest U.S. Reports, a reprinted early state
+    reporter — the volume's own list of cases says which file the citation is
+    in (see :func:`_case_law_listed_url`).
     """
     url = _case_law_json_url(cite)
     if not url:
         return None
+    url = _case_law_listed_url(cite, url)
     try:
         resp = _anon_session.get(url, timeout=10)
     except Exception as exc:
@@ -3112,7 +3259,10 @@ def _case_law_text_for_cite(
     data = _case_law_metadata(cite)
     if not data:
         return None
+    json_url = _case_law_listed_url(cite, json_url)
     pdf_url = _static_case_law_url(cite)
+    if pdf_url:
+        pdf_url = _case_law_listed_url(cite, pdf_url)
     siblings = _case_law_page_opinions(pdf_url) if pdf_url else []
     if len(siblings) > 1:
         matched = _match_page_opinion(siblings, expected_name)
@@ -3550,6 +3700,11 @@ def _text_opinion_link_ranges(parts) -> dict[int, list]:
     paragraph can still refer back (as it does in Giancola).  Part and
     body/footnote boundaries use a blank line to stop an antecedent from
     leaking into a different writing or note apparatus.
+
+    A star page is scanned as spaces, one for one: it is the reporter's page
+    break, not the opinion's words, and one falling inside a citation —
+    "California v. Carney, 471 *583 U. S. 386" — would otherwise be read as
+    its volume, linking 583 U.S. 386 and leaving the 471 behind.
     """
     chunks: list[str] = []
     italic: list[bool] = []
@@ -3581,6 +3736,8 @@ def _text_opinion_link_ranges(parts) -> dict[int, list]:
                 start = cursor
                 for span in getattr(block, "spans", None) or []:
                     text = str(getattr(span, "text", "") or "")
+                    if getattr(span, "pagenum", False):
+                        text = " " * len(text)
                     add(text, bool(getattr(span, "italic", False)))
                 block_offsets.append((id(block), start, cursor))
             wrote_group = True
@@ -3610,6 +3767,38 @@ def _text_opinion_link_ranges(parts) -> dict[int, list]:
                 )
             j += 1
     return out
+
+
+def _scholar_anchors(spans) -> "list[tuple[int, int, str, str]]":
+    """``(start, end, href, text)`` for each Google Scholar case link in a
+    block's *spans*, gathered whole.  Scholar sets one link in several styled
+    runs — "<i>Wakely</i> v. <i>Hart,</i> 6 Binney 316, 318" — and breaks it
+    around a star page that falls inside it, and every piece is still the
+    one link, whose words are what say where it goes.  Offsets count each
+    span's text, star pages included, as the whole-document scan's do; the
+    *text* leaves the star pages out."""
+    anchors: list = []
+    pos = 0
+    cur = None
+    for span in spans:
+        text = str(getattr(span, "text", "") or "")
+        start, pos = pos, pos + len(text)
+        if getattr(span, "pagenum", False):
+            continue        # a star page does not end the link it falls in
+        note = getattr(span, "fnref", None) or getattr(span, "fndef", None)
+        href = "" if note else (getattr(span, "link", None) or "")
+        if href and cur is not None and cur[2] == href:
+            cur[1] = pos
+            cur[3] += text
+            continue
+        if cur is not None:
+            anchors.append(tuple(cur))
+            cur = None
+        if href:
+            cur = [start, pos, href, text]
+    if cur is not None:
+        anchors.append(tuple(cur))
+    return anchors
 
 
 def _item_from_cluster(cluster: dict) -> dict:
@@ -3659,7 +3848,9 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     falling into the even less careful full-text search), the candidates are
     scored: the cluster also bearing the citation's modern U.S.-Reports
     parallel wins, then a match on the case ``name`` the caller knows, then
-    the Supreme Court for a nominative SCOTUS cite."""
+    the Supreme Court for a nominative SCOTUS cite.  Where that still leaves
+    different cases level — the page of orders "498 U.S. 807" is borne by all
+    eleven cases whose certiorari it grants — nothing is returned."""
     cite = (cite or "").split("@", 1)[0].strip()
     if not cite:
         return None
@@ -3702,6 +3893,31 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
             bool(altkey and (court or "").lower() == _SCOTUS_COURT_ID),
         )
 
+    def pick(candidates: list, name_of, cites_of, court_of):
+        """The candidate the signals above single out — or None where they
+        leave more than one *case* level at the top: the cases sharing a page
+        of orders ("498 U.S. 807" begins eleven grants of certiorari), with no
+        name to say which is meant.  CourtListener's first is no answer, and
+        opening it opened the wrong case.  Two records of one case (Court-
+        Listener keeps some orders twice) are no choice; the fuller wins."""
+        def plain(c) -> str:
+            return re.sub(r"<[^>]+>", "", name_of(c) or "")
+
+        rated = [(score(plain(c), cites_of(c), court_of(c)), c)
+                 for c in candidates]
+        top = max(s for s, _c in rated)
+        tied = [c for s, c in rated if s == top]
+        first = plain(tied[0])
+        for other in tied[1:]:
+            name = plain(other)
+            if (_name_tokens(name) != _name_tokens(first)
+                    and _match_tier(first, name) < 3):
+                print(f"[cl-cite] {cite!r} is borne by {len(candidates)} "
+                      f"records of different cases ({first!r}, {name!r}, …) "
+                      f"and nothing says which is meant")
+                return None
+        return max(tied, key=lambda c: len(cites_of(c)))
+
     # 1) Resolution via the citation-lookup endpoint (exact; 300 = ambiguous).
     # Try the form the user entered first.  A Cranch citation can also denote a
     # D.C. Circuit reporter, so consulting its U.S.-Reports counterpart is a
@@ -3713,14 +3929,15 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                 if entry.get("status") in (200, 300):
                     clusters.extend(entry.get("clusters") or [])
             if clusters:
-                best = max(
+                best = pick(
                     clusters,
-                    key=lambda cl: score(
-                        cl.get("case_name") or cl.get("case_name_full") or "",
-                        norm_cites(cl.get("citations")),
-                        str(cl.get("court_id") or cl.get("court") or ""),
-                    ),
+                    lambda cl: cl.get("case_name") or cl.get("case_name_full"),
+                    lambda cl: norm_cites(cl.get("citations")),
+                    lambda cl: str(
+                        cl.get("court_id") or cl.get("court") or ""),
                 )
+                if best is None:
+                    return None     # ambiguous: a guess is worse than none
                 item = _item_from_cluster(best)
                 if item.get("cluster_id"):
                     return item
@@ -3745,14 +3962,11 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                     seen_items.add(key)
                     matched.append(item)
         if matched:
-            return max(
+            return pick(
                 matched,
-                key=lambda it: score(
-                    re.sub(r"<[^>]+>", "",
-                           it.get("caseName") or it.get("case_name") or ""),
-                    norm_cites(it.get("citation")),
-                    str(it.get("court_id") or ""),
-                ),
+                lambda it: it.get("caseName") or it.get("case_name"),
+                lambda it: norm_cites(it.get("citation")),
+                lambda it: str(it.get("court_id") or ""),
             )
     return None
 
@@ -8850,7 +9064,7 @@ class CourtListenerGUI:
     def open_cited_case_pdf(self, parent: tk.Misc, action: tuple,
                             snippet: str = "",
                             status=lambda _s: None, fallback=None,
-                            name: str = "") -> bool:
+                            name: str = "", context_name: str = "") -> bool:
         """Follow a citation clicked *inside a PDF* to the cited case's own
         PDF, in a viewer window of its own.
 
@@ -8873,6 +9087,15 @@ class CourtListenerGUI:
         ``fallback`` runs when none of them has a scan, so a citation with no
         PDF anywhere opens as text exactly as clicking it always did.  Returns
         whether the lookup was started; it finishes on a worker thread.
+
+        A U.S. Reports page of orders is the exception.  Every case on it bears
+        its citation, so the case a name picks out opens, named for itself;
+        where the link names no case, ``context_name`` (the case the reader is
+        in) may — "We granted certiorari, 498 U. S. 807", in California v.
+        Acevedo, is Acevedo's own grant, one of eleven on that page.  It is
+        used for nothing else.  With neither, the page itself opens named for
+        no case, since any text behind it would be one order's; and a page
+        that is not all orders opens nothing at all, and says why.
         """
         kind, value = action if isinstance(action, tuple) else ("", "")
         if kind != "cite":
@@ -8908,9 +9131,21 @@ class CourtListenerGUI:
             item: dict = {}
             try:
                 item = self._cited_case_pdf_item(client, cite, name)
+                if context_name and not name:
+                    item["_context_name"] = context_name
                 url = self._resolve_pdf_url(client, item) or ""
             except Exception as exc:
                 print(f"[cite-pdf] resolving {cite!r} failed: {exc}")
+            if not url and item.get("_page_mates"):
+                message = (f"{item['_page_mates']} cases begin at {cite} — "
+                           "can't tell which, so nothing opened")
+
+                def refuse() -> None:
+                    safe_status(message)
+                    self._spotlight_notify(message, duration_ms=6000)
+
+                self._post_root(refuse)
+                return
             fetched = None
             if url:
                 try:
@@ -8923,12 +9158,16 @@ class CourtListenerGUI:
                                     "opening the text instead."))
                 return
             data, final_url = fetched
+            # An order picked off a page of them is named for its own case;
+            # the page shown for no one order in it, for none.
+            shown_name = ("" if item.get("_orders_page")
+                          else name or str(item.get("_order_name") or ""))
             # The cluster this scan was found through is worth keeping: it is
             # what the T button falls back to when Google Scholar has no copy
             # of the case, and it saves looking the citation up a second time.
             self._post_root(
                 lambda: self._show_cited_case_pdf(
-                    parent, data, final_url, cite, pin, name, action,
+                    parent, data, final_url, cite, pin, shown_name, action,
                     snippet, safe_status, cl_item=item,
                 )
             )
@@ -9010,7 +9249,11 @@ class CourtListenerGUI:
         # citations and the decision date a Bluebook filename is built from.
         named = {"data": data, "url": url, "cite": cite, "name": name,
                  "pin": pin, "record": None, "page": None, "pin_page": None,
-                 "text_source": None}
+                 "text_source": None,
+                 # A page of orders opened for none of them in particular:
+                 # it is the page, called by its citation alone, and has no
+                 # text to show — any would be one order's, and name it.
+                 "orders_page": bool((cl_item or {}).get("_orders_page"))}
 
         def described(record: dict) -> None:
             """The text has loaded: name the window properly."""
@@ -9062,17 +9305,22 @@ class CourtListenerGUI:
             def as_text(a=act, s=snip) -> None:
                 _follow_brief_action(self, onward(), a, status, snippet=s)
 
+            # The case these pages are, for a citation to its own orders.
+            own = str((named.get("record") or {}).get("name")
+                      or named.get("name") or "")
             if not self.open_cited_case_pdf(onward(), act, snip, status,
-                                            fallback=as_text):
+                                            fallback=as_text,
+                                            context_name=own):
                 as_text()
 
         # The text is fetched now rather than when the reader asks for it, so
         # the case name opens a page already in hand — and so the window can be
         # titled with the case's real citation rather than the clicked one.
-        self._warm_case_text(cite, name, on_record=described,
-                             on_page=page_ready,
-                             on_text_source=text_source_ready,
-                             cl_item=cl_item, scan_url=url)
+        if not named["orders_page"]:
+            self._warm_case_text(cite, name, on_record=described,
+                                 on_page=page_ready,
+                                 on_text_source=text_source_ready,
+                                 cl_item=cl_item, scan_url=url)
         try:
             window = _FloatingPdfWindow(
                 self.root, data, url, title, margin=margin, app=self,
@@ -9081,8 +9329,8 @@ class CourtListenerGUI:
                 on_print=lambda pane: self._print_cited_pdf(named, pane, status),
                 on_cite=cite_clicked,
                 on_cite_browser=_open_citation_in_browser,
-                on_build_text=lambda body: self._embed_cited_case_text(
-                    body, named),
+                on_build_text=None if named["orders_page"] else (
+                    lambda body: self._embed_cited_case_text(body, named)),
                 on_close=self._cited_pdf_window_closed,
             )
         except Exception as exc:
@@ -9115,7 +9363,19 @@ class CourtListenerGUI:
                      if _normalized_us_cite(c)), "")
             if not printed:
                 printed = _normalized_us_cite(named.get("cite") or "")
-        return printed or _case_law_reporter_cite(url)
+        if printed:
+            return printed
+        # A static.case.law file found by the very citation clicked is that
+        # citation's own, page and all: the sure answer where its file name is
+        # not — a reporter the slug table doesn't know ("6 Binn. 316"), or a
+        # volume whose page labels drift from its citations ("10 Johns. 263",
+        # kept as "0267-01").
+        cite = named.get("cite") or ""
+        clicked = _static_case_law_url(cite) if cite else None
+        if clicked and url and (clicked.rsplit("/case-pdfs/", 1)[0].lower()
+                                == url.rsplit("/case-pdfs/", 1)[0].lower()):
+            return cite
+        return _case_law_reporter_cite(url)
 
     def _jump_to_pin(self, named: dict, pdf_pages=None) -> None:
         """Open a cited scan at the page the pin cite names.
@@ -9371,7 +9631,9 @@ class CourtListenerGUI:
         if not data:
             return
         item = self._cited_filename_item(named)
-        default = _build_default_filename(item)
+        # A page of orders shown for none of them is filed by its citation.
+        default = ((named.get("cite") or "orders") if named.get("orders_page")
+                   else _build_default_filename(item))
         path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
@@ -9384,7 +9646,9 @@ class CourtListenerGUI:
         url = named.get("url") or ""
         whiten = _is_redacted_case_pdf(url)
         header = ""
-        if whiten:
+        if whiten and named.get("orders_page"):
+            header = named.get("cite", "")
+        elif whiten:
             try:
                 header = _case_law_print_citation(
                     data, url, item=item, cite_hint=named.get("cite", ""),
@@ -9414,7 +9678,9 @@ class CourtListenerGUI:
         item = self._cited_filename_item(named)
         whiten = _is_redacted_case_pdf(url)
         header = ""
-        if whiten:
+        if whiten and named.get("orders_page"):
+            header = named.get("cite", "")   # the page, named for no case
+        elif whiten:
             try:
                 header = _case_law_print_citation(
                     data, url, item=item, cite_hint=named.get("cite", ""),
@@ -9422,7 +9688,9 @@ class CourtListenerGUI:
                             if self._token_var.get().strip() else None))
             except Exception as exc:
                 print(f"[cite-pdf] header citation failed: {exc}")
-        path = _named_temp_pdf_path(_build_default_filename(item))
+        path = _named_temp_pdf_path(
+            (named.get("cite") or "orders") if named.get("orders_page")
+            else _build_default_filename(item))
         _write_output_pdf(path, data, pane, whiten=whiten, header=header)
         _print_pdf_file(self.root, path, status)
 
@@ -9624,6 +9892,15 @@ class CourtListenerGUI:
             self._post_case_law_pdf(
                 pdf, cite, pin, name, parent=target_parent,
             )
+            return True
+        # A page of the U.S. Reports' orders is no one case's, so nothing
+        # above answers for it; the page itself does — the order a name picks
+        # out, or else the page named for no case (see _resolve_pdf_url).
+        us = _normalized_us_cite(cite)
+        if us and _orders_only(_case_law_page_cases(us)):
+            self._post_root(lambda: self.open_cited_case_pdf(
+                target_parent, ("cite", f"{cite}@{pin}" if pin else cite),
+                name, self._safe_root_status, name=name))
             return True
         return False
 
@@ -11216,7 +11493,12 @@ class CourtListenerGUI:
             str(item.get("caseName") or item.get("case_name") or ""),
         ).strip()
 
-        def _head_ok(url: str, label: str) -> bool:
+        def _head_ok(url: str, label: str, pdf_only: bool = False) -> bool:
+            """Whether *url* answers.  ``pdf_only`` is for a source that
+            serves its scans directly: GovInfo answers a PDF it does not hold
+            by redirecting to a "page not found" that itself returns 200, and
+            taken for the scan, that page stood between the reader and the
+            Library of Congress copy behind it."""
             try:
                 session = (
                     client._session if _is_courtlistener_url(url)
@@ -11230,6 +11512,12 @@ class CourtListenerGUI:
                 resp = session.head(
                     url, timeout=10, allow_redirects=True, headers=headers)
                 if resp.status_code == 200:
+                    kind = str((getattr(resp, "headers", None) or {}).get(
+                        "Content-Type") or "").lower()
+                    if pdf_only and "html" in kind:
+                        print(f"[resolve] {label} is a web page, not the "
+                              f"scan: {url}")
+                        return False
                     return True
                 print(f"[resolve] {label} returned {resp.status_code}: {url}")
             except Exception as exc:
@@ -11258,21 +11546,21 @@ class CourtListenerGUI:
             if not gov:
                 return None
             link_url, direct_url = gov
-            if _head_ok(link_url, "GovInfo link"):
+            if _head_ok(link_url, "GovInfo link", pdf_only=True):
                 print(f"[resolve] using GovInfo link URL: {link_url}")
                 # The stable link redirects to the first opinion on the page;
                 # where a second one begins there too, the scans themselves
                 # are what have to be chosen between.
                 chosen = _which_opinion(cite, direct_url)
                 return link_url if chosen == direct_url else chosen
-            if _head_ok(direct_url, "GovInfo direct PDF"):
+            if _head_ok(direct_url, "GovInfo direct PDF", pdf_only=True):
                 print(f"[resolve] using GovInfo direct PDF URL: {direct_url}")
                 return _which_opinion(cite, direct_url)
             return None
 
         def _try_loc(cite: str) -> Optional[str]:
             loc_url = _us_reports_loc_url(cite)
-            if loc_url and _head_ok(loc_url, "LOC US Reports"):
+            if loc_url and _head_ok(loc_url, "LOC US Reports", pdf_only=True):
                 print(f"[resolve] using LOC US Reports PDF: {loc_url}")
                 return _which_opinion(cite, loc_url)
             return None
@@ -11373,6 +11661,43 @@ class CourtListenerGUI:
             url = _try_official_us_reports(cite)
             if url is not None:
                 return url
+
+        # 0.4. A page several cases begin on, and no official scan of it.
+        #      That is nearly always a page of orders — the U.S. Reports print
+        #      them a dozen to a page, and 498 U.S. 807 grants certiorari in
+        #      eleven cases — which CAP files one order at a time under its
+        #      own case name.  The case the item names picks the file, and
+        #      failing that the case it was cited *in* (an opinion citing its
+        #      own grant: "We granted certiorari, 498 U. S. 807").  Where
+        #      neither does, a page of nothing but orders still opens: every
+        #      order's file shows that same page, and it is named for no case
+        #      (see ``_orders_page``).  Anything else stops here, every rung
+        #      below being a guess — the last one opened another case.
+        if known_us:
+            page_cases = _case_law_page_cases(known_us)
+            if len(page_cases) > 1:
+                chosen = (
+                    _match_page_opinion(page_cases, expected_name)
+                    or _match_page_opinion(
+                        page_cases, str(item.get("_context_name") or ""))
+                )
+                if chosen is not None and _head_ok(
+                        chosen.url, "static.case.law order", pdf_only=True):
+                    print(f"[resolve] {known_us} is a page of orders; "
+                          f"{chosen.name!r}'s is {chosen.url}")
+                    item["_order_name"] = chosen.name
+                    return chosen.url
+                if _orders_only(page_cases) and _head_ok(
+                        page_cases[0].url, "static.case.law page of orders",
+                        pdf_only=True):
+                    print(f"[resolve] {known_us} is a page of orders in "
+                          f"{len(page_cases)} cases; showing the page itself")
+                    item["_orders_page"] = True
+                    return page_cases[0].url
+                item["_page_mates"] = len(page_cases)
+                print(f"[resolve] {len(page_cases)} cases begin at "
+                      f"{known_us}, and nothing says which")
+                return None
 
         # 0.5. Non-SCOTUS: the Harvard CAP static.case.law copy.  Try every
         #      parallel cite before giving up; when more than one reporter scan
@@ -16277,6 +16602,146 @@ def _union_line_runs(boxes: list) -> list:
     return out
 
 
+def _column_reading_order(chars: list) -> "Optional[list]":
+    """The order to read a page set in two columns — its characters' local
+    indexes, with ``-1`` wherever a line break has to be supplied — or
+    ``None`` for a page in one column, read in the order its text came.
+
+    A reporter's scan prints two columns, and its text layer can run each line
+    straight across the gutter: "provide. Cf. Mathews v. Eldridge, 424 act or
+    failure to act. / U.S. 319, 334-35, …" — a citation broken at a line's end
+    in one column continued only after the other column's line.  Read column
+    by column it is one citation again.  The gutter is where no line's glyphs
+    reach across the middle of the page while both sides of it are thick with
+    text (a table of authorities, its page numbers set flush right, is not);
+    a line that does reach across it — a caption, a heading set full width —
+    closes the columns above it, which are read first.
+
+    Each column's footnotes, set in smaller type at its foot, are read after
+    both columns' text: a sentence the left column breaks off — "(quoting
+    Zimmerman v. Tribble, 226 F.3d" — goes on at the top of the right one
+    ("568, 571 (7th Cir.2000)"), not in the note below it ("1. Section
+    1915A …", which read as 226 F.3d 1)."""
+    import statistics
+
+    lines: list = []
+    cur: list = []
+    for i, (ch, _bx) in enumerate(chars):
+        cur.append(i)
+        if ch == "\n":
+            lines.append(cur)
+            cur = []
+    if cur:
+        lines.append(cur)
+    glyphs = [(i, bx) for i, (ch, bx) in enumerate(chars)
+              if bx is not None and not ch.isspace()]
+    if len(lines) < 8 or len(glyphs) < 200:
+        return None
+    left = min(bx[0] for _i, bx in glyphs)
+    width = max(bx[2] for _i, bx in glyphs) - left
+    if width < 100:
+        return None
+    # How many lines have ink at each point across the page.
+    cover = [0] * (int(width) + 2)
+    counted = 0
+    for line in lines:
+        marks: set = set()
+        for i in line:
+            ch, bx = chars[i]
+            if bx is not None and not ch.isspace():
+                marks.update(range(int(bx[0] - left), int(bx[2] - left) + 1))
+        if marks:
+            counted += 1
+            for x in marks:
+                if 0 <= x < len(cover):
+                    cover[x] += 1
+    lo, hi = int(0.3 * width), int(0.7 * width)
+    gut = min(range(lo, hi + 1), key=lambda x: cover[x])
+    if counted < 8 or cover[gut] > 0.08 * counted:
+        return None
+    a = b = gut
+    while a > lo and cover[a - 1] <= cover[gut]:
+        a -= 1
+    while b < hi and cover[b + 1] <= cover[gut]:
+        b += 1
+
+    def thick(x0: float, x1: float) -> bool:
+        band = cover[max(0, int(x0)):max(0, int(x1))]
+        return bool(band) and sum(band) / len(band) >= 0.4 * counted
+
+    if not (thick(0.1 * width, a - 0.05 * width)
+            and thick(b + 0.05 * width, 0.9 * width)):
+        return None
+    gutter = left + (a + b) / 2
+
+    # Small type: a line whose lowercase letters stand well short of the
+    # page's own — a footnote's.  None when a line has too few to say.
+    lower = [bx[3] - bx[1] for i, bx in glyphs if chars[i][0].islower()]
+    small_h = 0.9 * statistics.median(lower) if len(lower) >= 50 else 0.0
+
+    def small(part: list) -> "Optional[bool]":
+        heights = [chars[i][1][3] - chars[i][1][1] for i in part
+                   if i >= 0 and chars[i][1] is not None
+                   and chars[i][0].islower()]
+        if len(heights) < 4:
+            return None
+        return statistics.median(heights) < small_h
+
+    def fresh() -> dict:
+        return {"text": [], "notes": [], "maybe": [], "in_notes": False}
+
+    cols = {"L": fresh(), "R": fresh()}
+
+    def add(col: dict, part: list) -> None:
+        """One line's worth of a column.  Two small lines running start its
+        notes, and everything below them in the column is notes too."""
+        kind = small(part)
+        if col["in_notes"]:
+            col["notes"] += part
+        elif kind or (kind is None and col["maybe"]):
+            col["maybe"].append(part)
+            if kind and sum(small(p) is True for p in col["maybe"]) >= 2:
+                col["in_notes"] = True
+                col["notes"] += [i for p in col["maybe"] for i in p]
+                col["maybe"] = []
+        else:
+            col["text"] += [i for p in col["maybe"] for i in p] + part
+            col["maybe"] = []
+
+    def flush() -> list:
+        out = cols["L"]["text"] + cols["R"]["text"]
+        for col in (cols["L"], cols["R"]):
+            out += col["notes"] + [i for p in col["maybe"] for i in p]
+        cols["L"], cols["R"] = fresh(), fresh()
+        return out
+
+    order: list = []
+    for line in lines:
+        sides: list = []
+        side = None
+        across = False
+        for i in line:
+            ch, bx = chars[i]
+            if bx is not None and not ch.isspace():
+                across = across or bx[0] < gutter < bx[2]
+                side = "L" if (bx[0] + bx[2]) / 2 < gutter else "R"
+            sides.append(side)
+        if across:
+            order += flush() + line
+            continue
+        # Whatever comes before the line's first glyph goes with it; spaces
+        # and the line's end go with the glyph before them.
+        first = next((s for s in sides if s), "L")
+        sides = [s or first for s in sides]
+        for want in ("L", "R"):
+            part = [i for i, s in zip(line, sides) if s == want]
+            if part:
+                if chars[part[-1]][0] != "\n":
+                    part.append(-1)
+                add(cols[want], part)
+    return order + flush()
+
+
 def _extract_pdf_text_pages(pdf_bytes: bytes) -> list:
     """The character/box data alone — see :func:`_extract_pdf_text_and_style`."""
     return _extract_pdf_text_and_style(pdf_bytes)[0]
@@ -16487,7 +16952,15 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
     ``pages`` is ``[[(char, box_or_None), …], …]`` — one list per page, each a
     parallel run of characters and their glyph boxes ``(left, bottom, right,
     top)`` in PDF points (``None`` for a char with no usable box, e.g. a line
-    break).  ``italics`` is the same shape with a bool per character, true where
+    break), measured from the corner of the page as it is shown.  PDFium gives
+    them in the page's own coordinate space, which need not begin at 0 — a
+    Library of Congress U.S. Reports scan's page box begins 1.92 or 3.84 pt up
+    — while everything that places a box on the rendered page (the viewer's
+    links, search hits and selection) counts from the corner; left as they
+    came, the boxes landed that far above their words, the bottom of every
+    citation outside its own link.
+
+    ``italics`` is the same shape with a bool per character, true where
     the glyph is set in an italic face: case names are italicised and the prose
     around them is not, which is what tells a citation from a sentence that
     merely ends in a capitalised word.  Each page's flags are a
@@ -16525,6 +16998,10 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
             with _PDFIUM_LOCK:
                 page = doc[pi]
                 try:
+                    try:
+                        ox, oy = page.get_cropbox()[:2]
+                    except Exception:
+                        ox = oy = 0.0
                     tp = page.get_textpage()
                     try:
                         n = tp.count_chars()
@@ -16538,6 +17015,9 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
                                 bx = tp.get_charbox(i)
                                 if not (bx and bx[2] > bx[0] and bx[3] > bx[1]):
                                     bx = None
+                                elif ox or oy:
+                                    bx = (bx[0] - ox, bx[1] - oy,
+                                          bx[2] - ox, bx[3] - oy)
                             except Exception:
                                 bx = None
                             chars.append((ch, bx))
@@ -16601,7 +17081,22 @@ def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) ->
         if len(page_text) == len(chars):
             for s, e in _page_furniture(page_text):
                 blank.update(range(s, e))
-        for li, (ch, _bx) in enumerate(chars):
+        # A two-column page is read column by column (-1: a line break the
+        # text layer ran across the gutter instead of giving).
+        order = _column_reading_order(chars)
+        for li in range(len(chars)) if order is None else order:
+            if li < 0:
+                parts.append("\n")
+                gmap.append((None, None))
+                slants.append(False)
+                continue
+            ch = chars[li][0]
+            if ch in "\ufffe\u00ad":
+                # The hyphen of a word broken at a line's end, which PDFium
+                # joins back up around U+FFFE: read without it, "Cali\ufffe
+                # fornia, supra" names California and "Com\ufffepare" is the
+                # signal it is.
+                continue
             parts.append(" " if li in blank and not ch.isspace() else ch)
             gmap.append((pi, li))
             slants.append(li < len(page_italics) and bool(page_italics[li]))
@@ -20328,6 +20823,15 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
 
     cite = _pick_cite(m_cites + [cite_hint, title])
     if not cite:
+        # The file's own metadata names it even where CAP's page labels are
+        # not the citation's pages — Bell v. Clapp, 10 Johns. 263, is kept as
+        # "0267-01" — so there its citation in this reporter's volume will do.
+        folder = (url or "").lower().rsplit("/case-pdfs/", 1)[0]
+        cite = next(
+            (c for c in m_cites
+             if (_static_case_law_url(c) or "").lower().rsplit(
+                 "/case-pdfs/", 1)[0] == folder), "")
+    if not cite:
         rep = _CASE_LAW_SLUG_REPORTERS.get(slug)
         if rep:
             cite = f"{vol} {rep} {first_page}"
@@ -22679,32 +23183,30 @@ class _ScholarTextWindow:
         Calder</i> v. <i>Bull,</i> 3 Dall. 386") — a single shared click action
         computed from the whole link text, so clicking the case name, the
         reporter, or anywhere in the link follows it and falls back identically.
+        A star page inside the link does not break it (see _scholar_anchors).
         Non-link spans render one at a time as before."""
-        def is_case_link(s) -> bool:
-            return bool(s.link) and not (s.pagenum or s.fnref or s.fndef)
-
-        i, n = 0, len(spans)
-        while i < n:
-            if is_case_link(spans[i]):
-                href = spans[i].link
-                j = i + 1
-                while j < n and is_case_link(spans[j]) and spans[j].link == href:
-                    j += 1
-                full_text = "".join(s.text for s in spans[i:j])
-                link_tag = self._new_link(
-                    self._scholar_link_action(full_text, href)
-                )
-                for s in spans[i:j]:
-                    self._insert_span(s, block_tags, neutral=neutral,
-                                      link_tag=link_tag,
-                                      detect_plain=detect_plain)
-                i = j
-            else:
-                self._insert_span(
-                    spans[i], block_tags, neutral=neutral,
-                    detect_plain=detect_plain,
-                )
-                i += 1
+        anchors = _scholar_anchors(spans)
+        anchor_tag: dict = {}
+        pos = 0
+        for span in spans:
+            start, pos = pos, pos + len(span.text or "")
+            ai = None
+            if span.link and not (span.pagenum or span.fnref or span.fndef):
+                if not span.text:
+                    continue
+                ai = next((k for k, (a0, a1, _h, _t) in enumerate(anchors)
+                           if a0 <= start < a1), None)
+            if ai is None:
+                self._insert_span(span, block_tags, neutral=neutral,
+                                  detect_plain=detect_plain)
+                continue
+            if ai not in anchor_tag:
+                _a0, _a1, href, full_text = anchors[ai]
+                anchor_tag[ai] = self._new_link(
+                    self._scholar_link_action(full_text, href))
+            self._insert_span(span, block_tags, neutral=neutral,
+                              link_tag=anchor_tag[ai],
+                              detect_plain=detect_plain)
 
     def _insert_spans_with_links(self, block, block_tags: tuple,
                                  neutral: bool, ranges: list,
@@ -22712,8 +23214,43 @@ class _ScholarTextWindow:
         """Render a block whose text contains citation runs we link ourselves
         (English Reports → CommonLII scan, Federal Appendix → case.law PDF): text
         inside a run gets one shared link (Scholar links dropped); everything
-        outside renders exactly as it normally would."""
+        outside renders as it normally would.
+
+        What is left over of a Google Scholar link one of our runs overlaps —
+        its parenthetical, "(concurring opinion)", or a comma between parallel
+        cites — goes with that run, since it is the same reference: clicking
+        it opens the case at the run's page, not at its first.  A Scholar link
+        no run touches is one link however many styled pieces it is set in,
+        its action read off its whole text."""
         range_tag: list = [None] * len(ranges)  # one link tag per run
+        anchors = _scholar_anchors(block.spans)
+        anchor_tag: dict = {}                    # anchor → its one link
+
+        def run_tag(ri: int) -> str:
+            if range_tag[ri] is None:
+                range_tag[ri] = self._new_link(ranges[ri][2])
+            return range_tag[ri]
+
+        def leftover_tag(at: int) -> "tuple[Optional[str], bool]":
+            """The link a piece of a Scholar link outside our runs takes, and
+            whether it is one of the runs'."""
+            ai = next((k for k, (a0, a1, _h, _t) in enumerate(anchors)
+                       if a0 <= at < a1), None)
+            if ai is None:
+                return None, False
+            a0, a1, href, full_text = anchors[ai]
+            inside = [k for k, (rs, re_, _a) in enumerate(ranges)
+                      if rs < a1 and a0 < re_]
+            if inside:
+                before = [k for k in inside if ranges[k][0] <= at]
+                ri = (max(before, key=lambda k: ranges[k][0]) if before
+                      else min(inside, key=lambda k: ranges[k][0]))
+                return run_tag(ri), True
+            if ai not in anchor_tag:
+                anchor_tag[ai] = self._new_link(
+                    self._scholar_link_action(full_text, href))
+            return anchor_tag[ai], False
+
         pos = 0
         for span in block.spans:
             s_start = pos
@@ -22735,19 +23272,24 @@ class _ScholarTextWindow:
                                          if rs > cur])
                     seg = span.text[cur - s_start: nxt - s_start]
                     if seg:
-                        self._insert_span(_dc_replace(span, text=seg),
-                                          block_tags, neutral=neutral,
-                                          detect_plain=detect_plain)
+                        tag, of_run = (leftover_tag(cur) if span.link
+                                       else (None, False))
+                        if of_run:
+                            self._insert_linked_segment(seg, span, block_tags,
+                                                        neutral, tag)
+                        else:
+                            self._insert_span(_dc_replace(span, text=seg),
+                                              block_tags, neutral=neutral,
+                                              link_tag=tag,
+                                              detect_plain=detect_plain)
                     cur = nxt
                 else:
                     rs, re_, action = ranges[ri]
                     seg_end = min(s_end, re_)
                     seg = span.text[cur - s_start: seg_end - s_start]
                     if seg:
-                        if range_tag[ri] is None:
-                            range_tag[ri] = self._new_link(action)
                         self._insert_linked_segment(seg, span, block_tags,
-                                                    neutral, range_tag[ri])
+                                                    neutral, run_tag(ri))
                     cur = seg_end
 
     def _insert_linked_segment(self, text: str, span, block_tags: tuple,
@@ -26806,6 +27348,8 @@ class _ScholarTextWindow:
                     ("cite", f"{cite}@{pin}" if pin else cite),
                     snippet or name, self._safe_status, fallback=as_text,
                     name=name,
+                    context_name=(getattr(self, "_bb", None) or {}).get(
+                        "name", ""),
                 ):
                     return
             except Exception as exc:
@@ -26906,6 +27450,9 @@ class _ScholarTextWindow:
         cite, _pin = _link_cite(record, {}) if record else ("", "")
         name = name or _link_name(record)
         if cite:
+            # Scholar's heading gives the page the case begins on; a pin the
+            # link's own words set after it rides along.
+            pin = pin or self._pin_from_link_text(tag, cite)
             # The link, followed as a citation from now on.
             self._link_actions[tag] = ("url", "\t".join(
                 [url]
@@ -26918,6 +27465,22 @@ class _ScholarTextWindow:
         else:
             self._status_var.set(
                 f"Google Scholar has no opinion for {name or 'this case'}.")
+
+    def _pin_from_link_text(self, tag: str, cite: str) -> str:
+        """The pin a link's own words set after the page *cite* begins on:
+        "Wakely v. Hart, 6 Binney 316, 318 (Pa. 1814)" pins 318 once Scholar
+        has said the case is 6 Binn. 316 — a reporter name the reader didn't
+        know, so the link carried no pin of its own."""
+        page = (cite.split() or [""])[-1]
+        if not page.isdigit():
+            return ""
+        try:
+            ranges = self._text.tag_ranges(tag)
+            text = self._text.get(ranges[0], ranges[-1]) if ranges else ""
+        except (AttributeError, tk.TclError):
+            return ""
+        m = re.search(rf"(?<!\d){page}(?!\d)", text)
+        return _pin_after(text, m.end())[0] if m else ""
 
     def _follow_cl_link(self, url: str) -> None:
         """Open a CourtListener opinion URL with structured block rendering."""
@@ -28859,6 +29422,8 @@ class _ScholarTextWindow:
             parent, action, snippet, self._safe_status,
             fallback=lambda: _follow_brief_action(
                 self._app, parent, action, self._safe_status, snippet=snippet),
+            context_name=(getattr(self, "_bb", None) or {}).get(
+                "name", ""),
         )
         if not opened:      # not a case citation — a statute, a rule, a docket
             _follow_brief_action(self._app, parent, action,
@@ -29243,7 +29808,7 @@ def _open_case_law_pdf(
         return
 
     try:
-        status("Checking for other cases on this reporter pageâ€¦")
+        status("Checking for other cases on this reporter page…")
     except tk.TclError:
         pass
 
@@ -29270,7 +29835,7 @@ def _open_case_law_pdf(
         final_title = title
         picked_name = _case_law_opinion_name(chosen) if chosen else ""
         if picked_name and picked_name.lower() not in title.lower():
-            final_title = f"{picked_name} â€” {title}"
+            final_title = f"{picked_name} — {title}"
         _PdfWindow(
             parent, final_url, final_title, status, app=app, is_case=True,
         )

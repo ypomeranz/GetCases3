@@ -492,6 +492,10 @@ _PLAIN_CASE_REPORTERS = {
 # only ever hands us a capitalized token.
 _JOURNAL_REPORTER_RE = re.compile(
     r"L\.\s?J\.|L\.\s?Rev\.|L\.\s?Q\.|\bRev\.|(?<![A-Za-z.&])(?<!&\s)J\."
+    # The Criminal Law Bulletin and Law & Contemporary Problems — "Latzer,
+    # Searching Cars and Their Contents: United States v. Ross, 18 Crim. L.
+    # Bull. 381" (Acevedo) was opened as the Ross the article is about.
+    r"|Crim\.\s?L\.\s?Bull\.|\bProbs\."
 )
 
 # "10 Op. Atty Gen. 382" — an opinion of the Attorney General.  Cited in a
@@ -848,7 +852,14 @@ def _case_name_start(
     i = len(toks)
     while i > 0:
         tok = toks[i - 1].group(0)
-        low = tok.lower().strip(",;:")
+        if tok.endswith(";"):
+            # A semicolon closes the citation before this one in a string
+            # cite — "See generally Chimel v. California, …. See Chimel;
+            # Coolidge v. New Hampshire, …" — and is never part of a name.
+            break
+        # A word hyphenated at a line end is still that word: a PDF's text
+        # layer marks the break with U+FFFE ("Com\ufffepare Harris v. …").
+        low = re.sub("[\ufffe\u00ad]", "", tok).lower().strip(",;:")
         # A signal opening a parenthetical is capitalized as often as not —
         # "(Citing Hollingsworth v. Perry, …)" — and is no more a name for it.
         if low in _NAME_STOPPERS or low.lstrip("([\"“‘'") in _NAME_STOPPERS:
@@ -894,6 +905,12 @@ def _case_name_start(
     start = toks[i].start()
     if head[start] in "([":
         start += 1  # "(Hollingsworth v. Perry, …)": the name is inside
+    # A scan's text layer runs a footnote's number into its first word —
+    # "12Illinois v. Rodriguez, 497 U. S. 177" — where no name has digits
+    # before a capitalized word ("3M", "20th Century" do not look so).
+    glued = re.match(r"\d{1,3}(?=[A-Z][a-z]{2,})", head[start:])
+    if glued:
+        start += glued.end()
     if len(" ".join(head[start:left_end].split())) > 90:
         return None  # implausibly long for a case name — leave it alone
     if italic is not None and not _mostly_italic(
@@ -2279,11 +2296,16 @@ def _id_antecedent(
     first page, the page belongs to some earlier authority, so the one before
     is tried, and so on.
 
-    *recent* is the citations seen so far as ``(action, end)``, oldest first.
-    *unlinkable* holds the spans of authorities that were recognised but
-    deliberately not linked — a law review, an Attorney General opinion.  An
-    "Id." after one of those refers to *it*, so it must not reach past one to
-    an earlier authority and cite the wrong source.
+    *recent* is the citations seen so far as ``(action, end, start)``, oldest
+    first.  *unlinkable* holds the spans of authorities that were recognised
+    but deliberately not linked — a law review, an Attorney General opinion.
+    An "Id." after one of those refers to *it*, so it must not reach past one
+    to an earlier authority and cite the wrong source.
+
+    A case cited in parallel — "536 U.S. 101, 122 S.Ct. 2061, 153 L.Ed.2d
+    106 (2002)" — is one authority in three reporters, and the pin reads
+    against the first of them that can hold the page (see
+    :func:`_parallel_lead`), not the last merely for being nearest.
 
     *notes* carries a footnote pinpoint written after the page ("Id., at 13
     n.4"); it rides into the returned action's pin so the link opens the note.
@@ -2292,7 +2314,9 @@ def _id_antecedent(
     """
     if pin is None:
         return None  # a bare "Id." names no page, and is never linked
-    for action, end in reversed(recent[-ID_LOOKBACK:]):
+    window = recent[-ID_LOOKBACK:]
+    for k in range(len(window) - 1, -1, -1):
+        action, end = window[k][0], window[k][1]
         gap = len(text[end:start].strip())
         if gap > ID_FAR_GAP:
             break
@@ -2303,8 +2327,8 @@ def _id_antecedent(
             continue  # unpaginated — "at N" cannot be pointing here
         if action[0] == "cite":
             if _id_pin_in_range(action[1], pin):
-                return ("cite",
-                        f"{action[1]}@{join_note_pin(pin, notes or [])}")
+                lead = _parallel_lead(text, window, k, pin)
+                return ("cite", f"{lead}@{join_note_pin(pin, notes or [])}")
             continue  # that reporter has no such page — look further back
         if action[0] in ("statpdf", "frpdf"):
             # Both official serials are paginated, so the same test applies.
@@ -2319,6 +2343,26 @@ def _id_antecedent(
             break  # a statute has no page to corroborate the reference with
         return action  # a statute/rule/regulation simply reopens
     return None
+
+
+def _parallel_lead(text: str, window: list, k: int, pin: str) -> str:
+    """The reporter an "Id." pin reads against, of the parallel citations
+    ending with ``window[k]``: the first of them whose reporter can hold the
+    page.  Citations are parallel when nothing but a comma stands between
+    them.  Turley v. Rednour, 729 F.3d 645, 652 (7th Cir. 2013), follows
+    "Morgan, 536 U.S. 101, 122 S.Ct. 2061, 153 L.Ed.2d 106 (2002)" with "Id.
+    at 115": that is 536 U.S. at 115 — the page the U.S. Reports scan the
+    link opens can go to — though L. Ed. could hold a page 115 as well."""
+    first = k
+    while first > 0 and window[first - 1][0][0] == "cite":
+        prev_end, this_start = window[first - 1][1], window[first][2]
+        if not re.fullmatch(r"\s*,\s*", text[prev_end:this_start]):
+            break
+        first -= 1
+    for j in range(first, k):
+        if _id_pin_in_range(window[j][0][1], pin):
+            return window[j][0][1]
+    return window[k][0][1]
 
 
 _FOOTNOTE_MARKS_AS_SPACES = str.maketrans(
@@ -2373,6 +2417,68 @@ _PAGE_NUMBER_LINE_RE = re.compile(
     r"(?:\d{1,4}|(?=[ivxlc])c{0,3}(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))"
     r"[ \t]*[-–—]?[ \t]*\r?")
 
+# A U.S. Reports page opens on a two-line running head, and a citation broken
+# across the page runs through it: "…of various searches. 433 / CALIFORNIA v.
+# ACEVEDO / 565 Opinion of the Court / U. S., at 22" (500 U.S. at 574-575).
+# The first line is the term ("132 OCTOBER TERM, 1924.") on a left-hand page,
+# the case in capitals ("CARROLL v. UNITED STATES. 133", "386 WALLACE v.
+# KATO") or the preliminary print's "Cite as: 549 U. S. 384 (2007) 385" on a
+# right-hand one; the second names the part in the Reports' own words ("132
+# Syllabus.", "Opinion of the Court 433 U. S.", "SCALIA, J., concurring in
+# judgment").  Only the pair together is a head, which keeps a brief's first
+# line out of it.  GovInfo's volumes carry the printer's slug above it all.
+_US_TERM_HEAD_RE = re.compile(
+    r"[ \t]*(?:\d{1,4}[ \t]+)?[A-Z]+[ \t]+TERM,[ \t]*\d{4}\.?"
+    r"(?:[ \t]+\d{1,4})?[ \t]*\r?")
+_US_CITE_AS_HEAD_RE = re.compile(
+    r"[ \t]*Cite[ \t]+as[ \t]*:[ \t]*\d{1,4}[ \t]+U\.[ \t]?S\.[ \t]+"
+    r"(?:\d{1,5}|_{2,})(?:[ \t]*\([ \t]*\d{4}[ \t]*\))?(?:[ \t]+\d{1,4})?"
+    r"[ \t]*\r?", re.IGNORECASE)
+_US_HEAD_PART_RE = re.compile(
+    r"[ \t]*(?:\d{1,4}[ \t]+)?"
+    r"(?:Syllabus|Opinion|Statement|Argument|Per[ \t]+Curiam|Counsel"
+    r"|Appendix|Separate|Memorandum|Order|Dissent|Concur|Reporter|Decree"
+    r"|[A-Z][A-Za-z'’]+,[ \t]*(?:C\.[ \t]*)?J\.)"
+    r"[A-Za-z.,'’&\- \t]{0,70}?(?:[ \t]+\d{1,4}[ \t]+U\.[ \t]?S\.)?[ \t]*\r?")
+_GPO_SLUG_RE = re.compile(r"[ \t]*\d{1,4}US\d*[ \t]+Unit:[^\n]*PGT:[^\n]*")
+
+
+def _caps_case_head(line: str) -> bool:
+    """Whether *line* is a case named in capitals, as a U.S. Reports running
+    head sets it — "UNITED STATES v. CHADWICK", "CARROLL v. UNITED STATES.
+    133" — its page number either side of it or not."""
+    name = re.sub(r"^\s*\d{1,4}\s+|\s+\d{1,4}\s*$", "", line).strip()
+    if not 5 <= len(name) <= 90:
+        return False
+    if not re.search(r"\sv\.\s", name) and not re.match(
+            r"(?:IN RE|EX PARTE)\b", name):
+        return False
+    rest = re.sub(r"\b(?:v|ex rel|et al)\.", "", name)
+    return (not re.search(r"[a-z]", rest)
+            and len(re.findall(r"[A-Z]", rest)) >= 3)
+
+
+def _us_reports_head(page: str, lines: list) -> "list[tuple[int, int]]":
+    """The running head among a U.S. Reports page's first *lines* (``(start,
+    end)`` spans of *page*), and GovInfo's slug above it — or nothing."""
+    first = lines[:4]
+    out: list = []
+    k = 0
+    if first and _GPO_SLUG_RE.fullmatch(page, *first[0]):
+        out.append(first[0])
+        k = 1
+    if k < len(first) and _PAGE_NUMBER_LINE_RE.fullmatch(page, *first[k]):
+        k += 1      # a lone page number set first (taken by the rule above)
+    if k + 1 < len(first):
+        (s1, e1), (s2, e2) = first[k], first[k + 1]
+        top = page[s1:e1]
+        if ((_US_TERM_HEAD_RE.fullmatch(top)
+             or _US_CITE_AS_HEAD_RE.fullmatch(top)
+             or _caps_case_head(top))
+                and _US_HEAD_PART_RE.fullmatch(page, s2, e2)):
+            out += [(s1, e1), (s2, e2)]
+    return out
+
 
 def _blank(text: str, spans) -> str:
     """*text* with the characters in *spans* read as spaces, its line breaks
@@ -2400,14 +2506,16 @@ def _lines(text: str) -> "list[tuple[int, int]]":
 
 def page_furniture(page: str) -> "list[tuple[int, int]]":
     """Spans of one page's text that are its furniture rather than its
-    matter: an e-filing stamp wherever it stands, and a page number standing
-    alone on the page's first or last line of text."""
+    matter: an e-filing stamp wherever it stands, a page number standing
+    alone on the page's first or last line of text, and a U.S. Reports
+    running head (see :func:`_us_reports_head`)."""
     spans = [(m.start(), m.end()) for m in _ECF_STAMP_RE.finditer(page)]
     plain = _blank(page, spans)
     lines = [(s, e) for s, e in _lines(plain) if plain[s:e].strip()]
     for s, e in lines[:1] + lines[-1:]:
         if _PAGE_NUMBER_LINE_RE.fullmatch(plain, s, e):
             spans.append((s, e))
+    spans.extend(_us_reports_head(plain, lines))
     return spans
 
 
@@ -2623,9 +2731,9 @@ def detect_links(
                   for hm in RUNNING_HEAD_CITE_RE.finditer(text)]
     out: list[tuple[int, int, tuple[str, str]]] = []
     pos = 0
-    # Every citation linked so far as (action, end), oldest first — an "Id."
-    # may have to look past the nearest one to find what it means.
-    recent: list[tuple[tuple[str, str], int]] = []
+    # Every citation linked so far as (action, end, start), oldest first — an
+    # "Id." may have to look past the nearest one to find what it means.
+    recent: list[tuple[tuple[str, str], int, int]] = []
     last_cite_end: int | None = None
     const_linked: set[int] = set()  # amendments already linked (prose dedup)
     for start, end, kind, m in matches:
@@ -2750,7 +2858,7 @@ def detect_links(
                 # An Id. is itself the nearest antecedent for a following Id.,
                 # but retain the clean reporter cite rather than its @pin
                 # action so a chain never becomes "base@23@24".
-                recent.append((("cite", base), span_end))
+                recent.append((("cite", base), span_end, segments[0][0]))
             else:
                 span_start = start
                 if kind in ("scotus", "recap"):
@@ -2766,7 +2874,7 @@ def detect_links(
                 out.append((span_start, span_end, action))
                 # Non-case Id. chains (to a statute, rule, or regulation) are
                 # safe too: their action has no pin suffix to accumulate.
-                recent.append((action, span_end))
+                recent.append((action, span_end, span_start))
             last_cite_end = span_end
             pos = span_end
             continue
