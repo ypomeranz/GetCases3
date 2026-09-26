@@ -1437,6 +1437,62 @@ class PartRailTests(unittest.TestCase):
         reader._on_partmap_click(mock.Mock(y=301))
         reader._text.yview.assert_called_once_with("s1")
 
+
+class RailHeadTests(unittest.TestCase):
+    """The caption and syllabus ahead of the Court's opinion: the top of the
+    rail goes back to them, as the syllabus band does on a scan."""
+
+    def _reader(self, kinds, starts):
+        reader = _RailReader(kinds, starts)
+        reader._draw_part_map()
+        return reader
+
+    def test_they_are_a_band_at_the_top_of_the_rail(self):
+        reader = self._reader(["header", "majority", "dissent"],
+                              [0, 1200, 8000])
+        self.assertEqual([row[4] for row in reader._partmap_rows],
+                         ["header", "majority", "dissent"])
+        top, bottom = reader._partmap_rows[0][:2]
+        # 1200/10000 of a 600px rail, down to where the opinion begins.
+        self.assertEqual((round(top), round(bottom)), (0, 72))
+
+    def test_clicking_the_top_of_the_rail_goes_to_the_beginning(self):
+        reader = self._reader(["header", "majority", "dissent"],
+                              [0, 1200, 8000])
+        reader._on_partmap_click(mock.Mock(y=2))
+        reader._text.yview.assert_called_once_with("s0")
+
+    def test_the_caption_and_the_headmatter_after_it_are_one_band(self):
+        reader = self._reader(["header", "header", "majority", "dissent"],
+                              [0, 300, 1200, 8000])
+        self.assertEqual([row[2] for row in reader._partmap_rows],
+                         ["s0", "s2", "s3"])
+
+    def test_they_are_not_coloured_as_anybody_s_writing(self):
+        reader = self._reader(["header", "majority", "dissent"],
+                              [0, 1200, 8000])
+        ticks = [fill for _c, fill in reader._partmap.rects
+                 if not str(fill).startswith("wash(")]
+        self.assertNotIn(ticks[0], PART_COLORS.values())
+
+    def test_an_opinion_that_opens_the_document_has_no_band_above_it(self):
+        reader = self._reader(["majority", "dissent"], [0, 8000])
+        self.assertEqual([row[4] for row in reader._partmap_rows],
+                         ["majority", "dissent"])
+
+    def test_a_case_of_one_opinion_still_takes_no_rail(self):
+        # The caption is not a second writing to navigate to.
+        reader = self._reader(["header", "majority"], [0, 1200])
+        self.assertEqual(reader._partmap.width_set, 0)
+        self.assertEqual(reader._partmap_rows, [])
+
+    def test_a_short_caption_is_still_given_room_to_click(self):
+        reader = self._reader(["header", "majority", "dissent"],
+                              [0, 30, 8000])
+        top, bottom, _start, _label, kind = reader._partmap_rows[0]
+        self.assertEqual(kind, "header")
+        self.assertGreaterEqual(bottom - top, RAIL_MIN_BAND_H)
+
 # ---------------------------------------------------------------------------
 # Resting on a part names it
 # ---------------------------------------------------------------------------

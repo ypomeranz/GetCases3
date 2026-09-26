@@ -678,6 +678,14 @@ class TextRowTests(unittest.TestCase):
         ])
         self.assertEqual([name for _y, name, _c in rows], ["KAGAN"])
 
+    def test_the_caption_band_at_the_top_is_left_unnamed(self):
+        rows = self._rows([
+            (0, 40, "1.0", "Header & Syllabus", "header"),
+            (40, 500, "9.0", "Opinion of the Court (Kagan)", "majority"),
+            (500, 600, "80.0", "JUSTICE ALITO, dissenting", "dissent"),
+        ])
+        self.assertEqual([name for _y, name, _c in rows], ["KAGAN", "ALITO"])
+
     def test_the_case_window_s_labelled_strip_is_not_named_twice(self):
         # It prints the names already; flashing a second set over the top of
         # them would only say it again.

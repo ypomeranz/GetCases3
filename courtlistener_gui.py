@@ -24176,7 +24176,11 @@ class _ScholarTextWindow:
         """The parts as washed bands on a slim rail, each covering the stretch
         of the opinion it occupies — the scrollbar's own companion, and all the
         width the opinion can spare.  A writing too short to click on at that
-        scale is given a band of ``_PdfPane._RAIL_MIN_BAND_H`` instead."""
+        scale is given a band of ``_PdfPane._RAIL_MIN_BAND_H`` instead.
+
+        What comes before the first writing — the caption and the syllabus —
+        is a band too, as the syllabus is on a scan: the top of the rail goes
+        back to the beginning of the case."""
         self._partmap_rows = []
         canvas.delete("all")
         parts = getattr(self, "_rendered_parts", None)
@@ -24185,16 +24189,21 @@ class _ScholarTextWindow:
                 or not parts or not regions):
             canvas.config(width=0)
             return
+        kinds = ("majority", "concurrence", "dissent", "separate", "syllabus")
         marks = [
             (start, parts[p].kind, parts[p].label)
             for start, _end, p in regions
-            if parts[p].kind in ("majority", "concurrence", "dissent",
-                                 "separate", "syllabus")
+            if parts[p].kind in kinds
         ]
         total = self._ypixels("end-1c")
         if len(marks) < 2 or not total:
             canvas.config(width=0)
             return
+        head, _end, p = regions[0]
+        if parts[p].kind not in kinds:
+            # Its band runs down to the first writing, so a headmatter part
+            # after the caption is taken in with it.
+            marks.insert(0, (head, parts[p].kind, parts[p].label))
         width = _PdfPane._RAIL_W
         canvas.config(width=width)
         try:
@@ -24223,7 +24232,8 @@ class _ScholarTextWindow:
 
         The rail's only.  The labelled strip a case window carries prints the
         names already, so a second set flashed over the top of them would say
-        it twice; and a syllabus, being nobody's writing, is left unnamed."""
+        it twice; and a syllabus or caption, being nobody's writing, is left
+        unnamed."""
         if not getattr(self, "_chromeless", False):
             return []
         rows = []
