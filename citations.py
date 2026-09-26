@@ -395,7 +395,12 @@ def early_fed_cite_text(m: re.Match) -> str:
 # REPORTER_ALT ("306 Md. 556", "100 Cal. 400", "515 Pa. 1").  This guarded
 # fallback is intentionally broad but excludes statute/regulation abbreviations
 # before they can become case links.
-_REPORTER_TOKEN = r"(?:[A-Z][A-Za-z0-9.'’]*|\d+d|\d+th)"
+#
+# No abbreviation runs two periods together.  A table of contents does, in the
+# dot leaders that carry a heading across to its page: "SUMMARY OF THE ARGUMENT
+# .... 2" over "ARGUMENT........ 6" reads as volume 2 of a reporter called
+# "ARGUMENT........", page 6, unless the leader ends the word.
+_REPORTER_TOKEN = r"(?:[A-Z](?:[A-Za-z0-9'’]|\.(?!\.))*|\d+d|\d+th)"
 # Its words are joined by spaces — or by an ampersand, in the reporters named
 # for two men: "3 H. & McH. 554", "10 Serg. & Rawle 240", "1 Woodb. & M. 401".
 _REPORTER_JOIN = r"(?:\s+|\s*&\s*)"
@@ -452,6 +457,11 @@ _NONCASE_REPORTERS = {
     # that contain "App." keep their own keys — "Cal. App. 4th" is calapp4th,
     # "Wn. App." wnapp, "N.Y. App. Div." nyappdiv, "F. App'x" fappx.
     "app",
+    # "Appl." is the application in a Supreme Court stay or emergency matter,
+    # cited by its pages the way the joint appendix is ("Appl. 6, 31"), and
+    # no reporter is abbreviated so.  With a footnote number set in front of it
+    # — "…irreparable injury.⁴ Appl. 6, 31" — it reads as volume 4, page 6.
+    "appl",
 }
 _PLAIN_CASE_REPORTERS = {
     "alaska", "idaho", "iowa", "ohio", "utah", "vermont", "wyoming",
@@ -482,12 +492,26 @@ _PLAIN_CASE_REPORTERS = {
 # only ever hands us a capitalized token.
 _JOURNAL_REPORTER_RE = re.compile(
     r"L\.\s?J\.|L\.\s?Rev\.|L\.\s?Q\.|\bRev\.|(?<![A-Za-z.&])(?<!&\s)J\."
+    # The Criminal Law Bulletin and Law & Contemporary Problems — "Latzer,
+    # Searching Cars and Their Contents: United States v. Ross, 18 Crim. L.
+    # Bull. 381" (Acevedo) was opened as the Ross the article is about.
+    r"|Crim\.\s?L\.\s?Bull\.|\bProbs\."
 )
 
 # "10 Op. Atty Gen. 382" — an opinion of the Attorney General.  Cited in a
 # reporter's shape, but it is executive advice, not a decided case, and no
 # case-law source can open it.
 _AG_OPINION_RE = re.compile(r"Att(?:orne)?y?\.?\s*'?y?\.?\s*Gen", re.IGNORECASE)
+
+# A court rule read as a reporter: a table of authorities sets each entry's
+# page number before the next entry, so "…Fed. R. App. P. 43 ... 23 / Fed. R.
+# Civ. P. 25" joins into "23 Fed. R. Civ. P. 25" — and a heading between them
+# ("23 Other Authorities Fed. R. App. P. 43") reads as part of the reporter.
+# Rules of procedure and evidence are never case reporters (the Federal Rules
+# *Service* reporters, "Fed. R. Serv." and "Fed. R. Evid. Serv.", are, and do
+# not match).
+_COURT_RULE_REPORTER_RE = re.compile(
+    r"\bR\.\s?(?:(?:App|Bankr|Civ|Crim)\.\s?P\.|Evid\.(?!\s?Serv\.))")
 
 # Short-form citation: "Roe, 410 U.S., at 152" → volume, reporter, pin page.
 SHORT_CITE_RE = re.compile(
@@ -509,9 +533,10 @@ ID_CITE_RE = re.compile(r"\bid\.(?:\s*,?\s*at\s+\*?(\d{1,6}))?", re.IGNORECASE)
 # Record cites in briefs commonly use "Id." too.  If one appears between an
 # authority and a later "Id. at N", do not carry the authority forward.  The
 # suffix guard matters for bare "ER"/"SER": without it ordinary prose such as
-# "error," "erred," and "errors" falsely breaks the chain.
+# "error," "erred," and "errors" falsely breaks the chain.  "Appl." is a
+# Supreme Court application, cited by its pages like the joint appendix.
 _RECORD_CITE_RE = re.compile(
-    r"\b(?:App\.|J\.?A\.|A\.R\.|R\.|Tr\.|Dkt\.|Doc\.|ECF|Ex\.|ER|SER)"
+    r"\b(?:Appl?\.|J\.?A\.|A\.R\.|R\.|Tr\.|Dkt\.|Doc\.|ECF|Ex\.|ER|SER)"
     r"(?![A-Za-z])\s*(?:No\.?\s*)?[\w*.-]+"
     r"|\b(?:ECF|Dkt\.|Doc\.)\s+No\.?\s+\d+|¶\s*\d+",
     re.IGNORECASE,
@@ -615,9 +640,14 @@ _SPELLED_OUT_NAME_WORDS = frozenset("""
 def _is_name_abbreviation(core: str) -> bool:
     """Whether a period-terminated word *core* ("Corp.", "U.S.") can sit
     inside a case name, rather than ending the sentence before it."""
-    if not _NAME_ABBREV_RE.match(core):
-        return False
     word = core.rstrip(".").replace("’", "'").lower()
+    if not _NAME_ABBREV_RE.match(core):
+        # Longer than an abbreviation usually runs, but one the Bluebook
+        # tables make all the same: "MCI Telecomms. Corp.", "Distribs.".
+        return (core[:1].isupper() and core.endswith(".")
+                and re.sub(r"[^a-z]", "", word)
+                in bluebook_names._TABLE_ABBREVIATIONS
+                and word not in bluebook_names._WORD_MAP)
     if "." in word:
         return True  # an initialism: "U.S.", "R.R."
     # A word the Bluebook tables abbreviate, written out in full ("Court.",
@@ -630,16 +660,28 @@ def _is_name_abbreviation(core: str) -> bool:
 # that ends it — 'Amendment."' is still the end of a sentence.
 _NAME_TRAIL = ",;:”\"’')]}"
 
-# A token that can sit inside a party name: capitalized, quoted, or a company
-# designation like "3M".  A bare number is not — that is a page number from a
-# running head or the tail of an earlier citation.
-_NAME_TOKEN_RE = re.compile(r"^[\"“'(]?(?:[A-Z]|\d+[A-Za-z])")
+# A token that can sit inside a party name: capitalized, quoted, a company
+# designation like "3M", or a name whose particle is set in lower case
+# ("Ashcroft v. al-Kidd", "Idaho v. Coeur d’Alene Tribe").  A bare number is
+# not — that is a page number from a running head or the tail of an earlier
+# citation.  The particles are named, so a prefix of prose ("pre-Miranda",
+# "non-Indian") stays prose.
+_NAME_TOKEN_RE = re.compile(
+    r"^[\"“'(]?(?:[A-Z]|\d+[A-Za-z]"
+    r"|(?:al|el|ad|ul|bin|ibn|abu|d|l|de|di|da|du|del|della|van|von|ter|ten"
+    r"|dos|das)[-'’][A-Z])")
 
 # How much text before a citation can hold its name.  Long enough for the
 # worst real caption ("Liverpool, New York & Philadelphia S. S. Co. v.
 # Commissioners of Emigration") with line breaks, short enough that the scan
 # never reaches the running head of the page above.
 _NAME_LOOKBEHIND = 200
+
+# The docket number a citation may carry between the case name and the cite:
+# ", No. A-61210-05T3", ", Nos. 12-6371, 12-6372", ", Civ. A. No. 96-3837".
+_DOCKET_AFTER_NAME_RE = re.compile(
+    r",\s*(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+)?Nos?\.\s*"
+    r"[\w:().-]{2,30}(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
 
 # "In re Winship", "Ex parte Young", "Matter of Doe" — a case name with no
 # "v." in it, anchored to the end of the window before the citation.
@@ -681,6 +723,71 @@ def _mostly_italic(text: str, italic, lo: int, hi: int) -> bool:
     return sum(1 for i in letters if italic[i]) * 2 > len(letters)
 
 
+def _set_in_roman(text: str, italic, lo: int, hi: int) -> bool:
+    """True when ``text[lo:hi]`` has letters and they are not set in italics
+    (see :func:`_mostly_italic`)."""
+    return (any(ch.isalpha() for ch in text[lo:hi])
+            and not _mostly_italic(text, italic, lo, hi))
+
+
+def _past_connectors(toks: list, i: int) -> int:
+    """The first of ``toks[i:]`` that is not a connector — where a name can
+    start ("of Columbia v. Wesby" starts at "Columbia")."""
+    while (i < len(toks)
+           and toks[i].group(0).lower().strip(",;:") in _NAME_CONNECTORS):
+        i += 1
+    return i
+
+
+# The last word of a line that heads a division of a table of authorities —
+# "Cases", "Federal Cases", "Constitutional Provisions", "Other Authorities".
+_HEADING_WORDS = frozenset("""
+    cases authorities statutes provisions rules regulations materials sources
+    treatises articles miscellaneous page(s) pages
+""".split())
+
+
+def _heading_line(line: str) -> bool:
+    """Whether a line of text is a heading rather than prose: set in capitals
+    throughout ("TABLE OF AUTHORITIES", "ARGUMENT"), or naming a division of
+    a table of authorities ("Federal Cases")."""
+    letters = [ch for ch in line if ch.isalpha()]
+    words = line.split()
+    return bool(words) and (
+        (len(letters) > 1 and all(ch.isupper() for ch in letters))
+        or words[-1].lower() in _HEADING_WORDS)
+
+
+def _past_headings(text: str, base: int, head: str, toks: list, i: int) -> int:
+    """Where a name found starting at ``toks[i]`` really starts, once any whole
+    heading line the backward scan read into it is dropped.
+
+    A table of authorities sets each entry on its own line under its
+    division's heading, and a heading is capitalized word by word, so the scan
+    back from the "v." of the first entry reads straight through it: "TABLE OF
+    AUTHORITIES / Federal Cases / Barnes v. E-Systems".  A name's first words
+    can stand on the line above its "v." — prose wraps — but a heading there
+    stands on a line of its own, which is what gives it away: the name would
+    begin at the very start of an earlier line, and that line reads as a
+    heading (see :func:`_heading_line`).  ``text[base:]`` begins with *head*,
+    the window the tokens were read from.
+    """
+    last = toks[-1].start()
+    while i < len(toks):
+        line_end = head.find("\n", toks[i].start())
+        if line_end < 0 or line_end > last:
+            break           # on the name's own line
+        line_start = text.rfind("\n", 0, base + toks[i].start()) + 1
+        if text[line_start:base + toks[i].start()].strip():
+            break           # starts partway along the line: prose wrapping
+        if not _heading_line(head[toks[i].start():line_end]):
+            break
+        i = _past_connectors(
+            toks, next(k for k in range(i, len(toks))
+                       if toks[k].start() > line_end))
+    return i
+
+
 def _case_name_start(
     text: str, cite_start: int, floor: int, italic=None) -> "int | None":
     """Index where the case name introducing the citation at *cite_start*
@@ -709,6 +816,13 @@ def _case_name_start(
     if not tail:
         return None
     head = head[:tail.start()]
+    # A docket number set between the name and the citation belongs to the
+    # citation — "Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3,
+    # 2008 WL 465653" — and the name is read from before it, not taken to be
+    # the number.
+    docket = _DOCKET_AFTER_NAME_RE.search(head)
+    if docket:
+        head = head[:docket.start()]
     if not head.strip():
         return None
 
@@ -724,7 +838,10 @@ def _case_name_start(
     left_end = None
     for split in reversed(list(re.finditer(r"(?<=[\w.'’)\]])\s+v[s]?\.\s+", head))):
         right = head[split.end():]
-        if right and len(right) <= 70 and all(_name_token_ok(t) for t in right.split()):
+        # Measured in words, not in the line breaks (or the page furniture
+        # read as spaces) a name broken across a page carries between them.
+        if (right and len(" ".join(right.split())) <= 70
+                and _party_ok(right.split())):
             left_end = split.start()
         break
     # No "v." immediately before the cite: read the shortened one-party form.
@@ -735,8 +852,17 @@ def _case_name_start(
     i = len(toks)
     while i > 0:
         tok = toks[i - 1].group(0)
-        low = tok.lower().strip(",;:")
-        if low in _NAME_STOPPERS:
+        if tok.endswith(";"):
+            # A semicolon closes the citation before this one in a string
+            # cite — "See generally Chimel v. California, …. See Chimel;
+            # Coolidge v. New Hampshire, …" — and is never part of a name.
+            break
+        # A word hyphenated at a line end is still that word: a PDF's text
+        # layer marks the break with U+FFFE ("Com\ufffepare Harris v. …").
+        low = re.sub("[\ufffe\u00ad]", "", tok).lower().strip(",;:")
+        # A signal opening a parenthetical is capitalized as often as not —
+        # "(Citing Hollingsworth v. Perry, …)" — and is no more a name for it.
+        if low in _NAME_STOPPERS or low.lstrip("([\"“‘'") in _NAME_STOPPERS:
             break
         if lone and i < len(toks) and tok.endswith(","):
             # With no "v." to anchor it, the party is whatever follows the
@@ -758,14 +884,34 @@ def _case_name_start(
             continue
         break
     # A name never *starts* with a connector ("of Columbia v. Wesby").
-    while i < len(toks) and toks[i].group(0).lower().strip(",;:") in _NAME_CONNECTORS:
-        i += 1
+    i = _past_connectors(toks, i)
+    i = _past_headings(text, base, head, toks, i)
+    if italic is not None:
+        # With the type to read, the name is what is set in italics, and what
+        # the scan took in ahead of it in roman — a heading, a signal — is
+        # not: under "TABLE OF AUTHORITIES / Federal Cases" the entry
+        # "Barnes v. E-Systems" names Barnes.  Only leading words go, and
+        # only while some of the party is left to start the name.
+        k = i
+        while k < len(toks) and _set_in_roman(
+                text, italic, base + toks[k].start(), base + toks[k].end()):
+            k += 1
+        if k < len(toks):
+            i = _past_connectors(toks, k)
     if i >= len(toks):
         return None
     if lone and len(toks) - i > 4:
         return None  # a lone party is one or two words, not half a sentence
     start = toks[i].start()
-    if left_end - start > 90:
+    if head[start] in "([":
+        start += 1  # "(Hollingsworth v. Perry, …)": the name is inside
+    # A scan's text layer runs a footnote's number into its first word —
+    # "12Illinois v. Rodriguez, 497 U. S. 177" — where no name has digits
+    # before a capitalized word ("3M", "20th Century" do not look so).
+    glued = re.match(r"\d{1,3}(?=[A-Z][a-z]{2,})", head[start:])
+    if glued:
+        start += glued.end()
+    if len(" ".join(head[start:left_end].split())) > 90:
         return None  # implausibly long for a case name — leave it alone
     if italic is not None and not _mostly_italic(
             text, italic, base + start, cite_start):
@@ -835,6 +981,19 @@ def _name_token_ok(tok: str) -> bool:
     if low in _NAME_STOPPERS:
         return False
     return bool(_NAME_TOKEN_RE.match(tok)) or low in _NAME_CONNECTORS
+
+
+def _party_ok(words: list) -> bool:
+    """Whether *words* — what follows a caption's "v." up to the comma
+    closing the name — can all sit in the second party's name.  An "at"
+    can too, set between capitalized words the way a campus is named:
+    "Reinebold v. Ind. Univ. at S. Bend"."""
+    return all(
+        _name_token_ok(w)
+        or (w == "at" and 0 < k < len(words) - 1
+            and bool(_NAME_TOKEN_RE.match(words[k - 1]))
+            and bool(_NAME_TOKEN_RE.match(words[k + 1])))
+        for k, w in enumerate(words))
 
 
 def _case_cite_spans(
@@ -1260,6 +1419,8 @@ def _valid_case_reporter(rep: str) -> bool:
         return False  # a law review, not a reporter — no case to open
     if _AG_OPINION_RE.search(rep):
         return False  # an Attorney General opinion, not a decided case
+    if _COURT_RULE_REPORTER_RE.search(rep):
+        return False  # "Fed. R. Civ. P.", a rule — the rule pass links it
     if _FIRM_RE.search(rep):
         return False  # "Smith & Co.", a firm
     family = reporter_family(rep)
@@ -1411,6 +1572,122 @@ def _pinned_without_at(
                 or re.search(r"(?<=[\w.'’)\]])\s+vs?\.\s+", name)):
             return None
     return max(firsts)
+
+
+def _name_words(name: str) -> set:
+    """The words of a case name that identify a party: "Trump v. Wilcox" →
+    {"trump", "wilcox"}."""
+    return {w for w in re.findall(r"[a-z0-9]+", (name or "").lower())
+            if w not in _NAME_CONNECTORS and w not in ("v", "vs")}
+
+
+def _whole_caption(name: str) -> bool:
+    """Whether *name* is a case's whole caption — "Trump v. Wilcox", "In re
+    Winship" — rather than one party standing for it."""
+    return bool(_NAME_NO_V_RE.match(name)
+                or re.search(r"(?<=[\w.'’)\]])\s+vs?\.\s+", name))
+
+
+def _names_of(
+    text: str, matches: "list[re.Match]", italic=None,
+) -> "list[tuple[re.Match, str]]":
+    """``(match, name)`` for each of *matches* — citations in document order —
+    that a case name introduces, the name as printed: a whole caption
+    ("Trump v. Wilcox") or the one party a short form keeps ("Wilcox")."""
+    out: list = []
+    floor = 0
+    for m in matches:
+        name_start = _case_name_start(text, m.start(), floor, italic)
+        floor = m.end()
+        if name_start is not None:
+            out.append(
+                (m, re.sub(r"[\s,]+$", "", text[name_start:m.start()])))
+    return out
+
+
+def _at_less_pins(
+    text: str, named: "list[tuple[re.Match, str]]",
+) -> dict[int, int]:
+    """``{start: first page}`` for each named case citation (see
+    :func:`_names_of`) that is really a short form with its "at" left out:
+    "Wilcox, 145 S. Ct. 1417" after "Trump v. Wilcox, 145 S. Ct. 1415" is a
+    pin cite to page 1417 of Wilcox, not a case beginning there.
+
+    Read that way only where everything says short form: a lone party
+    introduces it rather than a whole caption; that party is a party to a case
+    the document has already cited in full, in the same volume, from a first
+    page a little before (within :data:`ID_PIN_WINDOW`); and no court/year
+    parenthetical follows, which a full citation would carry.  A string cite
+    naming one party of another case in the same volume ("Abdul Latif, 939
+    F. 3d 710") fails the party test, and stays a case of its own.
+    """
+    captions: list = []     # (volume, reporter key, first page, name words)
+    out: dict[int, int] = {}
+    for m, name in named:
+        key = (m.group(1), _match_reporter_key(m))
+        if _whole_caption(name):
+            captions.append((key, int(m.group(3)), _name_words(name)))
+            continue
+        page = int(m.group(3))
+        party = _name_words(name)
+        _notes, after = note_pin_after_page(text, m.end())
+        if not party or _COURT_YEAR_PAREN_RE.match(text, after):
+            continue
+        firsts = [first for k, first, words in captions
+                  if k == key and first < page <= first + ID_PIN_WINDOW
+                  and party <= words]
+        if firsts:
+            out[m.start()] = max(firsts)
+    return out
+
+
+# A short form that names the case and the page but leaves out the reporter:
+# "Nken, at 433-34", "Nken, supra, at 433".  The page may not run straight
+# into a capitalized word, which would make it a volume ("at 5 U.S.C."), nor
+# into a word of prose ("In Smith, at 5 years old") — a footnote aside
+# ("at 433 n.2").
+_NAME_AT_RE = re.compile(
+    r"(?:supra\s*,\s*)?at\s+\*?(\d{1,6})"
+    r"(?!\d|\s*[A-Z]|\s+(?!nn?\.|notes?\b)[a-z])")
+
+
+def _name_at_cites(
+    text: str, named: "list[tuple[re.Match, str]]", italic=None,
+) -> "list[tuple[int, int, str]]":
+    """Short forms that give the case by name and the page but no reporter —
+    "Nken, at 433-34" — as ``(start, end, "vol rep first@page")``, from the
+    "at" (or "supra") on; the caller grows the span back over the name.
+
+    The name must pick out exactly one case the document cites in full under
+    a whole caption, by its parties' words ("Nken" is Nken v. Holder), and the
+    page must be one of that case's (within :data:`ID_PIN_WINDOW` of its first
+    page).  A name no case answers to — an author's, "Bray, Preliminary
+    Injunction Realism, at 225" — or one several answer to ("Trump") comes
+    back with an empty cite: a citation, but not one to open.
+    """
+    cases: dict[str, set] = {}      # base cite → its parties' words
+    for m, name in named:
+        if _whole_caption(name):
+            cases.setdefault(_case_match_text(m), set()).update(
+                _name_words(name))
+    out: list = []
+    for m in _NAME_AT_RE.finditer(text):
+        name_start = _case_name_start(text, m.start(), 0, italic)
+        if name_start is None:
+            continue
+        words = _name_words(text[name_start:m.start()])
+        hits = [base for base, parties in cases.items()
+                if words and words <= parties]
+        first = int(hits[0].rsplit(" ", 1)[1]) if len(hits) == 1 else 0
+        page = int(m.group(1))
+        if not first or not first <= page <= first + ID_PIN_WINDOW:
+            out.append((m.start(), m.end(), ""))
+            continue
+        notes, _end = note_pin_after_page(text, m.end())
+        pin = join_note_pin(str(page), notes)
+        out.append((m.start(), m.end(),
+                    f"{hits[0]}@{pin}" if pin != str(first) else hits[0]))
+    return out
 
 
 def _iter_case_cites(text: str) -> list[re.Match]:
@@ -1665,24 +1942,56 @@ _RECAP_AFTER_RE = re.compile(
     r"(\d{1,2}),\s+(\d{4})\)"
 )
 
-# The case name before the citation — for the viewer's window title, and,
-# when the citation prints no docket number, as the RECAP search key itself.
-_RECAP_NAME_BODY = (
-    r"([A-Z][\w.,'’&()/ -]{1,180}?\sv\.?\s"
-    r"[\w.,'’&()/ -]{1,140}?|"
-    r"In\s+re\s+[\w.,'’&()/ -]{2,140}?)"
-)
-# … followed by the docket number ("Care One …, No. 12-6371, 2024 WL …"):
-_RECAP_NAME_RE = re.compile(
-    _RECAP_NAME_BODY + r",\s*(?:Nos?\.|Civ|Case\s+No\.)")
-# … or running right up to the cite ("Pecos River Talc LLC v. Emory,
-# 2025 WL 1249947 …") — anchored to the end of the before-window.
-_RECAP_NAME_END_RE = re.compile(_RECAP_NAME_BODY + r",\s*$")
+# What closes a WL/LEXIS citation after its number: a pin cite to its star
+# pages (", at *4", " at *4–*5", ", at *2-3") and then the court/date
+# parenthetical — both part of the link, as a reporter cite's are.
+_RECAP_PIN_RE = re.compile(
+    r",?\s*at\s+\*{1,2}\d{1,6}(?:\s*[-–—]\s*\*{0,2}\d{1,6})?"
+    r"(?:\s*,\s*\*{1,2}\d{1,6}(?:\s*[-–—]\s*\*{0,2}\d{1,6})?)*")
+
+# A case's whole caption — "X v. Y", "In re X" — as against the one party a
+# short form keeps ("Hoffman, 2025 WL 1504376").
+_CAPTION_RE = re.compile(
+    r"\svs?\.?\s|^(?:In\s+re|In\s+the\s+Matter\s+of|Ex\s+parte|Matter\s+of)"
+    r"\s")
 
 # Signal words a name grab may drag along ("See Peninsula Pathology …").
 _NAME_SIGNAL_RE = re.compile(
     r"^(?:But\s+see|See\s+also|See|Accord|Cf|Compare|Contra|Citing|Quoting|"
     r"E\.g)\W+\s*")
+
+
+def _recap_end(text: str, end: int) -> int:
+    """Where the WL/LEXIS citation whose number ends at *end* ends: past its
+    star-page pin cite and its court/date parenthetical, when it has them."""
+    pin = _RECAP_PIN_RE.match(text, end)
+    if pin:
+        end = pin.end()
+    paren = _COURT_YEAR_PAREN_RE.match(text, end)
+    return paren.end() if paren else end
+
+
+def _recap_name(text: str, cite_start: int, italic=None) -> str:
+    """The caption of the case whose unpublished opinion is cited at
+    *cite_start* — the WL number, or the "No." of a docket-only cite — for
+    the viewer's window title and, when the citation prints no docket, as the
+    RECAP search key itself; ``""`` when none is printed there.
+
+    Read back from the citation the way a reporter cite's name is (see
+    :func:`_case_name_start`), past any docket number between them: "…in
+    Hoffman v. Board of Regents …, No. 23-cv-853-jdp, 2025 WL 1504376" names
+    Hoffman v. Board of Regents, not the prose before it or the case cited
+    before it in a string cite.  Only a whole caption is a name here: a short
+    form's lone party ("Hoffman, 2025 WL 1504376") keys no search."""
+    start = _case_name_start(text, cite_start, 0, italic)
+    if start is None:
+        return ""
+    head = re.sub(r",\s*$", "", text[start:cite_start])
+    docket = _DOCKET_AFTER_NAME_RE.search(head)
+    if docket:
+        head = head[:docket.start()]
+    name = _clean_case_name(re.sub(r"\s+", " ", head))
+    return name if _CAPTION_RE.search(name) else ""
 
 
 def _clean_case_name(raw: str) -> str:
@@ -1734,7 +2043,9 @@ for _map in (court_catalog.CIRCUIT_COURTS, court_catalog.DISTRICT_COURTS,
         _FED_COURT_IDS[re.sub(r"[^a-z0-9]", "", _abbr.lower())] = _cid
 
 
-def iter_recap_cites(text: str) -> list[tuple[int, int, "str | None"]]:
+def iter_recap_cites(
+    text: str, italic=None,
+) -> list[tuple[int, int, "str | None"]]:
     """Every WL / LEXIS citation in *text* as ``(start, end, spec)``.
 
     ``spec`` is a JSON string with the fields a RECAP lookup needs —
@@ -1745,7 +2056,9 @@ def iter_recap_cites(text: str) -> list[tuple[int, int, "str | None"]]:
     an ordinary case citation.  A docket number is the preferred key, but
     a citation printing none at all — "Pecos River Talc LLC v. Emory,
     2025 WL 1249947 (E.D. Va. Apr. 30, 2025)" — still resolves when the
-    case name, federal court and date are all present."""
+    case name, federal court and date are all present.  The name is the
+    first whole caption printed before any occurrence (see
+    :func:`_recap_name`; *italic* as for :func:`detect_links`)."""
     index: dict = {}
     occurrences: list = []
     for m in WL_CITE_RE.finditer(text or ""):
@@ -1756,15 +2069,10 @@ def iter_recap_cites(text: str) -> list[tuple[int, int, "str | None"]]:
         dm = _RECAP_DOCKET_RE.search(before)
         if dm:
             info.setdefault("docket", dm.group(1).strip())
-            nm = _RECAP_NAME_RE.search(before)
-        else:
-            # No docket printed — the case name running right up to the
-            # cite can key the RECAP lookup instead.
-            nm = _RECAP_NAME_END_RE.search(before)
-        if nm:
-            name = _clean_case_name(nm.group(1))
+        if "name" not in info:
+            name = _recap_name(text, m.start(), italic)
             if name:
-                info.setdefault("name", name)
+                info["name"] = name
         am = _RECAP_AFTER_RE.match(
             re.sub(r"\s+", " ", text[m.end():m.end() + 180]))
         if am:
@@ -1835,7 +2143,9 @@ def docket_numbers_in(text: str) -> list[str]:
     return out
 
 
-def iter_docket_cites(text: str) -> list[tuple[int, int, str]]:
+def iter_docket_cites(
+    text: str, italic=None,
+) -> list[tuple[int, int, str]]:
     """Slip opinions cited by docket number with no WL/LEXIS number at all —
     "Peninsula Pathology Assocs. v. Am. Int'l Indus., No. 23-1971 (4th Cir.
     Feb. 12, 2024)" — as ``(start, end, spec)`` RECAP actions, spanning the
@@ -1854,14 +2164,69 @@ def iter_docket_cites(text: str) -> list[tuple[int, int, str]]:
         fields = {"docket": m.group(1).strip(),
                   "date": f"{m.group(6)}-{mon:02d}-{int(m.group(5)):02d}",
                   "court": court_id}
-        before = re.sub(r"\s+", " ", text[max(0, m.start() - 260):m.start()])
-        nm = _RECAP_NAME_END_RE.search(before)
-        if nm:
-            name = _clean_case_name(nm.group(1))
-            if name:
-                fields["name"] = name
+        name = _recap_name(text, m.start(), italic)
+        if name:
+            fields["name"] = name
         out.append((m.start(), m.end(), json.dumps(fields)))
     return out
+
+
+# A later cite of a Supreme Court decision by its slip opinion's page, the
+# case named just before it: "Trump v. California, slip op. at 2".
+_SLIP_OP_SHORT_RE = re.compile(
+    r"slip\s+op\.,?\s+at\s+\d{1,4}(?:\s*[-–—]\s*\d{1,4})?(?!\d)")
+
+
+def iter_scotus_docket_cites(
+    text: str, italic=None,
+) -> list[tuple[int, int, str]]:
+    """Supreme Court decisions cited by docket number rather than by volume
+    and page — an order on an emergency application, or an opinion not yet in
+    the U.S. Reports: "Trump v. California, No. 26A139, slip op. at 4 (U.S.
+    Aug. 24, 2026)".  "(U.S. …)" is the Bluebook's name for the Court in a
+    court/date parenthetical; the date is the decision's.
+
+    Returns ``(start, end, spec)`` in document order: each such citation from
+    its "No." through the parenthetical, and each later short form that names
+    the case and pins its slip opinion ("Trump v. California, slip op. at 2")
+    from "slip op." on — the caller grows either back over the case name.
+    ``spec`` is JSON with the ``docket``, the decision ``date`` (ISO) and the
+    case ``name`` where one is printed, the same for every cite of a docket
+    (from its first).  A short form whose name matches no such citation, or
+    more than one, is not read.
+    """
+    text = text or ""
+    found: list = []                # (start, end, docket)
+    dockets: dict[str, dict] = {}   # docket → spec fields, from its first cite
+    parties: dict[str, set] = {}    # docket → every name's words
+    for m in _DOCKET_CITE_RE.finditer(text):
+        if re.sub(r"[^a-z0-9]", "", m.group(3).lower()) != "us":
+            continue  # not the Supreme Court — see iter_docket_cites
+        docket = re.sub(r"[‐-―−]", "-", m.group(1).strip()).upper()
+        mon = _MONTHS.get(m.group(4)[:3].lower())
+        if not mon or not _SCOTUS_DOCKET_NUMBER_RE.fullmatch(docket):
+            continue
+        fields = dockets.setdefault(docket, {
+            "docket": docket,
+            "date": f"{m.group(6)}-{mon:02d}-{int(m.group(5)):02d}",
+        })
+        name_start = _case_name_start(text, m.start(), 0, italic)
+        if name_start is not None:
+            name = re.sub(r"\s+", " ", text[name_start:m.start()]).strip(" ,")
+            fields.setdefault("name", name)
+            parties.setdefault(docket, set()).update(_name_words(name))
+        found.append((m.start(), m.end(), docket))
+    for m in _SLIP_OP_SHORT_RE.finditer(text):
+        if any(s <= m.start() < e for s, e, _d in found):
+            continue  # the pin of a full citation, read with it
+        name_start = _case_name_start(text, m.start(), 0, italic)
+        if name_start is None:
+            continue
+        words = _name_words(text[name_start:m.start()])
+        hits = [d for d, ws in parties.items() if words and words <= ws]
+        if len(hits) == 1:
+            found.append((m.start(), m.end(), hits[0]))
+    return [(s, e, json.dumps(dockets[d])) for s, e, d in sorted(found)]
 
 
 # ---------------------------------------------------------------------------
@@ -1931,11 +2296,16 @@ def _id_antecedent(
     first page, the page belongs to some earlier authority, so the one before
     is tried, and so on.
 
-    *recent* is the citations seen so far as ``(action, end)``, oldest first.
-    *unlinkable* holds the spans of authorities that were recognised but
-    deliberately not linked — a law review, an Attorney General opinion.  An
-    "Id." after one of those refers to *it*, so it must not reach past one to
-    an earlier authority and cite the wrong source.
+    *recent* is the citations seen so far as ``(action, end, start)``, oldest
+    first.  *unlinkable* holds the spans of authorities that were recognised
+    but deliberately not linked — a law review, an Attorney General opinion.
+    An "Id." after one of those refers to *it*, so it must not reach past one
+    to an earlier authority and cite the wrong source.
+
+    A case cited in parallel — "536 U.S. 101, 122 S.Ct. 2061, 153 L.Ed.2d
+    106 (2002)" — is one authority in three reporters, and the pin reads
+    against the first of them that can hold the page (see
+    :func:`_parallel_lead`), not the last merely for being nearest.
 
     *notes* carries a footnote pinpoint written after the page ("Id., at 13
     n.4"); it rides into the returned action's pin so the link opens the note.
@@ -1944,7 +2314,9 @@ def _id_antecedent(
     """
     if pin is None:
         return None  # a bare "Id." names no page, and is never linked
-    for action, end in reversed(recent[-ID_LOOKBACK:]):
+    window = recent[-ID_LOOKBACK:]
+    for k in range(len(window) - 1, -1, -1):
+        action, end = window[k][0], window[k][1]
         gap = len(text[end:start].strip())
         if gap > ID_FAR_GAP:
             break
@@ -1955,8 +2327,8 @@ def _id_antecedent(
             continue  # unpaginated — "at N" cannot be pointing here
         if action[0] == "cite":
             if _id_pin_in_range(action[1], pin):
-                return ("cite",
-                        f"{action[1]}@{join_note_pin(pin, notes or [])}")
+                lead = _parallel_lead(text, window, k, pin)
+                return ("cite", f"{lead}@{join_note_pin(pin, notes or [])}")
             continue  # that reporter has no such page — look further back
         if action[0] in ("statpdf", "frpdf"):
             # Both official serials are paginated, so the same test applies.
@@ -1973,6 +2345,207 @@ def _id_antecedent(
     return None
 
 
+def _parallel_lead(text: str, window: list, k: int, pin: str) -> str:
+    """The reporter an "Id." pin reads against, of the parallel citations
+    ending with ``window[k]``: the first of them whose reporter can hold the
+    page.  Citations are parallel when nothing but a comma stands between
+    them.  Turley v. Rednour, 729 F.3d 645, 652 (7th Cir. 2013), follows
+    "Morgan, 536 U.S. 101, 122 S.Ct. 2061, 153 L.Ed.2d 106 (2002)" with "Id.
+    at 115": that is 536 U.S. at 115 — the page the U.S. Reports scan the
+    link opens can go to — though L. Ed. could hold a page 115 as well."""
+    first = k
+    while first > 0 and window[first - 1][0][0] == "cite":
+        prev_end, this_start = window[first - 1][1], window[first][2]
+        if not re.fullmatch(r"\s*,\s*", text[prev_end:this_start]):
+            break
+        first -= 1
+    for j in range(first, k):
+        if _id_pin_in_range(window[j][0][1], pin):
+            return window[j][0][1]
+    return window[k][0][1]
+
+
+_FOOTNOTE_MARKS_AS_SPACES = str.maketrans(
+    {mark: " " for mark in "⁰¹²³⁴⁵⁶⁷⁸⁹"})
+
+
+def without_footnote_marks(text: str) -> str:
+    """*text* with its superscript digits — footnote marks, as a brief's text
+    carries them ("injury.⁴", "183⁵") — read as spaces.
+
+    No citation has one in it, and left in, one hides where a citation ends:
+    a superscript digit is a word character, so "183⁵" has no page 183 in it
+    to find.  One character for one, so offsets into the result are offsets
+    into *text*."""
+    return (text or "").translate(_FOOTNOTE_MARKS_AS_SPACES)
+
+
+# ---------------------------------------------------------------------------
+# Page furniture
+# ---------------------------------------------------------------------------
+# A filed brief carries the court's e-filing stamp on every page — "Case:
+# 26-1507 Document: 11 Filed: 05/01/2026 Pages: 87", "Case: 3:24-cv-00161-jdp
+# Document #: 73 Filed: 02/20/26 Page 1 of 8" — besides its own page number.
+# Text read page by page runs both into whatever sentence crosses the page
+# break, so a citation broken there reads "Luder v. Endicott, 253 Case: 26-1507
+# Document: 11 Filed: 05/01/2026 Pages: 87 20 F.3d 1020": the volume cut off
+# from its reporter, and the page number taken for the volume.  Detection
+# reads the furniture as spaces.
+
+# The fields after "Case … Document …", in whatever order a court prints them:
+# the filing date, the page ("Page 1 of 8", "Pages: 87", "Page: 3"), a PageID
+# or Entry ID, a bare date or a long document number (the Second Circuit's).
+_ECF_FIELD = (
+    r"(?:(?:Date\s+)?Filed\s*:?\s*\d{1,2}/\d{1,2}/\d{2,4}"
+    r"|Pages?\s*:?\s*\d{1,5}(?:\s+of\s+\d{1,5})?"
+    r"|Page\s*ID\s*#?\s*:?\s*\d{1,9}"
+    r"|Entry\s+ID\s*:?\s*\d{1,12}"
+    r"|\d{1,2}/\d{1,2}/\d{4}|\d{6,14})")
+_ECF_STAMP_RE = re.compile(
+    r"(?:USCA\d{0,2}[ \t]+|Appellate[ \t]+)?Case[ \t]*[:#]?[ \t]*#?[ \t]*"
+    r"[\w:.\-]{2,40},?[ \t]+Document[ \t]*[:#]?[ \t]*#?[ \t]*:?[ \t]*"
+    r"[\w\-]{1,20},?(?:[ \t]*,?[ \t]*" + _ECF_FIELD + r",?)+"
+    # The Ninth Circuit's names no document: "Case: 19-35678, 07/10/2020,
+    # ID: 11747321, DktEntry: 25, Page 3 of 40".
+    r"|Case:[ \t]*\d{2}-\d{3,6},[ \t]*\d{1,2}/\d{1,2}/\d{4},[ \t]*"
+    r"ID:[ \t]*\d{4,12},[ \t]*DktEntry:[ \t]*[\d.\-]{1,10},[ \t]*"
+    r"Page[ \t]*\d{1,5}(?:[ \t]+of[ \t]+\d{1,5})?")
+
+# A page number standing alone on its line: "20", "iv", "- 7 -".
+_PAGE_NUMBER_LINE_RE = re.compile(
+    r"[ \t]*[-–—]?[ \t]*"
+    r"(?:\d{1,4}|(?=[ivxlc])c{0,3}(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))"
+    r"[ \t]*[-–—]?[ \t]*\r?")
+
+# A U.S. Reports page opens on a two-line running head, and a citation broken
+# across the page runs through it: "…of various searches. 433 / CALIFORNIA v.
+# ACEVEDO / 565 Opinion of the Court / U. S., at 22" (500 U.S. at 574-575).
+# The first line is the term ("132 OCTOBER TERM, 1924.") on a left-hand page,
+# the case in capitals ("CARROLL v. UNITED STATES. 133", "386 WALLACE v.
+# KATO") or the preliminary print's "Cite as: 549 U. S. 384 (2007) 385" on a
+# right-hand one; the second names the part in the Reports' own words ("132
+# Syllabus.", "Opinion of the Court 433 U. S.", "SCALIA, J., concurring in
+# judgment").  Only the pair together is a head, which keeps a brief's first
+# line out of it.  GovInfo's volumes carry the printer's slug above it all.
+_US_TERM_HEAD_RE = re.compile(
+    r"[ \t]*(?:\d{1,4}[ \t]+)?[A-Z]+[ \t]+TERM,[ \t]*\d{4}\.?"
+    r"(?:[ \t]+\d{1,4})?[ \t]*\r?")
+_US_CITE_AS_HEAD_RE = re.compile(
+    r"[ \t]*Cite[ \t]+as[ \t]*:[ \t]*\d{1,4}[ \t]+U\.[ \t]?S\.[ \t]+"
+    r"(?:\d{1,5}|_{2,})(?:[ \t]*\([ \t]*\d{4}[ \t]*\))?(?:[ \t]+\d{1,4})?"
+    r"[ \t]*\r?", re.IGNORECASE)
+_US_HEAD_PART_RE = re.compile(
+    r"[ \t]*(?:\d{1,4}[ \t]+)?"
+    r"(?:Syllabus|Opinion|Statement|Argument|Per[ \t]+Curiam|Counsel"
+    r"|Appendix|Separate|Memorandum|Order|Dissent|Concur|Reporter|Decree"
+    r"|[A-Z][A-Za-z'’]+,[ \t]*(?:C\.[ \t]*)?J\.)"
+    r"[A-Za-z.,'’&\- \t]{0,70}?(?:[ \t]+\d{1,4}[ \t]+U\.[ \t]?S\.)?[ \t]*\r?")
+_GPO_SLUG_RE = re.compile(r"[ \t]*\d{1,4}US\d*[ \t]+Unit:[^\n]*PGT:[^\n]*")
+
+
+def _caps_case_head(line: str) -> bool:
+    """Whether *line* is a case named in capitals, as a U.S. Reports running
+    head sets it — "UNITED STATES v. CHADWICK", "CARROLL v. UNITED STATES.
+    133" — its page number either side of it or not."""
+    name = re.sub(r"^\s*\d{1,4}\s+|\s+\d{1,4}\s*$", "", line).strip()
+    if not 5 <= len(name) <= 90:
+        return False
+    if not re.search(r"\sv\.\s", name) and not re.match(
+            r"(?:IN RE|EX PARTE)\b", name):
+        return False
+    rest = re.sub(r"\b(?:v|ex rel|et al)\.", "", name)
+    return (not re.search(r"[a-z]", rest)
+            and len(re.findall(r"[A-Z]", rest)) >= 3)
+
+
+def _us_reports_head(page: str, lines: list) -> "list[tuple[int, int]]":
+    """The running head among a U.S. Reports page's first *lines* (``(start,
+    end)`` spans of *page*), and GovInfo's slug above it — or nothing."""
+    first = lines[:4]
+    out: list = []
+    k = 0
+    if first and _GPO_SLUG_RE.fullmatch(page, *first[0]):
+        out.append(first[0])
+        k = 1
+    if k < len(first) and _PAGE_NUMBER_LINE_RE.fullmatch(page, *first[k]):
+        k += 1      # a lone page number set first (taken by the rule above)
+    if k + 1 < len(first):
+        (s1, e1), (s2, e2) = first[k], first[k + 1]
+        top = page[s1:e1]
+        if ((_US_TERM_HEAD_RE.fullmatch(top)
+             or _US_CITE_AS_HEAD_RE.fullmatch(top)
+             or _caps_case_head(top))
+                and _US_HEAD_PART_RE.fullmatch(page, s2, e2)):
+            out += [(s1, e1), (s2, e2)]
+    return out
+
+
+def _blank(text: str, spans) -> str:
+    """*text* with the characters in *spans* read as spaces, its line breaks
+    kept."""
+    if not spans:
+        return text
+    chars = list(text)
+    for start, end in spans:
+        for i in range(start, end):
+            if not chars[i].isspace():
+                chars[i] = " "
+    return "".join(chars)
+
+
+def _lines(text: str) -> "list[tuple[int, int]]":
+    """``(start, end)`` of each line of *text*, its "\\n" left out."""
+    out: list = []
+    start = 0
+    for m in re.finditer(r"\n", text):
+        out.append((start, m.start()))
+        start = m.end()
+    out.append((start, len(text)))
+    return out
+
+
+def page_furniture(page: str) -> "list[tuple[int, int]]":
+    """Spans of one page's text that are its furniture rather than its
+    matter: an e-filing stamp wherever it stands, a page number standing
+    alone on the page's first or last line of text, and a U.S. Reports
+    running head (see :func:`_us_reports_head`)."""
+    spans = [(m.start(), m.end()) for m in _ECF_STAMP_RE.finditer(page)]
+    plain = _blank(page, spans)
+    lines = [(s, e) for s, e in _lines(plain) if plain[s:e].strip()]
+    for s, e in lines[:1] + lines[-1:]:
+        if _PAGE_NUMBER_LINE_RE.fullmatch(plain, s, e):
+            spans.append((s, e))
+    spans.extend(_us_reports_head(plain, lines))
+    return spans
+
+
+def without_page_furniture(text: str) -> str:
+    """*text* — a whole document, its pages run together — with its page
+    furniture read as spaces, one character for one: every e-filing stamp,
+    and each page number standing alone on a line beside a blank line or a
+    stamp, which is where a page break falls in text read page by page."""
+    if "Case" not in text and not re.search(r"\n[ \t\r]*\n", text):
+        return text
+    spans = [(m.start(), m.end()) for m in _ECF_STAMP_RE.finditer(text)]
+    plain = _blank(text, spans)
+    lines = _lines(plain)
+    blank_line = [not plain[s:e].strip() for s, e in lines]
+    for i, (s, e) in enumerate(lines):
+        if blank_line[i] or not _PAGE_NUMBER_LINE_RE.fullmatch(plain, s, e):
+            continue
+        if ((i > 0 and blank_line[i - 1])
+                or (i + 1 < len(lines) and blank_line[i + 1])):
+            spans.append((s, e))
+    return _blank(text, spans)
+
+
+def scan_text(text: str) -> str:
+    """*text* as citation detection reads it: footnote marks and page
+    furniture as spaces, one character for one, so offsets into the result
+    are offsets into *text*."""
+    return without_page_furniture(without_footnote_marks(text))
+
+
 def detect_links(
     text: str, *, italic=None,
 ) -> list[tuple[int, int, tuple[str, str]]]:
@@ -1985,7 +2558,9 @@ def detect_links(
       * ``("usc"|"cfr"|"rule"|"const"|"statestat", spec)`` — an in-app source,
       * ``("browse", url)`` — a state statute we only link out to,
       * ``("statpdf", url)`` — a Statutes at Large scan,
-      * ``("frpdf", url)`` — a Federal Register scan.
+      * ``("frpdf", url)`` — a Federal Register scan,
+      * ``("scotus", spec)`` — a Supreme Court decision cited by docket
+        number (see :func:`iter_scotus_docket_cites`).
 
     Unlike the opinion reader this works over the whole document at once, so a
     short form ("410 U.S. at 152") or an ``Id.`` resolves against citations that
@@ -1997,6 +2572,7 @@ def detect_links(
     """
     if not text:
         return []
+    text = scan_text(text)
     # Only usable when the document actually carries styling: a scan's OCR
     # layer has none, and gating on it would then drop every case name.
     if italic is not None and not any(italic):
@@ -2012,7 +2588,13 @@ def detect_links(
         (m.start(), m.end()) for m in BROAD_CITE_CAPTURE_RE.finditer(text)
         if not _valid_case_reporter(m.group(2)) and "&" not in m.group(2)
     ]
-    index = build_short_cite_index(text)
+    case_cites = _iter_case_cites(text)
+    named = _names_of(text, case_cites, italic)
+    # A short form written without its "at" opens the case it pins into, and
+    # is no first page for the short forms after it to resolve against.
+    at_less = _at_less_pins(text, named)
+    index = _index_first_pages(
+        [m for m in case_cites if m.start() not in at_less])
     matches: list[tuple[int, int, str, object]] = []
     # English Reports citations first — the reprint form ("156 Eng. Rep.
     # 145"), its short form ("156 Eng. Rep., at 151") and the original
@@ -2028,7 +2610,7 @@ def detect_links(
     # the rest become ordinary case cites (Scholar), including the 7-digit
     # WL numbers the broad reporter regex's page group won't match.
     recap_spans: list[tuple[int, int]] = []
-    for start, end, spec in iter_recap_cites(text):
+    for start, end, spec in iter_recap_cites(text, italic):
         recap_spans.append((start, end))
         if spec is not None:
             matches.append((start, end, "recap", spec))
@@ -2037,11 +2619,19 @@ def detect_links(
             matches.append((start, end, "cite", cite))
     # Slip opinions cited by docket number alone (no WL/LEXIS number) are
     # RECAP lookups too — "No. 23-1971 (4th Cir. Feb. 12, 2024)".
-    for start, end, spec in iter_docket_cites(text):
+    for start, end, spec in iter_docket_cites(text, italic):
         if any(start < e and s < end for s, e in recap_spans):
             continue
         recap_spans.append((start, end))
         matches.append((start, end, "recap", spec))
+    # A Supreme Court decision cited by docket number — "Trump v. California,
+    # No. 26A139, slip op. at 4 (U.S. Aug. 24, 2026)" — and its later "slip
+    # op. at N" short forms open the decision from the Court itself.
+    for start, end, spec in iter_scotus_docket_cites(text, italic):
+        if any(start < e and s < end for s, e in recap_spans):
+            continue
+        recap_spans.append((start, end))
+        matches.append((start, end, "scotus", spec))
     # Federal Cases cited by case number ("Cole v. The Atlantic, Case No.
     # 2,976"; chained "The Chusan, Id. 2,717") — resolved at click time
     # through the CourtListener API by the printed name and the number.
@@ -2079,7 +2669,7 @@ def detect_links(
         engrep_spans + recap_spans + fedcas_spans + efed_spans
         + stat_spans + fr_spans
     )
-    for m in _iter_case_cites(text):
+    for m in case_cites:
         if any(m.start() < e and s < m.end() for s, e in claimed_spans):
             continue
         matches.append((m.start(), m.end(), "cite", m))
@@ -2105,6 +2695,10 @@ def detect_links(
             m.group(1), reporter_key(m.group(2)),
         ))
         if not pages:
+            # A case the document never cites in full — or cites under a
+            # mistyped volume ("588 U.S. at 190" for 558) — is still the
+            # authority a following "id." means, so it stops the chain.
+            unlinkable.append((m.start(), m.end()))
             continue
         pin = int(m.group(3))
         below = [p for p in pages if p <= pin]
@@ -2115,6 +2709,14 @@ def detect_links(
         if pin != first or notes:
             cite += "@" + join_note_pin(str(pin), notes)
         matches.append((m.start(), m.end(), "shortcite", cite))
+    # Short forms naming the case but not its reporter: "Nken, at 433-34".
+    # One whose name answers to no case, or to several — an article's
+    # author, "Bray, …, at 225" — is an authority all the same.
+    for start, end, cite in _name_at_cites(text, named, italic):
+        if cite:
+            matches.append((start, end, "shortcite", cite))
+        else:
+            unlinkable.append((start, end))
     for m in ID_CITE_RE.finditer(text):
         matches.append((m.start(), m.end(), "idcite", m))
     for c in state_statutes.iter_cites(text):
@@ -2129,9 +2731,9 @@ def detect_links(
                   for hm in RUNNING_HEAD_CITE_RE.finditer(text)]
     out: list[tuple[int, int, tuple[str, str]]] = []
     pos = 0
-    # Every citation linked so far as (action, end), oldest first — an "Id."
-    # may have to look past the nearest one to find what it means.
-    recent: list[tuple[tuple[str, str], int]] = []
+    # Every citation linked so far as (action, end, start), oldest first — an
+    # "Id." may have to look past the nearest one to find what it means.
+    recent: list[tuple[tuple[str, str], int, int]] = []
     last_cite_end: int | None = None
     const_linked: set[int] = set()  # amendments already linked (prose dedup)
     for start, end, kind, m in matches:
@@ -2141,7 +2743,17 @@ def detect_links(
             continue  # the reporter's running head, not a citation to follow
         action: tuple[str, str] | None
         cite_base = ""
-        if kind == "cite":
+        at_less_first = (at_less.get(start)
+                         if kind == "cite" and not isinstance(m, str) else None)
+        if at_less_first is not None:
+            # "Wilcox, 145 S. Ct. 1417": the page is a pin into the case.
+            rep = re.sub(r"\s+", " ", m.group(2)).strip().replace(
+                "U. S.", "U.S.")
+            cite_base = f"{m.group(1)} {rep} {at_less_first}"
+            notes, _end = note_pin_after_page(text, end)
+            action = ("cite",
+                      f"{cite_base}@{join_note_pin(m.group(3), notes)}")
+        elif kind == "cite":
             # m is a regex match for reporter cites, a pre-normalized string
             # for the WL/LEXIS cites added by the RECAP pass.
             cite = m if isinstance(m, str) else _case_match_text(m)
@@ -2152,6 +2764,8 @@ def detect_links(
             action = ("cite", cite)
         elif kind == "recap":
             action = ("recap", m)  # m is the pre-built JSON spec
+        elif kind == "scotus":
+            action = ("scotus", m)  # m is the pre-built JSON spec
         elif kind == "usc":
             action = ("usc", us_code.cite_spec(m))
         elif kind == "cfr":
@@ -2218,18 +2832,20 @@ def detect_links(
             # does — "id., at 675, 681-683, 693" is three of them — so it is
             # split alongside them.  It has no name to find.
             id_pages = kind == "idcite" and action[0] == "cite"
+            # A case name may not reach back past anything already linked, or
+            # past a running head.
+            floor = pos
+            for hs, he in head_spans:
+                if he <= start:
+                    floor = max(floor, he)
             if kind in ("cite", "shortcite") or id_pages:
                 # Blue the citation the reader sees, not just the reporter
-                # fragment the regex matched.  The name may not reach back past
-                # anything already linked, or past a running head.
-                floor = pos
-                for hs, he in head_spans:
-                    if he <= start:
-                        floor = max(floor, he)
+                # fragment the regex matched.
                 base = action[1].split("@")[0] if id_pages else cite_base
                 segments = _case_cite_spans(
                     text, start, end, floor,
-                    short=(kind in ("shortcite", "idcite")),
+                    short=(kind in ("shortcite", "idcite")
+                           or at_less_first is not None),
                     italic=italic, with_name=not id_pages,
                 )
                 for seg_start, seg_end, seg_pin in segments:
@@ -2242,12 +2858,23 @@ def detect_links(
                 # An Id. is itself the nearest antecedent for a following Id.,
                 # but retain the clean reporter cite rather than its @pin
                 # action so a chain never becomes "base@23@24".
-                recent.append((("cite", base), span_end))
+                recent.append((("cite", base), span_end, segments[0][0]))
             else:
-                out.append((start, end, action))
+                span_start = start
+                if kind in ("scotus", "recap"):
+                    # A decision cited by docket or WL number is named like
+                    # any other — "Trump v. California, No. 26A139 (…)",
+                    # "Hoffman, 2025 WL 1504376, at *4" — and the link takes
+                    # the name in, and a WL cite's pin and parenthetical.
+                    name_start = _case_name_start(text, start, floor, italic)
+                    if name_start is not None:
+                        span_start = name_start
+                    if kind == "recap":
+                        span_end = _recap_end(text, end)
+                out.append((span_start, span_end, action))
                 # Non-case Id. chains (to a statute, rule, or regulation) are
                 # safe too: their action has no pin suffix to accumulate.
-                recent.append((action, span_end))
+                recent.append((action, span_end, span_start))
             last_cite_end = span_end
             pos = span_end
             continue

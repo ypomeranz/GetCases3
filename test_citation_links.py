@@ -58,6 +58,58 @@ class RunningHeadTests(unittest.TestCase):
                             ("cite", "534 U.S. 266@277"))])
 
 
+def _across_pages(*pages: str) -> str:
+    """The pages as the PDF viewer scans them: each page's furniture read as
+    spaces, and the pages run together with a line break between."""
+    return "\n".join(
+        citations._blank(p, citations.page_furniture(p)) for p in pages)
+
+
+class ReportsRunningHeadTests(unittest.TestCase):
+    """A citation broken across a U.S. Reports page runs through the next
+    page's running head, which is furniture, not text."""
+
+    def test_a_short_form_broken_across_a_recto_head(self):
+        # California v. Acevedo, 500 U.S. at 574-575.
+        text = _across_pages(
+            "Chadwick, 433 U. S. 1 (1977). It was said to \"control the "
+            "outcome\" of various searches. 433",
+            "CALIFORNIA v. ACEVEDO\r\n565 Opinion of the Court\r\n"
+            "U. S., at 22. The rule also was so confusing")
+        self.assertEqual(
+            [a for _s, _e, a in detect_links(text)][-1],
+            ("cite", "433 U.S. 1@22"))
+
+    def test_a_full_cite_broken_across_a_verso_head(self):
+        text = _across_pages(
+            "have added at least two more. California v. Carney, 471",
+            "OCTOBER TERM, 1990\r\nSCALIA, J., concurring in judgment "
+            "500 U. S.\r\nU. S. 386 (1985) (searches of mobile homes);")
+        self.assertIn(("cite", "471 U.S. 386"),
+                      [a for _s, _e, a in detect_links(text)])
+
+    def test_the_head_is_never_read_as_a_citation(self):
+        # "500 U. S." ends the head; the next page may open on a number.
+        text = _across_pages(
+            "the automobile.",
+            "OCTOBER TERM, 1990\r\nOpinion of the Court 500 U. S.\r\n"
+            "567 persons were stopped")
+        self.assertEqual(detect_links(text), [])
+
+    def test_govinfo_slug_and_cite_as_head(self):
+        page = ("549US2 Unit: $U19 [03-28-10 12:27:20] PAGES PGT: OPIN\r\n"
+                "Cite as: 549 U. S. 384 (2007) 387 \r\n"
+                "Opinion of the Court \r\n"
+                "U. S. 261, 276 (1985). The claim accrued")
+        text = _across_pages("under Wilson v. Garcia, 471", page)
+        self.assertIn(("cite", "471 U.S. 261@276"),
+                      [a for _s, _e, a in detect_links(text)])
+
+    def test_a_brief_header_over_prose_is_not_a_head(self):
+        page = "SMITH v. JONES\r\nSee Carroll v. United States,\r\n267 U.S. 132"
+        self.assertEqual(citations.page_furniture(page), [])
+
+
 class CaseCiteSpanTests(unittest.TestCase):
     """Blue covers the citation a reader sees, not the reporter fragment."""
 
@@ -75,9 +127,45 @@ class CaseCiteSpanTests(unittest.TestCase):
             _spans(text)[0][0],
             "Ortberg v. United States, 81 A. 3d 303, 308 (D. C. 2013)")
 
+    def test_a_name_starts_after_the_semicolon_before_it(self):
+        # California v. Acevedo, 500 U.S. at 582 (Scalia, J.): "Chimel" is
+        # the case cited just before — clicked, it opened Coolidge.
+        text = ("See generally Chimel v. California, 395 U. S. 752 (1969). "
+                "See Chimel; Coolidge v. New Hampshire, 403 U. S. 443 (1971).")
+        self.assertEqual(
+            _spans(text)[-1],
+            ("Coolidge v. New Hampshire, 403 U. S. 443 (1971)",
+             ("cite", "403 U.S. 443")))
+
+    def test_a_signal_hyphenated_at_a_line_end_is_still_a_signal(self):
+        # The scan's text layer marks the break inside "Com-pare" with U+FFFE.
+        text = ("searches of structures.) Com\ufffepare Harris v. United "
+                "States, 331 U. S. 145 (1947), with Johnson")
+        self.assertEqual(
+            _spans(text)[0][0], "Harris v. United States, 331 U. S. 145 (1947)")
+
+    def test_a_footnote_number_run_into_the_name_is_not_the_name(self):
+        text = ('of the search or seizure."\r\n12Illinois v. Rodriguez, '
+                "497 U. S. 177 (1990); Florida v. Wells, 495 U. S. 1 (1990)")
+        self.assertEqual(
+            [s for s, _a in _spans(text)],
+            ["Illinois v. Rodriguez, 497 U. S. 177 (1990)",
+             "Florida v. Wells, 495 U. S. 1 (1990)"])
+
     def test_explanatory_parenthetical_is_excluded(self):
         text = "Pringle, 540 U.S. 366, 372 (2003) (holding that totality controls)."
         self.assertEqual(_spans(text)[0][0], "Pringle, 540 U.S. 366, 372 (2003)")
+
+    def test_a_docket_number_before_the_cite_is_part_of_it(self):
+        # The number is no name: the name is the caption before it.
+        text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3, "
+                "2008 WL 465653 (N.J. Super. Ct. App. Div. Feb. 22, 2008) is "
+                "a state case.")
+        self.assertEqual(
+            _spans(text),
+            [("Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3, 2008 "
+              "WL 465653 (N.J. Super. Ct. App. Div. Feb. 22, 2008)",
+              ("cite", "2008 WL 465653"))])
 
     def test_multi_word_party_names(self):
         text = ("The Court in District of Columbia v. Wesby, 583 U. S. 48, 57 "
@@ -463,6 +551,49 @@ class TextOpinionLinkRangeTests(unittest.TestCase):
             self._local_links(block, links),
         )
 
+    def test_star_page_inside_a_cite_is_not_read_as_its_volume(self):
+        # California v. Acevedo, 500 U.S. 565, 582 (Scalia, J.): Scholar puts
+        # the star page between the volume and the reporter.  Read as text,
+        # "*583" became the volume and the link opened 583 U.S. 386.
+        block = SimpleNamespace(spans=[
+            SimpleNamespace(text="California", italic=True),
+            SimpleNamespace(text=" v. ", italic=False),
+            SimpleNamespace(text="Carney", italic=True),
+            SimpleNamespace(text=", 471 ", italic=False),
+            SimpleNamespace(text="*583", italic=False, pagenum=True),
+            SimpleNamespace(text=" U. S. 386 (1985) (searches of mobile "
+                                 "homes).", italic=False),
+        ])
+        part = SimpleNamespace(blocks=[block], footnotes=[])
+
+        links = self.detect_blocks([part])
+
+        self.assertEqual(
+            self._local_links(block, links),
+            [("California v. Carney, 471 *583 U. S. 386 (1985)",
+              ("cite", "471 U.S. 386"))],
+        )
+
+    def test_star_page_inside_a_short_form_keeps_its_pin(self):
+        # Acevedo, 500 U.S. at 575: "433 *575 U. S., at 22" is Chadwick at 22.
+        full = self._block(
+            ("United States v. Chadwick", True),
+            (", 433 U. S. 1 (1977).", False),
+        )
+        short = SimpleNamespace(spans=[
+            SimpleNamespace(text="various searches. 433 ", italic=False),
+            SimpleNamespace(text="*575", italic=False, pagenum=True),
+            SimpleNamespace(text=" U. S., at 22.", italic=False),
+        ])
+        part = SimpleNamespace(blocks=[full, short], footnotes=[])
+
+        links = self.detect_blocks([part])
+
+        self.assertEqual(
+            self._local_links(short, links),
+            [("433 *575 U. S., at 22", ("cite", "433 U.S. 1@22"))],
+        )
+
     def test_styled_full_cite_gets_pdf_style_pin_specific_ranges(self):
         block = self._block(
             ("Devenpeck v. Alford", True),
@@ -839,7 +970,15 @@ class ReporterSweepTests(unittest.TestCase):
         "U. Pa. L. Rev.", "Nw. U. L. Rev.", "Emory L.J.", "Tul. L. Rev.",
         "Vand. L. Rev.", "Wis. L. Rev.", "Ohio St. L.J.", "Ind. L.J.",
         "Am. Crim. L. Rev.", "J. Crim. L. & Criminology",
+        "Crim. L. Bull.", "Law & Contemp. Probs.",
     )
+
+    def test_an_article_named_for_a_case_is_not_that_case(self):
+        # California v. Acevedo, 500 U.S. at 581 n.* — the article's title
+        # names Ross; linked, the citation opened United States v. Ross.
+        text = ("Latzer, Searching Cars and Their Contents: United States "
+                "v. Ross, 18 Crim. L. Bull. 381 (1982). Id., at 385.")
+        self.assertEqual(_spans(text), [])
 
     def test_no_real_reporter_is_rejected(self):
         lost = [r for r in self.REPORTERS if not _valid_case_reporter(r)]
@@ -1033,6 +1172,34 @@ class IdChainTests(unittest.TestCase):
                 "United States v. Miller, 425 U. S. 435 (1976). Id., at 442.")
         self.assertEqual(_spans(text)[-1],
                          ("Id., at 442", ("cite", "425 U.S. 435@442")))
+
+    def test_id_after_parallel_cites_pins_the_first_reporter(self):
+        # Turley v. Rednour, 729 F.3d 645, 652 (7th Cir. 2013): 115 is a page
+        # of both 536 U.S. 101 and 153 L. Ed. 2d 106, but it is the U.S.
+        # Reports that the pin reads against — and whose scan the link opens.
+        text = ("National Railroad Passenger Corp. v. Morgan, 536 U.S. 101, "
+                "115-21, 122 S.Ct. 2061, 153 L.Ed.2d 106 (2002). Morgan "
+                "concerned the timeliness of a hostile work environment "
+                "claim. Id. at 115.")
+        self.assertEqual(_spans(text)[-1],
+                         ("Id. at 115", ("cite", "536 U.S. 101@115")))
+
+    def test_but_not_a_first_reporter_that_lacks_the_page(self):
+        # Manuel v. City of Joliet, 903 F.3d 667, 668 (7th Cir. 2018): "___
+        # U.S. ___" is no cite, and 920 is no page of 197 L. Ed. 2d 312.
+        text = ("Manuel v. Joliet, ___ U.S. ___, 137 S.Ct. 911, 197 L.Ed.2d "
+                "312 (2017). The Justices remanded the question whether "
+                "Manuel sued in time. Id. at 920-22.")
+        self.assertEqual(_spans(text)[-1],
+                         ("Id. at 920-22", ("cite", "137 S.Ct. 911@920")))
+
+    def test_subsequent_history_is_no_parallel_cite(self):
+        # The affirmance is an authority of its own, and the nearest: read as
+        # a parallel of 20 F.3d 50, the pin would have gone back to that.
+        text = ("Doe v. Roe, 20 F.3d 50, 55 (2d Cir. 1991), aff'd, 500 U.S. "
+                "10 (1992). The Court agreed. Id. at 55.")
+        self.assertEqual(_spans(text)[-1],
+                         ("Id. at 55", ("cite", "500 U.S. 10@55")))
 
     def test_id_survives_a_paragraph_of_discussion_of_that_case(self):
         text = ("United States v. Carpenter, 819 F. 3d 880 (CA6 2016). "

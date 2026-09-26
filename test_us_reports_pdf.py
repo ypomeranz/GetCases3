@@ -20,6 +20,7 @@ import typing
 import unittest
 from types import SimpleNamespace
 
+import brief_reader
 from court_catalog import STATE_COURTS
 
 try:
@@ -135,16 +136,20 @@ class PageProofPhraseTests(unittest.TestCase):
                 self.assertIsNone(NS["_PAGE_PROOF_RE"].search(text))
 
 
-def _minimal_pdf(*content_lines: str) -> bytes:
-    """A one-page PDF drawing each of *content_lines* as a line of text."""
+def _minimal_pdf(*content_lines: str,
+                 media_box=(0, 0, 612, 792)) -> bytes:
+    """A one-page PDF drawing each of *content_lines* as a line of text, the
+    first 92 pt below the top of *media_box*."""
+    top = media_box[3]
     stream = "\n".join(
-        f"BT /F1 12 Tf 72 {700 - 40 * i} Td ({line}) Tj ET"
+        f"BT /F1 12 Tf 72 {top - 92 - 40 * i:g} Td ({line}) Tj ET"
         for i, line in enumerate(content_lines)
     ).encode("latin-1")
+    box = " ".join(f"{v:g}" for v in media_box).encode("latin-1")
     objects = [
         b"<</Type/Catalog/Pages 2 0 R>>",
         b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
-        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]"
+        b"<</Type/Page/Parent 2 0 R/MediaBox[" + box + b"]"
         b"/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
         b"<</Length %d>>stream\n" % len(stream) + stream + b"\nendstream",
         b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
@@ -295,13 +300,17 @@ class LinkPipelineTests(unittest.TestCase):
         import citations
         cls.ns = _load(
             "_degenerate_ocr_metrics", "_page_has_repairable_ocr_text",
-            "_repair_degenerate_ocr_page",
+            "_repair_degenerate_ocr_page", "_PageSlants",
             "_union_line_runs", "_extract_pdf_text_and_style",
             "_extract_pdf_text_pages", "_citation_links_from_pages",
+            "_column_reading_order",
             "_page_has_scan_background", "_pdf_ocr_scan_pages",
             "_citation_links_from_visible_pdf_text",
             "_detect_pdf_citation_links",
             consts=("_FONT_FLAG_ITALIC",),
+            extra={"brief_reader": brief_reader,
+                   "_scan_text": citations.scan_text,
+                   "_page_furniture": citations.page_furniture},
         )
         cls.ns["detect_brief_links"] = citations.detect_links
         cls.pdf = _minimal_pdf("See Roe v. Wade, 410 U.S. 113, 152 (1973).")
@@ -311,6 +320,24 @@ class LinkPipelineTests(unittest.TestCase):
         self.assertEqual(len(pages), len(italics))
         for chars, slants in zip(pages, italics):
             self.assertEqual(len(chars), len(slants))
+
+    def test_glyph_boxes_count_from_the_corner_of_the_page(self):
+        # A Library of Congress scan's page box begins 3.84 pt up.  The viewer
+        # places a box on the rendered page as "height - top", so the same
+        # page drawn in a box that begins at 0 must read the same — otherwise
+        # every link sits 3.84 pt above its words.
+        line = "See Roe v. Wade, 410 U.S. 113, 152 (1973)."
+        flat = self.ns["_extract_pdf_text_pages"](
+            _minimal_pdf(line, media_box=(0, 0, 431.04, 648.96)))[0]
+        raised = self.ns["_extract_pdf_text_pages"](
+            _minimal_pdf(line, media_box=(0, 3.84, 431.04, 652.8)))[0]
+        self.assertEqual([ch for ch, _bx in flat], [ch for ch, _bx in raised])
+        for (ch, a), (_ch, b) in zip(flat, raised):
+            if a is None or b is None:
+                self.assertEqual(a, b)
+                continue
+            for u, v in zip(a, b):
+                self.assertAlmostEqual(u, v, places=2, msg=repr(ch))
 
     def test_the_one_value_extractor_still_returns_just_pages(self):
         pages = self.ns["_extract_pdf_text_pages"](self.pdf)
@@ -336,6 +363,114 @@ class LinkPipelineTests(unittest.TestCase):
         self.assertTrue(sum(len(v) for v in direct.values()))
 
 
+def _page_of_lines(rows) -> list:
+    """(char, box) for a page whose text layer reads each row straight
+    across: every row a list of (x, text) — or (x, text, glyph height) for
+    smaller type — glyphs 5 pt wide and 10 pt tall."""
+    chars: list = []
+    for r, row in enumerate(rows):
+        y = 700 - 14 * r
+        for j, (x0, text, *size) in enumerate(row):
+            h = size[0] if size else 10
+            if j:
+                chars.append((" ", None))
+            for k, ch in enumerate(text):
+                chars.append((ch, None if ch == " " else
+                              (x0 + 5 * k, y, x0 + 5 * k + 4.5, y + h)))
+        chars += [("\r", None), ("\n", None)]
+    return chars
+
+
+# Turley v. Rednour, 729 F.3d 645, 654 (7th Cir. 2013), as static.case.law's
+# scan reads: the left column's line, then the right column's, on one line.
+_TURLEY_LEFT = (
+    "what value additional safeguards", "would provide. Cf. Mathews v.",
+    "Eldridge, 424", "U.S. 319, 334-35 (1976). As Turley",
+    "had the opportunity for a remedy", "and his deprivation was not of a",
+    "type that would require a hearing", "his claim must fail on that point.",
+    "We reverse in part and affirm in", "part the judgment of the court.",
+    "Although I join the opinion, I", "think it helpful to elaborate.",
+)
+_TURLEY_RIGHT = (
+    "runs from each independently unlawful", "act or failure to act.",
+    "Deeds that are not themselves viola-", "tions of law become actionable",
+    "if they add up. This situation was", "addressed by the hostile-environ-",
+    "ment part of the opinion. One or two", "offensive remarks do not violate",
+    "the statute, but a cascade of them", "over the course of months may do",
+    "so, and the period for a claim of", "that kind runs from the last one.",
+)
+
+
+class ColumnOrderTests(unittest.TestCase):
+    """A two-column scan is read column by column, so a citation broken at a
+    line's end is not broken by the other column's line."""
+
+    @classmethod
+    def setUpClass(cls):
+        import citations
+        cls.ns = _load(
+            "_PageSlants", "_union_line_runs", "_column_reading_order",
+            "_citation_links_from_pages",
+            extra={"_scan_text": citations.scan_text,
+                   "_page_furniture": citations.page_furniture,
+                   "detect_brief_links": citations.detect_links},
+        )
+
+    def test_a_cite_wrapped_in_one_column_is_found(self):
+        page = _page_of_lines(
+            [[(40, lt), (250, rt)]
+             for lt, rt in zip(_TURLEY_LEFT, _TURLEY_RIGHT)])
+        links = self.ns["_citation_links_from_pages"]([page])
+        found = [(a, s) for _rect, a, s in links.get(0, ())]
+        self.assertIn((("cite", "424 U.S. 319@334"),
+                       "Mathews v. Eldridge, 424 U.S. 319, 334-35 (1976)"),
+                      found)
+        # Its rectangles are all in the left column.
+        rects = [r for r, a, _s in links[0] if a[1] == "424 U.S. 319@334"]
+        self.assertEqual(len(rects), 3)
+        self.assertTrue(all(r[2] < 250 for r in rects))
+
+    def test_a_sentence_broken_off_goes_on_in_the_next_column(self):
+        # Turley, 729 F.3d at 650: the left column's text ends mid-cite above
+        # its footnote, and goes on at the top of the right column.
+        body = _TURLEY_LEFT[4:11] + (
+            "favorable to the plaintiff. Id. at 756",
+            "(quoting Zimmerman v. Tribble, 226 F.3d")
+        notes = ("1. Section 1915A provides as follows",
+                 "(a) Screening. The court shall review",
+                 "before docketing a complaint in which")
+        right = ("568, 571 (7th Cir.2000) (internal quotation",
+                 "marks omitted)). We must examine whether",) + _TURLEY_RIGHT
+        rows = [[(40, lt), (250, rt)] for lt, rt in zip(body, right)]
+        rows += [[(40, nt, 8), (250, rt)]
+                 for nt, rt in zip(notes, right[len(body):])]
+        links = self.ns["_citation_links_from_pages"]([_page_of_lines(rows)])
+        actions = [a for _r, a, _s in links.get(0, ())]
+        self.assertIn(("cite", "226 F.3d 568@571"), actions)
+        self.assertNotIn(("cite", "226 F.3d 1"), actions)
+
+    def test_a_word_hyphenated_at_a_line_end_is_read_whole(self):
+        # Acevedo, 500 U.S. at 583 (Scalia, J.): PDFium joins "Cali-" and
+        # "fornia" around U+FFFE; read with it, the supra named nobody.
+        rows = [[(40, "Chimel v. California, 395 U.S. 752 (1969).")],
+                [(40, "Chimel v. Cali\ufffefornia, supra, at 762-763;")]]
+        links = self.ns["_citation_links_from_pages"]([_page_of_lines(rows)])
+        self.assertIn((("cite", "395 U.S. 752@762"),
+                       "Chimel v. California, supra, at 762-763"),
+                      [(a, s) for _r, a, s in links[0]])
+
+    def test_one_column_is_read_as_it_came(self):
+        page = _page_of_lines(
+            [[(40, lt + " " + rt)]
+             for lt, rt in zip(_TURLEY_LEFT, _TURLEY_RIGHT)])
+        self.assertIsNone(self.ns["_column_reading_order"](page))
+
+    def test_a_table_of_authorities_is_not_two_columns(self):
+        entry = "Carroll v. United States, 267 U.S. 132 (1925)"
+        page = _page_of_lines([[(40, entry), (450, "12")]] * 12)
+        self.assertIsNone(self.ns["_column_reading_order"](page))
+
+
 @unittest.skipUnless(HAVE_PDFIUM, "pypdfium2 not installed")
 class GovInfoHiddenTextTests(unittest.TestCase):
     """The image-backed 2012 GovInfo format remains searchable and colored."""
@@ -345,11 +480,15 @@ class GovInfoHiddenTextTests(unittest.TestCase):
         import citations
         cls.ns = _load(
             "_degenerate_ocr_metrics", "_page_has_repairable_ocr_text",
-            "_repair_degenerate_ocr_page",
+            "_repair_degenerate_ocr_page", "_PageSlants",
             "_union_line_runs", "_extract_pdf_text_and_style",
-            "_citation_links_from_pages", "_page_has_scan_background",
+            "_citation_links_from_pages", "_column_reading_order",
+            "_page_has_scan_background",
             "_pdf_ocr_scan_pages", "_citation_links_from_visible_pdf_text",
             consts=("_FONT_FLAG_ITALIC",),
+            extra={"brief_reader": brief_reader,
+                   "_scan_text": citations.scan_text,
+                   "_page_furniture": citations.page_furniture},
         )
         cls.ns["detect_brief_links"] = citations.detect_links
         cls.pdf = _govinfo_ocr_pdf()

@@ -1013,7 +1013,7 @@ _SEP_DELIVERED_RE = re.compile(
 _SEP_OF_RE = re.compile(
     r"^\s*(?:The\s+)?Separate\s+opinion\s+of\s+"
     r"(?:MR\.\s+|MRS\.\s+|MS\.\s+)?(?:CHIEF\s+)?JUSTICE\s+"
-    r"[A-Z][\w.'â€™-]+\s*[.:]?\s*$",
+    r"[A-Z][\w.'’-]+\s*[.:]?\s*$",
     re.IGNORECASE,
 )
 

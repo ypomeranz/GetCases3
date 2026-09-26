@@ -34,6 +34,7 @@ import citations
 from google_scholar import (
     GoogleScholarFetcher,
     ScholarError,
+    Span,
     is_how_cited_url,
     parse_opinion_blocks,
 )
@@ -45,6 +46,8 @@ except Exception:  # pragma: no cover - depends on the machine
     gui = None
 
 
+WAKELY_URL = ("https://scholar.google.com/scholar_case?about=2798076343637491245"
+              "&q=California+v+Acevedo&hl=en&as_sdt=2006")
 PIERCE_URL = ("https://scholar.google.com/scholar_case?about=8429242000591666836"
               "&q=%22496+U.S.+310%22&hl=en&as_sdt=2006")
 
@@ -421,6 +424,26 @@ class FollowingHowCitedLinksTests(unittest.TestCase):
         fetcher.fetch_by_citation.assert_called_once_with(
             "138 Mass. 165", case_name="Commonwealth v. Pierce")
 
+    def test_a_pin_the_link_sets_after_the_page_rides_along(self):
+        # Acevedo, 500 U.S. at 581 (Scalia, J.): "Wakely v. Hart, 6 Binney
+        # 316, 318" — a reporter name the reader doesn't know, so only
+        # Scholar's page says where the case begins, and 318 is the pin.
+        fetcher = self._scholar()
+        fetcher.how_cited_heading.return_value = (
+            "Wakely v. Hart, 6 Binn. 316 - Pa: Supreme Court 1814")
+        win = self._window(("url", WAKELY_URL), fetcher)
+        win._text = mock.Mock()
+        win._text.tag_ranges.return_value = ("1.0", "1.44")
+        win._text.get.return_value = (
+            "Wakely v. Hart, 6 Binney 316, 318 (Pa. 1814)")
+        win._post = lambda fn, *args: fn(*args)
+        win._link_scholar_failed = mock.Mock()
+        with mock.patch.object(gui.threading, "Thread", _Inline):
+            win._follow_link("lnk1")
+        self.assertEqual(win._link_actions["lnk1"], ("url", "	".join([
+            WAKELY_URL, "pin=318", "cite=6 Binn. 316",
+            "name=Wakely v. Hart"])))
+
     def test_an_answer_opens_the_next_best_copy_without_retrying(self):
         win = self._window(("cite", "138 Mass. 165"), self._scholar())
         win._app._get_client.return_value = object()
@@ -473,6 +496,122 @@ class FollowingHowCitedLinksTests(unittest.TestCase):
         self.assertEqual(fetcher.fetch_by_citation.call_count, 1)
         win._status_var.set.assert_called_with(
             "Google Scholar has no copy of the cited case.")
+
+
+# ---------------------------------------------------------------------------
+# One Scholar link, however it was set
+# ---------------------------------------------------------------------------
+
+class _TextStub:
+    """Just enough of a Tk Text to render spans into: what was inserted,
+    and with which tags."""
+
+    def __init__(self):
+        self.runs: list = []
+
+    def insert(self, _index, text, tags=()):
+        self.runs.append((text, tuple(tags)))
+
+    def index(self, _spec):
+        return f"1.{sum(len(t) for t, _tags in self.runs)}"
+
+    def tag_bind(self, *_args, **_kwargs):
+        pass
+
+    def tag_add(self, *_args):
+        pass
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class ScholarLinkPiecesTests(unittest.TestCase):
+    """Scholar sets one case link in several styled pieces.  Each piece
+    used to be a link of its own, read off its own few words: "v." named
+    nobody, and "(concurring opinion)" opened its case at the first page."""
+
+    @staticmethod
+    def _reader():
+        win = object.__new__(gui._ScholarTextWindow)
+        win._text = _TextStub()
+        win._link_n = 0
+        win._link_actions = {}
+        win._short_cite_index = {}
+        win._last_cite_action = None
+        win._pending_id = None
+        win._cur_page = None
+        win._page_pos = {}
+        win._new_page_mark = lambda index: index
+        win._fnref_pages = {}
+        win._fn_ref_pos = {}
+        win._fn_def_pos = {}
+        win._font_tag = lambda *args, **kwargs: "font"
+        return win
+
+    @staticmethod
+    def _links(win):
+        """(text, tag, action) for each piece rendered as a link."""
+        out = []
+        for text, tags in win._text.runs:
+            tag = next((t for t in tags if t.startswith("lnk")), None)
+            if tag:
+                out.append((text, tag, win._link_actions[tag]))
+        return out
+
+    def test_what_is_left_of_a_link_goes_where_its_citation_goes(self):
+        # Manuel v. City of Joliet, 903 F.3d 667, 669 (7th Cir. 2018).
+        href = "https://scholar.google.com/scholar_case?case=4716794293588309059"
+        cite = "Turley v. Rednour, 729 F.3d 645, 654-55 (7th Cir. 2013)"
+        block = SimpleNamespace(spans=[
+            Span("Turley v. Rednour", italic=True, link=href),
+            Span(", 729 F.3d 645, 654-55 (7th Cir. 2013) (concurring opinion)",
+                 link=href),
+        ])
+        win = self._reader()
+        gui._ScholarTextWindow._insert_spans_with_links(
+            win, block, (), False,
+            [(0, len(cite), ("cite", "729 F.3d 645@654"))], detect_plain=False)
+        links = self._links(win)
+        self.assertEqual("".join(t for t, _g, _a in links),
+                         cite + " (concurring opinion)")
+        self.assertEqual({(g, a) for _t, g, a in links},
+                         {(links[0][1], ("cite", "729 F.3d 645@654"))})
+
+    def test_a_link_set_in_pieces_is_one_link_read_whole(self):
+        about = "https://scholar.google.com/scholar_case?about=2798076343637491245"
+        spans = [
+            Span("See "),
+            Span("Wakely", italic=True, link=about),
+            Span(" v. ", link=about),
+            Span("Hart,", italic=True, link=about),
+            Span(" 6 Binney 316, 318 (Pa. 1814)", link=about),
+            Span(". See 10 Johns. 263."),
+        ]
+        text = "".join(s.text for s in spans)
+        start = text.index("10 Johns. 263")
+        win = self._reader()
+        gui._ScholarTextWindow._insert_spans_with_links(
+            win, SimpleNamespace(spans=spans), (), False,
+            [(start, start + len("10 Johns. 263"), ("cite", "10 Johns. 263"))],
+            detect_plain=False)
+        wakely = [(t, g, a) for t, g, a in self._links(win) if a[0] == "url"]
+        self.assertEqual("".join(t for t, _g, _a in wakely),
+                         "Wakely v. Hart, 6 Binney 316, 318 (Pa. 1814)")
+        self.assertEqual(len({g for _t, g, _a in wakely}), 1)
+        self.assertIn("name=Wakely v. Hart", wakely[0][2][1])
+
+    def test_a_star_page_inside_a_link_does_not_split_it(self):
+        href = ("https://scholar.google.com/scholar_case?"
+                "case=15820223925611411971")
+        spans = [Span("California v. Carney, 471 ", link=href),
+                 Span("*583", pagenum=True),
+                 Span(" U. S. 386 (1985)", link=href)]
+        win = self._reader()
+        gui._ScholarTextWindow._insert_spans_grouped(
+            win, spans, (), False, detect_plain=False)
+        links = self._links(win)
+        self.assertEqual([t for t, _g, _a in links],
+                         ["California v. Carney, 471 ", " U. S. 386 (1985)"])
+        self.assertEqual(len({g for _t, g, _a in links}), 1)
+        self.assertIn("cite=471 U.S. 386", links[0][2][1])
 
 
 if __name__ == "__main__":
