@@ -937,6 +937,7 @@ from bluebook_names import (
     collapse_personal_all_caps_run,
     cut_companion_cases,
     is_recognized_given_name,
+    name_persons_by_surname,
     normal_case_caption,
     refine_caption_case,
     simplify_historical_entity_caption,
@@ -5611,7 +5612,8 @@ def _bluebook_saved_opinion_name(db, hit: dict) -> str:
         name = simplify_historical_entity_caption(name, body)
         # The store keeps the court id under "court" (see opinion_db).
         return abbreviate_case_name(
-            name, court_state=_state_of_court(str(hit.get("court") or "")))
+            name, court_state=_state_of_court(str(hit.get("court") or "")),
+            body_text=body)
     except Exception:
         return raw
 
@@ -13805,8 +13807,12 @@ def _scholar_caption_name(blocks) -> str:
 
     def refine(name: str) -> str:
         body = _scholar_body_text(blocks)
-        return simplify_historical_entity_caption(
-            refine_caption_case(name, body), body)
+        # The prose also settles a person's surname where the given-name
+        # lists can't ("Chad Everet Brackeen" is Brackeen), which every
+        # later abbreviation of this caption — a file name, a window title
+        # — then keeps without needing the text again.
+        return name_persons_by_surname(simplify_historical_entity_caption(
+            refine_caption_case(name, body), body), body)
 
     for b in blocks[:8]:
         if b.kind != "center":
@@ -24930,6 +24936,7 @@ class _ScholarTextWindow:
         name = abbreviate_case_name(
             name,
             court_state=_state_of_court(court_id, str(item.get("court") or "")),
+            body_text=opinion_body,
         )
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
