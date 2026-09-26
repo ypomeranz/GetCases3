@@ -322,6 +322,21 @@ _PHRASES: list[tuple[str, str]] = [
     ("west virginia", "W. Va."),
 ]
 
+# T10's cities, abbreviated as the states are inside a longer party name —
+# "Univ. of Chi.", "S.F. Arts & Athletics, Inc.", "Balt. & Ohio R.R." — and
+# like them left whole when the city is the entire party ("Dallas v.
+# Stanglin", "City of Chicago").  Kept apart from the states, whose tables
+# they would muddle: Los Angeles's "L.A." reads the same as Louisiana's "La.".
+_T10_CITY_WORDS: dict[str, str] = {
+    "baltimore": "Balt.", "boston": "Bos.", "chicago": "Chi.",
+    "dallas": "Dall.", "houston": "Hous.", "miami": "Mia.",
+    "philadelphia": "Phila.", "phoenix": "Phx.",
+}
+_T10_CITY_PHRASES: list[tuple[str, str]] = [
+    ("los angeles", "L.A."),
+    ("san francisco", "S.F."),
+]
+
 # Geographic units left untouched when they are the entire party name
 # (rule 10.2.2 / Indigo R8.3): "United States v. Nixon", "Arizona v. Gant".
 _GEO_PARTIES = (
@@ -331,6 +346,8 @@ _GEO_PARTIES = (
      "north dakota", "rhode island", "south carolina", "south dakota",
      "west virginia", "washington"}
     | set(_T10_WORDS)
+    | set(_T10_CITY_WORDS)
+    | {p for p, _ in _T10_CITY_PHRASES}
 )
 
 # "State of X" / "Commonwealth of X" / "People of the State of X" are
@@ -353,7 +370,8 @@ _STATE_OF_RE = re.compile(
 # the cite reads "Indiana ex rel. Anderson", never "Ind. ex rel. Anderson".
 # Matched case-insensitively and re-emitted in canonical lowercase form.
 _EX_REL_RE = re.compile(
-    r"[\s,]+(?:ex\s+rel(?:\.|atione)?|on\s+(?:the\s+)?relation\s+of)[\s,]+",
+    r"[\s,]+(?:ex\s+rel(?:\.|atione)?|on\s+(?:the\s+)?rel(?:ation|\.)\s+of)"
+    r"[\s,]+",
     re.IGNORECASE,
 )
 
@@ -390,6 +408,38 @@ def _expand_geo_party(head: str) -> str:
     return _GEO_EXPANSIONS.get(_norm_geo(head), head)
 
 
+def _geo_party_key(s: str) -> str:
+    """An abbreviation as spelled, for an exact lookup: "U.S.." -> "u.s.",
+    "W. Va." -> "w.va."."""
+    return re.sub(r"\.+$", ".", re.sub(r"\s+", "", s.lower()))
+
+
+# The same abbreviations by their exact spelling, for a party that is
+# nothing else — "Olmstead v. U.S." as a name stored already abbreviated —
+# which rule 10.2.2 names in full.  Unlike the letters-only key above, an
+# exact spelling never takes Los Angeles's "L.A." for Louisiana's "La.".
+_GEO_PARTY_ABBREVIATIONS: dict[str, str] = {
+    _geo_party_key(_abbr): _full.title() for _full, _abbr in _T10_WORDS.items()
+}
+_GEO_PARTY_ABBREVIATIONS.update({
+    _geo_party_key(_abbr): _GEO_EXPANSIONS[_norm_geo(_abbr)]
+    for _phrase, _abbr in _PHRASES if _norm_geo(_abbr) in _GEO_EXPANSIONS
+})
+_GEO_PARTY_ABBREVIATIONS.update({
+    _geo_party_key(_abbr): _full.title()
+    for _full, _abbr in list(_T10_CITY_WORDS.items()) + _T10_CITY_PHRASES
+})
+
+
+def _place_in_full(place: str) -> str:
+    """A geographic name a source abbreviated, spelled out again — "U.S." ->
+    "United States", "N.Y." -> "New York", "L.A." -> "Los Angeles" — for a
+    party that is that place and nothing more (rule 10.2.2); anything else
+    passes through."""
+    return _GEO_PARTY_ABBREVIATIONS.get(_geo_party_key(place.strip(" ,")),
+                                        place)
+
+
 def _same_state(place: str, state: str) -> bool:
     """Whether a party's geographic name and a deciding court's state are the
     same place.  Either side may be spelled out or abbreviated ("N.Y." /
@@ -412,10 +462,32 @@ def _same_state(place: str, state: str) -> bool:
 # shorten, consistent with City/Town/Borough, which no table abbreviates.)
 # When more follows the place ("City of New York Department of Education") the
 # party is a larger entity and abbreviates normally.
+_UNIT_ALTERNATION = (
+    r"(?:City|Town|Township|Twp\.|Village|Vill\.|Borough|County|Cnty\.|"
+    r"Parish|Par\.)"
+)
+# …including the consolidated kind: "City and County of San Francisco".
 _MUNICIPAL_RE = re.compile(
-    r"^(City|Town|Township|Village|Borough|County|Parish)\s+of\s+(.+)$",
+    r"^(" + _UNIT_ALTERNATION
+    + r"(?:\s+(?:&|and)\s+" + _UNIT_ALTERNATION + r")?)\s+of\s+(.+)$",
     re.IGNORECASE,
 )
+
+# The unit words as table T6 abbreviates them, spelled out again when the
+# unit is the whole party: a name stored already abbreviated ("Clayton
+# Cnty.", "Twp. of Scott") cites as "Clayton County", "Township of Scott".
+_SPELLED_UNITS = {
+    "twp.": "Township", "vill.": "Village", "cnty.": "County",
+    "par.": "Parish",
+}
+
+
+def _spelled_unit(word: str) -> str:
+    """A municipal unit's words spelled out, a pair joined the Bluebook way:
+    "Cnty." -> "County", "City and County" -> "City & County"."""
+    return " & ".join(
+        _SPELLED_UNITS.get(w.lower(), w)
+        for w in re.split(r"\s+(?:&|and)\s+", word, flags=re.IGNORECASE))
 
 # The same unit expressions in mid-name position are omitted (rule
 # 10.2.1(f)): "Board of Education of the Borough of Hawthorne" -> "Board of
@@ -435,7 +507,8 @@ _MID_GEO_UNIT_RE = re.compile(
 # institution follows ("Cook County Bd. of Review") the larger party
 # abbreviates normally.
 _GEO_SUFFIX_RE = re.compile(
-    r"^(.+?)\s+(?:City|Town|Township|Village|Borough|County|Parish)$",
+    r"^(.+?)\s+(City|Town|Township|Twp\.|Village|Vill\.|Borough|County|"
+    r"Cnty\.|Parish|Par\.)$",
     re.IGNORECASE,
 )
 
@@ -545,6 +618,10 @@ _INSTITUTION_WORDS = frozenset({
 _PLACE_NAMING_WORDS = (
     _UNIT_WORDS | _INSTITUTION_WORDS
     | {"port", "district", "dist", "division", "div"}
+    # A tribe is named for where it is, too: "Seminole Tribe of Fla.",
+    # "Kiowa Tribe of Okla.", "Miami Nation of Indians of Ind."
+    | {"tribe", "tribes", "nation", "nations", "band", "indians", "pueblo",
+       "rancheria"}
 )
 
 # An officer is named for the place whose office it is — "Att'y Gen. of
@@ -622,11 +699,19 @@ def _is_place(text: str) -> bool:
     if len(words) >= 2 and lead in _REGION_WORDS and _is_place(
             " ".join(words[1:])):
         return True     # "Southeastern Pennsylvania", "Greater Kansas City"
-    if len(words) >= 3 and words[1].lower() == "of":
-        if lead in ("state", "commonwealth", "territory"):
-            return _is_state(words[2:])
-        if lead in _UNIT_WORDS or lead == "port":
-            return _is_state(words[2:]) or _is_place_name(words[2:])
+    if len(words) >= 3 and words[1].lower() == "of" and lead in (
+            "state", "commonwealth", "territory"):
+        return _is_state(words[2:])
+    # "City of New York", "the Port of Philadelphia", "City and County of
+    # San Francisco"
+    k = 0
+    while k < len(words) and (_word_key(words[k]) in _UNIT_WORDS
+                              or _word_key(words[k]) == "port"):
+        k += 1
+        if k < len(words) and words[k].lower() in ("&", "and"):
+            k += 1
+    if 0 < k < len(words) - 1 and words[k].lower() == "of":
+        return _is_state(words[k + 1:]) or _is_place_name(words[k + 1:])
     if (len(words) >= 2 and _word_key(words[-1]) in _UNIT_WORDS
             and _is_place_name(words[:-1])):
         return True     # "Bryan County", "Abington Township", "Kansas City"
@@ -1420,6 +1505,7 @@ def _build_word_map() -> dict[str, str]:
             words[p[0]] = p[1]
     words.update(_T6_PLURAL)
     words.update(_T10_WORDS)
+    words.update(_T10_CITY_WORDS)
     return words
 
 
@@ -1427,8 +1513,10 @@ _WORD_MAP = _build_word_map()
 
 # T6 words signal an organization, blocking given-name dropping ("George
 # Washington University").  T10 place names are excluded from that signal:
-# they double as given names far too often (Virginia, Georgia).
-_T6_WORDS = frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
+# they double as given names and surnames far too often (Virginia, Georgia,
+# Houston).
+_T6_WORDS = (frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
+             - frozenset(_T10_CITY_WORDS))
 
 # The same tables read from the other side: the *abbreviated* forms the tables
 # produce ("R.R.", "Ry.", "Cent.", "N.Y."), keyed like a caption token.  A
@@ -1439,6 +1527,11 @@ _T6_WORDS = frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
 _TABLE_ABBREVIATIONS = frozenset(
     re.sub(r"[^A-Za-z]", "", _abbr).lower() for _abbr in _WORD_MAP.values()
 )
+# …of which T6's alone are organizational: "Dep't", "Bd.", "Comm'n".
+_T6_ABBREVIATION_KEYS = frozenset(
+    re.sub(r"[^A-Za-z]", "", _abbr).lower()
+    for _word, _abbr in _WORD_MAP.items() if _word in _T6_WORDS
+)
 
 # A token is a run of letters with internal apostrophes/periods, so already-
 # abbreviated forms ("Ass'n", "Inc.") and possessives ("Children's") come
@@ -1446,10 +1539,11 @@ _TABLE_ABBREVIATIONS = frozenset(
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'’.]*")
 
 _PHRASE_RE = re.compile(
-    r"\b(" + "|".join(p.replace(" ", r"\s+") for p, _ in _PHRASES) + r")\b",
+    r"\b(" + "|".join(p.replace(" ", r"\s+")
+                      for p, _ in _PHRASES + _T10_CITY_PHRASES) + r")\b",
     re.IGNORECASE,
 )
-_PHRASE_MAP = {p: a for p, a in _PHRASES}
+_PHRASE_MAP = {p: a for p, a in _PHRASES + _T10_CITY_PHRASES}
 
 _ET_AL_RE = re.compile(r",?\s+et\s+als?\.?\s*$", re.IGNORECASE)
 _V_SPLIT_RE = re.compile(r"\s+vs?\.\s+")
@@ -1544,25 +1638,47 @@ def cut_companion_cases(text: str) -> str:
     defeats one at the first boundary but not the second), so the earliest
     cut wins."""
     cuts: list[int] = []
-    cm = re.search(
+    for cm in re.finditer(
         r"\.\s+(?=[^.]*?\s+vs?\.\s+|SAME\b|IN\s+RE\b|EX\s+PARTE\b"
         r"|(?:IN\s+THE\s+)?MATTER\s+OF\b)",
         text, re.IGNORECASE,
-    )
-    if cm:
+    ):
+        before = text[: cm.start()]
+        wm = re.search(r"([A-Za-z]+)$", before)
+        if wm and (len(wm.group(1)) <= 1
+                   or wm.group(1).lower() in _CUT_NEVER_ENDS):
+            continue  # an initial ("Ronald C. Unterberger v."), "Jr.", a "v."
+        if before.count("(") > before.count(")"):
+            continue  # inside a parenthesis: "(Nat. Mother) v. …"
         cuts.append(cm.start())
+        break
     m2 = re.search(r"\s+(?:vs?\.|(?i:versus|against))\s+", text)
     if m2:
         head = text[: m2.start()]
-        for c2 in re.finditer(r"\.(?:\[[^\]]{1,6}\])?\s+(?=[A-Z0-9(])", head):
-            wm = re.search(r"([A-Za-z]+)$", head[: c2.start()])
+        for c2 in re.finditer(r"\.(?:\[[^\]]{1,6}\])?\s+(?=[A-Z0-9(*])",
+                              head):
+            before = head[: c2.start()]
+            wm = re.search(r"([A-Za-z]+)$", before)
             word = (wm.group(1) if wm else "").lower()
+            if (head[c2.end():c2.end() + 1].isdigit()
+                    and (len(word) <= 4 or word in _TABLE_ABBREVIATIONS)):
+                continue  # "86 Fed. Reg. 61402" — a citation's period
+            if before.endswith(".") or before[-1:].isdigit():
+                # A sentence's period after an abbreviation's ("U.S..") or
+                # after a number ("61402. Mass. Bldg. …").
+                cuts.append(c2.start())
+                break
             if len(word) <= 1 or word in _CUT_NEVER_ENDS:
                 continue  # an abbreviation's period, not a case boundary
             if word in _CUT_ENTITY_ENDS:
                 nxt = re.match(r"[A-Za-z]+", head[c2.end():])
                 if nxt and nxt.group(0).lower() in _NAME_CONTINUATIONS:
                     continue  # "Acme Co. of America" — same party's name
+            elif word in _TABLE_ABBREVIATIONS:
+                # A caption already abbreviated is full of these, and they
+                # end no case: "Perez v. Mortg. Bankers Ass'n et al.
+                # Nickols …" is not cut after "Mortg.".
+                continue
             cuts.append(c2.start())
             break
     # Three: an in rem caption naming a second res.  The Paquete Habana and
@@ -1615,9 +1731,13 @@ def _strip_party_designations(p: str) -> str:
         p = q
 
 
-def _strip_given_names(p: str) -> str | None:
+def _strip_given_names(p: str, *, person: bool = False) -> str | None:
     """Surname-only form of a personal party name (rule 10.2.1(g)), or
-    None when the party does not safely read as an individual's name."""
+    None when the party does not safely read as an individual's name.
+
+    *person* is outside evidence that the party is a natural person — an
+    office named after it ("Austin Reeve Jackson, Judge") — which lets an
+    unrecognized given or middle name pass, as a suffix or honorific does."""
     suffixed = bool(_NAME_SUFFIX_RE.search(p))
     p = _NAME_SUFFIX_RE.sub("", p)
     if "," in p or "&" in p or re.search(r"\bof\b", p, re.IGNORECASE):
@@ -1630,6 +1750,12 @@ def _strip_given_names(p: str) -> str | None:
         p = p[m.end():]
         titled = True
     tokens = p.split()
+    # A table abbreviation's period is its own, not a caption's: "Clayton
+    # Cnty." is a county, never a Mr. Cnty.
+    if (tokens and tokens[-1].endswith(".")
+            and len(_word_key(tokens[-1])) > 1
+            and _word_key(tokens[-1]) in _TABLE_ABBREVIATIONS):
+        return None
     # A caption's sentence period ("Ex parte Anthony P. MURPHY.") is
     # punctuation, not part of the surname; an initial's own period stays
     # ("Susan B."), as does an internal-dot abbreviation ("U.S.").
@@ -1653,7 +1779,7 @@ def _strip_given_names(p: str) -> str | None:
     # named for people.  An honorific is deliberately NOT enough here: it
     # relaxes only the middle tokens ("Dr. Theresa Swain Emory"), or
     # "Mrs. Fields Cookies" would truncate to "Cookies".
-    person_shaped = (suffixed or any(
+    person_shaped = (suffixed or person or any(
         re.fullmatch(r"(?:[A-Z]\.)+", t) for t in tokens[1:-1]))
     if low[0] not in _GIVEN_NAMES and not (
             person_shaped and re.fullmatch(r"[A-Z][A-Za-z'’-]+", tokens[0])):
@@ -1681,7 +1807,7 @@ def _strip_given_names(p: str) -> str | None:
     # already establishes a natural person, so under one any name-shaped
     # middle token passes ("Dr. Theresa Swain Emory" -> "Emory").
     for t, tl in zip(tokens[1:i], low[1:i]):
-        if not (titled or suffixed or tl in _GIVEN_NAMES
+        if not (titled or suffixed or person or tl in _GIVEN_NAMES
                 or tl in _SURNAME_PARTICLES
                 or re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]\.?", t)):
             return None
@@ -1704,25 +1830,70 @@ _APPOSITIVE_ENTITY_TERMS = {
 }
 
 
+# The words that open a description of a party already named — its office,
+# or the capacity it is sued in — rather than more of its name (rule
+# 10.2.1(e)): "Bowers, Att'y Gen. of Ga.", "Printz, Sheriff/Coroner",
+# "Sandoval, Individually & on Behalf of …", "Brand, Tr.".
+_DESCRIPTIVE_WORDS = _OFFICE_WORDS | frozenset({
+    "individually", "personally", "trustee", "tr", "executor", "exr",
+    "executrix", "exx", "receiver", "guardian", "conservator", "officer",
+    "deputy", "chairman", "chairperson", "chair", "president", "member",
+    "postmaster", "justice", "acting", "former", "inspector", "custodian",
+})
+
+
+def _describes_party(rest: str) -> bool:
+    """Whether the matter after a party's comma opens with its office or
+    capacity — a descriptive word among the first few of its first segment
+    ("Corr. Dir.", "Dist. Att'y", "Acting Sec'y", "Sheriff/Coroner"), or a
+    capacity it is sued in ("as Trustee", "by Next Friend", "on behalf of
+    himself", "in her capacity as Ex'r")."""
+    first = rest.split(",", 1)[0]
+    words = [w for w in re.split(r"[\s/\-]+", first) if w][:3]
+    if words and words[0].lower() in ("as", "by", "on"):
+        return True
+    if words and words[0].lower() == "in" and re.search(
+            r"\bcapacit(?:y|ies)\b", first, re.IGNORECASE):
+        return True
+    return any(_word_key(w) in _DESCRIPTIVE_WORDS for w in words)
+
+
+def _lone_surname(head: str) -> str | None:
+    """A party named by surname alone ("Bowers") — asked only once what
+    follows its comma has shown it to be a person."""
+    name = head.strip()
+    if not re.fullmatch(r"[A-Z][A-Za-z'’\-]+", name):
+        return None
+    key = name.replace("’", "'").lower()
+    if (key in _T6_WORDS or key in _ORG_WORDS or key in _GEO_PARTIES
+            or _word_key(name) in _APPOSITIVE_ENTITY_TERMS):
+        return None
+    return name
+
+
 def _office_holder_surname(p: str) -> str | None:
     """Surname of a natural person named with a following office or descriptive
     title — "Gayle Franzen, Dir., Dep't of Corr., State of Ill." -> "Franzen".
     A named individual is cited by surname alone: given names drop (rule
     10.2.1(g)), the office describes the person and is omitted (10.2.1(e)), and
-    only the first party is kept (10.2.1(a)).  Returns None when the text
+    only the first party is kept (10.2.1(a)).  A caption that names the person
+    by surname alone reads the same once the office shows it to be one:
+    "Bowers, Att'y Gen. of Ga." -> "Bowers".  Returns None when the text
     before the first comma is not a personal name, or when the appositive
     begins with a corporate designator that is really part of a firm's name
     ("Sara Lee, Inc."; "Dean Witter Reynolds, Inc.")."""
     head, sep, rest = p.partition(",")
     if not sep:
         return None
-    surname = _strip_given_names(head)
-    if surname is None:
-        return None
     lead = re.search(r"[A-Za-z][\w'’.&-]*", rest)
     if lead and re.sub(r"[^a-z]", "", lead.group(0).lower()) in _APPOSITIVE_ENTITY_TERMS:
         return None
-    return surname
+    surname = _strip_given_names(head)
+    if surname is not None:
+        return surname
+    if not _describes_party(rest):
+        return None
+    return _strip_given_names(head, person=True) or _lone_surname(head)
 
 
 # Bluebook rule 10.2.1(c): the name of a widely recognized institution is
@@ -1864,8 +2035,9 @@ def _is_bare_place(place: str) -> bool:
     Parks") or as a T6 word sitting after the place name — i.e. after a word
     that is not itself a T6 word ("New York Police Department").  A T6 word that
     *leads* the name is part of the place, not a descriptor, and is kept:
-    "Commerce" (the city), "Central Falls"."""
-    if re.search(r"\bof\b", place, re.IGNORECASE):
+    "Commerce" (the city), "Central Falls".  A conjunction or a comma joins
+    two parties, never two words of one place ("Ky. & Pike County")."""
+    if re.search(r"\bof\b|\band\b|[&,]", place, re.IGNORECASE):
         return False
     seen_plain = False
     for w in place.split():
@@ -1885,6 +2057,45 @@ def _is_bare_place(place: str) -> bool:
 _IN_REM_ADVERSARY_PARTIES = {
     "the amistad": "The Amistad",
 }
+
+
+def _continues_party(rest: str) -> bool:
+    """Whether what follows a party's comma goes on naming that party — a
+    department or board of it, "City of L.A., Dep't of Water & Power" —
+    rather than naming another party ("Doe Crupi") or describing this one
+    ("a Mun. Corp.")."""
+    words = rest.split(",", 1)[0].split()
+    if not words or words[0].lower() in ("a", "an"):
+        return False
+    return any(w.replace("’", "'").lower().rstrip(".") in _T6_WORDS
+               or _word_key(w) in _T6_ABBREVIATION_KEYS
+               or w.lower() in _ORG_WORDS
+               for w in words[:2])
+
+
+def _municipal_party(p: str) -> str | None:
+    """*p* as the whole of a municipal unit, its unit word spelled out —
+    "City of New York", "Village of Arlington Heights", "Clayton County" — or
+    None when *p* is something more.
+
+    Such a party is one geographic unit, which rule 10.2.2 leaves
+    unabbreviated.  A unit in suffix form ("Cook County", "New York City",
+    "Atlantic City") is identified by its trailing unit word, so the words
+    ahead are always the place's proper name — a T6 word among them
+    ("Atlantic", "Central") belongs to that name, not to an institution.  A
+    larger entity puts the unit word mid-name ("Cook County Bd. of Review"),
+    where the '$' anchor no longer matches, and an institution can end in one
+    ("Sch. Dist. of Abington Twp."), which the bare-place test turns away."""
+    p = p.strip()
+    m = _MUNICIPAL_RE.match(p)
+    if m and _is_bare_place(m.group(2)):
+        return (f"{_spelled_unit(m.group(1))} of "
+                f"{_place_in_full(m.group(2))}")
+    suffix = _GEO_SUFFIX_RE.match(p)
+    if suffix and _is_bare_place(suffix.group(1)):
+        return (f"{_place_in_full(suffix.group(1))} "
+                f"{_spelled_unit(suffix.group(2))}")
+    return None
 
 
 def _abbreviate_party(party: str, *, recognize_initials: bool = True,
@@ -1943,6 +2154,11 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
         initials = _recognized_initialism(p)
         if initials:
             return initials
+    # "U.S." as a whole party is the United States, never a person's
+    # initials, and rule 10.2.2 names it in full.  A two-letter state ("N.C.")
+    # could be an anonymized party's initials, and is left to the next step.
+    if _geo_party_key(p) == "u.s.":
+        return "United States"
     anon = _format_anonymous_initials(p)
     if anon is not None:
         return anon
@@ -1961,22 +2177,23 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     p = _MID_GEO_UNIT_RE.sub(r"\1", p)
     if p.strip(" ,.").lower() in _GEO_PARTIES:
         return p
+    # …and one a source abbreviated is named in full all the same: a stored
+    # "Olmstead v. U.S." cites as "Olmstead v. United States".
+    full = _place_in_full(p)
+    if full != p:
+        return full
 
-    m = _MUNICIPAL_RE.match(p)
-    if m and _is_bare_place(m.group(2)):
-        return f"{m.group(1)} of {m.group(2)}"
-
-    # A municipal unit in suffix form ("Cook County", "New York City",
-    # "Atlantic City") is the entire geographic party: its trailing unit word is
-    # what identifies it, so the words ahead are always the place's proper name
-    # — a T6 word among them ("Atlantic", "Central") belongs to that name, not
-    # to an institution — and the whole party stays whole.  A larger entity puts
-    # the unit word mid-name ("Cook County Bd. of Review"), where the '$' anchor
-    # no longer matches and normal abbreviation applies — as it does when the
-    # unit ends an institution's name instead ("Sch. Dist. of Abington Twp.").
-    suffix = _GEO_SUFFIX_RE.match(p)
-    if suffix and _is_bare_place(suffix.group(1)):
-        return p
+    # A municipal unit that is the whole party stays whole — named first,
+    # too, with other parties or its own description after a comma ("City of
+    # Los Angeles, Doe Crupi, …", "City of Los Angeles, a Mun. Corp."): the
+    # unit is then the party, and the rest goes (rules 10.2.1(a), (e)).
+    unit = _municipal_party(p)
+    if unit is None and "," in p:
+        first, _comma, rest = p.partition(",")
+        if not _continues_party(rest):
+            unit = _municipal_party(first)
+    if unit is not None:
+        return unit
 
     # Rule 10.2.1(a): only the first-listed party on a side is kept.  The
     # split applies only when *every* '&'/'and'-joined segment reads as an
@@ -2020,15 +2237,22 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
         lambda m: _PHRASE_MAP[re.sub(r"\s+", " ", m.group(0).lower())], p
     )
 
-    # A state name right after a given name is part of a person's name,
+    # A state or city right after a given name is part of a person's name,
     # not a geographic unit: "George Washington University" keeps
-    # "Washington" (rule 10.2.2 abbreviates only geographic units).
+    # "Washington", "Sam Houston State University" keeps "Houston" (rule
+    # 10.2.2 abbreviates only geographic units).  So is a city's name that a
+    # people shares, ahead of "Tribe" or "Nation": "Miami Tribe of Okla.".
     protected: set[int] = set()
     tokens = list(_TOKEN_RE.finditer(p))
     for prev, tok in zip(tokens, tokens[1:]):
-        if (tok.group(0).lower() in _T10_WORDS
+        word = tok.group(0).lower()
+        if ((word in _T10_WORDS or word in _T10_CITY_WORDS)
                 and prev.group(0).lower() in _GIVEN_NAMES):
             protected.add(tok.start())
+        if (prev.group(0).lower() in _T10_CITY_WORDS
+                and word.rstrip(".") in ("tribe", "tribes", "nation",
+                                         "indians")):
+            protected.add(prev.start())
 
     def _sub(m: re.Match) -> str:
         if m.start() in protected:
@@ -2218,7 +2442,18 @@ def abbreviate_case_name(name: str, *, court_state: str = "") -> str:
         "", name, flags=re.IGNORECASE)
     if not name:
         return name
+    # Only the first-listed case of a consolidated caption is cited (rule
+    # 10.2.1(b)).  The caption readers cut the others off, but a name that
+    # comes another way — a stored record, a CourtListener caseName — can
+    # still carry them: "Bostock v. Clayton County, Georgia. Altitude
+    # Express, Inc., et al., Petitioners v. Zarda …".  An in-re caption has
+    # no "v." of its own, so any in it belongs to a companion.
     parts = _V_SPLIT_RE.split(name, maxsplit=1)
+    if len(parts) == 2 and not _PROCEDURAL_PREFIX_RE.match(parts[0]):
+        parts[1] = cut_companion_cases(parts[1])
+    else:
+        name = cut_companion_cases(name)
+        parts = _V_SPLIT_RE.split(name, maxsplit=1)
     # Rule 10.2.1(d) keeps "The" when it is part of the name of the object of
     # an in rem action: an adversary-less caption opening with "The" names
     # the res itself — an admiralty vessel ("The Silvia", "The Paquete
@@ -2358,6 +2593,27 @@ if __name__ == "__main__":
         ("McCreary County, Kentucky v. "
          "American Civil Liberties Union of Kentucky",
          "McCreary County v. ACLU of Ky."),
+        ("Seminole Tribe of Florida v. Florida",
+         "Seminole Tribe of Fla. v. Florida"),
+        # Table T10's cities abbreviate inside a longer name (rule 10.2.2)
+        # and stay whole as the entire party.
+        ("Cannon v. University of Chicago", "Cannon v. Univ. of Chi."),
+        ("San Francisco Arts & Athletics, Inc. v. United States Olympic "
+         "Committee", "S.F. Arts & Athletics, Inc. v. U.S. Olympic Comm."),
+        ("Terminiello v. Chicago", "Terminiello v. Chicago"),
+        ("Lockyer v. City and County of San Francisco",
+         "Lockyer v. City & County of San Francisco"),
+        # An office after a lone surname describes the party and goes (rules
+        # 10.2.1(e), (g)).
+        ("Bowers, Attorney General of Georgia v. Hardwick",
+         "Bowers v. Hardwick"),
+        ("Roe v. Wade, District Attorney of Dallas County", "Roe v. Wade"),
+        # A consolidated caption cites its first case alone (rule 10.2.1(b)),
+        # however the name arrived.
+        ("Bostock v. Clayton Cnty., Georgia. Altitude Express, Inc., et al., "
+         "Petitioners v. Melissa Zarda", "Bostock v. Clayton County"),
+        ("Olmstead v. U.S.. Green Et Al. v. Same. McInnis v. Same",
+         "Olmstead v. United States"),
         ("Soldal v. Cook County", "Soldal v. Cook County"),
         ("Los Angeles County v. Humphries", "Los Angeles County v. Humphries"),
         ("Washington County v. Gunther", "Washington County v. Gunther"),
