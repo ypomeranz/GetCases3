@@ -9,6 +9,13 @@ polled at most a few times a day.  It also parses the Court's per-Term
 slip-opinion tables and safely matches a case by docket, reporter citation, or
 caption plus the exact decision date printed in the opinion.
 
+The homepage panel is empty between Terms, so the latest entries of the
+Term's "Opinions of the Court" table stand in for it
+(:func:`recent_merits_opinions`), and the Term's "Opinions Relating to
+Orders" — which lists each separate writing on an order as a row of its own —
+is gathered into one entry per order naming the Justices who wrote
+(:func:`recent_order_opinions`).
+
 Headless and dependency-light (``requests`` + ``beautifulsoup4``, both already
 required by the app); no tkinter.  Run ``python -X utf8 scotus_recent.py`` for
 an offline self-test (parses a bundled fixture) plus, with ``--live``, a real
@@ -38,6 +45,11 @@ HOME_URL = "https://www.supremecourt.gov/"
 SLIP_INDEX_URL = (
     "https://www.supremecourt.gov/opinions/slipopinion/{term}"
 )
+# A Term's opinion table: ``slipopinion`` is "Opinions of the Court", the
+# merits opinions; ``relatingtoorders`` is "Opinions Relating to Orders".
+TERM_TABLE_URL = "https://www.supremecourt.gov/opinions/{kind}/{term}"
+MERITS = "slipopinion"
+RELATING_TO_ORDERS = "relatingtoorders"
 _BASE = "https://www.supremecourt.gov/"
 _CACHE_PATH = Path.home() / ".cache" / "courtlistener_scotus_recent.json"
 _CACHE_VERSION = 3
@@ -45,6 +57,7 @@ _CACHE_TTL = 6 * 3600  # seconds; the homepage updates on decision days only
 _SLIP_CACHE_VERSION = 1
 _SLIP_CURRENT_TTL = 6 * 3600
 _SLIP_PAST_TTL = 30 * 24 * 3600
+_TERM_CACHE_VERSION = 1
 _TIMEOUT = 25
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) "
        "Gecko/20100101 Firefox/144.0")
@@ -81,6 +94,47 @@ class SlipOpinion:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class TermOpinion:
+    """One row of a Term's opinion table — "Opinions of the Court" or
+    "Opinions Relating to Orders" — including a row the Court has not linked
+    a PDF to yet."""
+
+    term: str            # two-digit October Term slug, e.g. "25"
+    date: str            # ISO date
+    docket: str          # as printed: "25-332", "26A305", "162, Orig."
+    name: str            # revision notes taken off
+    author: str          # the "J." column: "R", "BK", "PC" (per curiam)
+    opinion_url: str     # absolute PDF URL, with any #page=; "" if none
+    description: str = ""  # the holding the Court puts on the link, if any
+    citation: str = ""   # "609 U.S. 422", or a preliminary-print "609/2"
+    release: str = ""    # the "R-" number (Opinions of the Court only)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class OrderOpinion:
+    """The separate writings on one order, gathered from the rows "Opinions
+    Relating to Orders" lists them in — one row per writing."""
+
+    name: str
+    docket: str
+    date: str            # ISO date of the order
+    authors: list        # each writing's "J." initials, in print order
+    opinion_url: str     # the first writing's PDF (with any #page=)
+    citation: str = ""
+
+
+#: The "J." column's initials → the Justice's surname.
+JUSTICES = {
+    "R": "Roberts", "T": "Thomas", "A": "Alito", "SS": "Sotomayor",
+    "EK": "Kagan", "NG": "Gorsuch", "BK": "Kavanaugh", "AB": "Barrett",
+    "KJ": "Jackson", "B": "Breyer", "G": "Ginsburg",
+}
 
 
 def _abs(href: str) -> str:
@@ -222,6 +276,17 @@ def _slip_cache_path(term: str) -> Path:
     )
 
 
+def _term_cache_ttl(term: str) -> int:
+    """How long a Term's tables are cached: hours while the Term is sitting,
+    a month once it has closed."""
+    term_year = 2000 + int(_term_slug(term))
+    return (
+        _SLIP_CURRENT_TTL
+        if term_year >= _current_term_year()
+        else _SLIP_PAST_TTL
+    )
+
+
 def _read_slip_cache(
     term: str, *, allow_stale: bool = False,
 ) -> "Optional[list[SlipOpinion]]":
@@ -231,15 +296,10 @@ def _read_slip_cache(
         )
         if blob.get("version") != _SLIP_CACHE_VERSION:
             return None
-        term_year = 2000 + int(_term_slug(term))
-        ttl = (
-            _SLIP_CURRENT_TTL
-            if term_year >= _current_term_year()
-            else _SLIP_PAST_TTL
-        )
         if (
             not allow_stale
-            and time.time() - float(blob.get("fetched_at") or 0) > ttl
+            and time.time() - float(blob.get("fetched_at") or 0)
+            > _term_cache_ttl(term)
         ):
             return None
         return [SlipOpinion(**item) for item in (blob.get("items") or [])]
@@ -522,6 +582,262 @@ def _read_cache_stale() -> "Optional[list[RecentDecision]]":
         return None
 
 
+# ---------------------------------------------------------------------------
+# A Term's opinion tables: Opinions of the Court, Opinions Relating to Orders
+# ---------------------------------------------------------------------------
+
+# The tables' column headings, as printed, → TermOpinion fields.
+_TERM_COLUMNS = {
+    "r-": "release", "date": "date", "docket": "docket", "name": "name",
+    "j.": "author", "citation": "citation",
+}
+# "Danco Laboratories, LLC v. Louisiana Revisions : 5/15/26" — the note of a
+# revised opinion, printed after the name in the same cell.
+_REVISIONS_RE = re.compile(r"\s*\bRevisions?\s*:.*$", re.IGNORECASE)
+_BARE_DATE_RE = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
+
+
+def parse_term_opinions(html: str, term: str | int) -> list[TermOpinion]:
+    """Every row of a Term's opinion tables, in the order the page lists them
+    (newest first).
+
+    Columns are read by their headings, so one parser serves both pages:
+    "Opinions of the Court" (R-, Date, Docket, Name, J., Citation) and
+    "Opinions Relating to Orders" (the same without R-).  A row the Court has
+    not linked a PDF to is kept, with no ``opinion_url``.  The case-name link
+    is taken over a revision notice's date-labelled one.
+    """
+    slug = _term_slug(term)
+    soup = BeautifulSoup(html or "", "html.parser")
+    out: list[TermOpinion] = []
+    seen: set[tuple] = set()
+    for table in soup.find_all("table"):
+        columns: dict[str, int] = {}
+        for tr in table.find_all("tr"):
+            heads = tr.find_all("th")
+            if heads:
+                labels = [_clean(th.get_text(" ", strip=True)).lower()
+                          for th in heads]
+                columns = {
+                    _TERM_COLUMNS[label]: i
+                    for i, label in enumerate(labels) if label in _TERM_COLUMNS
+                }
+                if not {"date", "docket", "name"} <= columns.keys():
+                    columns = {}
+                continue
+            cells = tr.find_all("td")
+            if not columns or len(cells) <= max(columns.values()):
+                continue
+
+            def text(field: str) -> str:
+                i = columns.get(field)
+                return (_clean(cells[i].get_text(" ", strip=True))
+                        if i is not None else "")
+
+            name_cell = cells[columns["name"]]
+            links = [
+                a for a in name_cell.find_all("a", href=True)
+                if re.search(r"\.pdf(?:[?#].*)?$", a["href"], re.IGNORECASE)
+            ]
+            link = next(
+                (a for a in links
+                 if not _BARE_DATE_RE.fullmatch(_clean(a.get_text()))),
+                links[0] if links else None,
+            )
+            name = _REVISIONS_RE.sub("", text("name")).strip()
+            iso = _date_iso(text("date"))
+            if not name or not iso:
+                continue
+            row = TermOpinion(
+                term=slug,
+                date=iso,
+                docket=text("docket"),
+                name=name,
+                author=text("author"),
+                opinion_url=_abs(link["href"]) if link is not None else "",
+                description=(_clean(link.get("title") or "")
+                             if link is not None else ""),
+                citation=text("citation"),
+                release=text("release"),
+            )
+            key = (row.date, row.docket, row.name, row.author, row.opinion_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+    return out
+
+
+def _term_cache_path(kind: str, term: str) -> Path:
+    return (
+        Path.home() / ".cache"
+        / f"courtlistener_scotus_{kind}_{_term_slug(term)}.json"
+    )
+
+
+def _read_term_cache(
+    kind: str, term: str, *, allow_stale: bool = False,
+) -> "Optional[list[TermOpinion]]":
+    try:
+        blob = json.loads(
+            _term_cache_path(kind, term).read_text(encoding="utf-8")
+        )
+        if blob.get("version") != _TERM_CACHE_VERSION:
+            return None
+        if (
+            not allow_stale
+            and time.time() - float(blob.get("fetched_at") or 0)
+            > _term_cache_ttl(term)
+        ):
+            return None
+        return [TermOpinion(**item) for item in (blob.get("items") or [])]
+    except Exception:
+        return None
+
+
+def _write_term_cache(kind: str, term: str, items: list[TermOpinion]) -> None:
+    try:
+        path = _term_cache_path(kind, term)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "version": _TERM_CACHE_VERSION,
+            "fetched_at": time.time(),
+            "items": [item.to_dict() for item in items],
+        }), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def fetch_term_opinions(
+    term: str | int, kind: str = MERITS, *, force: bool = False, session=None,
+) -> list[TermOpinion]:
+    """A Term's "Opinions of the Court" (``kind=MERITS``) or "Opinions
+    Relating to Orders" (``kind=RELATING_TO_ORDERS``), cached like the
+    slip-opinion index: six hours for the sitting Term, thirty days for a
+    closed one, and a stale copy when supremecourt.gov is unreachable.
+    Returns ``[]`` for a Term with no table yet."""
+    slug = _term_slug(term)
+    if not slug:
+        return []
+    if not force:
+        cached = _read_term_cache(kind, slug)
+        if cached is not None:
+            return cached
+    url = TERM_TABLE_URL.format(kind=kind, term=slug)
+    try:
+        get = session.get if session is not None else requests.get
+        resp = get(url, headers={"User-Agent": _UA}, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        items = parse_term_opinions(resp.text, slug)
+    except Exception as exc:
+        print(f"[scotus] {kind} {slug} failed: {exc}")
+        return _read_term_cache(kind, slug, allow_stale=True) or []
+    if items:
+        _write_term_cache(kind, slug, items)
+    return items
+
+
+def _release_number(release: str) -> int:
+    digits = re.sub(r"\D", "", release or "")
+    return int(digits) if digits else 0
+
+
+def recent_merits_opinions(limit: int = 10, *, session=None) -> list[TermOpinion]:
+    """The Court's latest opinions of the Court, newest first: the sitting
+    Term's table, reaching back into the last Term while this one has fewer
+    than *limit*.  What stands in for the homepage's Recent Decisions panel
+    when it is empty."""
+    out: list[TermOpinion] = []
+    year = _current_term_year()
+    for term in (year, year - 1):
+        out.extend(fetch_term_opinions(term, MERITS, session=session))
+        if len(out) >= limit:
+            break
+    out.sort(key=lambda row: (row.date, _release_number(row.release)),
+             reverse=True)
+    return out[:limit]
+
+
+def pdf_page(url: str) -> int:
+    """The page a PDF link's ``#page=N`` opens at (1 when it names none)."""
+    m = re.search(r"#page=(\d+)", url or "", re.IGNORECASE)
+    return max(1, int(m.group(1))) if m else 1
+
+
+def group_order_opinions(rows: list[TermOpinion]) -> list[OrderOpinion]:
+    """One entry per order, in the order the rows come: "Opinions Relating to
+    Orders" gives each separate writing on an order a row of its own, all
+    with the order's date and docket.
+
+    The writings of an order share one PDF, each row pointing at its own
+    ``#page=`` — in a closed Term, pages of the preliminary print's orders
+    section.  The entry opens at the first of them, and names its writers in
+    the order their writings are printed."""
+    groups: dict[tuple[str, str], tuple[OrderOpinion, list]] = {}
+    out: list[OrderOpinion] = []
+    for row in rows:
+        key = (row.date, _normalize_docket(row.docket) or row.name.lower())
+        if key not in groups:
+            group = OrderOpinion(
+                name=row.name, docket=row.docket, date=row.date, authors=[],
+                opinion_url="", citation=row.citation,
+            )
+            groups[key] = (group, [])
+            out.append(group)
+        groups[key][1].append(row)
+    for group, members in groups.values():
+        printed = sorted(
+            enumerate(members),
+            key=lambda pair: (pdf_page(pair[1].opinion_url), pair[0]),
+        )
+        for _i, row in printed:
+            if row.author and row.author not in group.authors:
+                group.authors.append(row.author)
+        group.opinion_url = next(
+            (row.opinion_url for _i, row in printed if row.opinion_url), "",
+        )
+        group.citation = printed[0][1].citation
+    return out
+
+
+def recent_order_opinions(limit: int = 5, *, session=None) -> list[OrderOpinion]:
+    """The latest orders that drew separate writings, newest first, each
+    listed once with the Justices who wrote (see :func:`group_order_opinions`)
+    — from the sitting Term, reaching back into the last while it has fewer
+    than *limit*."""
+    out: list[OrderOpinion] = []
+    year = _current_term_year()
+    for term in (year, year - 1):
+        out.extend(group_order_opinions(
+            fetch_term_opinions(term, RELATING_TO_ORDERS, session=session)
+        ))
+        if len(out) >= limit:
+            break
+    out.sort(key=lambda order: order.date, reverse=True)  # stable within a day
+    return out[:limit]
+
+
+def author_label(initials: str) -> str:
+    """The "J." column's initials as a byline: "Roberts, C.J.", "Kagan, J.",
+    "Per curiam" — or the initials as printed, for ones not known here."""
+    code = (initials or "").strip().upper()
+    if code == "PC":
+        return "Per curiam"
+    name = JUSTICES.get(code)
+    if not name:
+        return (initials or "").strip()
+    return f"{name}, C.J." if code == "R" else f"{name}, J."
+
+
+def display_date(iso: str) -> str:
+    """"2026-06-29" → "June 29, 2026"; anything else as given."""
+    try:
+        day = datetime.strptime(iso or "", "%Y-%m-%d").date()
+    except ValueError:
+        return iso or ""
+    return f"{day:%B} {day.day}, {day.year}"
+
+
 if __name__ == "__main__":  # pragma: no cover - offline smoke test
     import sys
 
@@ -566,6 +882,23 @@ if __name__ == "__main__":  # pragma: no cover - offline smoke test
     check(all("Order" not in it.name for it in items),
           "the order without an opinion PDF is dropped")
 
+    ORDERS_FIXTURE = """
+    <table>
+      <tr><th>Date</th><th>Docket</th><th>Name</th><th>J.</th><th>Citation</th></tr>
+      <tr><td>9/14/26</td><td>26A305</td>
+          <td><a href="/opinions/25pdf/26a305_4g15.pdf">Postal Service v. California</a></td>
+          <td>BK</td><td>609/2</td></tr>
+      <tr><td>9/14/26</td><td>26A305</td>
+          <td><a href="/opinions/25pdf/26a305_4g15.pdf#page=2">Postal Service v. California</a></td>
+          <td>A</td><td>609/2</td></tr>
+    </table>
+    """
+    rows = parse_term_opinions(ORDERS_FIXTURE, "25")
+    check(len(rows) == 2, f"one row per separate writing: {len(rows)}")
+    orders = group_order_opinions(rows)
+    check(len(orders) == 1 and orders[0].authors == ["BK", "A"],
+          f"one entry per order, naming its writers: {orders}")
+
     if "--live" in sys.argv:
         print("\n--- live fetch ---")
         live = fetch_recent_decisions(force=True)
@@ -574,7 +907,18 @@ if __name__ == "__main__":  # pragma: no cover - offline smoke test
             print(f"  {it.date} | {it.name} ({it.docket})")
             print(f"      {it.description[:90]}")
             print(f"      {it.opinion_url}")
-        check(len(live) > 0, "live homepage returned at least one decision")
+        latest = recent_merits_opinions(10)
+        print(f"\n{len(latest)} latest opinions of the Court")
+        for it in latest:
+            print(f"  {display_date(it.date)} | {it.name} ({it.docket}) | "
+                  f"{author_label(it.author)}")
+        recent = recent_order_opinions(5)
+        print(f"\n{len(recent)} latest opinions relating to orders")
+        for it in recent:
+            print(f"  {display_date(it.date)} | {it.name} ({it.docket}) | "
+                  + "; ".join(author_label(a) for a in it.authors))
+        check(bool(live or latest),
+              "live homepage or Term table returned at least one opinion")
 
     if failures:
         print(f"\n{len(failures)} FAILED")

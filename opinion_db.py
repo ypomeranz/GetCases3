@@ -1453,7 +1453,7 @@ class OpinionDB:
         with self._lock:
             rows = self._db.execute(
                 f"SELECT o.scholar_id, o.name, o.court, o.year, o.url, "
-                f"o.cites_json, o.snippet, "
+                f"o.cites_json, o.snippet, o.line_length AS size, "
                 f"COUNT(DISTINCT p.token) AS _n "
                 f"FROM parties p JOIN opinions o ON o.scholar_id=p.scholar_id "
                 f"WHERE p.token IN ({placeholders}) "
@@ -1485,7 +1485,7 @@ class OpinionDB:
     @classmethod
     def _summary(cls, row: sqlite3.Row) -> dict:
         cites = json.loads(row["cites_json"] or "[]")
-        return {
+        summary = {
             "scholar_id": row["scholar_id"],
             "name": row["name"],
             "cite": cites[0] if cites else "",
@@ -1495,6 +1495,11 @@ class OpinionDB:
             "url": row["url"],
             "snippet": row["snippet"] or "",
         }
+        # The stored record's length, where the query asked for it: an order
+        # is a kilobyte or so, a merits opinion tens of them.
+        if "size" in row.keys():
+            summary["size"] = int(row["size"] or 0)
+        return summary
 
     @staticmethod
     def _summary_from_record(rec: dict) -> dict:
