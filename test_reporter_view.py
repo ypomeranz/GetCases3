@@ -363,6 +363,7 @@ def _raise(*_a, **_kw):
 
 VIEWER_NAMES = ["has_scan", "has_text_side", "set_text_side", "_toggle_mode",
                 "showing_text", "_sync_bar", "_refresh_scale",
+                "_place_details_btn",
                 "attach_scan", "no_scan_to_find", "_mode_button_tip"]
 
 
@@ -387,6 +388,8 @@ class _Button:
         self.text = text
         self.packed = False
         self.before = None
+        self.side = None
+        self.packings = 0
         self.state = "normal"
 
     def configure(self, **kw):
@@ -396,9 +399,24 @@ class _Button:
     def pack(self, **kw):
         self.packed = True
         self.before = kw.get("before")
+        self.side = kw.get("side")
+        self.packings += 1
 
     def pack_forget(self):
         self.packed = False
+
+    def winfo_manager(self):
+        return "pack" if self.packed else ""
+
+
+class _Strip:
+    """The strip, as far as saying what is packed on it, in packing order."""
+
+    def __init__(self, *buttons):
+        self.buttons = buttons
+
+    def pack_slaves(self):
+        return [b for b in self.buttons if b.packed]
 
 
 class _Viewer:
@@ -428,6 +446,14 @@ class _Viewer:
         self._fit_btn.packed = True
         self._copy_btn = _Button("Copy ▾")
         self._zoom_label = object()
+        # The side panel's switch, packed where _build_bar packs it for a
+        # case: first, so at the strip's very end.
+        self._details_btn = _Button()
+        self._details_btn.packed = True
+        self._window_btn = _Button()
+        self._window_btn.packed = True
+        self._bar = _Strip(self._details_btn, self._window_btn,
+                           self._mode_btn, self._fit_btn)
         self.switched = []
         for name in VIEWER_NAMES:
             setattr(self, name, VIEWER_NS[name].__get__(self))
@@ -491,6 +517,36 @@ class NoTextSideTests(unittest.TestCase):
         viewer = _Viewer(scan=False, reader=object())
         viewer.set_text_side(False)
         self.assertTrue(viewer.has_text_side())
+
+    def test_nor_has_it_a_side_panel_icon(self):
+        # No case behind the pages, so no details to show: the icon comes off
+        # rather than sit there refusing to work, as T does.
+        viewer = _Viewer()
+        viewer._sync_bar()
+        self.assertFalse(viewer._details_btn.packed)
+
+    def test_a_case_keeps_the_icon_where_it_is(self):
+        viewer = _Viewer(build_text=lambda host: object())
+        viewer._sync_bar()
+        self.assertTrue(viewer._details_btn.packed)
+        self.assertEqual(viewer._details_btn.packings, 0)   # never re-packed
+
+    def test_a_lookup_that_came_back_empty_takes_the_icon_off_too(self):
+        viewer = _Viewer(build_text=lambda host: object())
+        viewer._sync_bar()
+        viewer.set_text_side(False)
+        self.assertFalse(viewer._details_btn.packed)
+
+    def test_an_icon_that_comes_back_comes_back_at_the_very_end(self):
+        # Packed from the right ahead of everything now on the strip — the
+        # first packed from the right is the one at the far end.
+        viewer = _Viewer()
+        viewer._sync_bar()
+        viewer._on_build_text = lambda host: object()
+        viewer._sync_bar()
+        self.assertTrue(viewer._details_btn.packed)
+        self.assertEqual(viewer._details_btn.side, "right")
+        self.assertIs(viewer._details_btn.before, viewer._window_btn)
 
 
 class ScanStillComingTests(unittest.TestCase):
@@ -957,7 +1013,8 @@ class _BookmarkApp:
 
 
 STRIP_NAMES = ["_sync_bar_menu", "_add_bar_menu_bookmark", "_bookmark_owner",
-               "showing_text", "has_text_side", "details_showing"]
+               "showing_text", "has_text_side", "details_showing",
+               "_details_label"]
 STRIP_NS = _load("_FloatingPdfWindow", STRIP_NAMES, {"_ACCEL": "Ctrl"})
 
 
@@ -1140,7 +1197,7 @@ DETAILS_NAMES = ["_details_shortcut", "details_showing", "toggle_details",
                  "_open_details", "_hide_details", "_details_window",
                  "_details_width", "_place_details", "_on_geometry",
                  "_build_reader", "adopt_reader", "has_scan", "has_text_side",
-                 "showing_text"]
+                 "showing_text", "_details_label", "_mark_details_btn"]
 
 
 class _Packable:
@@ -1231,6 +1288,16 @@ class _DetailsReader:
         self.refreshed += 1
 
 
+class _PanelIcon:
+    """The strip's side panel icon, as far as which artwork it shows."""
+
+    def __init__(self):
+        self.image = "panel"
+
+    def configure(self, **kw):
+        self.image = kw.get("image", self.image)
+
+
 class _GeomWindow(_Widget):
     """A window that knows where it is and how big it is."""
 
@@ -1317,6 +1384,9 @@ class _DetailsViewer:
         self._text_host = None
         self._details_win = None
         self._details_geom = ()
+        self._details_btn = _PanelIcon()
+        self._strip_icons = {"panel": "panel",
+                             "panel_showing": "panel_showing"}
         self.flashed: list = []
         self.synced = 0
         self.reader = _DetailsReader() if reader == "build" else None
@@ -1490,6 +1560,63 @@ class DetailsPanelTests(unittest.TestCase):
         viewer = _DetailsViewer()
         viewer._on_geometry(_ConfigureEvent(viewer._win))   # nothing to place
         self.assertEqual(_DetailsPanelWindow.made, [])
+
+
+class DetailsIconTests(unittest.TestCase):
+    """The strip's side panel icon is the "s" key's switch, and shows which
+    way it is set."""
+
+    def setUp(self):
+        _DetailsPanelWindow.made.clear()
+
+    def test_a_click_opens_the_panel_and_another_puts_it_away(self):
+        # The icon's command is toggle_details, the switch "s" throws.
+        viewer = _DetailsViewer()
+        viewer.toggle_details()
+        self.assertTrue(viewer.details_showing())
+        viewer.toggle_details()
+        self.assertFalse(viewer.details_showing())
+        self.assertEqual(len(_DetailsPanelWindow.made), 1)
+
+    def test_its_column_is_filled_in_while_the_panel_is_up(self):
+        viewer = _DetailsViewer()
+        self.assertEqual(viewer._details_btn.image, "panel")
+        viewer.toggle_details()
+        self.assertEqual(viewer._details_btn.image, "panel_showing")
+        viewer.toggle_details()
+        self.assertEqual(viewer._details_btn.image, "panel")
+
+    def test_the_key_moves_it_as_well(self):
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        self.assertEqual(viewer._details_btn.image, "panel_showing")
+        viewer.press_s()
+        self.assertEqual(viewer._details_btn.image, "panel")
+
+    def test_and_the_panel_s_own_keys_and_close_box(self):
+        viewer = _DetailsViewer()
+        for seq in ("<KeyPress-s>", "<Escape>") + ACCEL("w"):
+            with self.subTest(seq=seq):
+                viewer.toggle_details()
+                self.assertEqual(viewer._details_btn.image, "panel_showing")
+                _DetailsPanelWindow.made[0].bindings[seq](None)
+                self.assertEqual(viewer._details_btn.image, "panel")
+        viewer.toggle_details()
+        _DetailsPanelWindow.made[0].protocols["WM_DELETE_WINDOW"]()
+        self.assertEqual(viewer._details_btn.image, "panel")
+
+    def test_a_case_whose_text_has_not_arrived_leaves_it_empty(self):
+        viewer = _DetailsViewer(reader="none")
+        viewer._on_build_text = lambda host: None
+        viewer.toggle_details()
+        self.assertEqual(viewer.flashed, ["Case details not ready"])
+        self.assertEqual(viewer._details_btn.image, "panel")
+
+    def test_its_tip_says_what_a_click_will_do(self):
+        viewer = _DetailsViewer()
+        self.assertEqual(viewer._details_label(), "Case Details   s")
+        viewer.toggle_details()
+        self.assertEqual(viewer._details_label(), "Hide Case Details   s")
 
 
 class DetailsMenuTests(unittest.TestCase):

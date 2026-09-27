@@ -955,7 +955,20 @@ class ReporterSweepTests(unittest.TestCase):
         "D.C.", "Cal.", "Cal. 4th",
         # Early federal and English
         "Wall. Jr.", "Sumn.", "Curt.", "Ben.", "Gall.", "Low.", "Q.B.", "K.B.",
-        "Ch.", "A.C.", "Johns.", "Binn.",
+        "Ch.", "A.C.", "Johns.", "Binn.", "Q.B.D.", "L.R. Q.B.",
+        # Reporters sharing a word with a periodical's title (table T13),
+        # which is why those words are not journal markers
+        "Soc. Sec. Rep. Serv.", "Educ. L. Rep.", "Wkly. Notes Cas.",
+        "Wkly. L. Bull.", "N.Y. Civ. Proc.", "La. Ann.", "Ann. Cas.",
+        "Mag. Cas.", "Am. Dec.", "Am. St. Rep.", "Media L. Rep.",
+        "Pub. Util. Rep.", "Fair Empl. Prac. Cas.", "Env't Rep. Cas.",
+        "U.S.P.Q.2d", "O.S.H. Cas.",
+        # Reporters named for the court they report
+        "A.D.2d", "A.D.3d", "App. Div.", "Misc. 2d", "Tex. Crim.",
+        "U.S. App. D.C.", "Cal. App. 4th Supp.",
+        # Reporters named for their reporters
+        "Harris & G.", "Smedes & M.", "Jones Eq.", "Gill & J.",
+        "Serg. & Rawle", "Watts & Serg.",
     )
 
     JOURNALS = (
@@ -971,7 +984,33 @@ class ReporterSweepTests(unittest.TestCase):
         "Vand. L. Rev.", "Wis. L. Rev.", "Ohio St. L.J.", "Ind. L.J.",
         "Am. Crim. L. Rev.", "J. Crim. L. & Criminology",
         "Crim. L. Bull.", "Law & Contemp. Probs.",
+        # The other sciences' periodicals, cited for an opinion's facts
+        "Epidemiologic Revs.", "Ann. Internal Med.", "Annals Internal Med.",
+        "Health Aff.", "Homicide Stud.", "Just. Q.", "Pol. Sci. Q.",
+        "Wm. & Mary Q.", "Q.J. Econ.", "Soc. Sci. & Med.", "Psychol. Sci.",
+        "Archives Sexual Behav.", "Law & Contemp. Prob.",
+        "Morbidity & Mortality Wkly. Rep.", "Proc. Nat'l Acad. Sci.",
+        "Pub. Health Rep.", "Criminology & Pub. Pol'y", "Inj. Prevention",
+        "Arch. Gen. Psychiatry", "Crim. Just. Rsch.", "Law & Soc'y Rev.",
+        "Contemp. Econ. Pol'y", "Philos. & Pub. Aff.", "Fla. Hist. Q.",
+        # Histories and legislative histories cited like them
+        "Leg. Hist.", "Documentary Hist.",
     )
+
+    def test_a_social_science_study_is_not_a_case(self):
+        # N.Y. State Rifle & Pistol Ass'n v. Bruen, 142 S. Ct. 2111, 2166
+        # (2022) (Breyer, J., dissenting): the study's journal, "Epidemiologic
+        # Revs.", was linked as a reporter, the article's title as the case.
+        text = (
+            "Brief for Educational Fund 8 (citing A. Zeoli, R. Malinski, & "
+            "B. Turchan, Risks and Targeted Interventions: Firearms in "
+            "Intimate Partner Violence, 38 Epidemiologic Revs. 125 (2016); "
+            "J. Campbell et al., Risk Factors for Femicide in Abusive "
+            "Relationships: Results From a Multisite Case Control Study, 93 "
+            "Am. J. Pub. Health 1089, 1092 (2003)). D. Studdert et al., "
+            "Handgun Ownership and Suicide in California, 382 New England J. "
+            "Med. 2220, 2224 (June 4, 2020).")
+        self.assertEqual(_spans(text), [])
 
     def test_an_article_named_for_a_case_is_not_that_case(self):
         # California v. Acevedo, 500 U.S. at 581 n.* — the article's title

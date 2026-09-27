@@ -33,6 +33,7 @@ import threading
 import time
 import tkinter as tk
 import urllib.parse
+import uuid
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace as _dc_replace
@@ -431,6 +432,90 @@ def _add_bookmarks_cascade(menubar: tk.Menu, app, win: tk.Misc) -> None:
     menubar.add_cascade(label="Bookmarks", menu=bookmarks_menu)
 
 
+def _menu_child(menu: tk.Menu) -> tk.Menu:
+    """A submenu of *menu* for this filling of it — gone at the next, when
+    :func:`_drop_menu_children` clears it out (a menu refilled each time it
+    opens would otherwise pile up one set of submenus per opening)."""
+    child = tk.Menu(menu, tearoff=0)
+    menu.__dict__.setdefault("_filled_children", []).append(child)
+    return child
+
+
+def _drop_menu_children(menu) -> None:
+    """Destroy the submenus :func:`_menu_child` made for *menu* last time."""
+    children = getattr(menu, "_filled_children", None) or []
+    for child in children:
+        try:
+            child.destroy()
+        except tk.TclError:
+            pass
+    if children:
+        children.clear()
+
+
+def _forget_bookmark_copy(entry: dict) -> None:
+    """Delete the local copy a bookmark reopened from, once it is no longer
+    bookmarked anywhere: the scan saved beside it (a case's PDF, a slip
+    opinion) — the only copy kept outside the bookmark itself."""
+    payload = entry.get("payload") if isinstance(entry, dict) else None
+    if isinstance(payload, dict) and payload.get("type") in ("pdf", "slip"):
+        _bookmark_pdf_delete(str(payload.get("url") or ""))
+
+
+def _ask_name(parent, title: str, prompt: str, initial: str = "",
+              check=None) -> Optional[str]:
+    """Ask for a name in a small dialog of its own; the name, or None when
+    it is put away.  *check* may refuse a name by returning why, which the
+    dialog says and waits for another."""
+    dlg = _ui_toplevel(parent)
+    dlg.title(title)
+    try:
+        if parent is not None and parent.winfo_viewable():
+            dlg.transient(parent)
+    except tk.TclError:
+        pass
+    dlg.resizable(False, False)
+    frame = _ui_frame(dlg)
+    frame.pack(fill="both", expand=True, padx=16, pady=14)
+    ttk.Label(frame, text=prompt, justify="left").pack(fill="x", pady=(0, 8))
+    value = tk.StringVar(master=dlg, value=initial)
+    entry = ttk.Entry(frame, textvariable=value, width=40)
+    entry.pack(fill="x")
+    entry.select_range(0, "end")
+    entry.focus_set()
+    problem = tk.StringVar(master=dlg, value="")
+    ttk.Label(frame, textvariable=problem, foreground="#a31515").pack(
+        fill="x", pady=(6, 0))
+    buttons = _ui_frame(frame)
+    buttons.pack(fill="x", pady=(10, 0))
+    answer: list = [None]
+
+    def ok() -> None:
+        name = re.sub(r"\s+", " ", value.get()).strip()
+        if not name:
+            problem.set("Enter a name.")
+            return
+        refused = check(name) if check is not None else None
+        if refused:
+            problem.set(refused)
+            return
+        answer[0] = name
+        dlg.destroy()
+
+    _ui_button(buttons, "OK", command=ok, primary=True, width=86).pack(
+        side="right")
+    _ui_button(buttons, "Cancel", command=dlg.destroy, width=86).pack(
+        side="right", padx=(0, 8))
+    dlg.bind("<Return>", lambda _e: ok())
+    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+    dlg.wait_window()
+    return answer[0]
+
+
 def _build_copy_menu(master: tk.Misc, reader) -> "Optional[tk.Menu]":
     """The copy menu for an opinion reader: the citation on its own, the
     selectable Ctrl-C styles, and copying the selection now.
@@ -469,8 +554,39 @@ def _build_copy_menu(master: tk.Misc, reader) -> "Optional[tk.Menu]":
     return copy_menu
 
 
+def _list_in_window_menu(app, win: tk.Misc) -> None:
+    """Have every Window menu list the window *win* is in, until it closes
+    (see ``CourtListenerGUI.register_document_window``)."""
+    if app is None or not hasattr(app, "register_document_window"):
+        return
+    try:
+        app.register_document_window(win)
+    except Exception as exc:
+        print(f"[window] could not list the window: {exc}")
+
+
+def _window_is_open(win) -> bool:
+    """Whether *win* is a window the reader has open — still there, and not
+    withdrawn out of sight (a minimized one is open all the same)."""
+    try:
+        return bool(win.winfo_exists()) and win.wm_state() != "withdrawn"
+    except (AttributeError, tk.TclError):
+        return False
+
+
+def _window_menu_label(win) -> str:
+    """What the Window menu calls *win*: its title, kept to a menu's width."""
+    try:
+        title = re.sub(r"\s+", " ", str(win.title() or "")).strip()
+    except (AttributeError, tk.TclError):
+        title = ""
+    title = title or "Untitled Window"
+    return title if len(title) <= 72 else title[:69] + "…"
+
+
 def _add_window_cascade(menubar: tk.Menu, app, win: tk.Misc) -> None:
-    """Append the Window menu — the actions about the window itself."""
+    """Append the Window menu — the actions about the window itself, and the
+    other windows open, to go to."""
     if app is None or not hasattr(app, "populate_window_menu"):
         return
     window_menu = tk.Menu(menubar, tearoff=0)
@@ -517,6 +633,7 @@ def _install_history_menubar(app, win: tk.Misc, reader=None):
         win.config(menu=menubar)
     except tk.TclError:
         return None
+    _list_in_window_menu(app, win)
     return menubar
 
 
@@ -557,6 +674,7 @@ def _install_window_menubar(app, win: tk.Misc):
         win.config(menu=menubar)
     except tk.TclError:
         return None
+    _list_in_window_menu(app, win)
     return menubar
 
 
@@ -874,13 +992,16 @@ _STRIP_ICON_W, _STRIP_ICON_H = 16, 14
 
 
 def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
-    """Save and print artwork for the floating PDF viewer's strip.
+    """Save, print, history, bookmark, window and side-panel artwork for the
+    floating PDF viewer's strip.
 
     Drawn with Pillow — which the viewer already needs to put a page on screen
     at all — at four times the size and reduced, so the strokes come out smooth
     at 16px.  Returned as CTkImages where CustomTkinter is in use, so a
     high-DPI display scales them; as ordinary PhotoImages otherwise.
     """
+    import math
+
     from PIL import Image, ImageDraw
 
     scale = 4
@@ -916,6 +1037,69 @@ def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
         draw.rectangle(body, fill=color)
     sheet(draw, 4.5, 9, 11, 13)
 
+    # Bookmarks: the ribbon a bookmark is drawn as, notched at its foot.
+    ribbon, draw = start()
+    draw.polygon([(4 * scale, 0.5 * scale), (12 * scale, 0.5 * scale),
+                  (12 * scale, 13.5 * scale), (8 * scale, 9.8 * scale),
+                  (4 * scale, 13.5 * scale)], fill=color)
+
+    # Window: two windows, one behind the other — the other windows there
+    # are to go to.  The one in front is cut out of the one behind, so the
+    # back window's edges stop at the front one's frame.
+    windows, draw = start()
+
+    def window(left, top, right, bottom) -> None:
+        draw.rectangle((left * scale, top * scale, right * scale,
+                        bottom * scale), outline=color, width=scale)
+        draw.rectangle((left * scale, top * scale, right * scale,
+                        (top + 2.6) * scale), fill=color)
+
+    window(5, 0.5, 15.5, 8.5)
+    draw.rectangle((0, 4 * scale, 11.5 * scale, 14 * scale),
+                   fill=(0, 0, 0, 0))
+    window(0.5, 5, 11, 13.5)
+
+    # History: a clock face whose rim turns back — open at the upper left,
+    # where an arrowhead points the way it winds — with the hands on it.
+    clock, draw = start()
+    cx, cy, r = 8.5 * scale, 7 * scale, 5.6 * scale
+    draw.arc((cx - r, cy - r, cx + r, cy + r), start=250, end=565,
+             fill=color, width=round(1.2 * scale))
+    tip_x, tip_y = cx + r * math.cos(math.radians(205)), cy + r * math.sin(
+        math.radians(205))
+    draw.polygon([(tip_x - 2.2 * scale, tip_y - 1.4 * scale),
+                  (tip_x + 2.0 * scale, tip_y - 1.4 * scale),
+                  (tip_x - 0.2 * scale, tip_y + 1.9 * scale)], fill=color)
+    draw.line([(cx, cy), (cx, cy - 3.3 * scale)], fill=color,
+              width=round(1.2 * scale))
+    draw.line([(cx, cy), (cx + 2.4 * scale, cy + 1.6 * scale)], fill=color,
+              width=round(1.2 * scale))
+
+    # Side panel: a window with a column ruled off down its right-hand side,
+    # where the panel stands — the column empty while the panel is away and
+    # filled in while it is up, so the icon says which it is.  Drawn on whole
+    # pixels of the finished icon, so its straight edges come out crisp.
+    def pixels(left, top, right, bottom) -> tuple:
+        return (left * scale, top * scale, (right + 1) * scale - 1,
+                (bottom + 1) * scale - 1)
+
+    def side_panel(showing: bool):
+        image, draw = start()
+
+        def rounded(box, **style) -> None:
+            try:
+                draw.rounded_rectangle(box, radius=1.5 * scale, **style)
+            except AttributeError:      # Pillow older than 8.2
+                draw.rectangle(box, **style)
+
+        rounded(pixels(1, 1, 14, 12), outline=color, width=scale)
+        if showing:
+            rounded(pixels(10, 1, 14, 12), fill=color)
+            draw.rectangle(pixels(10, 1, 11, 12), fill=color)
+        else:
+            draw.rectangle(pixels(10, 1, 10, 12), fill=color)
+        return image
+
     def finish(image):
         small = image.resize((_STRIP_ICON_W, _STRIP_ICON_H), Image.LANCZOS)
         if _CTK_AVAILABLE:
@@ -927,7 +1111,39 @@ def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
         from PIL import ImageTk
         return ImageTk.PhotoImage(small, master=widget)
 
-    return {"save": finish(save), "print": finish(printer)}
+    return {"save": finish(save), "print": finish(printer),
+            "bookmarks": finish(ribbon), "windows": finish(windows),
+            "history": finish(clock),
+            "panel": finish(side_panel(False)),
+            "panel_showing": finish(side_panel(True))}
+
+
+def _folder_icon(master: tk.Misc, color: str = "#3f4650"):
+    """A small folder, drawn as the strip's icons are, for a bookmark folder
+    on the Bookmarks menu and in the Organize Bookmarks window — both Tk
+    widgets that take a plain PhotoImage.  None where it cannot be drawn."""
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+        scale = 4
+        # Wider than the artwork by a margin on its right: the space between
+        # the folder and its name, which a menu entry does not put there.
+        width = _STRIP_ICON_W + 4
+        image = Image.new("RGBA", (width * scale, _STRIP_ICON_H * scale),
+                          (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        # The tab, then the body below it.
+        draw.polygon([(1 * scale, 2 * scale), (6 * scale, 2 * scale),
+                      (7.5 * scale, 4 * scale), (1 * scale, 4 * scale)],
+                     fill=color)
+        draw.rectangle((1 * scale, 4 * scale, 15 * scale, 12.5 * scale),
+                       outline=color, width=scale)
+        draw.rectangle((1 * scale, 4 * scale, 15 * scale, 6 * scale),
+                       fill=color)
+        small = image.resize((width, _STRIP_ICON_H), Image.LANCZOS)
+        return ImageTk.PhotoImage(small, master=master)
+    except Exception as exc:
+        print(f"[bookmarks] the folder icon could not be drawn: {exc}")
+        return None
 
 
 from bluebook_names import (
@@ -1758,6 +1974,25 @@ def _scholar_parallel_cites(client, item: dict, exclude: str) -> list[str]:
 # before comparing reporter words against a court abbreviation.
 _REPORTER_SERIES_RE = re.compile(r"\b\d*(?:2d|3d|4th|5th|6th)\b\.?|\b\d+\b")
 
+# Reporters whose titles convey more than their abbreviations spell out, keyed
+# by the reporter's words (series dropped): the leading words of the court
+# abbreviation each one already says, and so leaves out of the parenthetical
+# (rule 10.4(b)).  The Appellate Division Reports are that court's own —
+# "154 App. Div. 413 (1913)"; the Miscellaneous Reports are New York's,
+# leaving which of its courts decided — "50 Misc. 2d 5 (Sup. Ct. 1966)"; the
+# Superior Court Reports leave the division — "(App. Div. 1990)".
+_REPORTER_CONVEYS: dict[tuple, str] = {
+    ("App.", "Div."): "N.Y. App. Div.",
+    ("A.D.",): "N.Y. App. Div.",
+    ("Misc.",): "N.Y.",
+    ("N.J.", "Super."): "N.J. Super. Ct.",
+    ("Tex.", "Crim."): "Tex. Crim. App.",
+    ("Okla.", "Crim."): "Okla. Crim. App.",
+    ("Cal.", "App.", "Supp."): "Cal. App. Dep't Super. Ct.",
+    ("App.", "D.C."): "D.C. Cir.",
+    ("U.S.", "App.", "D.C."): "D.C. Cir.",
+}
+
 _SCOTUS_REPORTERS = {"U.S.", "S. Ct.", "S.Ct.", "L. Ed.", "L. Ed. 2d", "L.Ed.", "L.Ed.2d"}
 
 
@@ -1810,8 +2045,11 @@ def _court_for_paren(citation: str, court_id: str, fallback: str = "") -> str:
       60 Fed. Cl. 600        → ()          reporter names the court
       306 Md. 556            → ()          official state reporter, highest court
       100 Cal. App. 4th 454  → ()          official reporter names the court
+      154 App. Div. 413      → ()          the Appellate Division's own reports
       75 Cal. Rptr. 2d 1     → (Ct. App.)  reporter conveys the state only
       12 N.Y.S.2d 345        → (App. Div.) reporter conveys the state only
+      400 N.Y.S.2d 5         → ()          ... and the highest court needs none
+      100 N.J. Super. 5      → (App. Div.) reporter conveys the court, not its division
       510 A.2d 562           → (Md.)       regional reporter conveys nothing
     """
     court_id = (court_id or "").strip().lower()
@@ -1837,18 +2075,27 @@ def _court_for_paren(citation: str, court_id: str, fallback: str = "") -> str:
             return ""
     if not abbr or not reporter:
         return abbr
+    # Compared as the Bluebook spells it: "Wn.2d" is the Washington Reports
+    # and "Pa. Cmwlth." the Commonwealth Court's, whatever the letters.
+    family = _reporter_family(reporter)
+    if family is not None:
+        reporter = family.canonical
     rep_tokens = [t for t in _REPORTER_SERIES_RE.sub(" ", reporter).split() if t]
     ct_tokens = abbr.split()
+    conveyed = _REPORTER_CONVEYS.get(tuple(rep_tokens), "").split()
+    if conveyed and ct_tokens[:len(conveyed)] == conveyed:
+        return " ".join(ct_tokens[len(conveyed):])
     meaningful = [t for t in ct_tokens if t != "Ct."]
     if meaningful and all(t in rep_tokens for t in meaningful):
         return ""
     if (
         rep_tokens
-        and len(ct_tokens) > 1
         and rep_tokens[0].replace(".", "").lower().startswith(
             ct_tokens[0].replace(".", "").lower()
         )
     ):
+        # The reporter names the state, leaving the court — none at all
+        # for the state's highest court: "400 N.Y.S.2d 5 (1977)".
         return " ".join(ct_tokens[1:])
     return abbr
 
@@ -6799,6 +7046,9 @@ class CourtListenerGUI:
         # Viewers opened by following a citation inside a PDF; they belong to
         # no reader, so the app holds them until they are closed.
         self._cited_pdf_windows: set = set()
+        # Every window a document is open in, in the order they opened, for
+        # the Window menu to switch between (see register_document_window).
+        self._document_windows: list = []
 
         # Recently viewed cases, most recent first, for the "History ▾"
         # dropdown every case window carries: {"key", "label", "reopen"}.
@@ -6808,8 +7058,15 @@ class CourtListenerGUI:
         # Bookmarked cases/statutes/rules, for the "Bookmarks" menu and the
         # tab right-click menu.  Each entry keeps a local copy of the document
         # (see _save_bookmarks) so it reopens offline; the menu lists them by
-        # most-recent access, not by when they were bookmarked.
+        # most-recent access, not by when they were bookmarked.  The folders
+        # the user keeps them in load first: an entry names the folders it is
+        # in, and a folder that is gone is no place to be.
+        self._bookmark_folders: list[dict] = self._load_bookmark_folders()
         self._bookmarks: list[dict] = self._load_bookmarks()
+        # Views of the bookmarks to refresh when they change, and the one
+        # Organize Bookmarks window (see show_bookmark_organizer).
+        self._bookmark_listeners: list = []
+        self._bookmark_organizer = None
 
         self._build_ui()
         self._setup_global_hotkey()
@@ -7042,11 +7299,33 @@ class CourtListenerGUI:
     # ------------------------------------------------------------------
 
     _BOOKMARK_MAX = 200
+    #: Where a bookmark in no folder is kept: loose at the top level of the
+    #: Bookmarks menu, under its folders.  A folder's own id is never empty.
+    _BOOKMARK_TOP = ""
+
+    def _load_bookmark_folders(self) -> list[dict]:
+        """The folders the bookmarks are kept in: [{"id", "name"}]."""
+        saved = _load_config().get("bookmark_folders", [])
+        if not isinstance(saved, list):
+            return []
+        out: list[dict] = []
+        seen: set[str] = set()
+        for raw in saved:
+            if not isinstance(raw, dict):
+                continue
+            fid = str(raw.get("id") or "").strip()
+            name = re.sub(r"\s+", " ", str(raw.get("name") or "")).strip()
+            if not fid or not name or fid in seen:
+                continue
+            seen.add(fid)
+            out.append({"id": fid, "name": name})
+        return out
 
     def _load_bookmarks(self) -> list[dict]:
         saved = _load_config().get("bookmarks", [])
         if not isinstance(saved, list):
             return []
+        folders = {f["id"] for f in getattr(self, "_bookmark_folders", [])}
         out: list[dict] = []
         seen: set[str] = set()
         for raw in saved:
@@ -7059,6 +7338,13 @@ class CourtListenerGUI:
             seen.add(key)
             label = re.sub(r"\s+", " ", str(raw.get("label") or "")).strip()
             marked = _as_float(raw.get("bookmarked_at")) or time.time()
+            # Every folder it is bookmarked in, the top level included — one
+            # saved before there were folders is at the top level.
+            places = raw.get("folders")
+            if not isinstance(places, list):
+                places = [self._BOOKMARK_TOP]
+            places = [p for p in dict.fromkeys(str(p) for p in places)
+                      if p == self._BOOKMARK_TOP or p in folders]
             out.append({
                 "key": key,
                 "label": label or key,
@@ -7066,6 +7352,7 @@ class CourtListenerGUI:
                 "payload": payload,
                 "bookmarked_at": marked,
                 "last_accessed": _as_float(raw.get("last_accessed")) or marked,
+                "folders": places or [self._BOOKMARK_TOP],
             })
         return out[:self._BOOKMARK_MAX]
 
@@ -7083,25 +7370,66 @@ class CourtListenerGUI:
                 "payload": _json_ready(payload),
                 "bookmarked_at": e.get("bookmarked_at", time.time()),
                 "last_accessed": e.get("last_accessed", time.time()),
+                "folders": list(self._places_of(e)),
             })
         data["bookmarks"] = saved
+        data["bookmark_folders"] = [
+            {"id": f["id"], "name": f["name"]}
+            for f in getattr(self, "_bookmark_folders", [])]
         _save_config(data)
+        # Whatever is showing the bookmarks — the Organize Bookmarks window —
+        # shows them as they now are.
+        for listener in list(getattr(self, "_bookmark_listeners", [])):
+            try:
+                listener()
+            except Exception as exc:
+                print(f"[bookmarks] refreshing a view of them failed: {exc}")
+
+    def _places_of(self, entry: dict) -> list[str]:
+        """Every folder *entry* is bookmarked in — "" for the top level."""
+        places = entry.get("folders")
+        if not isinstance(places, list) or not places:
+            return [self._BOOKMARK_TOP]
+        return places
+
+    def _bookmark_entry(self, key: str) -> Optional[dict]:
+        return next((e for e in self._bookmarks if e.get("key") == key), None)
 
     def is_bookmarked(self, key: str) -> bool:
-        return any(e.get("key") == key for e in self._bookmarks)
+        return self._bookmark_entry(key) is not None
 
-    def add_bookmark(self, descriptor: Optional[dict]) -> None:
-        """Store *descriptor* ({key, label, noun, payload}) as a bookmark,
-        moving it to the front and stamping it accessed-now."""
+    def bookmark_places(self, key: str) -> list[str]:
+        """Every folder the document *key* is bookmarked in ("" for the top
+        level), or [] when it is not bookmarked at all."""
+        entry = self._bookmark_entry(key)
+        return list(self._places_of(entry)) if entry is not None else []
+
+    def add_bookmark(self, descriptor: Optional[dict],
+                     folder: str = "") -> None:
+        """Store *descriptor* ({key, label, noun, payload}) as a bookmark in
+        *folder* — the top level unless a folder is named — stamped
+        accessed-now.  A document already bookmarked goes into that folder as
+        well: it can sit in any number of folders, all one bookmark, with one
+        stored copy of the document."""
         if not descriptor:
             return
         key = str(descriptor.get("key") or "").strip()
         payload = descriptor.get("payload")
         if not key or not isinstance(payload, dict):
             return
+        if folder != self._BOOKMARK_TOP and self._bookmark_folder(folder) is None:
+            folder = self._BOOKMARK_TOP
         now = time.time()
         label = re.sub(r"\s+", " ", str(descriptor.get("label") or "")).strip()
-        self._bookmarks = [e for e in self._bookmarks if e.get("key") != key]
+        entry = self._bookmark_entry(key)
+        if entry is not None:
+            places = self._places_of(entry)
+            entry["folders"] = places if folder in places else places + [folder]
+            entry["label"] = label or entry.get("label") or key
+            entry["payload"] = _json_ready(payload)
+            entry["last_accessed"] = now
+            self._save_bookmarks()
+            return
         self._bookmarks.insert(0, {
             "key": key,
             "label": label or key,
@@ -7109,18 +7437,105 @@ class CourtListenerGUI:
             "payload": _json_ready(payload),
             "bookmarked_at": now,
             "last_accessed": now,
+            "folders": [folder],
         })
         del self._bookmarks[self._BOOKMARK_MAX:]
         self._save_bookmarks()
 
+    def add_bookmark_place(self, key: str, folder: str) -> None:
+        """Put the bookmark *key* in *folder* as well as wherever it is."""
+        entry = self._bookmark_entry(key)
+        if entry is None or (folder != self._BOOKMARK_TOP
+                             and self._bookmark_folder(folder) is None):
+            return
+        places = self._places_of(entry)
+        if folder not in places:
+            entry["folders"] = places + [folder]
+            self._save_bookmarks()
+
     def remove_bookmark(self, key: str) -> Optional[dict]:
-        """Drop the bookmark with *key*; return the removed entry (or None)."""
-        removed = next((e for e in self._bookmarks if e.get("key") == key), None)
+        """Drop the bookmark with *key* from every folder it is in; return the
+        removed entry (or None)."""
+        removed = self._bookmark_entry(key)
         if removed is None:
             return None
         self._bookmarks = [e for e in self._bookmarks if e.get("key") != key]
         self._save_bookmarks()
         return removed
+
+    def remove_bookmark_from_folder(self, key: str,
+                                    folder: str) -> Optional[dict]:
+        """Take the bookmark *key* out of *folder* alone.  Out of the last
+        folder it was in, it is no longer bookmarked at all — and then the
+        removed entry is returned, so its stored copy can go as well."""
+        entry = self._bookmark_entry(key)
+        if entry is None:
+            return None
+        places = self._places_of(entry)
+        rest = [p for p in places if p != folder]
+        if not rest:
+            return self.remove_bookmark(key)
+        if rest != places:
+            entry["folders"] = rest
+            self._save_bookmarks()
+        return None
+
+    def discard_bookmark_place(self, key: str, folder: str) -> None:
+        """Take the bookmark *key* out of *folder* for a window that is not
+        showing the document: the stored copy the document reopens from goes
+        with the last place it was in, as its own bookmark toggle drops it."""
+        removed = self.remove_bookmark_from_folder(key, folder)
+        if removed is not None:
+            _forget_bookmark_copy(removed)
+
+    def move_bookmark(self, key: str, source: str, target: str) -> None:
+        """Move the bookmark *key* out of *source* into *target* (either one
+        "" for the top level)."""
+        entry = self._bookmark_entry(key)
+        if entry is None or source == target:
+            return
+        if target != self._BOOKMARK_TOP and self._bookmark_folder(target) is None:
+            return
+        moved: list[str] = []
+        for place in self._places_of(entry) + [target]:
+            place = target if place == source else place
+            if place not in moved:
+                moved.append(place)
+        if moved != self._places_of(entry):
+            entry["folders"] = moved
+            self._save_bookmarks()
+
+    def set_bookmark_in_folder(self, owner, folder: str, on: bool) -> None:
+        """Put the document *owner* is showing in *folder*, or take it out —
+        the "Bookmark This Case In" checkboxes.  The first place a document
+        is bookmarked goes through the owner's own bookmark toggle, which
+        keeps the copy it reopens from, and so does the last place it is
+        taken out of, which drops that copy."""
+        try:
+            desc = owner._bookmark_descriptor()
+        except Exception as exc:
+            print(f"[bookmarks] describing the document failed: {exc}")
+            return
+        if not desc:
+            return
+        key = desc.get("key")
+        places = self.bookmark_places(key)
+        if on:
+            if folder in places:
+                return
+            if places:
+                self.add_bookmark(desc, folder)
+                return
+            owner._toggle_bookmark()
+            if self.is_bookmarked(key) and folder != self._BOOKMARK_TOP:
+                self.move_bookmark(key, self._BOOKMARK_TOP, folder)
+            return
+        if folder not in places:
+            return
+        if places == [folder]:
+            owner._toggle_bookmark()
+        else:
+            self.remove_bookmark_from_folder(key, folder)
 
     def touch_bookmark(self, key: str) -> None:
         """Mark a bookmark accessed-now (so it rises in the Bookmarks menu,
@@ -7144,6 +7559,94 @@ class CourtListenerGUI:
     def _bookmarks_by_access(self) -> list[dict]:
         return sorted(self._bookmarks,
                       key=lambda e: e.get("last_accessed") or 0, reverse=True)
+
+    def bookmarks_in(self, folder: str) -> list[dict]:
+        """The bookmarks in *folder* ("" for the top level), the most
+        recently used first."""
+        return [e for e in self._bookmarks_by_access()
+                if folder in self._places_of(e)]
+
+    # -- folders -----------------------------------------------------------
+
+    def bookmark_folders(self) -> list[dict]:
+        """The bookmark folders, by name."""
+        return sorted(getattr(self, "_bookmark_folders", []),
+                      key=lambda f: (f["name"].casefold(), f["name"]))
+
+    def _bookmark_folder(self, folder_id: str) -> Optional[dict]:
+        return next((f for f in getattr(self, "_bookmark_folders", [])
+                     if f["id"] == folder_id), None)
+
+    def _bookmark_folder_named(self, name: str) -> Optional[dict]:
+        wanted = name.casefold()
+        return next((f for f in getattr(self, "_bookmark_folders", [])
+                     if f["name"].casefold() == wanted), None)
+
+    def create_bookmark_folder(self, name: str) -> Optional[str]:
+        """Make a bookmark folder called *name* and return its id — the id of
+        the folder already called that, if there is one, since two folders of
+        one name could not be told apart on the menu.  None for no name."""
+        name = re.sub(r"\s+", " ", name or "").strip()
+        if not name:
+            return None
+        existing = self._bookmark_folder_named(name)
+        if existing is not None:
+            return existing["id"]
+        folder = {"id": "f" + uuid.uuid4().hex[:12], "name": name}
+        self._bookmark_folders.append(folder)
+        self._save_bookmarks()
+        return folder["id"]
+
+    def rename_bookmark_folder(self, folder_id: str, name: str) -> bool:
+        """Rename a folder — False, and nothing changed, when *name* is blank
+        or is another folder's."""
+        name = re.sub(r"\s+", " ", name or "").strip()
+        folder = self._bookmark_folder(folder_id)
+        if folder is None or not name:
+            return False
+        other = self._bookmark_folder_named(name)
+        if other is not None and other is not folder:
+            return False
+        if folder["name"] != name:
+            folder["name"] = name
+            self._save_bookmarks()
+        return True
+
+    def delete_bookmark_folder(self, folder_id: str) -> None:
+        """Delete a folder.  A folder is only where bookmarks are kept, so its
+        bookmarks do not go with it: one in no other folder moves to the top
+        level."""
+        if self._bookmark_folder(folder_id) is None:
+            return
+        self._bookmark_folders = [
+            f for f in self._bookmark_folders if f["id"] != folder_id]
+        for e in self._bookmarks:
+            places = self._places_of(e)
+            if folder_id in places:
+                e["folders"] = ([p for p in places if p != folder_id]
+                                or [self._BOOKMARK_TOP])
+        self._save_bookmarks()
+
+    def new_bookmark_folder(self, view=None, owner=None) -> Optional[str]:
+        """Ask for a name and make a folder of it — with the document *owner*
+        is showing put straight into it, when there is one.  Returns the new
+        folder's id, or None when the question was put away."""
+        parent = self._current_window(view) or getattr(self, "root", None)
+        name = _ask_name(parent, "New Folder", "Name the new bookmark folder:")
+        folder = self.create_bookmark_folder(name or "")
+        if folder is not None and owner is not None:
+            self.set_bookmark_in_folder(owner, folder, True)
+        return folder
+
+    def show_bookmark_organizer(self, view=None) -> None:
+        """Open the Organize Bookmarks window — or bring it forward, when it
+        is already open."""
+        organizer = getattr(self, "_bookmark_organizer", None)
+        if organizer is not None and organizer.alive():
+            organizer.surface()
+            return
+        parent = self._current_window(view) or self.root
+        self._bookmark_organizer = _BookmarkOrganizer(self, parent)
 
     def _viewer_for_host(self, host):
         """The reader object (the ``owner``) behind a tab page or window, so
@@ -7230,15 +7733,25 @@ class CourtListenerGUI:
                 self.root, url, title, app=self, description=desc)
         return None
 
-    def populate_bookmarks_menu(self, menu: tk.Menu, view=None) -> None:
-        """Fill the Bookmarks dropdown: the current document's
-        bookmark/unbookmark toggle first (always, tabs or no tabs), then the
-        saved bookmarks ordered by most-recent access."""
+    def populate_bookmarks_menu(self, menu: tk.Menu, view=None,
+                                owner=None) -> None:
+        """Fill the Bookmarks dropdown.
+
+        A window showing a document leads with that document: its
+        bookmark/unbookmark toggle, then the folders it is in, to change.
+        Then the folders, each a submenu, and the bookmarks in no folder —
+        each list most recently used first — and last the entries that make
+        and arrange folders.  *owner* is whatever can bookmark the document
+        on screen, for a window that knows it better than the app can tell
+        from *view* (the floating viewer, showing a scan or an opinion)."""
         try:
             menu.delete(0, "end")
         except tk.TclError:
             return
-        viewer = self._viewer_for_host(view) if view is not None else None
+        _drop_menu_children(menu)
+        viewer = owner
+        if viewer is None and view is not None:
+            viewer = self._viewer_for_host(view)
         desc = None
         if viewer is not None and hasattr(viewer, "_bookmark_descriptor"):
             try:
@@ -7255,11 +7768,36 @@ class CourtListenerGUI:
             else:
                 menu.add_command(label=f"Bookmark This {noun}",
                                  command=viewer._toggle_bookmark)
+            places = _menu_child(menu)
+            self._fill_bookmark_places_menu(places, viewer, current_key, view)
+            menu.add_cascade(label=f"Bookmark This {noun} In", menu=places)
             menu.add_separator()
-        entries = self._bookmarks_by_access()
-        if not entries:
+        folders = self.bookmark_folders()
+        icon = self._bookmark_folder_icon()
+        for folder in folders:
+            sub = _menu_child(menu)
+            if not self._add_bookmark_entries(
+                    sub, self.bookmarks_in(folder["id"]), current_key):
+                sub.add_command(label="Empty", state="disabled")
+            extra = {"image": icon, "compound": "left"} if icon else {}
+            menu.add_cascade(label=folder["name"], menu=sub, **extra)
+        loose = self.bookmarks_in(self._BOOKMARK_TOP)
+        if folders and loose:
+            menu.add_separator()
+        if (not self._add_bookmark_entries(menu, loose, current_key)
+                and not folders):
             menu.add_command(label="No bookmarks yet", state="disabled")
-            return
+        menu.add_separator()
+        menu.add_command(label="New Folder…",
+                         command=lambda: self.new_bookmark_folder(view))
+        menu.add_command(label="Organize Bookmarks…",
+                         command=lambda: self.show_bookmark_organizer(view))
+
+    def _add_bookmark_entries(self, menu, entries: list,
+                              current_key=None) -> int:
+        """One entry per bookmark, each reopening it; the document the menu's
+        window is showing is marked.  Returns how many went in."""
+        added = 0
         for e in entries:
             opener = self._bookmark_opener_from_entry(e)
             if opener is None:
@@ -7270,6 +7808,42 @@ class CourtListenerGUI:
             if e.get("key") == current_key:
                 label = "• " + label  # the document this view is showing
             menu.add_command(label=label, command=opener)
+            added += 1
+        return added
+
+    def _fill_bookmark_places_menu(self, menu, owner, key, view=None) -> None:
+        """Where the document on screen is bookmarked, as checkboxes — the top
+        level ("No Folder") and every folder — each putting it in that place
+        or taking it out; a document can be in any number of them.  Then a
+        folder to make and put it in, in one step."""
+        places = self.bookmark_places(key)
+        choices = [(self._BOOKMARK_TOP, "No Folder")] + [
+            (f["id"], f["name"]) for f in self.bookmark_folders()]
+        marks = []
+        for folder, name in choices:
+            mark = tk.BooleanVar(master=menu, value=folder in places)
+            marks.append(mark)
+            menu.add_checkbutton(
+                label=name, variable=mark, onvalue=True, offvalue=False,
+                command=lambda f=folder, m=mark: self.set_bookmark_in_folder(
+                    owner, f, bool(m.get())))
+        # A check mark shows only while its variable lives: the menu keeps
+        # them for as long as it is up.
+        menu._place_marks = marks
+        menu.add_separator()
+        menu.add_command(
+            label="New Folder…",
+            command=lambda: self.new_bookmark_folder(view, owner=owner))
+
+    def _bookmark_folder_icon(self):
+        """The small folder drawn beside a folder's name, made once — or None
+        where it cannot be drawn."""
+        icon = getattr(self, "_folder_icon_image", None)
+        if icon is None:
+            # False, once it has failed: it is not tried again.
+            icon = _folder_icon(getattr(self, "root", None)) or False
+            self._folder_icon_image = icon
+        return icon or None
 
     # ------------------------------------------------------------------
     # Windows: every document opens in the reporter interface
@@ -7277,7 +7851,8 @@ class CourtListenerGUI:
 
     def populate_window_menu(self, menu: tk.Menu, view=None) -> None:
         """Fill the Window menu a document window carries at its right-hand
-        end."""
+        end: what can be done to this window, then every window open, to go
+        to — the one this menu belongs to marked."""
         try:
             menu.delete(0, "end")
         except tk.TclError:
@@ -7292,6 +7867,93 @@ class CourtListenerGUI:
             )
         if view is not None and view is not getattr(self, "root", None):
             menu.add_command(label="Close Window", command=view.destroy)
+        windows = self._open_windows()
+        if not windows:
+            return
+        if source_owner is not None or (
+                view is not None and view is not getattr(self, "root", None)):
+            menu.add_separator()
+        current = self._current_window(view)
+        # One choice among the windows, so the one in front carries the
+        # menu's own mark.  The variable must outlive this call, or Tk
+        # forgets which entry is marked: the menu keeps it.
+        choice = tk.StringVar(master=menu, value="")
+        menu._window_choice = choice
+        for index, win in enumerate(windows):
+            if win is current:
+                choice.set(str(index))
+            menu.add_radiobutton(
+                label=_window_menu_label(win), value=str(index),
+                variable=choice,
+                command=lambda w=win: self.bring_window_forward(w))
+
+    def register_document_window(self, win) -> None:
+        """List the window *win* is in on every Window menu, until it closes.
+
+        Only the windows documents open in are listed — a case, a scan, a
+        statute, a brief — never the panels beside them (the case details
+        standing against a viewer), a dialog, or a tip."""
+        try:
+            top = win.winfo_toplevel()
+        except (AttributeError, tk.TclError):
+            return
+        if top is self.root or any(w is top for w in self._document_windows):
+            return
+        self._document_windows.append(top)
+
+        def gone(event, top=top) -> None:
+            if event.widget is top:
+                self._document_windows = [
+                    w for w in self._document_windows if w is not top]
+
+        try:
+            top.bind("<Destroy>", gone, add="+")
+        except tk.TclError:
+            pass
+
+    def _open_windows(self) -> list:
+        """The windows to go between: the search window while it is up, then
+        every document window, in the order they opened.  A withdrawn window
+        is not open as far as the reader can tell; a minimized one is."""
+        windows = []
+        root = getattr(self, "root", None)
+        if root is not None and not getattr(self, "_root_hidden", False):
+            windows.append(root)
+        windows.extend(getattr(self, "_document_windows", []))
+        return [w for w in windows if _window_is_open(w)]
+
+    def _current_window(self, view):
+        """The window a Window menu belongs to — or, for the search window's
+        own menu bar (every window's menu bar on macOS), the window in front,
+        which is the one with the keyboard."""
+        try:
+            top = view.winfo_toplevel() if view is not None else None
+        except (AttributeError, tk.TclError):
+            top = None
+        if top is None or top is getattr(self, "root", None):
+            try:
+                focus = self.root.focus_get()
+                if focus is not None:
+                    top = focus.winfo_toplevel()
+            except (AttributeError, KeyError, tk.TclError):
+                pass
+        return top
+
+    def bring_window_forward(self, win) -> None:
+        """Raise *win* and give it the keyboard: a choice on the Window
+        menu."""
+        if win is getattr(self, "root", None) and getattr(
+                self, "_root_hidden", False):
+            self._show_main_window()
+            return
+        try:
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+        except tk.TclError:
+            return
+        if sys.platform == "win32":
+            self._win_force_foreground(win)
 
     def new_case_view_host(self, parent: tk.Misc):
         """Where a new opinion's text goes: a floating viewer of its own, on
@@ -7452,6 +8114,9 @@ class CourtListenerGUI:
         # document view, so this one lists the saved bookmarks without the
         # "Bookmark This …" toggle the readers show first.
         _add_bookmarks_cascade(menubar, self, self.root)
+        # …and the Window menu, at the far right as on every other window, to
+        # go from here to any document open.
+        _add_window_cascade(menubar, self, self.root)
         # The Mac modifier is Cmd, and Tk keeps the two apart — the same
         # reason Ctrl-F alone never opened the find bar there (_bind_find_keys).
         for key, command in (("l", self._show_statute_lookup),
@@ -13235,6 +13900,450 @@ class CourtListenerGUI:
             subprocess.Popen(["open", path])
         else:
             subprocess.Popen(["xdg-open", path])
+
+
+class _BookmarkOrganizer:
+    """The Organize Bookmarks window: every folder and bookmark in one tree.
+
+    A folder is a row with its bookmarks under it, and the bookmarks in no
+    folder follow the folders, at the top level — the Bookmarks menu, laid
+    out to be rearranged.  Drag a bookmark onto a folder (or onto a bookmark
+    in it) to move it there, or onto the top level to take it out of its
+    folder; hold Ctrl (Option on a Mac) as you drop it to put it there as
+    well, rather than move it — a case can be in any number of folders.  The
+    buttons and the right-click menu do the same, and make, rename and delete
+    the folders.  Double-click a bookmark, or press Return, to open it.
+
+    The tree is rebuilt from the app's bookmarks whenever they change, here
+    or anywhere else, so it never shows a folder as it was.
+    """
+
+    _W, _H = 660, 480
+    #: How far the pointer travels before a press on a row becomes a drag.
+    _DRAG_SLOP = 6
+
+    def __init__(self, app, parent: tk.Misc) -> None:
+        self._app = app
+        self._win = _ui_toplevel(app.window_master(parent))
+        _ensure_modern_ttk_styles(self._win)
+        self._win.title("Organize Bookmarks")
+        self._win.minsize(460, 300)
+        try:
+            parent.update_idletasks()
+            x = parent.winfo_rootx() + 40
+            y = parent.winfo_rooty() + 40
+            self._win.geometry(f"{self._W}x{self._H}+{x}+{y}")
+        except (AttributeError, tk.TclError):
+            self._win.geometry(f"{self._W}x{self._H}")
+        # tree row -> ("folder", folder id, None), ("bookmark", folder id,
+        # key) or ("empty", folder id, None); rebuilt with the tree.
+        self._rows: dict = {}
+        self._closed: set = set()     # folders the reader has collapsed
+        self._drag: Optional[dict] = None
+        self._drop_row = ""
+        self._icon = app._bookmark_folder_icon()
+        self._build()
+        app._bookmark_listeners.append(self._refresh)
+        self._win.bind("<Destroy>", self._on_destroy, add="+")
+        _list_in_window_menu(app, self._win)
+        self._refresh()
+
+    # -- building ----------------------------------------------------------
+
+    def _build(self) -> None:
+        outer = _ui_frame(self._win)
+        outer.pack(fill="both", expand=True, padx=14, pady=12)
+        copy_key = "Option" if sys.platform == "darwin" else "Ctrl"
+        hint = _ui_label(
+            outer, size=12, muted=True, anchor="w",
+            text=("Drag a bookmark onto a folder to move it there — hold "
+                  f"{copy_key} as you drop it to add it there as well. A "
+                  "case can be in any number of folders."))
+        try:
+            hint.configure(wraplength=self._W - 40, justify="left")
+        except (tk.TclError, ValueError):
+            pass
+        hint.pack(fill="x", pady=(0, 8))
+        body = _ui_frame(outer)
+        body.pack(fill="both", expand=True)
+        side = _ui_frame(body)
+        side.pack(side="right", fill="y", padx=(12, 0))
+        tree_box = _ui_frame(body)
+        tree_box.pack(side="left", fill="both", expand=True)
+        style = "Modern.Treeview" if _CTK_AVAILABLE else "Treeview"
+        tree = ttk.Treeview(tree_box, show="tree", selectmode="browse",
+                            style=style)
+        bar = ttk.Scrollbar(tree_box, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        tree.tag_configure("empty", foreground=_UI["muted"])
+        tree.tag_configure("drop", background=_UI["selection"])
+        self._tree = tree
+
+        def button(text, command):
+            btn = _ui_button(side, text, command=command, width=128)
+            btn.pack(fill="x", pady=(0, 6))
+            return btn
+
+        self._open_btn = button("Open", self._open)
+        self._new_btn = button("New Folder…", self._new_folder)
+        self._rename_btn = button("Rename…", self._rename)
+        self._move_btn = button("Move To ▾", lambda: self._post_places(
+            self._move_btn, move=True))
+        self._add_btn = button("Also Add To ▾", lambda: self._post_places(
+            self._add_btn, move=False))
+        self._remove_btn = button("Remove", self._remove)
+        _ui_button(side, "Close", command=self._win.destroy, width=128).pack(
+            side="bottom", fill="x")
+
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._sync_buttons())
+        tree.bind("<Double-1>", self._double_click)
+        tree.bind("<Return>", lambda _e: self._open() or "break")
+        for key in ("<Delete>", "<BackSpace>"):
+            tree.bind(key, lambda _e: self._remove() or "break")
+        tree.bind("<F2>", lambda _e: self._rename() or "break")
+        tree.bind("<ButtonPress-1>", self._press, add="+")
+        tree.bind("<B1-Motion>", self._motion, add="+")
+        tree.bind("<ButtonRelease-1>", self._release, add="+")
+        for seq in ("<Button-3>", "<Button-2>"):   # Button-2: a Mac's right
+            tree.bind(seq, self._context_menu)
+        tree.bind("<<TreeviewOpen>>", lambda _e: self._folded(False))
+        tree.bind("<<TreeviewClose>>", lambda _e: self._folded(True))
+        for seq in ("<Escape>",) + _accel_sequences("w"):
+            try:
+                self._win.bind(seq, lambda _e: self._win.destroy())
+            except tk.TclError:
+                pass    # modifier not supported on this platform
+
+    def _refresh(self) -> None:
+        """Rebuild the tree from the bookmarks as they now are, keeping the
+        selection, what is folded and where the list is scrolled."""
+        if not self.alive():
+            return
+        tree, app = self._tree, self._app
+        chosen = self._rows.get(self._selected())
+        top = tree.yview()[0] if tree.get_children() else 0.0
+        tree.delete(*tree.get_children())
+        self._rows = {}
+        again = ""
+        for folder in app.bookmark_folders():
+            kw = {"image": self._icon} if self._icon else {}
+            row = tree.insert("", "end", text=folder["name"],
+                              open=folder["id"] not in self._closed, **kw)
+            self._rows[row] = ("folder", folder["id"], None)
+            if chosen == self._rows[row]:
+                again = row
+            inside = app.bookmarks_in(folder["id"])
+            for entry in inside:
+                again = self._insert_bookmark(row, folder["id"], entry,
+                                              chosen) or again
+            if not inside:
+                empty = tree.insert(row, "end", text="Empty",
+                                    tags=("empty",))
+                self._rows[empty] = ("empty", folder["id"], None)
+        for entry in app.bookmarks_in(app._BOOKMARK_TOP):
+            again = self._insert_bookmark("", app._BOOKMARK_TOP, entry,
+                                          chosen) or again
+        if not tree.get_children():
+            empty = tree.insert("", "end", text="No bookmarks yet",
+                                tags=("empty",))
+            self._rows[empty] = ("empty", None, None)
+        if again:
+            tree.selection_set(again)
+            tree.see(again)
+        else:
+            tree.yview_moveto(top)
+        self._sync_buttons()
+
+    def _insert_bookmark(self, parent: str, folder: str, entry: dict,
+                         chosen) -> str:
+        """One bookmark's row; its id when it is the one to select again."""
+        label = entry.get("label") or entry.get("key", "")
+        row = self._tree.insert(parent, "end", text=label)
+        self._rows[row] = ("bookmark", folder, entry.get("key"))
+        return row if self._rows[row] == chosen else ""
+
+    # -- what is selected, and what can be done with it --------------------
+
+    def _selected(self) -> str:
+        chosen = self._tree.selection()
+        return chosen[0] if chosen else ""
+
+    def _selected_row(self):
+        return self._rows.get(self._selected(), (None, None, None))
+
+    def _sync_buttons(self) -> None:
+        kind, _folder, _key = self._selected_row()
+        is_mark, is_folder = kind == "bookmark", kind == "folder"
+        for btn, on in ((self._open_btn, is_mark),
+                        (self._rename_btn, is_folder),
+                        (self._move_btn, is_mark),
+                        (self._add_btn, is_mark),
+                        (self._remove_btn, is_mark or is_folder)):
+            _ui_button_enable(btn, on)
+        try:
+            self._remove_btn.configure(
+                text="Delete Folder" if is_folder else "Remove")
+        except tk.TclError:
+            pass
+
+    def _folded(self, closed: bool) -> None:
+        kind, folder, _key = self._rows.get(self._tree.focus(),
+                                            (None, None, None))
+        if kind == "folder":
+            (self._closed.add if closed else self._closed.discard)(folder)
+
+    # -- the actions ---------------------------------------------------------
+
+    def _open(self) -> None:
+        kind, _folder, key = self._selected_row()
+        if kind != "bookmark":
+            return
+        entry = self._app._bookmark_entry(key)
+        opener = (self._app._bookmark_opener_from_entry(entry)
+                  if entry is not None else None)
+        if opener is None:
+            return
+        try:
+            opener()
+        except Exception as exc:
+            messagebox.showerror("Open Bookmark", str(exc), parent=self._win)
+
+    def _double_click(self, event) -> Optional[str]:
+        row = self._tree.identify_row(event.y)
+        if self._rows.get(row, (None,))[0] == "bookmark":
+            self._tree.selection_set(row)
+            self._open()
+            return "break"   # not the folder-toggle a double-click also is
+        return None
+
+    def _new_folder(self) -> None:
+        folder = self._app.new_bookmark_folder(self._win)
+        if folder is not None:
+            self._select(("folder", folder, None))
+
+    def _rename(self) -> None:
+        kind, folder, _key = self._selected_row()
+        found = (self._app._bookmark_folder(folder)
+                 if kind == "folder" else None)
+        if found is None:
+            return
+
+        def taken(name: str) -> Optional[str]:
+            other = self._app._bookmark_folder_named(name)
+            if other is not None and other["id"] != folder:
+                return f"There is already a folder called “{other['name']}”."
+            return None
+
+        name = _ask_name(self._win, "Rename Folder", "Rename the folder:",
+                         found["name"], check=taken)
+        if name:
+            self._app.rename_bookmark_folder(folder, name)
+
+    def _remove(self) -> None:
+        kind, folder, key = self._selected_row()
+        app = self._app
+        if kind == "folder":
+            found = app._bookmark_folder(folder)
+            if found is None:
+                return
+            if not messagebox.askyesno(
+                    "Delete Folder",
+                    f"Delete the folder “{found['name']}”?\n\nIts bookmarks "
+                    "are kept: any that are in no other folder move to the "
+                    "top level.", parent=self._win):
+                return
+            app.delete_bookmark_folder(folder)
+            return
+        if kind != "bookmark":
+            return
+        entry = app._bookmark_entry(key)
+        if entry is None:
+            return
+        if app.bookmark_places(key) == [folder] and not messagebox.askyesno(
+                "Remove Bookmark",
+                f"Remove “{entry.get('label') or key}” from your bookmarks?"
+                "\n\nIt is in no other folder.", parent=self._win):
+            return
+        app.discard_bookmark_place(key, folder)
+
+    def _put(self, key: str, source: str, target: str, move: bool) -> None:
+        """Move the bookmark *key* from *source* to *target*, or add it
+        there as well — and keep it selected where it went."""
+        if move:
+            self._app.move_bookmark(key, source, target)
+        else:
+            self._app.add_bookmark_place(key, target)
+        self._select(("bookmark", target, key))
+
+    def _select(self, wanted) -> None:
+        row = next((r for r, v in self._rows.items() if v == wanted), "")
+        if row:
+            self._tree.selection_set(row)
+            self._tree.see(row)
+            self._tree.focus(row)
+
+    def _places_menu(self, key: str, source: str, move: bool) -> tk.Menu:
+        """The places a bookmark could go: the top level ("No Folder") and
+        every folder, those it is already in greyed out — then a new folder,
+        made and filled in one step."""
+        app = self._app
+        menu = tk.Menu(self._win, tearoff=0)
+        here = app.bookmark_places(key)
+        for folder, name in [(app._BOOKMARK_TOP, "No Folder")] + [
+                (f["id"], f["name"]) for f in app.bookmark_folders()]:
+            menu.add_command(
+                label=name, state="disabled" if folder in here else "normal",
+                command=lambda f=folder: self._put(key, source, f, move))
+        menu.add_separator()
+
+        def into_new() -> None:
+            folder = app.new_bookmark_folder(self._win)
+            if folder is not None:
+                self._put(key, source, folder, move)
+
+        menu.add_command(label="New Folder…", command=into_new)
+        return menu
+
+    def _post_places(self, button, move: bool) -> None:
+        kind, folder, key = self._selected_row()
+        if kind != "bookmark":
+            return
+        menu = self._places_menu(key, folder, move)
+        try:
+            menu.tk_popup(button.winfo_rootx(),
+                          button.winfo_rooty() + button.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _context_menu(self, event) -> None:
+        row = self._tree.identify_row(event.y)
+        if row:
+            self._tree.selection_set(row)
+        kind, folder, key = self._rows.get(row, (None, None, None))
+        menu = tk.Menu(self._win, tearoff=0)
+        if kind == "bookmark":
+            menu.add_command(label="Open", command=self._open)
+            menu.add_cascade(label="Move To",
+                             menu=self._places_menu(key, folder, True))
+            menu.add_cascade(label="Also Add To",
+                             menu=self._places_menu(key, folder, False))
+            menu.add_separator()
+            menu.add_command(label="Remove", command=self._remove)
+        elif kind == "folder":
+            menu.add_command(label="Rename…", command=self._rename)
+            menu.add_command(label="Delete Folder", command=self._remove)
+        menu.add_separator()
+        menu.add_command(label="New Folder…", command=self._new_folder)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    # -- dragging a bookmark to another place --------------------------------
+
+    def _press(self, event) -> None:
+        row = self._tree.identify_row(event.y)
+        kind, folder, key = self._rows.get(row, (None, None, None))
+        self._drag = ({"key": key, "source": folder, "x": event.x,
+                       "y": event.y, "active": False}
+                      if kind == "bookmark" else None)
+
+    def _motion(self, event) -> Optional[str]:
+        drag = self._drag
+        if drag is None:
+            return None
+        if not drag["active"]:
+            if (abs(event.x - drag["x"]) < self._DRAG_SLOP
+                    and abs(event.y - drag["y"]) < self._DRAG_SLOP):
+                return None
+            drag["active"] = True
+            try:
+                self._tree.configure(cursor="hand2")
+            except tk.TclError:
+                pass
+        target = self._drop_target(event.y)
+        self._mark_drop(self._folder_row(target))
+        return "break"   # a drag is no rubber-band selection
+
+    def _release(self, event) -> None:
+        drag, self._drag = self._drag, None
+        self._mark_drop("")
+        try:
+            self._tree.configure(cursor="")
+        except tk.TclError:
+            pass
+        if drag is None or not drag["active"]:
+            return
+        target = self._drop_target(event.y)
+        if target is None or target == drag["source"]:
+            return
+        self._put(drag["key"], drag["source"], target,
+                  move=not self._copy_modifier(event.state))
+
+    def _drop_target(self, y: int) -> Optional[str]:
+        """The place a bookmark dropped at *y* goes: the folder under the
+        pointer, or the folder of the bookmark there — or the top level, for
+        a loose bookmark or the empty space below them all."""
+        row = self._tree.identify_row(y)
+        if not row:
+            return self._app._BOOKMARK_TOP
+        kind, folder, _key = self._rows.get(row, (None, None, None))
+        if folder is None:
+            return self._app._BOOKMARK_TOP
+        return folder
+
+    def _folder_row(self, folder: Optional[str]) -> str:
+        return next((r for r, v in self._rows.items()
+                     if v[0] == "folder" and v[1] == folder), "")
+
+    def _mark_drop(self, row: str) -> None:
+        """Tint the folder a dragged bookmark would land in."""
+        if row == self._drop_row:
+            return
+        for old, tags in ((self._drop_row, ()), (row, ("drop",))):
+            if old:
+                try:
+                    self._tree.item(old, tags=tags)
+                except tk.TclError:
+                    pass
+        self._drop_row = row
+
+    @staticmethod
+    def _copy_modifier(state: int) -> bool:
+        """Whether the drop was made holding the key that copies instead of
+        moving: Ctrl, or Option on a Mac.  (Tk's Windows port raises Mod1 for
+        Num Lock, so no other bit is trusted.)"""
+        copy = 0x0004                       # Control
+        if sys.platform == "darwin":
+            copy |= 0x0010                  # Option
+        return bool(int(state or 0) & copy)
+
+    # -- the window ------------------------------------------------------------
+
+    def alive(self) -> bool:
+        try:
+            return bool(self._win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def surface(self) -> None:
+        try:
+            self._win.deiconify()
+            self._win.lift()
+            self._win.focus_force()
+        except tk.TclError:
+            pass
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self._win:
+            return
+        listeners = getattr(self._app, "_bookmark_listeners", [])
+        if self._refresh in listeners:
+            listeners.remove(self._refresh)
+        if getattr(self._app, "_bookmark_organizer", None) is self:
+            self._app._bookmark_organizer = None
 
 
 class _CourtPickerDialog:
@@ -19901,7 +21010,9 @@ class _FloatingPdfWindow:
 
     _W = 720     # preferred size, clamped to the usable desktop in _place_beside
     _H = 880
-    _MIN_W = 380
+    # Wide enough for the whole strip: its controls on the left, the History,
+    # Bookmarks and Window icons and the side panel's switch on the right.
+    _MIN_W = 440
     _MIN_H = 280
     _BAR_H = 30  # the top strip: one 22px button row plus its padding
 
@@ -19961,9 +21072,14 @@ class _FloatingPdfWindow:
         self._win.minsize(self._MIN_W, self._MIN_H)
 
         self._zoom_var = tk.StringVar(master=self._win, value="100%")
+        # The menus the strip's Window and Bookmarks icons drop, made on
+        # first use and refilled on every one after.
+        self._strip_menus: dict = {}
         self._build_bar()
         self._body = ttk.Frame(self._win)
         self._body.pack(side="top", fill="both", expand=True)
+        # A window of its own, so the other windows' Window menus list it.
+        _list_in_window_menu(app, self._win)
 
         # Cmd and Control are separate modifiers in Tk, so a Mac keyboard needs
         # its own bindings for the same accelerators — and only a Mac keyboard
@@ -20042,7 +21158,8 @@ class _FloatingPdfWindow:
 
     def _build_bar(self) -> None:
         """The one piece of chrome: save and print, then the zoom controls,
-        the document name at the right, a hairline under it and nothing else."""
+        the History, Bookmarks and Window menus and the side panel's switch at
+        the right, a hairline under it and nothing else."""
         if _CTK_AVAILABLE:
             bar = ctk.CTkFrame(self._win, fg_color=_UI["surface"],
                                corner_radius=0, height=self._BAR_H)
@@ -20053,10 +21170,41 @@ class _FloatingPdfWindow:
             bar = tk.Frame(self._win, bg=_UI["surface"])
             bar.pack(side="top", fill="x")
         self._bar = bar
-        # Save and print lead the strip, as icons: the two things a reader does
-        # with a scan besides look at it.  Tk drops an image nothing refers to,
-        # so the artwork is kept on the window.
+        # Tk drops an image nothing refers to, so the strip's artwork is kept
+        # on the window.
         self._strip_icons = _pdf_strip_icons(bar)
+        # The case's details stand against the window's right-hand edge, so
+        # the icon that brings them takes the strip's last place, over where
+        # they appear — set a little apart from the menus, being a switch
+        # rather than one of them.  The same switch as the "s" key, and on the
+        # strip only where there is a case to have details of (see
+        # _place_details_btn, which _sync_bar asks again as that changes).
+        self._details_btn = _ui_mini_button(
+            bar, "", self.toggle_details, width=30,
+            image=self._strip_icons["panel"])
+        _HoverTip(self._details_btn, self._details_label, delay=450)
+        self._place_details_btn()
+        # The menus a document window carries on its menu bar and this one
+        # has no bar for, as icons at the strip's far end — words would crowd
+        # a strip this narrow — in the order a menu bar has them: History,
+        # Bookmarks, and Window last, where every other window keeps it.
+        # (Packed from the right, so the last is packed first.)  Window's 8px
+        # on its right is the strip's margin where the panel's switch is not
+        # there, and with the switch's own 4px the gap setting it apart where
+        # it is.  Like the switch, these are packed before anything on the
+        # left, so they get their room first: a window too narrow for the
+        # whole strip squeezes the scale readout, not these.
+        self._window_btn = self._strip_menu_button(
+            bar, "windows", "Windows", self._post_window_menu,
+            "populate_window_menu", padx=(4, 8))
+        self._bookmarks_btn = self._strip_menu_button(
+            bar, "bookmarks", "Bookmarks", self._post_bookmarks_menu,
+            "populate_bookmarks_menu", padx=(4, 0))
+        self._history_btn = self._strip_menu_button(
+            bar, "history", "History", self._post_history_menu,
+            "populate_history_menu", padx=(4, 0))
+        # Save and print lead the strip, as icons: the two things a reader does
+        # with a scan besides look at it.
         save_btn = _ui_mini_button(bar, "", self._save, width=30,
                                    image=self._strip_icons["save"])
         save_btn.pack(side="left", padx=(8, 0), pady=4)
@@ -20110,6 +21258,73 @@ class _FloatingPdfWindow:
         for seq in ("<Button-3>", "<Button-2>"):  # Button-2 is the Mac right-click
             _bind_recursive(bar, seq, self._post_bar_menu)
 
+    def _strip_menu_button(self, bar, icon: str, tip: str, command,
+                           filler: str, padx):
+        """An icon at the strip's right-hand end that drops one of the app's
+        menus — or nothing, where there is no app to fill it."""
+        app = self._app
+        if app is None or not hasattr(app, filler):
+            return None
+        btn = _ui_mini_button(bar, "", command, width=30,
+                              image=self._strip_icons[icon])
+        btn.pack(side="right", padx=padx, pady=4)
+        _HoverTip(btn, lambda: tip, delay=450)
+        return btn
+
+    def _post_window_menu(self) -> None:
+        """Every window open, to go to — the Window menu a document window
+        carries on its menu bar."""
+        self._post_strip_menu(
+            self._window_btn, "window",
+            lambda menu: self._app.populate_window_menu(menu, self._win))
+
+    def _post_history_menu(self) -> None:
+        """The cases viewed last, most recent first — the History menu every
+        other window carries (and the "Recent" the strip's right-click menu
+        keeps)."""
+        self._post_strip_menu(
+            self._history_btn, "history",
+            lambda menu: self._app.populate_history_menu(menu))
+
+    def _post_bookmarks_menu(self) -> None:
+        """The Bookmarks menu, its first entries for whatever is showing: the
+        opinion when the text is up, the document behind the pages when it
+        is not (the same owner the strip's right-click menu asks)."""
+        self._post_strip_menu(
+            self._bookmarks_btn, "bookmarks",
+            lambda menu: self._app.populate_bookmarks_menu(
+                menu, self._win, owner=self._bookmark_owner()))
+
+    def _post_strip_menu(self, button, name: str, fill) -> None:
+        """Fill the menu *name* afresh and drop it under *button*, its right
+        edge on the button's — these sit at the window's right-hand edge,
+        and a menu hanging off to the right of one would leave the window.
+        One menu per button, refilled on every click, as a menu bar's
+        cascade is."""
+        if button is None:
+            return
+        menu = self._strip_menus.get(name)
+        if menu is None:
+            menu = self._strip_menus[name] = tk.Menu(self._win, tearoff=0)
+        try:
+            fill(menu)
+        except Exception as exc:
+            print(f"[pdf-window] filling the {name} menu failed: {exc}")
+            return
+        try:
+            menu.update_idletasks()
+            x = (button.winfo_rootx() + button.winfo_width()
+                 - menu.winfo_reqwidth())
+            menu.tk_popup(max(0, x), button.winfo_rooty()
+                          + button.winfo_height())
+        except tk.TclError:
+            pass
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+
     def _bar_submenu(self, filler: str, *args):
         """A submenu of the strip's menu that the app fills when it opens, or
         None when this app cannot fill it."""
@@ -20155,8 +21370,7 @@ class _FloatingPdfWindow:
         if self.has_text_side():
             try:
                 menu.add_command(
-                    label=("Hide Case Details\ts" if self.details_showing()
-                           else "Case Details\ts"),
+                    label=self._details_label().replace("   ", "\t"),
                     command=self.toggle_details,
                 )
             except tk.TclError:
@@ -20575,10 +21789,45 @@ class _FloatingPdfWindow:
             return False
 
     def toggle_details(self) -> None:
+        """The panel's switch — the "s" key, the strip's panel icon, and Case
+        Details on the strip's right-click menu."""
         if self.details_showing():
             self._hide_details()
         else:
             self._open_details()
+
+    def _details_label(self) -> str:
+        """What the switch does now — the icon's tip and, with a tab for the
+        spaces, the right-click menu's entry."""
+        return ("Hide Case Details   s" if self.details_showing()
+                else "Case Details   s")
+
+    def _mark_details_btn(self, showing: bool) -> None:
+        """Fill in the panel icon's column while the panel is up, and empty it
+        again as the panel goes, whichever way it went — so the icon says
+        which a click will do."""
+        try:
+            self._details_btn.configure(image=self._strip_icons[
+                "panel_showing" if showing else "panel"])
+        except tk.TclError:
+            pass
+
+    def _place_details_btn(self) -> None:
+        """Put the panel icon on the strip only where there is a case to have
+        details of — like T, it comes off rather than sit there refusing to
+        work — and back in the strip's last place when there is one again."""
+        btn = self._details_btn
+        try:
+            if not self.has_text_side():
+                btn.pack_forget()
+            elif not btn.winfo_manager():
+                # Ahead of everything else on the strip: the first packed from
+                # the right is the one at the very end.
+                packed = self._bar.pack_slaves()
+                ahead = {"before": packed[0]} if packed else {}
+                btn.pack(side="right", padx=(4, 8), pady=4, **ahead)
+        except tk.TclError:
+            pass
 
     def _open_details(self) -> None:
         """Show the panel, building it the first time it is asked for.
@@ -20614,6 +21863,8 @@ class _FloatingPdfWindow:
             win.lift()
         except tk.TclError:
             self._details_win = None
+            return
+        self._mark_details_btn(True)
 
     def _hide_details(self) -> None:
         """Put the panel away — withdrawn, not destroyed, so bringing it back
@@ -20624,6 +21875,7 @@ class _FloatingPdfWindow:
                 win.withdraw()
             except tk.TclError:
                 self._details_win = None
+        self._mark_details_btn(False)
         return None
 
     def _details_window(self, reader) -> tk.Toplevel:
@@ -20718,9 +21970,10 @@ class _FloatingPdfWindow:
         units the surface uses — a zoom percentage, or a type size.
 
         A scan with no text behind it loses the switch itself: there is
-        nothing for it to switch to.  A case whose scan is still being looked
-        for keeps it, greyed, so the reader can see that the pages are coming
-        (or that there are none) rather than wondering where the button
+        nothing for it to switch to — nor a case to have details of, so the
+        side panel's switch goes too.  A case whose scan is still being looked
+        for keeps its switch, greyed, so the reader can see that the pages are
+        coming (or that there are none) rather than wondering where the button
         went."""
         text = self.showing_text() or not self.has_scan()
         going, coming = ((self._fit_btn, self._copy_btn) if text
@@ -20739,6 +21992,7 @@ class _FloatingPdfWindow:
                 self._mode_btn.pack_forget()
         except tk.TclError:
             pass
+        self._place_details_btn()
         self._refresh_scale()
 
     def _refresh_scale(self) -> None:
@@ -25200,6 +26454,10 @@ class _ScholarTextWindow:
             if official:
                 display_cite = _respace_reporter_in_cite(official)
 
+        # The reporter as the Bluebook spells it, as every other line the app
+        # writes has it: "154 App. Div. 413" where the page prints the courts'
+        # "154 A.D. 413", "104 Wash. 2d 677" for "104 Wn.2d 677".
+        display_cite = _bluebook_reporter_spelling(display_cite)
         if court_id in ("wis", "wisctapp") or court_id.startswith("wis"):
             wi_cite = _wisconsin_display_cite(known_cites)
             if wi_cite:
@@ -25474,7 +26732,7 @@ class _ScholarTextWindow:
             # reporter with a parenthetical qualifier ("Media L. Rep. (BNA)")
             # alone — re-spacing would drop the parentheses.
             if "(" not in c:
-                c = _respace_reporter_in_cite(c)
+                c = _bluebook_reporter_spelling(_respace_reporter_in_cite(c))
             key = re.sub(r"\s+", "", c).lower()
             identity_key = re.sub(r"[^a-z0-9]", "", c.lower())
             if pos and (key in display_key

@@ -2058,6 +2058,98 @@ class ReporterAndDecisionDateTests(unittest.TestCase):
         self.assertEqual(bb["display_cite"], "409 Mich. 672")
 
 
+class ReporterConveysCourtTests(unittest.TestCase):
+    """Rule 10.4(b): the date parenthetical leaves out the jurisdiction and
+    the court wherever the reporter's title conveys them — though its
+    abbreviation may not spell them out."""
+
+    def paren(self, cite, court_id):
+        from courtlistener_gui import _court_for_paren
+        return _court_for_paren(cite, court_id, "")
+
+    def check(self, court_id, *pairs):
+        for cite, want in pairs:
+            with self.subTest(cite=cite, court=court_id):
+                self.assertEqual(self.paren(cite, court_id), want)
+
+    def test_the_appellate_divisions_own_reports_name_it(self):
+        self.check("nyappdiv",
+                   ("154 A.D. 413", ""), ("154 App. Div. 413", ""),
+                   ("100 A.D.2d 5", ""), ("100 A.D.3d 5", ""),
+                   # The New York Supplement names only the state.
+                   ("139 N.Y.S. 277", "App. Div."))
+
+    def test_the_miscellaneous_reports_name_new_york(self):
+        self.check("nysupct", ("50 Misc. 2d 5", "Sup. Ct."),
+                   ("10 Johns. 263", "N.Y. Sup. Ct."))
+        self.check("nycivct", ("50 Misc. 3d 5", "Civ. Ct."))
+        self.check("nyappterm", ("50 Misc. 2d 5", "App. Term"))
+        self.check("nysurct", ("50 Misc. 5", "Sur. Ct."))
+
+    def test_the_superior_court_reports_leave_the_division(self):
+        self.check("njsuperctappdiv", ("100 N.J. Super. 5", "App. Div."),
+                   ("100 A.2d 5", "N.J. Super. Ct. App. Div."))
+        self.check("njsuperctlawdiv", ("100 N.J. Super. 5", "Law Div."))
+        self.check("njsuperctchdiv", ("100 N.J. Super. 5", "Ch. Div."))
+
+    def test_the_criminal_appeals_reports_name_their_courts(self):
+        self.check("texcrimapp", ("140 Tex. Crim. 3", ""),
+                   ("140 Tex. Cr. R. 3", ""),
+                   ("100 S.W.2d 5", "Tex. Crim. App."))
+        self.check("oklacrimapp", ("120 Okla. Crim. 5", ""),
+                   ("120 Okl. Cr. 5", ""))
+
+    def test_other_reporters_named_for_their_courts(self):
+        self.check("calappdeptsuper", ("123 Cal. App. 4th Supp. 1", ""))
+        self.check("cadc", ("54 App. D.C. 46", ""),
+                   ("100 U.S. App. D.C. 5", ""), ("293 F. 1013", "D.C. Cir."))
+
+    def test_a_reporter_in_the_courts_own_spelling(self):
+        self.check("wash", ("104 Wn.2d 677", ""), ("100 P.2d 5", "Wash."))
+        self.check("washctapp", ("50 Wn. App. 5", ""))
+        self.check("pacommwct", ("100 Pa. Cmwlth. 5", ""))
+
+    def test_the_highest_court_needs_no_name_beside_its_states_reporter(self):
+        self.check("ny", ("400 N.Y.S.2d 5", ""), ("100 N.E. 5", "N.Y."),
+                   ("50 N.Y.2d 5", ""))
+        self.check("cal", ("75 Cal. Rptr. 2d 1", ""), ("100 P.3d 5", "Cal."))
+
+    def test_the_bluebook_line_for_an_appellate_division_case(self):
+        item = {"caseName": "People ex rel. Darling v. Warden of City Prison",
+                "citation": ["154 A.D. 413", "139 N.Y.S. 277"],
+                "dateFiled": "1913-01-11", "court_id": "nyappdiv"}
+        self.assertEqual(
+            _bluebook_display_name(item),
+            "People ex rel. Darling v. Warden of City Prison, "
+            "154 App. Div. 413 (1913)")
+
+    def test_the_text_window_cites_the_reporter_the_bluebook_way(self):
+        win = object.__new__(_ScholarTextWindow)
+        win._item = {
+            "case_name": "People ex rel. Darling v. Warden of City Prison",
+            "citation": ["154 A.D. 413", "139 N.Y.S. 277"],
+            "court_id": "nyappdiv",
+            "date_filed": "1913-01-11",
+        }
+        win._blocks = [
+            Block("center", [Span("154 A.D. 413 (1913)")]),
+            Block("center", [Span("THE PEOPLE ex rel. DARLING v. WARDEN")]),
+            Block("para", [Span("The writ is dismissed.")]),
+        ]
+
+        bb = win._compute_bluebook_parts()
+
+        self.assertEqual((bb["display_cite"], bb["court"], bb["year"]),
+                         ("154 App. Div. 413", "", "1913"))
+        win._bb = bb
+        win._base_citation_override = ""
+        win._header_cites = ["154 A.D. 413", "139 N.Y.S. 277"]
+        # The courts' spelling is the same citation, not a parallel one.
+        self.assertEqual(
+            win._title_citation(),
+            f"{bb['name']}, 154 App. Div. 413, 139 N.Y.S. 277 (1913)")
+
+
 class StateCourtPartyTests(unittest.TestCase):
     """Rule 10.2.1(f): "State of," "Commonwealth of," and "People of" drop out
     of a party name, leaving the state's name — except when the citation is to
@@ -3715,12 +3807,16 @@ class CaseWindowTests(unittest.TestCase):
 
         menu = Menu()
         app.populate_bookmarks_menu(menu, app.root)
-        # Most recently accessed first, and nothing to bookmark from here.
-        self.assertEqual(menu.items, ["18 U.S.C. § 922", "Roe v. Wade"])
+        # Most recently accessed first, and nothing to bookmark from here —
+        # then what makes and arranges the folders they can be kept in.
+        self.assertEqual(menu.items, [
+            "18 U.S.C. § 922", "Roe v. Wade",
+            "--", "New Folder…", "Organize Bookmarks…"])
 
         app._bookmarks = []
         app.populate_bookmarks_menu(menu, app.root)
-        self.assertEqual(menu.items, ["No bookmarks yet"])
+        self.assertEqual(menu.items, [
+            "No bookmarks yet", "--", "New Folder…", "Organize Bookmarks…"])
 
     def test_citation_result_uses_launching_view_parent(self):
         app = object.__new__(CourtListenerGUI)

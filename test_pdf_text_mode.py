@@ -173,6 +173,9 @@ class _FakeButton:
     def pack_forget(self):
         self.packed = False
 
+    def winfo_manager(self):
+        return "pack" if self.packed else ""
+
     def winfo_rootx(self):
         return 10
 
@@ -181,6 +184,16 @@ class _FakeButton:
 
     def winfo_height(self):
         return 22
+
+
+class _FakeStrip:
+    """The strip the buttons are packed on, as far as asking what is."""
+
+    def __init__(self, *packed):
+        self.packed = list(packed)
+
+    def pack_slaves(self):
+        return list(self.packed)
 
 
 class _FakePane:
@@ -332,7 +345,8 @@ VIEWER_NAMES = [
     "showing_text", "has_scan", "has_text_side", "set_text_side",
     "_mode_button_tip", "_toggle_mode",
     "_build_reader", "zoom",
-    "_show_text", "_show_scan", "_sync_bar", "_refresh_scale", "_flash",
+    "_show_text", "_show_scan", "_sync_bar", "_place_details_btn",
+    "_refresh_scale", "_flash",
     "_post_copy_menu", "_bigger", "_smaller", "_reset_scale", "_rescale",
     "_scroll_key", "_page_key", "_find_open", "_find_step", "_drop_reader",
     "_show_zoom",
@@ -386,6 +400,11 @@ class _Viewer:
         self._fit_btn.packed = True
         self._copy_btn = _FakeButton("Copy ▾")
         self._zoom_label = object()
+        # The side panel's switch, where _build_bar leaves it for a case.
+        self._details_btn = _FakeButton("panel")
+        self._details_btn.packed = True
+        self._bar = _FakeStrip(self._details_btn, self._mode_btn,
+                               self._fit_btn)
         for name in VIEWER_NAMES:
             setattr(self, name, VIEWER_NS[name].__get__(self))
 
