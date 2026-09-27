@@ -33814,7 +33814,8 @@ class _StatuteWindow:
             except tk.TclError:
                 pass  # modifier not supported on this platform
 
-    _ENUM_LEAD_RE = re.compile(r"((?:\((?:\d{1,3}|[a-zA-Z]{1,4})\)\s*)+)")
+    _ENUM_LEAD_RE = re.compile(
+        r"((?:\((?:\d{1,3}[A-Za-z]{0,2}|[a-zA-Z]{1,4})\)\s*)+)")
 
     def _render(self) -> None:
         txt = self._text
@@ -33827,6 +33828,15 @@ class _StatuteWindow:
         # (position, enumerator path) per enumerated paragraph, for the
         # pin-cite jump and for citing a selection in _copy_cite
         self._anchors: list[tuple[str, tuple]] = []
+        # The U.S. Code keeps the OLRC page's own indentation, which follows
+        # the printed Code ("(2)" flush with "(d)(1)"), so an indent is not a
+        # depth there: each paragraph's subdivision is read from the page's
+        # layout instead — flush text included, so a selection in it cites
+        # the subdivision it belongs to.
+        usc_paths = (
+            us_code.statute_paths(self._doc.paras)
+            if self._doc.kind == "usc" else None
+        )
         para_styles = getattr(self._doc, "para_styles", [])
         site_formatting = bool(
             self._doc.kind == "cfr"
@@ -33847,7 +33857,14 @@ class _StatuteWindow:
             m = self._ENUM_LEAD_RE.match(text) if kind in ("body", "head") \
                 else None
             lead = m.group(1) if m else ""
-            if lead:
+            if usc_paths is not None:
+                if kind in ("body", "head"):
+                    para_path = usc_paths[para_index]
+                    self._anchors.append((txt.index("end-1c"), para_path))
+                    if (target and target_pos is None and para_path
+                            and list(para_path[:len(target)]) == target):
+                        target_pos = txt.index("end-1c")
+            elif lead:
                 # One eCFR <P> can open several nested levels separated by
                 # heading dashes, e.g. "(b) ...—(1) ..." or
                 # "(v) ...—(A) ...—(1) ...".  Use the same structural reading

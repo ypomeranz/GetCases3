@@ -155,7 +155,7 @@ Source	Description
 CourtListener	Full‑text search across U.S. federal and state court opinions. Provides PDFs and structured opinion text.
 Google Scholar	Opinion text with formatting, citations, and separate opinions (majority, concurrence, dissent). Used as primary text viewer.
 static.case.law (Harvard CAP)	Scans of the printed reporters, and the text read off them. The scan is what Reporter View opens; the per-case JSON beside it carries the case’s metadata (name, court, decision date, parallel citations) and the HTML beside that carries the report itself — head matter, separate writings, footnotes and reporter page breaks — which is the text the app shows for any case Google Scholar lacks, in preference to CourtListener’s. Coverage ends with the volumes published in 2018.
-U.S. Code	Current law from the Office of the Law Revision Counsel (OLRC). Renders with indentation and enumerator hierarchy.
+U.S. Code	Current law from the Office of the Law Revision Counsel (OLRC). Renders with the OLRC page's own indentation (as the printed Code lays it out); pin cites and Copy + Cite read each paragraph's subdivision from that layout.
 Code of Federal Regulations	eCFR API – current regulations, section‑by‑section.
 Federal Rules	Civil, Criminal, Evidence, Appellate, Bankruptcy – from Cornell LII.
 U.S. Constitution	Full text with article/amendment navigation; detects both formal citations and prose references.
