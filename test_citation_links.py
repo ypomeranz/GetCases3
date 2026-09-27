@@ -969,6 +969,9 @@ class ReporterSweepTests(unittest.TestCase):
         # Reporters named for their reporters
         "Harris & G.", "Smedes & M.", "Jones Eq.", "Gill & J.",
         "Serg. & Rawle", "Watts & Serg.",
+        # …and in capitals, as a table of authorities may set them
+        "U.S.", "F.3D", "N.J. SUPER.", "CAL. APP. 4TH", "WALL. JR.",
+        "M.J.", "Q.B.",
     )
 
     JOURNALS = (
@@ -995,7 +998,55 @@ class ReporterSweepTests(unittest.TestCase):
         "Contemp. Econ. Pol'y", "Philos. & Pub. Aff.", "Fla. Hist. Q.",
         # Histories and legislative histories cited like them
         "Leg. Hist.", "Documentary Hist.",
+        # …and as a law review prints them all, in small capitals, which a
+        # PDF's text layer gives as capitals (135 Harv. L. Rev. 515)
+        "HARV. L. REV.", "YALE L.J.", "GEO. WASH. L. REV.",
+        "U.C. IRVINE L. REV.", "N.Y.U. L. REV. ONLINE",
+        "TEX. L. REV. SEE ALSO", "WASH. U. L.Q.", "LAW & CONTEMP. PROBS.",
+        "CRIME & DELINQ.", "CRIM. JUST. & BEHAV.", "ANN. REV. CRIMINOLOGY",
+        "CLINICAL PSYCH. REV.", "LAW & SOC'Y REV.", "AM. ECON. REV.",
+        # Periodicals whose names give nothing else away
+        "Fed. Sent'g Rep.", "FED. SENT’G REP.", "Crime & Just.",
+        "U. Chi. Legal F.", "PUB. INT.", "CONST. COMMENT.", "Fed. Probation",
+        "J. Commc'n",
     )
+
+    NOT_CASES = (
+        # Congress's record, and commentary on the cases
+        "Cong. Rec.", "CONG. REC.", "Cong.Rec.", "Annals of Cong.",
+        "Reg. Deb.", "A.L.R.", "A.L.R.2d", "A.L.R.4th", "A.L.R. Fed.",
+        # A date, and an old court parenthetical, read as citations
+        "Nov.", "Sept.", "Cir.",
+    )
+
+    def test_no_record_of_congress_or_annotation_is_a_case(self):
+        kept = [s for s in self.NOT_CASES if _valid_case_reporter(s)]
+        self.assertEqual(kept, [], f"accepted as case reporters: {kept}")
+
+    def test_a_law_review_footnote_links_only_its_cases(self):
+        # Footnotes as 135 Harv. L. Rev. 515 prints them: journals in small
+        # capitals between the cases.
+        text = (
+            "See generally Sharon Dolovich, Forms of Deference in Prison "
+            "Law, 24 FED. SENT’G REP. 245 (2012); Ruffin v. Commonwealth, "
+            "62 Va. (21 Gratt.) 790, 796 (1871); Justin Driver, The "
+            "Constitutional Conservatism of the Warren Court, 100 CALIF. L. "
+            "REV. 1101, 1114 (2012); Turner v. Safley, 482 U.S. 78, 89 "
+            "(1987); 2 CRIME & JUST. 429, 434 (1980).")
+        self.assertEqual(
+            [a[1] for _t, a in _spans(text) if a[0] == "cite"],
+            ["62 Va. 790@796", "482 U.S. 78@89"])
+
+    def test_a_parallel_it_drops_does_not_leave_its_parenthetical_behind(
+            self):
+        # The A.L.R. parallel and the Congressional Record are no longer
+        # linked; the "(2 Cir. 1961)" and the "(17 Nov. 1970)" after them
+        # must not be read as citations of their own.
+        text = ("Moore-McCormack Lines v. Richardson, 295 F.2d 583, 96 "
+                "A.L.R.2d 1085 (2 Cir. 1961). 116 Cong.Rec. 37,652 (17 Nov. "
+                "1970).")
+        self.assertEqual([a[1] for _t, a in _spans(text) if a[0] == "cite"],
+                         ["295 F.2d 583"])
 
     def test_a_social_science_study_is_not_a_case(self):
         # N.Y. State Rifle & Pistol Ass'n v. Bruen, 142 S. Ct. 2111, 2166
