@@ -996,13 +996,50 @@ class StripIconTests(unittest.TestCase):
         self.assertLess(self.body.index('bar, "history"'),
                         self.body.index('_ui_mini_button(bar, "", self._save'))
 
-    def test_the_artwork_draws_the_three_icons(self):
+    def test_the_side_panel_switch_is_an_icon_too(self):
+        # The "s" key's switch, as a click.
+        self.assertIn('self._details_btn = _ui_mini_button(\n'
+                      '            bar, "", self.toggle_details', self.body)
+        self.assertIn('image=self._strip_icons["panel"]', self.body)
+        self.assertIn("_HoverTip(self._details_btn, self._details_label",
+                      self.body)
+
+    def test_at_the_very_end_of_the_strip_where_the_panel_opens(self):
+        # Placed before anything else is packed, so it is the first packed
+        # from the right: right of Window, over the panel's own side.
+        self.assertLess(self.body.index("self._place_details_btn()"),
+                        self.body.index('bar, "windows"'))
+        place = _source_of("_FloatingPdfWindow", "_place_details_btn")
+        self.assertIn('side="right"', place)
+        self.assertIn('"before": packed[0]', place)
+
+    def test_the_strip_asks_again_whenever_it_is_brought_up_to_date(self):
+        # A lookup that finds the case has no text after all takes the icon
+        # off; an opinion arriving in a window that had none puts it back.
+        self.assertIn("self._place_details_btn()",
+                      _source_of("_FloatingPdfWindow", "_sync_bar"))
+
+    def test_the_icon_changes_as_the_panel_comes_and_goes(self):
+        opened = _source_of("_FloatingPdfWindow", "_open_details")
+        hidden = _source_of("_FloatingPdfWindow", "_hide_details")
+        self.assertIn("self._mark_details_btn(True)", opened)
+        self.assertIn("self._mark_details_btn(False)", hidden)
+
+    def test_the_window_is_wide_enough_for_all_of_it(self):
+        # Measured under Tk: the text side's strip (Copy ▾ in Fit's place,
+        # the type size read out) with every icon at full width.
+        self.assertGreaterEqual(
+            _class_attr("_FloatingPdfWindow", "_MIN_W"), 440)
+
+    def test_the_artwork_draws_the_strip_s_icons(self):
         art = next(ast.get_source_segment(SRC, n) for n in TREE.body
                    if isinstance(n, ast.FunctionDef)
                    and n.name == "_pdf_strip_icons")
         self.assertIn('"bookmarks": finish(ribbon)', art)
         self.assertIn('"windows": finish(windows)', art)
         self.assertIn('"history": finish(clock)', art)
+        self.assertIn('"panel": finish(side_panel(False))', art)
+        self.assertIn('"panel_showing": finish(side_panel(True))', art)
 
 
 class _StripTk(_Tk):

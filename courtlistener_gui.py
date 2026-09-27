@@ -992,8 +992,8 @@ _STRIP_ICON_W, _STRIP_ICON_H = 16, 14
 
 
 def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
-    """Save, print, history, bookmark and window artwork for the floating
-    PDF viewer's strip.
+    """Save, print, history, bookmark, window and side-panel artwork for the
+    floating PDF viewer's strip.
 
     Drawn with Pillow — which the viewer already needs to put a page on screen
     at all — at four times the size and reduced, so the strokes come out smooth
@@ -1075,6 +1075,31 @@ def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
     draw.line([(cx, cy), (cx + 2.4 * scale, cy + 1.6 * scale)], fill=color,
               width=round(1.2 * scale))
 
+    # Side panel: a window with a column ruled off down its right-hand side,
+    # where the panel stands — the column empty while the panel is away and
+    # filled in while it is up, so the icon says which it is.  Drawn on whole
+    # pixels of the finished icon, so its straight edges come out crisp.
+    def pixels(left, top, right, bottom) -> tuple:
+        return (left * scale, top * scale, (right + 1) * scale - 1,
+                (bottom + 1) * scale - 1)
+
+    def side_panel(showing: bool):
+        image, draw = start()
+
+        def rounded(box, **style) -> None:
+            try:
+                draw.rounded_rectangle(box, radius=1.5 * scale, **style)
+            except AttributeError:      # Pillow older than 8.2
+                draw.rectangle(box, **style)
+
+        rounded(pixels(1, 1, 14, 12), outline=color, width=scale)
+        if showing:
+            rounded(pixels(10, 1, 14, 12), fill=color)
+            draw.rectangle(pixels(10, 1, 11, 12), fill=color)
+        else:
+            draw.rectangle(pixels(10, 1, 10, 12), fill=color)
+        return image
+
     def finish(image):
         small = image.resize((_STRIP_ICON_W, _STRIP_ICON_H), Image.LANCZOS)
         if _CTK_AVAILABLE:
@@ -1088,7 +1113,9 @@ def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
 
     return {"save": finish(save), "print": finish(printer),
             "bookmarks": finish(ribbon), "windows": finish(windows),
-            "history": finish(clock)}
+            "history": finish(clock),
+            "panel": finish(side_panel(False)),
+            "panel_showing": finish(side_panel(True))}
 
 
 def _folder_icon(master: tk.Misc, color: str = "#3f4650"):
@@ -20953,8 +20980,8 @@ class _FloatingPdfWindow:
     _W = 720     # preferred size, clamped to the usable desktop in _place_beside
     _H = 880
     # Wide enough for the whole strip: its controls on the left, the History,
-    # Bookmarks and Window icons on the right.
-    _MIN_W = 400
+    # Bookmarks and Window icons and the side panel's switch on the right.
+    _MIN_W = 440
     _MIN_H = 280
     _BAR_H = 30  # the top strip: one 22px button row plus its padding
 
@@ -21100,8 +21127,8 @@ class _FloatingPdfWindow:
 
     def _build_bar(self) -> None:
         """The one piece of chrome: save and print, then the zoom controls,
-        the History, Bookmarks and Window menus at the right, a hairline under
-        it and nothing else."""
+        the History, Bookmarks and Window menus and the side panel's switch at
+        the right, a hairline under it and nothing else."""
         if _CTK_AVAILABLE:
             bar = ctk.CTkFrame(self._win, fg_color=_UI["surface"],
                                corner_radius=0, height=self._BAR_H)
@@ -21115,14 +21142,27 @@ class _FloatingPdfWindow:
         # Tk drops an image nothing refers to, so the strip's artwork is kept
         # on the window.
         self._strip_icons = _pdf_strip_icons(bar)
+        # The case's details stand against the window's right-hand edge, so
+        # the icon that brings them takes the strip's last place, over where
+        # they appear — set a little apart from the menus, being a switch
+        # rather than one of them.  The same switch as the "s" key, and on the
+        # strip only where there is a case to have details of (see
+        # _place_details_btn, which _sync_bar asks again as that changes).
+        self._details_btn = _ui_mini_button(
+            bar, "", self.toggle_details, width=30,
+            image=self._strip_icons["panel"])
+        _HoverTip(self._details_btn, self._details_label, delay=450)
+        self._place_details_btn()
         # The menus a document window carries on its menu bar and this one
         # has no bar for, as icons at the strip's far end — words would crowd
         # a strip this narrow — in the order a menu bar has them: History,
-        # Bookmarks, and Window at the very end, where every other window
-        # keeps it.  (Packed from the right, so the last is packed first.)
-        # They are packed before anything on the left, so they get their
-        # room first: a window too narrow for the whole strip squeezes the
-        # scale readout, not these.
+        # Bookmarks, and Window last, where every other window keeps it.
+        # (Packed from the right, so the last is packed first.)  Window's 8px
+        # on its right is the strip's margin where the panel's switch is not
+        # there, and with the switch's own 4px the gap setting it apart where
+        # it is.  Like the switch, these are packed before anything on the
+        # left, so they get their room first: a window too narrow for the
+        # whole strip squeezes the scale readout, not these.
         self._window_btn = self._strip_menu_button(
             bar, "windows", "Windows", self._post_window_menu,
             "populate_window_menu", padx=(4, 8))
@@ -21299,8 +21339,7 @@ class _FloatingPdfWindow:
         if self.has_text_side():
             try:
                 menu.add_command(
-                    label=("Hide Case Details\ts" if self.details_showing()
-                           else "Case Details\ts"),
+                    label=self._details_label().replace("   ", "\t"),
                     command=self.toggle_details,
                 )
             except tk.TclError:
@@ -21719,10 +21758,45 @@ class _FloatingPdfWindow:
             return False
 
     def toggle_details(self) -> None:
+        """The panel's switch — the "s" key, the strip's panel icon, and Case
+        Details on the strip's right-click menu."""
         if self.details_showing():
             self._hide_details()
         else:
             self._open_details()
+
+    def _details_label(self) -> str:
+        """What the switch does now — the icon's tip and, with a tab for the
+        spaces, the right-click menu's entry."""
+        return ("Hide Case Details   s" if self.details_showing()
+                else "Case Details   s")
+
+    def _mark_details_btn(self, showing: bool) -> None:
+        """Fill in the panel icon's column while the panel is up, and empty it
+        again as the panel goes, whichever way it went — so the icon says
+        which a click will do."""
+        try:
+            self._details_btn.configure(image=self._strip_icons[
+                "panel_showing" if showing else "panel"])
+        except tk.TclError:
+            pass
+
+    def _place_details_btn(self) -> None:
+        """Put the panel icon on the strip only where there is a case to have
+        details of — like T, it comes off rather than sit there refusing to
+        work — and back in the strip's last place when there is one again."""
+        btn = self._details_btn
+        try:
+            if not self.has_text_side():
+                btn.pack_forget()
+            elif not btn.winfo_manager():
+                # Ahead of everything else on the strip: the first packed from
+                # the right is the one at the very end.
+                packed = self._bar.pack_slaves()
+                ahead = {"before": packed[0]} if packed else {}
+                btn.pack(side="right", padx=(4, 8), pady=4, **ahead)
+        except tk.TclError:
+            pass
 
     def _open_details(self) -> None:
         """Show the panel, building it the first time it is asked for.
@@ -21758,6 +21832,8 @@ class _FloatingPdfWindow:
             win.lift()
         except tk.TclError:
             self._details_win = None
+            return
+        self._mark_details_btn(True)
 
     def _hide_details(self) -> None:
         """Put the panel away — withdrawn, not destroyed, so bringing it back
@@ -21768,6 +21844,7 @@ class _FloatingPdfWindow:
                 win.withdraw()
             except tk.TclError:
                 self._details_win = None
+        self._mark_details_btn(False)
         return None
 
     def _details_window(self, reader) -> tk.Toplevel:
@@ -21862,9 +21939,10 @@ class _FloatingPdfWindow:
         units the surface uses — a zoom percentage, or a type size.
 
         A scan with no text behind it loses the switch itself: there is
-        nothing for it to switch to.  A case whose scan is still being looked
-        for keeps it, greyed, so the reader can see that the pages are coming
-        (or that there are none) rather than wondering where the button
+        nothing for it to switch to — nor a case to have details of, so the
+        side panel's switch goes too.  A case whose scan is still being looked
+        for keeps its switch, greyed, so the reader can see that the pages are
+        coming (or that there are none) rather than wondering where the button
         went."""
         text = self.showing_text() or not self.has_scan()
         going, coming = ((self._fit_btn, self._copy_btn) if text
@@ -21883,6 +21961,7 @@ class _FloatingPdfWindow:
                 self._mode_btn.pack_forget()
         except tk.TclError:
             pass
+        self._place_details_btn()
         self._refresh_scale()
 
     def _refresh_scale(self) -> None:
