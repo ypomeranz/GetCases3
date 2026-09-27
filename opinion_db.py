@@ -446,13 +446,13 @@ def extract_record(
     raw_name = re.sub(
         r"<[^>]+>", "", item.get("caseName") or item.get("case_name") or ""
     ).strip()
+    prose = _prose_text(blocks)
     if not raw_name:
         raw_name = _caption_name(blocks)
         if raw_name:
             raw_name = _smart_titlecase(raw_name)  # caption is often ALL CAPS
             # The body's mixed-case prose corrects ambiguous title-casing
             # guesses ("Us Dominion" -> "US Dominion").
-            prose = _prose_text(blocks)
             raw_name = refine_caption_case(raw_name, prose)
             raw_name = simplify_historical_entity_caption(raw_name, prose)
 
@@ -468,8 +468,11 @@ def extract_record(
 
     # Rule 10.2.1(f): whether a "People of the State of …" party keeps the
     # designation or the state name turns on the deciding court.
+    # The prose also settles a surname the given-name lists don't know
+    # ("Chad Everet Brackeen" is Brackeen, rule 10.2.1(g)).
     name = abbreviate_case_name(
-        raw_name, court_state=state_of_court(court)) if raw_name else ""
+        raw_name, court_state=state_of_court(court),
+        body_text=prose) if raw_name else ""
 
     parties = parties_from_name(name or raw_name)
 
@@ -1453,7 +1456,7 @@ class OpinionDB:
         with self._lock:
             rows = self._db.execute(
                 f"SELECT o.scholar_id, o.name, o.court, o.year, o.url, "
-                f"o.cites_json, o.snippet, "
+                f"o.cites_json, o.snippet, o.line_length AS size, "
                 f"COUNT(DISTINCT p.token) AS _n "
                 f"FROM parties p JOIN opinions o ON o.scholar_id=p.scholar_id "
                 f"WHERE p.token IN ({placeholders}) "
@@ -1485,7 +1488,7 @@ class OpinionDB:
     @classmethod
     def _summary(cls, row: sqlite3.Row) -> dict:
         cites = json.loads(row["cites_json"] or "[]")
-        return {
+        summary = {
             "scholar_id": row["scholar_id"],
             "name": row["name"],
             "cite": cites[0] if cites else "",
@@ -1495,6 +1498,11 @@ class OpinionDB:
             "url": row["url"],
             "snippet": row["snippet"] or "",
         }
+        # The stored record's length, where the query asked for it: an order
+        # is a kilobyte or so, a merits opinion tens of them.
+        if "size" in row.keys():
+            summary["size"] = int(row["size"] or 0)
+        return summary
 
     @staticmethod
     def _summary_from_record(rec: dict) -> dict:

@@ -1368,7 +1368,8 @@ class DetailsPanelTests(unittest.TestCase):
         self.assertEqual(reader.refreshed, 1)
 
     def test_it_offers_the_case_s_details_and_the_docket_behind_them(self):
-        # The shorter list: the rest of the views want a window's room.
+        # The shorter list — the case, its docket, the Court's recent
+        # opinions: related cases and the outline want a window's room.
         viewer = _DetailsViewer()
         viewer.press_s()
         self.assertEqual(

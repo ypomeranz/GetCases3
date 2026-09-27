@@ -18,6 +18,8 @@ safely pass through twice.
 
 from __future__ import annotations
 
+import gzip
+import os
 import re
 
 # ---------------------------------------------------------------------------
@@ -322,6 +324,21 @@ _PHRASES: list[tuple[str, str]] = [
     ("west virginia", "W. Va."),
 ]
 
+# T10's cities, abbreviated as the states are inside a longer party name —
+# "Univ. of Chi.", "S.F. Arts & Athletics, Inc.", "Balt. & Ohio R.R." — and
+# like them left whole when the city is the entire party ("Dallas v.
+# Stanglin", "City of Chicago").  Kept apart from the states, whose tables
+# they would muddle: Los Angeles's "L.A." reads the same as Louisiana's "La.".
+_T10_CITY_WORDS: dict[str, str] = {
+    "baltimore": "Balt.", "boston": "Bos.", "chicago": "Chi.",
+    "dallas": "Dall.", "houston": "Hous.", "miami": "Mia.",
+    "philadelphia": "Phila.", "phoenix": "Phx.",
+}
+_T10_CITY_PHRASES: list[tuple[str, str]] = [
+    ("los angeles", "L.A."),
+    ("san francisco", "S.F."),
+]
+
 # Geographic units left untouched when they are the entire party name
 # (rule 10.2.2 / Indigo R8.3): "United States v. Nixon", "Arizona v. Gant".
 _GEO_PARTIES = (
@@ -331,6 +348,8 @@ _GEO_PARTIES = (
      "north dakota", "rhode island", "south carolina", "south dakota",
      "west virginia", "washington"}
     | set(_T10_WORDS)
+    | set(_T10_CITY_WORDS)
+    | {p for p, _ in _T10_CITY_PHRASES}
 )
 
 # "State of X" / "Commonwealth of X" / "People of the State of X" are
@@ -353,7 +372,8 @@ _STATE_OF_RE = re.compile(
 # the cite reads "Indiana ex rel. Anderson", never "Ind. ex rel. Anderson".
 # Matched case-insensitively and re-emitted in canonical lowercase form.
 _EX_REL_RE = re.compile(
-    r"[\s,]+(?:ex\s+rel(?:\.|atione)?|on\s+(?:the\s+)?relation\s+of)[\s,]+",
+    r"[\s,]+(?:ex\s+rel(?:\.|atione)?|on\s+(?:the\s+)?rel(?:ation|\.)\s+of)"
+    r"[\s,]+",
     re.IGNORECASE,
 )
 
@@ -390,6 +410,38 @@ def _expand_geo_party(head: str) -> str:
     return _GEO_EXPANSIONS.get(_norm_geo(head), head)
 
 
+def _geo_party_key(s: str) -> str:
+    """An abbreviation as spelled, for an exact lookup: "U.S.." -> "u.s.",
+    "W. Va." -> "w.va."."""
+    return re.sub(r"\.+$", ".", re.sub(r"\s+", "", s.lower()))
+
+
+# The same abbreviations by their exact spelling, for a party that is
+# nothing else — "Olmstead v. U.S." as a name stored already abbreviated —
+# which rule 10.2.2 names in full.  Unlike the letters-only key above, an
+# exact spelling never takes Los Angeles's "L.A." for Louisiana's "La.".
+_GEO_PARTY_ABBREVIATIONS: dict[str, str] = {
+    _geo_party_key(_abbr): _full.title() for _full, _abbr in _T10_WORDS.items()
+}
+_GEO_PARTY_ABBREVIATIONS.update({
+    _geo_party_key(_abbr): _GEO_EXPANSIONS[_norm_geo(_abbr)]
+    for _phrase, _abbr in _PHRASES if _norm_geo(_abbr) in _GEO_EXPANSIONS
+})
+_GEO_PARTY_ABBREVIATIONS.update({
+    _geo_party_key(_abbr): _full.title()
+    for _full, _abbr in list(_T10_CITY_WORDS.items()) + _T10_CITY_PHRASES
+})
+
+
+def _place_in_full(place: str) -> str:
+    """A geographic name a source abbreviated, spelled out again — "U.S." ->
+    "United States", "N.Y." -> "New York", "L.A." -> "Los Angeles" — for a
+    party that is that place and nothing more (rule 10.2.2); anything else
+    passes through."""
+    return _GEO_PARTY_ABBREVIATIONS.get(_geo_party_key(place.strip(" ,")),
+                                        place)
+
+
 def _same_state(place: str, state: str) -> bool:
     """Whether a party's geographic name and a deciding court's state are the
     same place.  Either side may be spelled out or abbreviated ("N.Y." /
@@ -412,10 +464,32 @@ def _same_state(place: str, state: str) -> bool:
 # shorten, consistent with City/Town/Borough, which no table abbreviates.)
 # When more follows the place ("City of New York Department of Education") the
 # party is a larger entity and abbreviates normally.
+_UNIT_ALTERNATION = (
+    r"(?:City|Town|Township|Twp\.|Village|Vill\.|Borough|County|Cnty\.|"
+    r"Parish|Par\.)"
+)
+# …including the consolidated kind: "City and County of San Francisco".
 _MUNICIPAL_RE = re.compile(
-    r"^(City|Town|Township|Village|Borough|County|Parish)\s+of\s+(.+)$",
+    r"^(" + _UNIT_ALTERNATION
+    + r"(?:\s+(?:&|and)\s+" + _UNIT_ALTERNATION + r")?)\s+of\s+(.+)$",
     re.IGNORECASE,
 )
+
+# The unit words as table T6 abbreviates them, spelled out again when the
+# unit is the whole party: a name stored already abbreviated ("Clayton
+# Cnty.", "Twp. of Scott") cites as "Clayton County", "Township of Scott".
+_SPELLED_UNITS = {
+    "twp.": "Township", "vill.": "Village", "cnty.": "County",
+    "par.": "Parish",
+}
+
+
+def _spelled_unit(word: str) -> str:
+    """A municipal unit's words spelled out, a pair joined the Bluebook way:
+    "Cnty." -> "County", "City and County" -> "City & County"."""
+    return " & ".join(
+        _SPELLED_UNITS.get(w.lower(), w)
+        for w in re.split(r"\s+(?:&|and)\s+", word, flags=re.IGNORECASE))
 
 # The same unit expressions in mid-name position are omitted (rule
 # 10.2.1(f)): "Board of Education of the Borough of Hawthorne" -> "Board of
@@ -435,9 +509,299 @@ _MID_GEO_UNIT_RE = re.compile(
 # institution follows ("Cook County Bd. of Review") the larger party
 # abbreviates normally.
 _GEO_SUFFIX_RE = re.compile(
-    r"^(.+?)\s+(?:City|Town|Township|Village|Borough|County|Parish)$",
+    r"^(.+?)\s+(City|Town|Township|Twp\.|Village|Vill\.|Borough|County|"
+    r"Cnty\.|Parish|Par\.)$",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Rule 10.2.1(f), last part: "Omit all prepositional phrases of location not
+# following 'City,' or like expressions, unless the omission would leave only
+# one word in the name of a party or the location is part of a business name."
+# So "Brown v. Bd. of Educ.", not "… of Topeka"; "Surrick v. Bd. of Wardens",
+# not "… of the Port of Philadelphia"; "Planned Parenthood v. Casey"; but
+# "Shapiro v. Bank of Harrisburg" (not "Bank") and "Standard Oil Co. of N.J."
+# Designations of national or larger areas stay ("Boy Scouts of Am."), so no
+# country is ever recognized as a place below.
+# ---------------------------------------------------------------------------
+
+# The states, the District of Columbia and the territories, spelled out...
+_STATE_NAMES = frozenset(
+    set(_T10_WORDS)
+    | {p for p, a in _PHRASES
+       if _norm_geo(a) in _GEO_EXPANSIONS and p != "united states"}
+    | {"alaska", "idaho", "iowa", "ohio", "utah", "guam", "virgin islands",
+       "american samoa", "northern mariana islands"}
+)
+
+# ...and abbreviated, as table T10 does it and as captions commonly do.  An
+# abbreviation is only ever read with its periods, so a word that happens to
+# spell one ("Me", "Or", "Mass") is never taken for a state, nor is a
+# professional association's "P.A." for Pennsylvania's "Pa.".
+_STATE_ABBREVIATIONS = frozenset(
+    re.sub(r"\s+", "", a.lower())
+    for a in list(_T10_WORDS.values())
+    + [a for p, a in _PHRASES if p in _STATE_NAMES]
+) | {"calif.", "ore.", "kans.", "nebr.", "wisc."}
+
+# A part of a state named ahead of it: "Southeastern Pennsylvania", "Se. Pa."
+_REGION_WORDS = frozenset({
+    "north", "south", "east", "west", "northern", "southern", "eastern",
+    "western", "central", "northeast", "northwest", "southeast",
+    "southwest", "northeastern", "northwestern", "southeastern",
+    "southwestern", "upstate", "downstate", "greater", "upper", "lower",
+    "middle", "n", "s", "e", "w", "ne", "nw", "se", "sw", "cent",
+})
+
+# Municipal units, spelled out or as table T6 abbreviates them, that make a
+# place of the name beside them: "Bryan County", "the Borough of Hawthorne".
+_UNIT_WORDS = frozenset({
+    "city", "town", "township", "twp", "village", "vill", "borough",
+    "county", "cnty", "parish", "par",
+})
+
+# Cities known by name alone, for a phrase that names no unit ("of Topeka"):
+# table T10's cities, the state capitals, and the country's larger cities.
+# Names that are also given names (Austin, Madison, Charlotte) or ordinary
+# words (Providence, Concord, Mobile) are left out — a phrase naming one of
+# those is kept, which is the safe way to be wrong.
+_CITY_NAMES = frozenset({
+    "akron", "albany", "albuquerque", "alexandria", "allentown", "anaheim",
+    "anchorage", "ann arbor", "annapolis", "arlington", "atlanta", "augusta",
+    "bakersfield", "baltimore", "baton rouge", "berkeley", "bethlehem",
+    "binghamton", "birmingham", "bismarck", "boise", "boston", "bridgeport",
+    "buffalo", "burlington", "cambridge", "camden", "charleston",
+    "chattanooga", "cheyenne", "chicago", "chula vista", "cincinnati",
+    "cleveland", "colorado springs", "columbus", "corpus christi", "dallas",
+    "dayton", "denver", "des moines", "detroit", "dover", "duluth", "durham",
+    "el paso", "evanston", "evansville", "fargo", "fort wayne", "fort worth",
+    "frankfort", "fresno", "galveston", "glendale", "grand rapids",
+    "greensboro", "harrisburg", "hartford", "hoboken", "honolulu", "houston",
+    "huntsville", "indianapolis", "jackson", "jacksonville", "juneau",
+    "knoxville", "lancaster", "lansing", "laredo", "las vegas", "lexington",
+    "lincoln", "little rock", "long beach", "los angeles", "louisville",
+    "lowell", "lubbock", "memphis", "mesa", "miami", "milwaukee",
+    "minneapolis", "modesto", "montgomery", "montpelier", "nashville",
+    "new haven", "new orleans", "newark", "norfolk", "oakland", "olympia",
+    "omaha", "orlando", "pasadena", "paterson", "peoria", "philadelphia",
+    "phoenix", "pittsburgh", "plano", "portland", "raleigh", "reno",
+    "richmond", "rochester", "sacramento", "saint louis", "saint paul",
+    "saint petersburg", "salem", "san antonio", "san diego",
+    "san francisco", "san jose", "santa ana", "santa fe", "savannah",
+    "schenectady", "scottsdale", "scranton", "seattle", "shreveport",
+    "sioux falls", "south bend", "spokane", "springfield", "st louis",
+    "st paul", "st petersburg", "stamford", "stockton", "syracuse",
+    "tacoma", "tallahassee", "tampa", "toledo", "topeka", "trenton",
+    "tucson", "tulsa", "utica", "virginia beach", "wichita", "wilkes-barre",
+    "wilmington", "winston-salem", "worcester", "yonkers", "youngstown",
+})
+_CITY_ABBREVIATIONS = frozenset({
+    "balt.", "bos.", "chi.", "dall.", "l.a.", "mia.", "phila.", "phx.",
+    "s.f.",
+})
+
+# One word of a place's proper name: capitalized ("Prince George's",
+# "Miami-Dade", "St."), or a particle ("Isle de France", "Coeur d'Alene").
+_PLACE_NAME_TOKEN_RE = re.compile(
+    r"[A-Z][A-Za-z'’.\-]*|de|la|le|du|del|des|di|da|van|von"
+    r"|d['’][A-Z][A-Za-z'’\-]*"
+)
+
+# The word right before "of <place>" that makes the place part of a name
+# rather than a location added to one: a unit or district, whose place is the
+# thing it names ("City of New York", "Sch. Dist. of Abington Twp.", "S.
+# Dist. of N.Y."), and an institution named for where it is ("Regents of
+# Univ. of Cal.", "Sup. Ct. of Va.", "Roman Cath. Archdiocese of San Juan").
+_INSTITUTION_WORDS = frozenset({
+    "university", "univ", "college", "coll", "institute", "inst",
+    "seminary", "academy", "acad", "hospital", "hosp", "court", "ct",
+    "church", "diocese", "archdiocese",
+})
+_PLACE_NAMING_WORDS = (
+    _UNIT_WORDS | _INSTITUTION_WORDS
+    | {"port", "district", "dist", "division", "div"}
+    # A tribe is named for where it is, too: "Seminole Tribe of Fla.",
+    # "Kiowa Tribe of Okla.", "Miami Nation of Indians of Ind."
+    | {"tribe", "tribes", "nation", "nations", "band", "indians", "pueblo",
+       "rancheria"}
+)
+
+# An officer is named for the place whose office it is — "Att'y Gen. of
+# N.Y.", "Sec'y of State of Md.", "Pers. Adm'r of Mass.", the Bluebook's own
+# "Mayor of New York" — so an office heading the party keeps its place too,
+# as does a court or a church whose place follows another word of its name.
+_OFFICE_WORDS = frozenset({
+    "attorney", "atty", "secretary", "secy", "administrator", "admr",
+    "administratrix", "admx", "commissioner", "commr", "director", "dir",
+    "superintendent", "supt", "governor", "gov", "mayor", "treasurer",
+    "comptroller", "controller", "auditor", "assessor", "collector",
+    "sheriff", "clerk", "registrar", "recorder", "warden", "prosecutor",
+    "solicitor", "judge", "magistrate", "marshal", "coroner", "surveyor",
+    "chief", "lieutenant",
+})
+_PLACE_KEEPING_HEADS = _OFFICE_WORDS | _INSTITUTION_WORDS
+
+# Words that make a party a business, whose location is part of its name.
+_BUSINESS_WORDS = frozenset({
+    "co", "cos", "company", "companies", "corp", "corporation", "inc",
+    "incorporated", "ltd", "limited", "llc", "llp", "lllp", "lp", "plc",
+    "pllc", "na", "fsb", "bank", "banks", "bancorp", "banking", "trust",
+    "insurance", "ins", "assurance", "mutual", "mut", "railroad", "rr",
+    "railway", "ry", "telephone", "tel", "telegraph", "savings", "sav",
+    "bros", "brothers", "mfg", "manufacturing", "exchange", "exch",
+})
+
+# "of" or "in" opening a phrase of location: "… of Topeka", "Sailor's Snug
+# Harbour in the City of New York".
+_LOCATION_PREP_RE = re.compile(r"\s+(?:of|in)\s+", re.IGNORECASE)
+
+
+def _word_key(word: str) -> str:
+    """A word's letters, lowercased: "Att'y" -> "atty", "Cnty." -> "cnty"."""
+    return re.sub(r"[^a-z]", "", word.lower())
+
+
+def _place_words(text: str) -> list[str]:
+    """The words of a would-be place, less edge punctuation and a leading
+    "the" ("the Port of Philadelphia")."""
+    words = re.sub(r"\.{2,}$", ".", (text or "").strip(" ,;")).split()
+    if words and words[0].lower() == "the":
+        words = words[1:]
+    return words
+
+
+def _is_state(words: list[str]) -> bool:
+    """A state, the District of Columbia or a territory, spelled out or
+    abbreviated: "Kansas", "North Carolina", "Ky.", "W. Va."."""
+    text = " ".join(words)
+    if text.lower().rstrip(".") in _STATE_NAMES:
+        return True
+    return ("." in text
+            and re.sub(r"\s+", "", text.lower()) in _STATE_ABBREVIATIONS)
+
+
+def _is_place_name(words: list[str]) -> bool:
+    """One to four words that can be a place's own proper name — the part
+    beside a unit word ("Bryan" County, City of "New York")."""
+    return (1 <= len(words) <= 4
+            and all(_PLACE_NAME_TOKEN_RE.fullmatch(w) for w in words)
+            and _is_bare_place(" ".join(words)))
+
+
+def _is_place(text: str) -> bool:
+    """Whether *text* names a place smaller than a nation: a state (or a part
+    of one), a county, city, town, township, village, borough, parish or
+    port, or a city known by name."""
+    words = _place_words(text)
+    if not words:
+        return False
+    if _is_state(words):
+        return True
+    lead = _word_key(words[0])
+    if len(words) >= 2 and lead in _REGION_WORDS and _is_place(
+            " ".join(words[1:])):
+        return True     # "Southeastern Pennsylvania", "Greater Kansas City"
+    if len(words) >= 3 and words[1].lower() == "of" and lead in (
+            "state", "commonwealth", "territory"):
+        return _is_state(words[2:])
+    # "City of New York", "the Port of Philadelphia", "City and County of
+    # San Francisco"
+    k = 0
+    while k < len(words) and (_word_key(words[k]) in _UNIT_WORDS
+                              or _word_key(words[k]) == "port"):
+        k += 1
+        if k < len(words) and words[k].lower() in ("&", "and"):
+            k += 1
+    if 0 < k < len(words) - 1 and words[k].lower() == "of":
+        return _is_state(words[k + 1:]) or _is_place_name(words[k + 1:])
+    if (len(words) >= 2 and _word_key(words[-1]) in _UNIT_WORDS
+            and _is_place_name(words[:-1])):
+        return True     # "Bryan County", "Abington Township", "Kansas City"
+    name = " ".join(words).lower()
+    return (name in _CITY_ABBREVIATIONS
+            or name.replace(".", "") in _CITY_NAMES)
+
+
+def _strip_trailing_places(p: str) -> str:
+    """Drop the geographic designations a caption appends after a comma —
+    "City of Arlington, Texas" -> "City of Arlington", "Board of Education
+    of Topeka, Shawnee County, Kansas" -> "Board of Education of Topeka"."""
+    while True:
+        head, sep, tail = p.rpartition(",")
+        if not sep or not head.strip() or not _is_place(tail):
+            return p
+        if (_norm_geo(tail) == "DC"
+                and head.strip(" ,").lower() == "washington"):
+            return p    # "Washington, D.C." is the city's own name
+        p = head.rstrip(" ,")
+
+
+def _location_phrase_start(name: str) -> int | None:
+    """Where the phrase of location that ends *name* begins — the first
+    "of"/"in" whose remainder is a place — or None when the name ends in no
+    such phrase, or the one it ends in follows a unit or institution word
+    that makes the place part of the name ("City of New York", "Regents of
+    the University of California")."""
+    for m in _LOCATION_PREP_RE.finditer(name):
+        if not _is_place(name[m.end():]):
+            continue
+        before = name[:m.start()].split()
+        if before and _word_key(before[-1]) in _PLACE_NAMING_WORDS:
+            return None
+        return m.start()
+    return None
+
+
+def _is_business_name(party: str) -> bool:
+    """Whether a party is a business, whose location is part of its name
+    ("Standard Oil Co. of N.J.", "Fed. Rsrv. Bank of N.Y.")."""
+    if re.search(r"\b(?:board|bd\.)\s+of\s+trade\b", party, re.IGNORECASE):
+        return True
+    return any(_word_key(w) in _BUSINESS_WORDS for w in party.split())
+
+
+def _omit_location(p: str, *, recognize_initials: bool) -> str:
+    """Apply rule 10.2.1(f)'s omission of a phrase of location to one party.
+
+    Only the party's own name — the part before any comma — is shortened;
+    what a caption adds after a comma describes it and is left for the rules
+    that deal with such matter, apart from trailing geographic designations,
+    which go (:func:`_strip_trailing_places`).  An office or court at the head
+    of the name keeps its place ("Att'y Gen. of N.Y.", "Sup. Ct. of Va."), as
+    does a business ("Standard Oil Co. of N.J."), and so does a name that
+    would otherwise be left one word long ("Bank of Harrisburg", "Mayor of
+    New York") — a widely recognized institution's initials counting as one
+    word, which is then what the party is called: "ACLU of Ky."."""
+    # A caption can interleave the two kinds of trailing matter ("…, State of
+    # R.I., Plaintiffs-Appellees, State of Haw., Plaintiff"), so peel them
+    # off in turn until neither is left, as a second pass would.
+    while True:
+        q = _strip_party_designations(_strip_trailing_places(p))
+        if q == p:
+            break
+        p = q
+    name, comma, rest = p.partition(",")
+    start = _location_phrase_start(name)
+    if start is None:
+        return p
+    head = name[:start].strip()
+    governing = re.split(r"\s+of\s+", head, maxsplit=1, flags=re.IGNORECASE)[0]
+    if any(_word_key(w) in _PLACE_KEEPING_HEADS for w in governing.split()):
+        return p
+    # The name is a business's by its own words or by the designator set off
+    # after it ("Nat'l Fed'n of the Blind of N.C., Inc."), not by another
+    # party a caption lists after a comma.
+    designator = rest.split(",", 1)[0].split()
+    if _is_business_name(name) or (designator and all(
+            _word_key(w) in _BUSINESS_WORDS for w in designator)):
+        return p
+    if recognize_initials:
+        initials = _recognized_initialism(head)
+        if initials:
+            return initials + name[start:] + comma + rest
+    if len(head.split()) <= 1:
+        return p
+    return head + comma + rest
 
 # Personal-name suffixes, dropped along with the given name
 _NAME_SUFFIX_RE = re.compile(r",?\s+(?:jr|sr|ii|iii|iv)\.?\s*$", re.IGNORECASE)
@@ -453,7 +817,7 @@ _PERSONAL_TITLE_RE = re.compile(
     r"^(?:dr|mr|mrs|ms|miss|messrs|prof(?:essor)?|rev(?:erend)?|"
     r"hon(?:orable)?|fr|sgt|sergeant|lt|lieutenant|capt(?:ain)?|"
     r"col(?:onel)?|maj(?:or)?|gen(?:eral)?|det(?:ective)?|officer|deputy|"
-    r"sheriff)\.?\s+",
+    r"sheriff|judge)\.?\s+",
     re.IGNORECASE,
 )
 
@@ -478,6 +842,11 @@ _ORG_WORDS = {
     "pictures", "pizza", "post", "press", "realty", "records", "shop",
     "shops", "steel", "store", "stores", "studios", "supply", "temple",
     "theaters", "theatres", "times", "tribune", "trust", "works",
+    # …and a business or a congregation, never a surname, whatever given
+    # name opens it: "Glen Theatre", "Hope Clinic", "Crystal Springs".
+    "brethren", "cinema", "clinic", "estates", "fellowship", "freight",
+    "gardens", "labs", "mining", "outlet", "software", "springs",
+    "storage", "theater", "theatre", "tobacco", "warehouse",
 }
 
 
@@ -593,7 +962,11 @@ moshe mordechai muhammad naftali nikolai olaf pierre pinchas priya rajesh
 ramesh reuven rivka sanjay sergei shira shlomo shmuel sunil svetlana takeshi
 tatiana tova tzvi vijay vladimir werner wolfgang yaakov yael yehuda yehoshua
 yisroel yitzchak yochanan yosef yuri zev
-""".split())
+""".split()) | frozenset({
+    # "First name unknown": the placeholder a charging document or a federal
+    # caption puts where the given name would be ("FNU Tanzin").
+    "fnu",
+})
 
 
 def is_recognized_given_name(token: str) -> bool:
@@ -605,6 +978,172 @@ def is_recognized_given_name(token: str) -> bool:
     """
     key = re.sub(r"[^A-Za-z]", "", token or "").lower()
     return bool(key and key in _GIVEN_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# Names the list above doesn't know ("Chad Everet Brackeen", "Javaid
+# Iqbal").  Two readings stand in for it, both more cautious than the list:
+#
+#   * the opinion's own prose, which names a party by surname once the
+#     caption has given the whole name ("Brackeen", "the Brackeens", "Mr.
+#     Iqbal") — see _OpinionNames; and
+#   * the Census Bureau's 1990 name files, shipped as person_names.tsv.gz:
+#     a caption whose first word is a recorded given name and whose last is
+#     a recorded surname reads as a person ("Susanne Richter").
+#
+# Neither reads a surname-first name ("Wong Kim Ark", "Chae Chan Ping"),
+# which the Bluebook cites whole: its opening surname is recognized below.
+# ---------------------------------------------------------------------------
+
+PERSON_NAMES_FILENAME = "person_names.tsv.gz"
+_CensusNames = tuple[frozenset[str], frozenset[str], frozenset[str]]
+_CENSUS_NAMES: _CensusNames | None = None
+
+
+def _census_names() -> _CensusNames:
+    """(given names, surnames, names mostly given ones) from the shipped
+    Census name files, loaded on first use; empty when the file is missing
+    or unreadable.  "Robert" is mostly a given name; "Morgan", a surname
+    far more often, is not — which is how "Morgan Stanley" reads."""
+    global _CENSUS_NAMES
+    if _CENSUS_NAMES is None:
+        given: set[str] = set()
+        surnames: set[str] = set()
+        mostly_given: set[str] = set()
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            PERSON_NAMES_FILENAME)
+        try:
+            with gzip.open(path, "rt", encoding="ascii") as fh:
+                for line in fh:
+                    if line.startswith("#"):
+                        continue
+                    name, _tab, kinds = line.rstrip("\n").partition("\t")
+                    if "f" in kinds or "F" in kinds:
+                        given.add(name)
+                    if "F" in kinds:
+                        mostly_given.add(name)
+                    if "s" in kinds:
+                        surnames.add(name)
+        except (OSError, EOFError, ValueError):
+            given, surnames, mostly_given = set(), set(), set()
+        _CENSUS_NAMES = (frozenset(given), frozenset(surnames),
+                         frozenset(mostly_given))
+    return _CENSUS_NAMES
+
+
+def _is_known_given_name(word: str) -> bool:
+    """Whether *word* is a given name on the curated list or in the Census
+    files."""
+    key = _word_key(word)
+    return bool(key) and (key in _GIVEN_NAMES or key in _census_names()[0])
+
+
+# Chinese, Korean, and Vietnamese surnames, which open a name written in
+# its own order ("Wong Kim Ark", "Chin Bow", "Yick Wo", "Kwong Hai Chew"):
+# the name is cited whole, so neither relaxed reading may take its last
+# word for a surname.  ("Kim" and "Lee" are given names too, but a name
+# they open is read only by the curated list, as before.)
+_SURNAME_FIRST_NAMES = frozenset("""
+ah bui chae chan chang chen cheng cheung chew chin cho choi chong choy chu
+chung dang dinh do duong fong fung han ho hoang hom hong hsu hu huang hui
+huynh hwang jeon jew jung kang kim ko kwan kwok kwon kwong lai lam lau le
+lee lem leung li liang lim lin liu lo loo louie lu lum ly ma mak moy mui
+ng ngo nguyen ong pak pang park pham phan poon quan quock quon seo shin
+soo sun sung tam tan tang tong tran truong tsai tse tsang vo vu wai wan
+wang wo wong woo wu yan yang yee yeh yep yick yip yong yoon yu yuen yung
+zhang zhao zhou zhu
+""".split())
+
+# A ship's name is no person's, whatever given name it borrows ("Schooner
+# Charming Betsy", "Brig Nancy", "S.S. Lucie Schulte").
+_VESSEL_WORDS = frozenset({
+    "schooner", "ship", "brig", "brigantine", "sloop", "steamer",
+    "steamboat", "bark", "barque", "vessel", "yacht", "tug", "tugboat",
+    "barge", "frigate", "packet", "privateer", "ketch", "scow", "boat",
+})
+
+# Accented letters folded to their bases, one for one so offsets agree: a
+# caption set without accents ("Munoz", "Pena") still finds the prose's.
+_FOLD_ACCENTS = str.maketrans(
+    "ÀÁÂÃÄÅàáâãäåÈÉÊËèéêëÌÍÎÏìíîïÒÓÔÕÖØòóôõöøÙÚÛÜùúûüÝýÿÑñÇç",
+    "AAAAAAaaaaaaEEEEeeeeIIIIiiiiOOOOOOooooooUUUUuuuuYyyNnCc",
+)
+_PREV_WORD_RE = re.compile(r"([A-Za-z][A-Za-z'’-]*)\.?[^\S\n]+$")
+_NEXT_WORD_RE = re.compile(r"[^\S\n]+([A-Za-z][A-Za-z'’-]*)")
+
+
+class _OpinionNames:
+    """How an opinion's own prose names its parties.
+
+    A court names a person in full once, if at all, and by surname after
+    that — "Chad and Jennifer Brackeen", then "the Brackeens"; "Mr. Iqbal";
+    "Iqbal's complaint" — so a caption word the prose uses on its own is
+    the surname, and the words ahead of it, never used without it, are
+    given names.  An entity is named in full every time ("Citizens United",
+    "Sutter Health"), and so is a person whose name puts the surname first
+    ("Chin Bow")."""
+
+    # The parties are named within the first pages (and in the caption's
+    # footnote, "*Together with … v. Alston", which a stored text may set
+    # after a shorter opinion's end); reading no further keeps a long
+    # opinion as quick to name as a short one.
+    READ_CHARS = 100_000
+
+    def __init__(self, text: str):
+        self.text = (text or "")[:self.READ_CHARS].translate(_FOLD_ACCENTS)
+        self._lowercase: dict[str, int] = {}
+
+    def lowercase_uses(self, word: str) -> int:
+        """How often *word* appears in lowercase — as a common word, which a
+        name never is ("citizens", "health", "schooner")."""
+        key = word.translate(_FOLD_ACCENTS).lower().strip(".,'’")
+        if not key.isalpha():
+            return 0
+        if key not in self._lowercase:
+            self._lowercase[key] = len(re.findall(
+                r"(?<![A-Za-z'’-])%s(?![A-Za-z'’-])" % re.escape(key),
+                self.text))
+        return self._lowercase[key]
+
+    def _uses(self, words: list[str]):
+        """Prose uses of *words* in a row — capitalized, not the capitals of
+        a heading or a caption — each with the words just before and after
+        it, when only a space separates them."""
+        pat = r"\s+".join(re.escape(w.translate(_FOLD_ACCENTS).strip(".,"))
+                          for w in words)
+        rx = re.compile(r"(?<![\w'’-])(%s)(?:['’]s|['’]|s|es)?(?![\w'’-])"
+                        % pat, re.IGNORECASE)
+        for m in rx.finditer(self.text):
+            found = m.group(1)
+            if not found[:1].isupper() or (len(found) > 2 and found.isupper()):
+                continue
+            prev = _PREV_WORD_RE.search(self.text[max(0, m.start() - 40):
+                                                  m.start()])
+            nxt = _NEXT_WORD_RE.match(self.text, m.end())
+            yield (prev.group(1) if prev else "", nxt.group(1) if nxt else "")
+
+    def surname_uses(self, tokens: list[str], i: int) -> int:
+        """How often the prose names the party by ``tokens[i:]`` alone, or by
+        its first given name and that alone (skipping middle names: "Hollis
+        King" for "Hollis Deshaun King")."""
+        given = {t.translate(_FOLD_ACCENTS).lower().strip(".,")
+                 for t in tokens[:i]}
+        first = tokens[0].translate(_FOLD_ACCENTS).lower().strip(".,")
+        count = 0
+        for prev, nxt in self._uses(tokens[i:]):
+            # "Lee County", "Jackson Women's Health": a capitalized word
+            # after it makes it part of another name.
+            if nxt[:1].isupper() and nxt != "I":
+                continue
+            if prev.lower() in given and not (
+                    i >= 2 and prev.lower() == first):
+                continue
+            count += 1
+        return count
+
+    def full_uses(self, tokens: list[str]) -> int:
+        """How often the prose names the party with every caption word."""
+        return sum(1 for _ in self._uses(tokens))
 
 
 _NONPERSON_CAPS = frozenset({
@@ -744,6 +1283,74 @@ _CAPTION_KEEP_CAPS = frozenset({
     "NAACP", "II", "III", "IV",
 })
 
+# Acronyms that litigants go by, which a caption printed in capitals
+# cannot tell from words: "RENO v. ACLU" is Reno v. ACLU, never "Aclu".
+# Each is pronounceable, so the vowelless-token rule below
+# (_is_caps_acronym) cannot find it.  None may double as a word or a name
+# in a caption — "ICE", "NOW", "CASA", "DOE" are left out — nor as a
+# table abbreviation, as "INS." (Insurance) and "SEC." (Section) are.
+_KNOWN_ACRONYMS = frozenset("""
+AARP ABC ACLU AFL AFSCME AFT AIG AIPAC ASCAP ASPCA BMI BMW CEO CIO CNN
+CBS ESPN FAA FBI FCC FDA FDIC FEC FEMA FERC FHA FHFA FNU FTC HBO HHS HMO
+HUD IBM IBEW ICC II III IRS IV LNU LLC LLLP LLP LULAC MALDEF MCA MCI
+MGM NAACP NARAL NASA NCAA NFIB NIFLA NLRB NOAA NRA NRC NYSUT OSHA PLC
+PLLC RCA SBA SEIU SSA TSA TVA TV TWA UAW UFCW UPS USA USAA USCIS USDA
+USPS USPTO
+""".split())
+
+# Stems that read as vowelless capitals without being acronyms: honorifics
+# and name or address abbreviations whose period a caption dropped ("MR",
+# "ST PAUL", "WM"), and the one common surname with no vowel ("Ng").
+_NOT_ACRONYMS = frozenset({
+    "mr", "mrs", "ms", "messrs", "dr", "jr", "sr", "st", "ste", "mt", "ft",
+    "wm", "ng", "chng", "pl", "pt", "sq", "ln", "hq", "mtn", "pkg", "svc",
+    "svcs", "bd", "ct", "rd", "blvd", "pkwy", "hwy", "cr", "cv", "pp",
+})
+
+
+def _is_caps_acronym(part: str, *, dotted: bool = False) -> bool:
+    """Whether one word (or one piece of a hyphenated word: "AFL-CIO") set in
+    capitals is an acronym, whose capitals are its spelling rather than
+    typography.  A known acronym is one, and so is a word with no vowel
+    ("NLRB", "CBS", "SBC", "TV") — nothing else is spelled without one —
+    unless a period marks it an abbreviation ("MGMT.") or it is an
+    honorific or a table abbreviation that lost its period ("MR", "CNTY")."""
+    if part in _KNOWN_ACRONYMS:
+        return True
+    if (dotted or len(part) < 2 or not part.isalpha() or not part.isupper()
+            or re.search(r"[AEIOUY]", part)):
+        return False
+    low = part.lower()
+    return low not in _NOT_ACRONYMS and low not in _TABLE_ABBREVIATIONS
+
+
+def _restore_acronym_case(name: str) -> str:
+    """Put back the capitals of acronyms a title-casing pass took away —
+    "Reno v. Aclu", "McDonald's Usa, LLC", "Afl-cio", "Cnbc, Llc" — and of
+    dotted initials it lowercased ("U.s.", "N.y.", "L.l.c.", "T.m.").  Acronyms are those :func:`_is_caps_acronym` accepts; a word
+    carrying a period is left alone ("Cia.", "Mfg."), since that marks an
+    abbreviation."""
+    def acronym(m: re.Match) -> str:
+        word = m.group(0)
+        pieces = word.split("-")
+        lowered = pieces[0].islower() and (
+            m.string[m.start() - 1:m.start()] == "/"
+            or any(p.isupper() for p in pieces[1:]))
+        if ((pieces[0].istitle() or lowered)
+                and all(p.islower() or p.istitle() or p.isupper()
+                        for p in pieces[1:])
+                and all(_is_caps_acronym(p.upper()) for p in pieces)):
+            return word.upper()
+        return word
+
+    name = re.sub(
+        r"(?<![\w'’&.-])[A-Za-z]+(?:-[A-Za-z]+)*(?![\w'’&.-])", acronym, name)
+    # A firm's "&" initialism: "A&m Records" is A&M, "At&t" AT&T.
+    name = re.sub(r"(?<![\w'’&.-])[A-Z][a-z]?&[A-Za-z]{1,2}(?![\w'’&.-])",
+                  lambda m: m.group(0).upper(), name)
+    return re.sub(r"(?<![\w'’.])[A-Z]\.(?:[a-z]\.)+",
+                  lambda m: m.group(0).upper(), name)
+
 
 def _capitalize_component(piece: str) -> str:
     """Capitalize a lowercased caption-word component, reaching the first
@@ -784,14 +1391,22 @@ def normal_case_caption(text: str) -> str:
                     and sum(c.isupper() for c in letters) <= len(letters) // 2)):
             out.append(word)
             continue
-        stripped = word.replace("’", "'").strip(".,()'\"“”")
+        stripped = word.replace("’", "'").strip(".,;:()'\"“”")
         # An all-caps word containing "&" is a firm's initialism (AT&T,
         # A&M, S&P, H&R) — English words never carry one, so caps are safe.
         # The dotted-initialism check tolerates a final letter left bare by
-        # the strip above ("L.L.C." arrives here as "L.L.C").
+        # the strip above ("L.L.C." arrives here as "L.L.C"), and the strip
+        # takes a party list's semicolon too ("N.Y.;" is still N.Y.).  So
+        # is an acronym, each piece of a hyphenated one ("AFL-CIO").
+        dotted = word.rstrip(",;:)'\"”’").endswith(".")
+        pieces = stripped.split("-")
         if (stripped in _CAPTION_KEEP_CAPS
                 or "&" in stripped
-                or re.fullmatch(r"(?:[A-Z]\.)+[A-Z]?", stripped)):
+                or re.fullmatch(r"(?:[A-Z]\.)+[A-Z]?", stripped)
+                # A lone letter rides along with an acronym ("R-II").
+                or (any(_is_caps_acronym(p, dotted=dotted) for p in pieces)
+                    and all(_is_caps_acronym(p, dotted=dotted)
+                            or re.fullmatch(r"[A-Z]", p) for p in pieces))):
             out.append(word)
             continue
         # A single dotted initial ("SAMUEL A. WORCESTER", "R. A. V.,
@@ -839,6 +1454,11 @@ def _caption_token_case_votes(
     """
     core = cores[i]
     votes: dict[str, int] = {}
+    # A small word the caption sets in lowercase ("of", "the", "re") counts
+    # the prose's lowercase uses for itself, so a sentence's opening "The" or
+    # a heading's "OF" can't outvote them — while "Di re" still becomes the
+    # "Di Re" the prose always writes.
+    keep_lower = core.islower() and core in _CAPTION_SMALL_WORDS
     for j in (i - 1, i + 1):
         if not 0 <= j < len(tokens):
             continue
@@ -862,20 +1482,52 @@ def _caption_token_case_votes(
             if not re.search(r"[a-z]", m.group(g_nb)):
                 continue  # all-caps context: no casing signal
             spelling = m.group(g_tok)
-            if not spelling.islower():
+            if (keep_lower or not spelling.islower()) and not _caps_typography(
+                    spelling, body_text, m.start(g_tok)):
                 votes[spelling] = votes.get(spelling, 0) + 1
     unanchored = not votes
     if unanchored:
         for m in re.finditer(r"\b%s\b" % re.escape(core), body_text,
                              re.IGNORECASE):
             spelling = m.group(0)
-            if not spelling.islower():
+            if (keep_lower or not spelling.islower()) and not _caps_typography(
+                    spelling, body_text, m.start()):
                 votes[spelling] = votes.get(spelling, 0) + 1
+    # A word the prose also writes in lowercase is a word, whatever a
+    # heading or a caption sets in capitals: "Jovan WILL" is Mr. Will.
+    if len(core) >= 3 and any(v.isupper() for v in votes) and re.search(
+            r"(?<![A-Za-z])%s(?![A-Za-z])" % re.escape(core.lower()),
+            body_text):
+        votes = {v: n for v, n in votes.items() if not v.isupper()}
     return votes, unanchored
 
 
+def _caps_typography(spelling: str, body_text: str, start: int) -> bool:
+    """Whether a capitalized occurrence is a surname Scholar set in capitals
+    after the given names ("David KING", "Corrine Morgan THOMAS", "John Q.
+    SMITH") — typography, not an acronym's spelling."""
+    if len(spelling) < 2 or not spelling.isupper():
+        return False
+    prev = _PREV_WORD_RE.search(body_text[max(0, start - 40):start])
+    if not prev:
+        return False
+    word = prev.group(1)
+    return bool(re.fullmatch(r"[A-Z]", word)) or (
+        word[:1].isupper() and not word.isupper()
+        and _is_known_given_name(word))
+
+
+def _defined_acronym(spelling: str, body_text: str) -> bool:
+    """Whether the opinion defines *spelling* as an acronym — "National
+    Institute of Family and Life Advocates (NIFLA)", "(hereinafter
+    “NYSUT”)" — which no surname set in capitals ever is."""
+    return bool(re.search(
+        r"\(\s*(?:hereinafter\s+)?[“\"']?%s[”\"']?\s*\)" % re.escape(spelling),
+        body_text or ""))
+
+
 def _reliable_caption_spelling(
-    core: str, votes: dict[str, int], unanchored: bool,
+    core: str, votes: dict[str, int], unanchored: bool, body_text: str = "",
 ) -> str:
     """The spelling supported strongly enough to use, or an empty string."""
     if not votes:
@@ -885,8 +1537,10 @@ def _reliable_caption_spelling(
     if best != core and votes[best] <= cur:
         best = core
     if best.isupper():
-        if len(core) > 4:
-            return ""  # long caps are typography, not acronym spelling
+        # Long caps are typography, not acronym spelling — unless the
+        # opinion defines the acronym ("… Advocates (NIFLA)").
+        if len(core) > 4 and not _defined_acronym(best, body_text):
+            return ""
         if unanchored and (votes[best] < 3 or votes[best] <= 2 * cur):
             return ""
         # One occurrence is enough when an adjacent caption word anchors it
@@ -927,21 +1581,43 @@ def refine_caption_case(name: str, body_text: str) -> str:
     """
     if not name or not body_text:
         return name
-    tokens = name.split()
-    if len(tokens) < 2:
+    if len(name.split()) < 2:
         return name
+    # Each word of a caption is weighed on its own, and so is each piece of
+    # a hyphenated one ("Afl-cio", "Pena-irala"), its neighbors being the
+    # pieces beside it.
+    tokens: list[str] = []
+    joins: list[str] = []      # what follows each piece: " ", "-" or ""
+    for word in name.split():
+        stem = word.strip(".,;:()'\"“”")
+        if re.fullmatch(r"[A-Za-z]+(?:-[A-Za-z]+)+", stem):
+            lead = word[:word.index(stem)]
+            tail = word[word.index(stem) + len(stem):]
+            pieces = stem.split("-")
+            pieces[0] = lead + pieces[0]
+            pieces[-1] += tail
+            tokens.extend(pieces)
+            joins.extend(["-"] * (len(pieces) - 1) + [" "])
+        else:
+            tokens.append(word)
+            joins.append(" ")
     cores = [re.sub(r"[^A-Za-z]", "", t) for t in tokens]
     for i, tok in enumerate(tokens):
         core = cores[i]
         if (len(core) < 2 or core.lower() in ("v", "vs")
                 or not tok.strip(".,;:()'\"“”").isalpha()):
             continue
+        # A table abbreviation keeps its own spelling: the prose's "LA" or
+        # "INC." never makes "La." or "Inc." capitals.
+        if (tok.rstrip(",;:)'\"”").endswith(".")
+                and core.lower() in _TABLE_ABBREVIATIONS):
+            continue
         votes, unanchored = _caption_token_case_votes(
             tokens, cores, i, body_text)
-        best = _reliable_caption_spelling(core, votes, unanchored)
+        best = _reliable_caption_spelling(core, votes, unanchored, body_text)
         if best and best != core:
             tokens[i] = tok.replace(core, best)
-    return " ".join(tokens)
+    return "".join(t + j for t, j in zip(tokens, joins)).rstrip()
 
 
 _HISTORICAL_BANK_WRAPPER_RE = re.compile(
@@ -1059,7 +1735,8 @@ def caption_case_reference_tokens(name: str, body_text: str) -> tuple[str, ...]:
                 continue
             votes, unanchored = _caption_token_case_votes(
                 tokens, cores, i, body_text or "")
-            if _reliable_caption_spelling(core, votes, unanchored):
+            if _reliable_caption_spelling(core, votes, unanchored,
+                                          body_text or ""):
                 continue
             if low not in result:
                 result.append(low)
@@ -1143,6 +1820,7 @@ def _build_word_map() -> dict[str, str]:
             words[p[0]] = p[1]
     words.update(_T6_PLURAL)
     words.update(_T10_WORDS)
+    words.update(_T10_CITY_WORDS)
     return words
 
 
@@ -1150,8 +1828,10 @@ _WORD_MAP = _build_word_map()
 
 # T6 words signal an organization, blocking given-name dropping ("George
 # Washington University").  T10 place names are excluded from that signal:
-# they double as given names far too often (Virginia, Georgia).
-_T6_WORDS = frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
+# they double as given names and surnames far too often (Virginia, Georgia,
+# Houston).
+_T6_WORDS = (frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
+             - frozenset(_T10_CITY_WORDS))
 
 # The same tables read from the other side: the *abbreviated* forms the tables
 # produce ("R.R.", "Ry.", "Cent.", "N.Y."), keyed like a caption token.  A
@@ -1162,6 +1842,11 @@ _T6_WORDS = frozenset(_WORD_MAP) - frozenset(_T10_WORDS)
 _TABLE_ABBREVIATIONS = frozenset(
     re.sub(r"[^A-Za-z]", "", _abbr).lower() for _abbr in _WORD_MAP.values()
 )
+# …of which T6's alone are organizational: "Dep't", "Bd.", "Comm'n".
+_T6_ABBREVIATION_KEYS = frozenset(
+    re.sub(r"[^A-Za-z]", "", _abbr).lower()
+    for _word, _abbr in _WORD_MAP.items() if _word in _T6_WORDS
+)
 
 # A token is a run of letters with internal apostrophes/periods, so already-
 # abbreviated forms ("Ass'n", "Inc.") and possessives ("Children's") come
@@ -1169,10 +1854,11 @@ _TABLE_ABBREVIATIONS = frozenset(
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'’.]*")
 
 _PHRASE_RE = re.compile(
-    r"\b(" + "|".join(p.replace(" ", r"\s+") for p, _ in _PHRASES) + r")\b",
+    r"\b(" + "|".join(p.replace(" ", r"\s+")
+                      for p, _ in _PHRASES + _T10_CITY_PHRASES) + r")\b",
     re.IGNORECASE,
 )
-_PHRASE_MAP = {p: a for p, a in _PHRASES}
+_PHRASE_MAP = {p: a for p, a in _PHRASES + _T10_CITY_PHRASES}
 
 _ET_AL_RE = re.compile(r",?\s+et\s+als?\.?\s*$", re.IGNORECASE)
 _V_SPLIT_RE = re.compile(r"\s+vs?\.\s+")
@@ -1267,25 +1953,47 @@ def cut_companion_cases(text: str) -> str:
     defeats one at the first boundary but not the second), so the earliest
     cut wins."""
     cuts: list[int] = []
-    cm = re.search(
+    for cm in re.finditer(
         r"\.\s+(?=[^.]*?\s+vs?\.\s+|SAME\b|IN\s+RE\b|EX\s+PARTE\b"
         r"|(?:IN\s+THE\s+)?MATTER\s+OF\b)",
         text, re.IGNORECASE,
-    )
-    if cm:
+    ):
+        before = text[: cm.start()]
+        wm = re.search(r"([A-Za-z]+)$", before)
+        if wm and (len(wm.group(1)) <= 1
+                   or wm.group(1).lower() in _CUT_NEVER_ENDS):
+            continue  # an initial ("Ronald C. Unterberger v."), "Jr.", a "v."
+        if before.count("(") > before.count(")"):
+            continue  # inside a parenthesis: "(Nat. Mother) v. …"
         cuts.append(cm.start())
+        break
     m2 = re.search(r"\s+(?:vs?\.|(?i:versus|against))\s+", text)
     if m2:
         head = text[: m2.start()]
-        for c2 in re.finditer(r"\.(?:\[[^\]]{1,6}\])?\s+(?=[A-Z0-9(])", head):
-            wm = re.search(r"([A-Za-z]+)$", head[: c2.start()])
+        for c2 in re.finditer(r"\.(?:\[[^\]]{1,6}\])?\s+(?=[A-Z0-9(*])",
+                              head):
+            before = head[: c2.start()]
+            wm = re.search(r"([A-Za-z]+)$", before)
             word = (wm.group(1) if wm else "").lower()
+            if (head[c2.end():c2.end() + 1].isdigit()
+                    and (len(word) <= 4 or word in _TABLE_ABBREVIATIONS)):
+                continue  # "86 Fed. Reg. 61402" — a citation's period
+            if before.endswith(".") or before[-1:].isdigit():
+                # A sentence's period after an abbreviation's ("U.S..") or
+                # after a number ("61402. Mass. Bldg. …").
+                cuts.append(c2.start())
+                break
             if len(word) <= 1 or word in _CUT_NEVER_ENDS:
                 continue  # an abbreviation's period, not a case boundary
             if word in _CUT_ENTITY_ENDS:
                 nxt = re.match(r"[A-Za-z]+", head[c2.end():])
                 if nxt and nxt.group(0).lower() in _NAME_CONTINUATIONS:
                     continue  # "Acme Co. of America" — same party's name
+            elif word in _TABLE_ABBREVIATIONS:
+                # A caption already abbreviated is full of these, and they
+                # end no case: "Perez v. Mortg. Bankers Ass'n et al.
+                # Nickols …" is not cut after "Mortg.".
+                continue
             cuts.append(c2.start())
             break
     # Three: an in rem caption naming a second res.  The Paquete Habana and
@@ -1319,7 +2027,9 @@ def cut_companion_cases(text: str) -> str:
 _ROLE_WORD = (
     r"(?:cross-|counter-|third-party )?"
     r"(?:appell(?:ants?|ees?)|plaintiffs?|defendants?|petitioners?|"
-    r"respondents?|relators?|intervenors?|movants?|claimants?|garnishees?)"
+    r"respondents?|relators?|intervenors?|movants?|claimants?|garnishees?|"
+    r"complainants?|libell?ants?|libell?ees?)"
+    r"(?:\s+in\s+error)?"
 )
 _PARTY_ROLE_RE = re.compile(
     r",\s*" + _ROLE_WORD + r"(?:\s*[-–—/]\s*" + _ROLE_WORD + r")*\.?\s*$",
@@ -1327,20 +2037,120 @@ _PARTY_ROLE_RE = re.compile(
 )
 
 
+# A description of the party already named — "…, a Del. Corp.", "…, an
+# individual", "…, a political subdivision of the State of Wash.", "…, his
+# wife" — is no part of its name (rule 10.2.1(e)).  Without its comma only
+# a corporate description is recognized ("Action Apartment Ass'n a Cal.
+# Corp."), as the article can otherwise begin more of a name ("Citizens for
+# a Better Environment").
+_PARTY_DESCRIPTION_RE = re.compile(
+    r"(?:,\s*(?:an?|his|her|their)\s+[^,;]+"
+    r"|\s+an?\s+(?:[\w.'’-]+\s+){0,3}(?:corp\.?|corporation)"
+    # A vessel's appurtenances ("S.S. Lucie Schulte, her engines, boilers,
+    # etc.") and a bare "etc." are no part of the name either.
+    r"|,\s*(?:her|its)\s+(?:engines?|boilers?|tackle|apparel|cargo|"
+    r"furniture|equipment|appurtenances)\b[^;]*"
+    r"|,?\s+etc\.?)\s*$",
+    re.IGNORECASE,
+)
+
+
 def _strip_party_designations(p: str) -> str:
-    """Peel role designations and "et al." off the right in turn (rules
-    10.2.1, 10.2.1(a)) until neither remains."""
+    """Peel role designations, "et al.", and descriptions of the party off
+    the right in turn (rules 10.2.1, 10.2.1(a), 10.2.1(e)) until none
+    remains."""
     while True:
         q = _ET_AL_RE.sub("", p.rstrip(" ,;")).rstrip(" ,;")
         q = _PARTY_ROLE_RE.sub("", q)
+        q = _PARTY_DESCRIPTION_RE.sub("", q)
         if q == p:
             return p
         p = q
 
 
-def _strip_given_names(p: str) -> str | None:
+# A role designation in mid-caption closes the first party and opens the
+# next: "Lockheed Martin Logistics Mgmt., Inc., Defendant-Appellee, Equal
+# Emp. Opportunity Comm'n, Amicus …", "Nat'l Lab. Rels. Bd., Respondent. S.
+# Cal. Painters …".  A joined designation ("Plaintiff-Appellant") is never
+# part of a name, so it closes the party even without a comma ("Suburban
+# Restoration Co. Plaintiff-Appellant").
+_ROLE_RUN = _ROLE_WORD + r"(?:\s*[-–—/]\s*" + _ROLE_WORD + r")*"
+_JOINED_ROLE = _ROLE_WORD + r"(?:\s*[-–—/]\s*" + _ROLE_WORD + r")+"
+_PARTY_LIST_BREAK_RE = re.compile(
+    r"(?:,\s*" + _ROLE_RUN + r"|\s+" + _JOINED_ROLE + r")\.?(?![\w'’-])"
+    # …and so does one role word set with a capital after the name, comma
+    # or no ("Frigaliment Importing Co. Plaintiff", "NBC Europe
+    # Appellants"), which a name never ends in.
+    r"|\s+(?-i:(?:Appell(?:ants?|ees?)|Plaintiffs?|Defendants?|"
+    r"Petitioners?|Respondents?|Complainants?))(?![\w'’-])",
+    re.IGNORECASE,
+)
+
+
+_ENTITY_LIST_BREAK_RE = re.compile(
+    r"(?:,\s+(?:(?:&|and)\s+)?|\s+(?:&|and)\s+)(?=(?:[Tt]he\s+)?[A-Z])")
+_LIST_CLOSING_DESIGNATORS = frozenset({
+    "co", "cos", "corp", "inc", "ltd", "llc", "llp", "lllp", "lp", "plc",
+    "pllc", "pc",
+})
+
+
+def _first_listed_party(side: str) -> str:
+    """The first party named on one side of an adversary caption (rule
+    10.2.1(a)).  A caption separates the parties it lists with semicolons
+    ("Jason Wolford; Alison Wolford; Atom Kasprzycki; Haw. Firearms Coal.")
+    or closes one with its role ("…, Inc., Defendant-Appellee, Equal Emp.
+    Opportunity Comm'n, Amicus …").  An in-re matter title is not a party
+    list, and its caller leaves it alone ("In re MCP No. 165, … Rule:
+    Covid-19 Vaccination & Testing; Emergency Temp. Standard")."""
+    side = side.split(";", 1)[0]
+    m = _PARTY_LIST_BREAK_RE.search(side)
+    if m:
+        side = side[:m.start()]
+    # "…, et al." closes the first party wherever it stands ("Am. Tel. &
+    # Tel. Co. et al. Appeal of John E. Moss, …").
+    m = re.search(r",?\s+et\s+als?\.?(?=\s)", side, re.IGNORECASE)
+    if m:
+        side = side[:m.start()]
+    # A cut inside a parenthetical ends the party before it: "Indus.
+    # Comm'n (Kay Whitis, Appellee)".
+    while side.count("(") > side.count(")"):
+        side = side[:side.rindex("(")]
+    # A person named after a comma is the next party: "Ill. State Police,
+    # Terrance W. Gainer, …", "N.J. Educ. Ass'n, Betty Kraemer, …".
+    for m in re.finditer(r",\s+(?:(?:&|and)\s+)?(?=[A-Z])", side):
+        nxt = re.split(r",|\s+(?:&|and)\s+", side[m.end():], maxsplit=1)[0]
+        if (len(nxt.split()) >= 2
+                and _strip_given_names(nxt, relaxed=False) is not None):
+            side = side[:m.start()]
+            break
+    # A firm's designator closes its name, so a comma or a conjunction after
+    # one opens the next party ("Acmat Corp., Laborers' Int'l Union …",
+    # "McDonald's USA, LLC, & McDonald's Corp.", "McDonald's Corp. &
+    # Needham, Harper & Steers") — unless another designator follows ("Bear
+    # Stearns & Co., Inc.").
+    for m in _ENTITY_LIST_BREAK_RE.finditer(side):
+        before = _word_key(side[:m.start()].rsplit(None, 1)[-1])
+        after = _word_key(side[m.end():].split(None, 1)[0])
+        if (before in _LIST_CLOSING_DESIGNATORS
+                and after not in _APPOSITIVE_ENTITY_TERMS):
+            side = side[:m.start()]
+            break
+    return re.sub(r"\s+(?:&|and)$", "", side.strip(" ,—–-")).strip(" ,")
+
+
+def _strip_given_names(p: str, *, person: bool = False,
+                       names: _OpinionNames | None = None,
+                       relaxed: bool = True) -> str | None:
     """Surname-only form of a personal party name (rule 10.2.1(g)), or
-    None when the party does not safely read as an individual's name."""
+    None when the party does not safely read as an individual's name.
+
+    *person* is outside evidence that the party is a natural person — an
+    office named after it ("Austin Reeve Jackson, Judge") — which lets an
+    unrecognized given or middle name pass, as a suffix or honorific does.
+    *names* is the opinion's prose, which settles a name the given-name
+    list doesn't know (see :func:`_relaxed_surname_start`); *relaxed*
+    False reads the list alone."""
     suffixed = bool(_NAME_SUFFIX_RE.search(p))
     p = _NAME_SUFFIX_RE.sub("", p)
     if "," in p or "&" in p or re.search(r"\bof\b", p, re.IGNORECASE):
@@ -1353,6 +2163,12 @@ def _strip_given_names(p: str) -> str | None:
         p = p[m.end():]
         titled = True
     tokens = p.split()
+    # A table abbreviation's period is its own, not a caption's: "Clayton
+    # Cnty." is a county, never a Mr. Cnty.
+    if (tokens and tokens[-1].endswith(".")
+            and len(_word_key(tokens[-1])) > 1
+            and _word_key(tokens[-1]) in _TABLE_ABBREVIATIONS):
+        return None
     # A caption's sentence period ("Ex parte Anthony P. MURPHY.") is
     # punctuation, not part of the surname; an initial's own period stays
     # ("Susan B."), as does an internal-dot abbreviation ("U.S.").
@@ -1368,19 +2184,8 @@ def _strip_given_names(p: str) -> str | None:
         return tokens[0]
     if not 2 <= len(tokens) <= 4:
         return None
-    low = [t.replace("’", "'").lower().rstrip(".") for t in tokens]
-    # Structural evidence can stand in for the given-name list: a stripped
-    # Jr./Sr. suffix, or a middle initial ("Okello T. Chatrie", "John
-    # F.A. Sandford") — organizations never reduce a middle word to a
-    # single letter, and the entity/T6 vetoes below still reject firms
-    # named for people.  An honorific is deliberately NOT enough here: it
-    # relaxes only the middle tokens ("Dr. Theresa Swain Emory"), or
-    # "Mrs. Fields Cookies" would truncate to "Cookies".
-    person_shaped = (suffixed or any(
-        re.fullmatch(r"(?:[A-Z]\.)+", t) for t in tokens[1:-1]))
-    if low[0] not in _GIVEN_NAMES and not (
-            person_shaped and re.fullmatch(r"[A-Z][A-Za-z'’-]+", tokens[0])):
-        return None
+    low = [t.translate(_FOLD_ACCENTS).replace("’", "'").lower().rstrip(".")
+           for t in tokens]
     # Every token must look like a name part: a capitalized word, an
     # initial ("W." or "F.A."), or a surname particle — and none may be an
     # organizational word ("George Washington University" abbreviates
@@ -1390,10 +2195,23 @@ def _strip_given_names(p: str) -> str | None:
         if (tl in _T6_WORDS or tl in _ORG_WORDS
                 or re.sub(r"[^a-z]", "", tl) in _APPOSITIVE_ENTITY_TERMS
                 or not re.fullmatch(
-                    r"(?:[A-Z]\.)+|[A-Z](?:[A-Za-z'’-]+|\.)?", t)):
+                    r"(?:[A-Z]\.)+|[A-ZÀ-ÖØ-Þ](?:[A-Za-zÀ-ÖØ-öø-ÿ'’-]+|\.)?",
+                    t)):
             return None
     if re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]", tokens[-1]):
         return None  # anonymized party ("Susan B.", "B. J. F.")
+    # An acronym is nobody's surname: "Philip Morris USA" is a firm.
+    if tokens[-1].isupper() and _is_caps_acronym(tokens[-1]):
+        return None
+    # Structural evidence can stand in for the given-name list: a stripped
+    # Jr./Sr. suffix, or a middle initial ("Okello T. Chatrie", "John
+    # F.A. Sandford") — organizations never reduce a middle word to a
+    # single letter, and the entity/T6 vetoes above still reject firms
+    # named for people.  An honorific is deliberately NOT enough here: it
+    # relaxes only the middle tokens ("Dr. Theresa Swain Emory"), or
+    # "Mrs. Fields Cookies" would truncate to "Cookies".
+    person_shaped = (suffixed or person or any(
+        re.fullmatch(r"(?:[A-Z]\.)+", t) for t in tokens[1:-1]))
     # Surname = last token plus any particles ("Nathan Van Buren")
     i = len(tokens) - 1
     while i > 1 and low[i - 1] in _SURNAME_PARTICLES:
@@ -1403,12 +2221,121 @@ def _strip_given_names(p: str) -> str | None:
     # Bank", whose middle token flunks this check).  A stripped honorific
     # already establishes a natural person, so under one any name-shaped
     # middle token passes ("Dr. Theresa Swain Emory" -> "Emory").
-    for t, tl in zip(tokens[1:i], low[1:i]):
-        if not (titled or suffixed or tl in _GIVEN_NAMES
-                or tl in _SURNAME_PARTICLES
-                or re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]\.?", t)):
-            return None
-    return " ".join(tokens[i:])
+    if ((low[0] in _GIVEN_NAMES or (
+            person_shaped
+            and re.fullmatch(r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+", tokens[0]))
+            # An office names a person even by initials: "W.M. Riddle,
+            # Sup't" is Riddle.
+            or (person and re.fullmatch(r"(?:[A-Z]\.)+", tokens[0])))
+            and all(titled or suffixed or person or tl in _GIVEN_NAMES
+                    or tl in _SURNAME_PARTICLES
+                    or re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]\.?", t)
+                    for t, tl in zip(tokens[1:i], low[1:i]))):
+        return _surname_text(tokens, i)
+    i = _relaxed_surname_start(tokens, low, names) if relaxed else None
+    return None if i is None else _surname_text(tokens, i)
+
+
+def _surname_text(tokens: list[str], i: int) -> str:
+    """``tokens[i:]`` as the surname — in ordinary case when the caption set
+    it in capitals after mixed-case given names, the way Scholar marks a
+    surname ("David KING" -> "King")."""
+    surname = tokens[i:]
+    if (any(re.search(r"[a-z]", t) for t in tokens[:i])
+            and all(t.isupper() for t in surname if len(t.strip(".")) > 1)
+            and any(len(t.strip(".")) > 1 for t in surname)):
+        return normal_case_caption(" ".join(surname))
+    return " ".join(surname)
+
+
+def _relaxed_surname_start(tokens: list[str], low: list[str],
+                           names: _OpinionNames | None) -> int | None:
+    """Where the surname begins in a name whose given names the curated list
+    doesn't know, or None when it can't be told safely.
+
+    The opinion's prose decides first: the surname is the run of closing
+    words it uses on its own most often ("Chad Everet Brackeen" ->
+    "Brackeen", "Pedro Vasquez Perdomo" -> "Vasquez Perdomo").  Without
+    such uses the Census files may: a recorded given name (and middle
+    names), then a recorded surname ("Susanne Richter" -> "Richter").
+    Either way the name must read as one — every word ahead of the surname
+    capitalized even in prose (a given name never appears as "citizens" or
+    "schooner"), none a possessive ("Whole Woman's Health") or a word that
+    names a place or a people ("Santa Clara Pueblo"), and the surname no
+    common word ("Sutter Health").  A name that opens with an East Asian
+    surname is written surname first and is never shortened ("Wong Kim
+    Ark")."""
+    if low[0] in _SURNAME_FIRST_NAMES:
+        return None
+    if any(re.search(r"['’]s?$", t) for t in tokens[:-1]):
+        return None
+    if any(tl in _PLACE_NAMING_WORDS or tl in _VESSEL_WORDS
+           or _word_key(t) in ("ss", "mv", "sv")
+           for t, tl in zip(tokens, low)):
+        return None
+    # …nor may the name open with a place: "Florida Star", "Dallas Morning
+    # News" (Florida and Dallas are recorded given names too).
+    if any(_is_place(" ".join(tokens[:k])) for k in range(1, len(tokens))):
+        return None
+    if names is not None and any(
+            names.lowercase_uses(t) for t, tl in zip(tokens[:-1], low[:-1])
+            if tl not in _SURNAME_PARTICLES and not re.fullmatch(
+                r"(?:[A-Z]\.)+|[A-Z]\.?", t)):
+        return None
+    census_given, census_surnames, mostly_given = _census_names()
+
+    def given(tl: str) -> bool:
+        return tl in _GIVEN_NAMES or tl in census_given
+
+    # A hyphenated surname is recorded by its halves ("Pena-Irala").
+    recorded_surname = any(piece in census_surnames for piece in
+                           re.split(r"[-–]", tokens[-1].lower().strip(".")))
+
+    if names is not None:
+        best, best_uses = None, 0
+        for i in range(1, len(tokens)):
+            # Particles belong to the surname after them ("Van Buren"), and
+            # begin it only after a given name: "Montoya de Hernandez" is
+            # one surname, never "de Hernandez".
+            if low[i - 1] in _SURNAME_PARTICLES or (
+                    low[i] in _SURNAME_PARTICLES and not given(low[i - 1])):
+                continue
+            uses = names.surname_uses(tokens, i)
+            if uses > best_uses:
+                best, best_uses = i, uses
+        # One use is enough for a name the Census files know as a surname,
+        # or after a known given name; otherwise the prose must say it
+        # twice — a lone "the Cakeshop" doesn't make a person.
+        needed = 1 if given(low[0]) or recorded_surname else 2
+        if (best is not None and best_uses >= needed
+                and names.lowercase_uses(tokens[-1]) <= best_uses // 2):
+            return best
+    i = len(tokens) - 1
+    while i > 1 and low[i - 1] in _SURNAME_PARTICLES:
+        i -= 1
+    if low[i - 1] in _SURNAME_PARTICLES:
+        return None     # all surname: "Van Ness", "De La Rosa"
+    # The name must open with a given name — without prose to check it
+    # against, one mostly used as one when nothing follows it but the
+    # surname: a firm is often two surnames ("Morgan Stanley", "Hunter
+    # Douglas").  The surname must be a recorded one — or, where there is
+    # prose, a word it never writes in lowercase ("Aubrey Elenis").
+    if (not (low[0] in _GIVEN_NAMES or low[0] in mostly_given
+             or ((i >= 2 or names is not None) and low[0] in census_given))
+            or not (recorded_surname or names is not None)
+            or not all(given(tl) or tl in _SURNAME_PARTICLES
+                       or re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]\.?", t)
+                       for t, tl in zip(tokens[1:i], low[1:i]))):
+        return None
+    # The prose, when there is some, can still veto: a surname it uses as
+    # a common word, or a name it gives in full again and again without
+    # ever shortening it — a firm ("Morgan Stanley"), not a person.
+    if names is not None and (
+            names.lowercase_uses(tokens[-1])
+            or (names.full_uses(tokens) >= 4
+                and not names.surname_uses(tokens, i))):
+        return None
+    return i
 
 
 # A comma-separated appositive beginning with one of these corporate or
@@ -1427,25 +2354,102 @@ _APPOSITIVE_ENTITY_TERMS = {
 }
 
 
-def _office_holder_surname(p: str) -> str | None:
+# The words that open a description of a party already named — its office,
+# or the capacity it is sued in — rather than more of its name (rule
+# 10.2.1(e)): "Bowers, Att'y Gen. of Ga.", "Printz, Sheriff/Coroner",
+# "Sandoval, Individually & on Behalf of …", "Brand, Tr.".
+_DESCRIPTIVE_WORDS = _OFFICE_WORDS | frozenset({
+    "individually", "personally", "trustee", "tr", "executor", "exr",
+    "executrix", "exx", "receiver", "guardian", "conservator", "officer",
+    "deputy", "chairman", "chairperson", "chair", "president", "member",
+    "postmaster", "justice", "acting", "former", "inspector", "custodian",
+})
+
+
+def _describes_party(rest: str) -> bool:
+    """Whether the matter after a party's comma opens with its office or
+    capacity — a descriptive word among the first few of its first segment
+    ("Corr. Dir.", "Dist. Att'y", "Acting Sec'y", "Sheriff/Coroner"), or a
+    capacity it is sued in ("as Trustee", "by Next Friend", "on behalf of
+    himself", "in her capacity as Ex'r")."""
+    first = rest.split(",", 1)[0]
+    words = [w for w in re.split(r"[\s/\-]+", first) if w][:3]
+    if words and words[0].lower() in ("as", "by", "on"):
+        return True
+    if words and words[0].lower() == "in" and re.search(
+            r"\bcapacit(?:y|ies)\b", first, re.IGNORECASE):
+        return True
+    return any(_word_key(w) in _DESCRIPTIVE_WORDS for w in words)
+
+
+# What follows a party's comma when it names who acts for the party, or the
+# capacity it is sued in, rather than more of its name.
+_REPRESENTATION_RE = re.compile(
+    r"(?:by\s+(?:&|and)\s+through|(?:by|through)\s+(?:its|his|her|their)\s"
+    r"|on\s+behalf\s+of\s|as\s|individually\b"
+    r"|an?\s+(?:minor|infant|incompetent)\b"
+    r"|in\s+(?:its|his|her|their)\s+(?:[\w.'’-]+\s+){0,2}capacit(?:y|ies)\b)",
+    re.IGNORECASE,
+)
+
+
+def _lone_surname(head: str) -> str | None:
+    """A party named by surname alone ("Bowers") — asked only once what
+    follows its comma has shown it to be a person."""
+    name = head.strip()
+    if not re.fullmatch(r"[A-Z][A-Za-z'’\-]+", name):
+        return None
+    key = name.replace("’", "'").lower()
+    if (key in _T6_WORDS or key in _ORG_WORDS or key in _GEO_PARTIES
+            or _word_key(name) in _APPOSITIVE_ENTITY_TERMS):
+        return None
+    return name
+
+
+# Office titles a caption sets after a name with no comma between.
+_TRAILING_OFFICE_WORDS = frozenset({
+    "warden", "sheriff", "superintendent", "commissioner", "director",
+    "secretary", "administrator", "treasurer", "mayor", "governor",
+})
+
+
+def _office_holder_surname(p: str, *,
+                           names: _OpinionNames | None = None) -> str | None:
     """Surname of a natural person named with a following office or descriptive
     title — "Gayle Franzen, Dir., Dep't of Corr., State of Ill." -> "Franzen".
     A named individual is cited by surname alone: given names drop (rule
     10.2.1(g)), the office describes the person and is omitted (10.2.1(e)), and
-    only the first party is kept (10.2.1(a)).  Returns None when the text
+    only the first party is kept (10.2.1(a)).  A caption that names the person
+    by surname alone reads the same once the office shows it to be one:
+    "Bowers, Att'y Gen. of Ga." -> "Bowers".  Returns None when the text
     before the first comma is not a personal name, or when the appositive
     begins with a corporate designator that is really part of a firm's name
     ("Sara Lee, Inc."; "Dean Witter Reynolds, Inc.")."""
     head, sep, rest = p.partition(",")
     if not sep:
         return None
-    surname = _strip_given_names(head)
-    if surname is None:
-        return None
     lead = re.search(r"[A-Za-z][\w'’.&-]*", rest)
     if lead and re.sub(r"[^a-z]", "", lead.group(0).lower()) in _APPOSITIVE_ENTITY_TERMS:
         return None
-    return surname
+    # Only the given-name list reads the words before the comma until what
+    # follows it shows them to be a person: the words before a firm's first
+    # comma can look like one's name ("Merrill Lynch, Pierce, Fenner &
+    # Smith, Inc.").
+    surname = _strip_given_names(head, relaxed=False)
+    if surname is not None:
+        return surname
+    # An office title that lost its comma closes the name: "Terry Royal
+    # Warden, Okla. State Penitentiary" is Warden Royal.
+    words = head.split()
+    if (len(words) >= 3 and _word_key(words[-1]) in _TRAILING_OFFICE_WORDS):
+        surname = _strip_given_names(" ".join(words[:-1]), person=True)
+        if surname is not None:
+            return surname
+    if not _describes_party(rest):
+        return None
+    return (_strip_given_names(head, names=names)
+            or _strip_given_names(head, person=True)
+            or _lone_surname(head))
 
 
 # Bluebook rule 10.2.1(c): the name of a widely recognized institution is
@@ -1514,6 +2518,7 @@ def _recognized_initialism(party: str) -> str:
     NLRB, FCC, EPA…), or '' if the party isn't one.  A leading 'United
     States'/'U.S.' is ignored so 'United States Environmental Protection
     Agency' resolves to EPA the same as the bare name."""
+    _add_initials_variants()
     key = _initials_key(party)
     acr = _WIDELY_RECOGNIZED_INITIALS.get(key)
     if acr:
@@ -1565,7 +2570,8 @@ _PROCEDURAL_CANON = {
 }
 
 
-def _format_procedural(party: str, *, recognize_initials: bool) -> str | None:
+def _format_procedural(party: str, *, recognize_initials: bool,
+                       names: _OpinionNames | None = None) -> str | None:
     """Canonicalize a procedural-phrase prefix and abbreviate the party that
     follows: "Ex Parte Young" -> "Ex parte Young", "In Re JW" -> "In re J.W.",
     "In the Matter of Smith" -> "In re Smith".  Returns None when the party
@@ -1577,7 +2583,9 @@ def _format_procedural(party: str, *, recognize_initials: bool) -> str | None:
     if not rest:
         return None
     prefix = _PROCEDURAL_CANON[re.sub(r"\s+", " ", m.group(1).lower())]
-    return f"{prefix} {_abbreviate_party(rest, recognize_initials=recognize_initials)}"
+    party = _abbreviate_party(rest, recognize_initials=recognize_initials,
+                              names=names)
+    return f"{prefix} {party}"
 
 
 def _is_bare_place(place: str) -> bool:
@@ -1587,8 +2595,9 @@ def _is_bare_place(place: str) -> bool:
     Parks") or as a T6 word sitting after the place name — i.e. after a word
     that is not itself a T6 word ("New York Police Department").  A T6 word that
     *leads* the name is part of the place, not a descriptor, and is kept:
-    "Commerce" (the city), "Central Falls"."""
-    if re.search(r"\bof\b", place, re.IGNORECASE):
+    "Commerce" (the city), "Central Falls".  A conjunction or a comma joins
+    two parties, never two words of one place ("Ky. & Pike County")."""
+    if re.search(r"\bof\b|\band\b|[&,]", place, re.IGNORECASE):
         return False
     seen_plain = False
     for w in place.split():
@@ -1610,9 +2619,55 @@ _IN_REM_ADVERSARY_PARTIES = {
 }
 
 
+def _continues_party(rest: str) -> bool:
+    """Whether what follows a party's comma goes on naming that party — a
+    department or board of it, "City of L.A., Dep't of Water & Power" —
+    rather than naming another party ("Doe Crupi") or describing this one
+    ("a Mun. Corp.")."""
+    words = rest.split(",", 1)[0].split()
+    if not words or words[0].lower() in ("a", "an"):
+        return False
+    return any(w.replace("’", "'").lower().rstrip(".") in _T6_WORDS
+               or (_word_key(w) and _word_key(w) in _T6_ABBREVIATION_KEYS)
+               or w.lower() in _ORG_WORDS
+               for w in words[:2])
+
+
+def _municipal_party(p: str) -> str | None:
+    """*p* as the whole of a municipal unit, its unit word spelled out —
+    "City of New York", "Village of Arlington Heights", "Clayton County" — or
+    None when *p* is something more.
+
+    Such a party is one geographic unit, which rule 10.2.2 leaves
+    unabbreviated.  A unit in suffix form ("Cook County", "New York City",
+    "Atlantic City") is identified by its trailing unit word, so the words
+    ahead are always the place's proper name — a T6 word among them
+    ("Atlantic", "Central") belongs to that name, not to an institution.  A
+    larger entity puts the unit word mid-name ("Cook County Bd. of Review"),
+    where the '$' anchor no longer matches, and an institution can end in one
+    ("Sch. Dist. of Abington Twp."), which the bare-place test turns away."""
+    p = p.strip()
+    m = _MUNICIPAL_RE.match(p)
+    if m and _is_bare_place(m.group(2)):
+        return (f"{_spelled_unit(m.group(1))} of "
+                f"{_place_in_full(m.group(2))}")
+    suffix = _GEO_SUFFIX_RE.match(p)
+    if suffix and _is_bare_place(suffix.group(1)):
+        return (f"{_place_in_full(suffix.group(1))} "
+                f"{_spelled_unit(suffix.group(2))}")
+    return None
+
+
 def _abbreviate_party(party: str, *, recognize_initials: bool = True,
-                      court_state: str = "") -> str:
+                      court_state: str = "",
+                      names: _OpinionNames | None = None) -> str:
     p = _strip_party_designations(re.sub(r"\s+", " ", party).strip())
+    # A recognized agency's initials a title-casing pass lowered, as the
+    # whole party ("Ins v. Chadha", "Sec v. Jarkesy") — alone it is no
+    # abbreviation for Insurance or Section.
+    if (re.fullmatch(r"[A-Z][a-z]{1,4}", p)
+            and p.upper() in _RECOGNIZED_ACRONYMS):
+        return p.upper()
     # Rule 10.2.1(d): a party's leading "The" is omitted — except when "The
     # King" or "The Queen" is the party, where the article is part of the
     # name.  (The rule's other exception, the object of an in rem action,
@@ -1644,13 +2699,9 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
             relator = p[rel.end():].strip(" ,")
             if relator:
                 return f"{designation} ex rel. " + _abbreviate_party(
-                    relator, recognize_initials=recognize_initials)
+                    relator, recognize_initials=recognize_initials,
+                    names=names)
             return designation
-    # Rule 10.2.1(f): "city of," "county of," and like expressions are
-    # omitted unless they begin the party name — "Bd. of Educ. of the
-    # Borough of Hawthorne" -> "Bd. of Educ. of Hawthorne", while "City of
-    # New York" as the whole party keeps its prefix (handled below).
-    p = _MID_GEO_UNIT_RE.sub(r"\1", p)
 
     # Relator construction (rule 10.2.1(b)): split "<party> ex rel. <relator>".
     # The named party keeps its full geographic name (rule 10.2.2) — restored
@@ -1663,36 +2714,56 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
         tail = p[rel_m.end():].strip(" ,")
         if head and tail:
             lhs = _abbreviate_party(head, recognize_initials=recognize_initials,
-                                    court_state=court_state)
-            rhs = _abbreviate_party(tail, recognize_initials=recognize_initials)
+                                    court_state=court_state, names=names)
+            rhs = _abbreviate_party(
+                tail, recognize_initials=recognize_initials, names=names)
             return f"{lhs} ex rel. {rhs}"
 
     if recognize_initials:  # rule 10.2.1(c): SEC, NLRB, FCC…
         initials = _recognized_initialism(p)
         if initials:
             return initials
+    # "U.S." as a whole party is the United States, never a person's
+    # initials, and rule 10.2.2 names it in full.  A two-letter state ("N.C.")
+    # could be an anonymized party's initials, and is left to the next step.
+    if _geo_party_key(p) == "u.s.":
+        return "United States"
     anon = _format_anonymous_initials(p)
     if anon is not None:
         return anon
-    procedural = _format_procedural(p, recognize_initials=recognize_initials)
+    procedural = _format_procedural(p, recognize_initials=recognize_initials,
+                                    names=names)
     if procedural is not None:
         return procedural
+    # Rule 10.2.1(f): a phrase of location drops — "Bd. of Educ. of Topeka"
+    # -> "Bd. of Educ." — as do the designations a caption appends after a
+    # comma ("Clayton County, Georgia" -> "Clayton County").
+    p = _omit_location(p, recognize_initials=recognize_initials)
+    # Rule 10.2.1(f): "city of," "county of," and like expressions are
+    # omitted unless they begin the party name — "Mayor of the City of New
+    # York" -> "Mayor of New York", while "City of New York" as the whole
+    # party keeps its prefix (handled below).  After the phrase of location
+    # above, which has to see the unit word to leave the place it names.
+    p = _MID_GEO_UNIT_RE.sub(r"\1", p)
     if p.strip(" ,.").lower() in _GEO_PARTIES:
         return p
+    # …and one a source abbreviated is named in full all the same: a stored
+    # "Olmstead v. U.S." cites as "Olmstead v. United States".
+    full = _place_in_full(p)
+    if full != p:
+        return full
 
-    m = _MUNICIPAL_RE.match(p)
-    if m and _is_bare_place(m.group(2)):
-        return f"{m.group(1)} of {m.group(2)}"
-
-    # A municipal unit in suffix form ("Cook County", "New York City",
-    # "Atlantic City") is the entire geographic party: its trailing unit word is
-    # what identifies it, so the words ahead are always the place's proper name
-    # — a T6 word among them ("Atlantic", "Central") belongs to that name, not
-    # to an institution — and the whole party stays whole.  A larger entity puts
-    # the unit word mid-name ("Cook County Bd. of Review"), where the '$' anchor
-    # no longer matches and normal abbreviation applies.
-    if _GEO_SUFFIX_RE.match(p):
-        return p
+    # A municipal unit that is the whole party stays whole — named first,
+    # too, with other parties or its own description after a comma ("City of
+    # Los Angeles, Doe Crupi, …", "City of Los Angeles, a Mun. Corp."): the
+    # unit is then the party, and the rest goes (rules 10.2.1(a), (e)).
+    unit = _municipal_party(p)
+    if unit is None and "," in p:
+        first, _comma, rest = p.partition(",")
+        if not _continues_party(rest):
+            unit = _municipal_party(first)
+    if unit is not None:
+        return unit
 
     # Rule 10.2.1(a): only the first-listed party on a side is kept.  The
     # split applies only when *every* '&'/'and'-joined segment reads as an
@@ -1720,37 +2791,65 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
                 and tail_word not in _APPOSITIVE_ENTITY_TERMS
                 and tail_word not in _FIRM_TAIL_WORDS):
             return first
-        surnames = [_strip_given_names(s) for s in segs]
+        # So does a municipal unit ("Oakland Cnty. & Andrew Meisner").
+        unit = _municipal_party(segs[0].strip(" ,;"))
+        if (unit is not None and tail_word not in _APPOSITIVE_ENTITY_TERMS
+                and tail_word not in _FIRM_TAIL_WORDS):
+            return unit
+        surnames = [_strip_given_names(s, names=names) for s in segs]
         if all(surnames):
             return surnames[0]
 
-    surname = _strip_given_names(p)
+    surname = _strip_given_names(p, names=names)
     if surname is not None:
         return surname
 
-    office_surname = _office_holder_surname(p)
+    office_surname = _office_holder_surname(p, names=names)
     if office_surname is not None:
         return office_surname
+
+    # A party acting through another, or sued in a capacity, is the party
+    # alone (rule 10.2.1(e)): "La., by & Through its Att'y Gen., Jeff
+    # Landry" is Louisiana; "U.S. Bank, as Trustee" is U.S. Bank.
+    head, comma, rest = p.partition(",")
+    if comma and head.strip() and _REPRESENTATION_RE.match(rest.strip()):
+        return _abbreviate_party(head, recognize_initials=recognize_initials,
+                                 court_state=court_state, names=names)
 
     p = _PHRASE_RE.sub(
         lambda m: _PHRASE_MAP[re.sub(r"\s+", " ", m.group(0).lower())], p
     )
 
-    # A state name right after a given name is part of a person's name,
+    # A state or city right after a given name is part of a person's name,
     # not a geographic unit: "George Washington University" keeps
-    # "Washington" (rule 10.2.2 abbreviates only geographic units).
+    # "Washington", "Sam Houston State University" keeps "Houston" (rule
+    # 10.2.2 abbreviates only geographic units).  So is a city's name that a
+    # people shares, ahead of "Tribe" or "Nation": "Miami Tribe of Okla.".
     protected: set[int] = set()
     tokens = list(_TOKEN_RE.finditer(p))
     for prev, tok in zip(tokens, tokens[1:]):
-        if (tok.group(0).lower() in _T10_WORDS
+        word = tok.group(0).lower()
+        if ((word in _T10_WORDS or word in _T10_CITY_WORDS)
                 and prev.group(0).lower() in _GIVEN_NAMES):
             protected.add(tok.start())
+        if (prev.group(0).lower() in _T10_CITY_WORDS
+                and word.rstrip(".") in ("tribe", "tribes", "nation",
+                                         "indians")):
+            protected.add(prev.start())
 
     def _sub(m: re.Match) -> str:
         if m.start() in protected:
             return m.group(0)
-        return _WORD_MAP.get(m.group(0).replace("’", "'").lower(),
-                             m.group(0))
+        word = m.group(0).replace("’", "'").lower()
+        abbr = _WORD_MAP.get(word)
+        if (abbr is None and m.end() == len(p) and word.endswith(".")
+                and "." not in word[:-1]):
+            # A caption's closing period rides on its last word ("Dallas
+            # County.", "Magnavox Co. of Tennessee.") and would otherwise
+            # keep the word from its abbreviation until a second pass,
+            # once the period is gone.
+            abbr = _WORD_MAP.get(word[:-1])
+        return m.group(0) if abbr is None else abbr
 
     return _TOKEN_RE.sub(_sub, p)
 
@@ -1759,11 +2858,21 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
 # "Nat'l Lab. Rels. Bd." — not just the spelled-out name.  Generate those keys
 # by running the long form through the ordinary abbreviator (with the
 # initials lookup itself disabled), so the variants always track table T6
-# instead of being hand-maintained.
-for _acr, _names in _WIDELY_RECOGNIZED_INITIALS_RAW.items():
-    for _name in _names:
-        _abbr = _abbreviate_party(_name, recognize_initials=False)
-        _WIDELY_RECOGNIZED_INITIALS.setdefault(_initials_key(_abbr), _acr)
+# instead of being hand-maintained.  Done on first use rather than at import,
+# which would read the Census name files for every program that imports
+# this module.
+_INITIALS_VARIANTS_ADDED = False
+
+
+def _add_initials_variants() -> None:
+    global _INITIALS_VARIANTS_ADDED
+    if _INITIALS_VARIANTS_ADDED:
+        return
+    _INITIALS_VARIANTS_ADDED = True
+    for acr, long_names in _WIDELY_RECOGNIZED_INITIALS_RAW.items():
+        for long_name in long_names:
+            abbr = _abbreviate_party(long_name, recognize_initials=False)
+            _WIDELY_RECOGNIZED_INITIALS.setdefault(_initials_key(abbr), acr)
 
 
 # Rule 10.2.1(h): omit "Inc.", "Ltd.", "L.L.C.", "L.L.P.", "N.A.", "F.S.B.",
@@ -1846,7 +2955,8 @@ def _lowercase_small_words(name: str) -> str:
     Of Columbia", "Tax Comm'n OF N.Y.") — a partially mixed-case caption
     bypasses ``normal_case_caption``'s all-caps handling, so these survive
     it.  A party-leading "The" ("v. The Boeing Co.") and words inside an
-    all-caps run ("CITIZENS FOR A BETTER ENVIRONMENT") stay untouched."""
+    all-caps run ("CITIZENS FOR A BETTER ENVIRONMENT") stay untouched, as
+    does an abbreviation that spells one of the words: "Or." is Oregon."""
     tokens = name.split(" ")
     out: list[str] = []
     for i, tok in enumerate(tokens):
@@ -1855,6 +2965,7 @@ def _lowercase_small_words(name: str) -> str:
         if (i > 0
                 and core.lower() in _SMALL_MIDWORD
                 and core[:1].isupper()
+                and not tok.rstrip(",;:").endswith(".")
                 and prev_core.lower() not in ("v", "vs", "re", "parte")
                 and any(c.islower() for c in prev_core)):
             out.append(tok.replace(core, core.lower(), 1))
@@ -1863,7 +2974,8 @@ def _lowercase_small_words(name: str) -> str:
     return " ".join(out)
 
 
-def abbreviate_case_name(name: str, *, court_state: str = "") -> str:
+def abbreviate_case_name(name: str, *, court_state: str = "",
+                         body_text: str = "") -> str:
     """Abbreviate a case name for use in a citation or filename per
     Bluebook rule 10.2.2 (= Indigo Book R8.3), dropping given names of
     individuals (rule 10.2.1(g)) and "State of" prefixes (10.2.1(f)).
@@ -1877,10 +2989,19 @@ def abbreviate_case_name(name: str, *, court_state: str = "") -> str:
     Tanella").  Left empty — the court is unknown, or is a federal one —
     the state name is kept, as it is for every court but that state's own.
     See :func:`court_catalog.state_of_court`, which derives it from a court
-    id or a court name."""
+    id or a court name.
+
+    *body_text* is the opinion's own text, when the caller has it.  Its
+    prose settles a personal name the given-name lists don't know — the
+    party it calls "Iqbal" is Javaid Iqbal's surname (rule 10.2.1(g)).
+    Without it, those names fall back to the Census name files."""
     # OCR renders the early reports' turned-comma apostrophe as U+2018
     # ("M‘Intosh"); normalize so name patterns and casing rules see it.
     name = re.sub(r"\s+", " ", (name or "").replace("‘", "'")).strip()
+    # Acronyms a title-casing pass lowered go back to capitals first, so
+    # the party rules below see "USA", not a surname "Usa" — and spaced
+    # initials close up, so they see "U.S.", not "U. S.".
+    name = _close_up_initials(_restore_acronym_case(name))
     # The old reports set an in rem vessel's name in quotation marks
     # (THE "SCOTLAND.", 105 U.S. 24) — the quotes are the reporter's
     # typography, never part of the Bluebook name.
@@ -1907,7 +3028,13 @@ def abbreviate_case_name(name: str, *, court_state: str = "") -> str:
     # another".  ("et al." itself is handled with the party structure.)
     name = re.sub(
         r",?\s+(?:et|and|&)\s+(?:ux(?:or)?|vir|wife|husband|others?|another)"
-        r"\.?(?=[\s,.]|$)",
+        r"\.?(?=[\s,.;]|$)",
+        "", name, flags=re.IGNORECASE)
+    # …as is a spouse named and described together: "John P. Van Ness &
+    # Marcia His Wife", "Charles Ward and Mary, his wife".
+    name = re.sub(
+        r"\s+(?:and|&)\s+[A-Z][\w'’-]*,?\s+(?:his|her)\s+(?:wife|husband)"
+        r"(?=[\s,.]|$)",
         "", name, flags=re.IGNORECASE)
     # A d/b/a or a/k/a clause names an alias, not the party; when the alias
     # is the citation name it replaced the party upstream, so a surviving
@@ -1918,13 +3045,47 @@ def abbreviate_case_name(name: str, *, court_state: str = "") -> str:
     # Bare "aka" is left alone — it is a real surname (Aka v. Wash. Hosp.
     # Ctr.).
     name = re.sub(
-        r",?\s+(?:d/b/a|d\.b\.a\.|dba|a/k/a|a\.k\.a\.|f/k/a|f\.k\.a\.|"
-        r"doing\s+business\s+as|also\s+known\s+as|formerly\s+known\s+as)\s+"
+        r"(?:,?\s+(?:d/b/a|d\.b\.a\.|dba|a/k/a|a\.k\.a\.|f/k/a|f\.k\.a\.|"
+        r"fka|n/k/a|nka|t/a|doing\s+business\s+as|also\s+known\s+as|"
+        r"formerly\s+known\s+as)|,\s*aka)\s+"
         r".*?(?=\s+vs?\.\s+|$)",
         "", name, flags=re.IGNORECASE)
     if not name:
         return name
+    # Only the first-listed case of a consolidated caption is cited (rule
+    # 10.2.1(b)).  The caption readers cut the others off, but a name that
+    # comes another way — a stored record, a CourtListener caseName — can
+    # still carry them: "Bostock v. Clayton County, Georgia. Altitude
+    # Express, Inc., et al., Petitioners v. Zarda …".  An in-re caption has
+    # no "v." of its own, so any in it belongs to a companion.
     parts = _V_SPLIT_RE.split(name, maxsplit=1)
+    # A middle initial "V." that a title-casing pass lowered reads as the
+    # separator: "Francis v. Lorenzo, Petitioner v. SEC" is Francis V.
+    # Lorenzo's case — a lone given name ahead of it, and a party's role
+    # before the true "v." still to come, give it away.
+    if (len(parts) == 2 and re.fullmatch(r"[A-Z][a-z]+", parts[0])
+            and parts[0].lower() in _GIVEN_NAMES):
+        rest = _V_SPLIT_RE.split(cut_companion_cases(parts[1]), maxsplit=1)
+        if len(rest) == 2 and re.search(
+                r",\s*" + _ROLE_RUN + r",?$", rest[0], re.IGNORECASE):
+            name = f"{parts[0]} V. {parts[1]}"
+            parts = _V_SPLIT_RE.split(name, maxsplit=1)
+    if len(parts) == 2 and not _PROCEDURAL_PREFIX_RE.match(parts[0]):
+        parts[1] = cut_companion_cases(parts[1])
+        # …and only the first party of each side (rule 10.2.1(a)) — unless
+        # the side names a plaintiff before another "v.", when the caption
+        # has lost what joined its first two names ("Jackson v. Hart,
+        # Plaintiff in Error v. Elias Lamphire" is Jackson ex dem. Hart's
+        # case against Lamphire) and cutting it would name another case.
+        rest = _V_SPLIT_RE.split(parts[1].split(";", 1)[0], maxsplit=1)
+        if not (len(rest) == 2 and re.search(
+                r",\s*(?:plaintiffs?|petitioners?|appellants?|complainants?|"
+                r"libell?ants?|relators?)(?:\s+in\s+error)?,?$",
+                rest[0], re.IGNORECASE)):
+            parts = [_first_listed_party(p) or p for p in parts]
+    else:
+        name = cut_companion_cases(name)
+        parts = _V_SPLIT_RE.split(name, maxsplit=1)
     # Rule 10.2.1(d) keeps "The" when it is part of the name of the object of
     # an in rem action: an adversary-less caption opening with "The" names
     # the res itself — an admiralty vessel ("The Silvia", "The Paquete
@@ -1942,15 +3103,78 @@ def abbreviate_case_name(name: str, *, court_state: str = "") -> str:
                     and not re.fullmatch(r"cases?", last)):
                 return _strip_trailing_period(
                     _lowercase_small_words("The " + res[art.end():]))
+    names = _OpinionNames(body_text) if body_text else None
     joined = " v. ".join(
-        _drop_redundant_entity(_abbreviate_party(p, court_state=court_state))
+        _drop_redundant_entity(
+            _abbreviate_party(p, court_state=court_state, names=names))
         for p in parts
     )
     # A stray capital after a possessive apostrophe ("Sailor'S") is a
     # title-casing artifact, never a name; all-caps runs (MCDONALD'S USA,
     # kept caps by design) are left whole.
     joined = re.sub(r"(?<=[a-z])(['’])S(?=\W|$)", r"\1s", joined)
-    return _strip_trailing_period(_lowercase_small_words(joined))
+    # (Restored again once a sentence period is off the end: "v. Aclu.")
+    return _restore_acronym_case(_close_up_initials(_capitalize_compounds(
+        _strip_trailing_period(_lowercase_small_words(joined)))))
+
+
+def _close_up_initials(name: str) -> str:
+    """Close up adjacent single capitals (rule 6.1(a)): "Home Depot U. S.
+    A., Inc." -> "U.S.A.", "Purdue Pharma L. P." -> "L.P." — unless a
+    longer abbreviation follows the run, as in "S. S. N. Am." (the steamship
+    North America), where the initials may belong to it."""
+    def close(m: re.Match) -> str:
+        after = name[m.end():]
+        if re.match(r"\s+[A-Z][a-z]+\.", after):
+            return m.group(0)
+        return re.sub(r"\s+", "", m.group(0))
+    return re.sub(r"(?<![\w.])[A-Z]\.(?:\s+[A-Z]\.)+(?![\w])", close, name)
+
+
+def _capitalize_compounds(name: str) -> str:
+    """Capitalize each word of a hyphenated compound, as a title-cased
+    caption does — "Take-two" and "Mont.-dakota" are casing slips for
+    "Take-Two" and "Mont.-Dakota".  Short pieces and small words keep their
+    case ("Co-op", "Mother-in-Law", "Match-e-Be-Nash-She-Wish")."""
+    def cap(m: re.Match) -> str:
+        pieces = m.group(0).split("-")
+        if not pieces[0][:1].isupper():
+            return m.group(0)
+        return "-".join(pieces[:1] + [
+            p[0].upper() + p[1:]
+            if (len(p) >= 3 and p.isalpha() and p.islower()
+                and p not in _CAPTION_SMALL_WORDS
+                and p not in _SURNAME_PARTICLES)
+            else p
+            for p in pieces[1:]])
+    return re.sub(r"[^\W\d_][\w.'’]*(?:-[^\W\d_][\w'’]*)+", cap, name)
+
+
+def name_persons_by_surname(name: str, body_text: str) -> str:
+    """*name* with each party the opinion's prose shows to be a person cut
+    to the surname (rule 10.2.1(g)) — "Haaland v. Chad Everet Brackeen" ->
+    "Haaland v. Brackeen" — and nothing else changed.
+
+    For a caller that keeps a caption unabbreviated for later use but has
+    the opinion's text only now: a party changes only where the prose
+    changes how :func:`abbreviate_case_name` reads it, so the caption
+    abbreviates later, without the text, to what it would have with it."""
+    if not name or not body_text:
+        return name
+    sides = _V_SPLIT_RE.split(name, maxsplit=1)
+    if len(sides) != 2 or _PROCEDURAL_PREFIX_RE.match(sides[0]):
+        return name
+    names = _OpinionNames(body_text)
+    changed = False
+    for k, side in enumerate(sides):
+        party = _strip_party_designations(side.strip())
+        read = _abbreviate_party(party, names=names)
+        if (read != _abbreviate_party(party)
+                and re.search(r"(?<!\w)%s$" % re.escape(read),
+                              party.strip(" .,"), re.IGNORECASE)):
+            sides[k] = read
+            changed = True
+    return " v. ".join(sides) if changed else name
 
 
 if __name__ == "__main__":
@@ -2016,7 +3240,7 @@ if __name__ == "__main__":
         ("Burwell v. Hobby Lobby Stores, Inc.",
          "Burwell v. Hobby Lobby Stores, Inc."),
         ("Planned Parenthood of Southeastern Pennsylvania v. Robert Casey",
-         "Planned Parenthood of Se. Pa. v. Casey"),
+         "Planned Parenthood v. Casey"),
         ("George Washington University v. Violet Aldridge",
          "George Washington Univ. v. Aldridge"),
         ("Chase Bank v. Mary McCoy", "Chase Bank v. McCoy"),
@@ -2036,16 +3260,55 @@ if __name__ == "__main__":
         ("Township of Willingboro v. Doe", "Township of Willingboro v. Doe"),
         ("Parish of Jefferson v. Doe", "Parish of Jefferson v. Doe"),
         ("Town of Greece v. Susan Galloway", "Town of Greece v. Galloway"),
-        # Mid-name "city of"/"borough of" expressions are omitted (rule
-        # 10.2.1(f)); the same expression *beginning* a party name is kept
+        # Rule 10.2.1(f): a prepositional phrase of location is omitted —
+        # a "borough of" or "township of" phrase along with the rest — unless
+        # that leaves the party one word, or the place is part of a business,
+        # office or institution's name.  A "city of" expression that survives
+        # drops ("Mayor of New York"), and one *beginning* a party is kept
         # (see the City/Village/Township cases above).
+        ("Brown v. Board of Education of Topeka", "Brown v. Bd. of Educ."),
+        ("Surrick v. Board of Wardens of the Port of Philadelphia",
+         "Surrick v. Bd. of Wardens"),
+        ("Shapiro v. Bank of Harrisburg", "Shapiro v. Bank of Harrisburg"),
+        ("Mayor of the City of New York v. Clark", "Mayor of N.Y. v. Clark"),
         ("Doremus v. Board of Education of the Borough of Hawthorne",
-         "Doremus v. Bd. of Educ. of Hawthorne"),
+         "Doremus v. Bd. of Educ."),
         ("Board of Education of Township of Piscataway v. Taxman",
-         "Bd. of Educ. of Piscataway v. Taxman"),
+         "Bd. of Educ. v. Taxman"),
         ("Board of Education of Kiryas Joel Village School District "
          "v. Grumet",
          "Bd. of Educ. of Kiryas Joel Vill. Sch. Dist. v. Grumet"),
+        ("Standard Oil Co. of New Jersey v. United States",
+         "Standard Oil Co. of N.J. v. United States"),
+        ("School District of Abington Township v. Schempp",
+         "Sch. Dist. of Abington Twp. v. Schempp"),
+        # …and a caption's trailing ", <State>" goes the same way.
+        ("Kelo v. City of New London, Connecticut",
+         "Kelo v. City of New London"),
+        ("McCreary County, Kentucky v. "
+         "American Civil Liberties Union of Kentucky",
+         "McCreary County v. ACLU of Ky."),
+        ("Seminole Tribe of Florida v. Florida",
+         "Seminole Tribe of Fla. v. Florida"),
+        # Table T10's cities abbreviate inside a longer name (rule 10.2.2)
+        # and stay whole as the entire party.
+        ("Cannon v. University of Chicago", "Cannon v. Univ. of Chi."),
+        ("San Francisco Arts & Athletics, Inc. v. United States Olympic "
+         "Committee", "S.F. Arts & Athletics, Inc. v. U.S. Olympic Comm."),
+        ("Terminiello v. Chicago", "Terminiello v. Chicago"),
+        ("Lockyer v. City and County of San Francisco",
+         "Lockyer v. City & County of San Francisco"),
+        # An office after a lone surname describes the party and goes (rules
+        # 10.2.1(e), (g)).
+        ("Bowers, Attorney General of Georgia v. Hardwick",
+         "Bowers v. Hardwick"),
+        ("Roe v. Wade, District Attorney of Dallas County", "Roe v. Wade"),
+        # A consolidated caption cites its first case alone (rule 10.2.1(b)),
+        # however the name arrived.
+        ("Bostock v. Clayton Cnty., Georgia. Altitude Express, Inc., et al., "
+         "Petitioners v. Melissa Zarda", "Bostock v. Clayton County"),
+        ("Olmstead v. U.S.. Green Et Al. v. Same. McInnis v. Same",
+         "Olmstead v. United States"),
         ("Soldal v. Cook County", "Soldal v. Cook County"),
         ("Los Angeles County v. Humphries", "Los Angeles County v. Humphries"),
         ("Washington County v. Gunther", "Washington County v. Gunther"),
@@ -2198,6 +3461,24 @@ if __name__ == "__main__":
         ("Nat'l Lab. Rels. Bd. v. Acme Corp.", "NLRB v. Acme Corp."),
         ("U.S. Env't Prot. Agency v. Smith", "EPA v. Smith"),
         ("Fed. Commc'ns Comm'n v. Smith", "FCC v. Smith"),
+        # Rule 10.2.1(a) whatever separates a side's parties: semicolons, a
+        # role, a firm's designator, a description (10.2.1(e)).
+        ("Jason Wolford; Alison Wolford; Haw. Firearms Coal. v. Lopez",
+         "Wolford v. Lopez"),
+        ("Hill v. Lockheed Martin Corp., Defendant-Appellee, Equal "
+         "Employment Opportunity Commission, Amicus",
+         "Hill v. Lockheed Martin Corp."),
+        ("Folkens v. Wyland Worldwide, LLC, a Cal. Corp.",
+         "Folkens v. Wyland Worldwide, LLC"),
+        # Acronyms and initials a title-casing pass lowered.
+        ("Reno v. Aclu", "Reno v. ACLU"),
+        ("Whittle v. U.s.", "Whittle v. United States"),
+        ("Home Depot U. S. A., Inc. v. Jackson",
+         "Home Depot U.S.A., Inc. v. Jackson"),
+        # Given names the curated list lacks, from the Census files — but
+        # never a name written surname first.
+        ("Dulles v. Susanne Richter", "Dulles v. Richter"),
+        ("United States v. Wong Kim Ark", "United States v. Wong Kim Ark"),
     ]
     # Rule 10.2.1(f)'s other half: cited to the deciding state's own courts,
     # "State"/"Commonwealth"/"People" is what survives instead of the state

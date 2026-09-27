@@ -937,6 +937,7 @@ from bluebook_names import (
     collapse_personal_all_caps_run,
     cut_companion_cases,
     is_recognized_given_name,
+    name_persons_by_surname,
     normal_case_caption,
     refine_caption_case,
     simplify_historical_entity_caption,
@@ -1290,6 +1291,8 @@ class _SavedStatuteDoc:
         self.title = str(data.get("title", ""))
         self.set_key = data.get("set_key")
         self.container = None
+        self.crumbs = [tuple(c) for c in (data.get("crumbs") or [])
+                       if len(c) == 2]
         self._kind = str(data.get("kind", "usc"))
         self._label = str(data.get("label", ""))
         self._source_name = str(data.get("source_name", ""))
@@ -4743,6 +4746,13 @@ _BUCKET_CAPS: dict[str, int] = {
 #: name should not be answered by that case alone.
 _SPOTLIGHT_PHRASE_MAX_ROWS = 1
 
+#: The longest a Supreme Court row from the saved-opinion database or
+#: CourtListener waits for Google Scholar's merits-first page before it is
+#: shown anyway (see _show_spotlight_dropdown).  Scholar usually answers in a
+#: second or two; a search spaced out behind an earlier request (the fetcher
+#: waits about three seconds between them) takes nearer five.
+_SPOTLIGHT_SCOTUS_HOLD_MS = 6000
+
 
 def _spotlight_phrase_page(scholar_page: list, rows_shown: int,
                            is_reporter_cite: bool) -> list:
@@ -4783,12 +4793,15 @@ def _prefer_source(new_bucket: str, shown_bucket: str) -> bool:
 def _rank_scholar_spotlight_results(
     query: str, results: list, limit: int,
 ) -> list:
-    """Rank a Scholar name-search page and promote the likely lead opinion.
+    """Rank a Scholar name-search page, each Supreme Court case led by its
+    merits opinion.
 
-    Match tier and caption closeness remain authoritative.  Within the
-    resulting order, when several SCOTUS rows have the same caption, the one
-    with the largest result-page ``Cited by`` count moves to the first position
-    occupied by that case.  The other writings keep their relative order.
+    Match tier and caption closeness remain authoritative: rows are ordered by
+    them, Scholar's own order breaking ties, and only the best tier present is
+    kept.  Within that order :func:`_scotus_merits_first` then moves each
+    Supreme Court case's merits opinion ahead of the orders filed under its
+    caption, and ahead of the decisions below it, and drops a second listing
+    of one writing.
     """
     scored = [
         (
@@ -4808,50 +4821,228 @@ def _rank_scholar_spotlight_results(
         result for tier, _score, _index, result in scored
         if tier == best_tier
     ]
+    return _scotus_merits_first(ranked)[:limit]
 
-    group_order: list[tuple[str, str, tuple[str, ...]]] = []
-    for result in ranked:
-        if _scholar_source_to_court_id(
-            getattr(result, "source", "") or ""
-        ) != _SCOTUS_COURT_ID:
+
+# A Supreme Court case reaches Google Scholar as a family of writings under one
+# caption: the merits opinion, and the orders issued along the way — the grant
+# of certiorari, a stay, argument and briefing motions, a recall of the
+# judgment — some with a dissent of their own.  A caption search lists them in
+# Scholar's relevance order, and that often puts an order first.  Citation
+# counts do not settle it: a stay with a dissent, even a bare grant of
+# certiorari that the courts below cite as "cert. granted", can be cited more
+# often than a merits opinion only months old; and the orders of an earlier
+# Term carry an earlier year than the merits opinion they led to.  So what
+# gives an order away is what its snippet says.  Nor is the newest writing
+# the merits opinion: one caption can name several cases ("United States v.
+# Texas", 2023 and 2024), and Scholar's order among them is kept.
+
+# What an order looks like in a Scholar snippet, which for a caption search is
+# usually the head of the writing: the Supreme Court Reporter's heading with a
+# bare date after the Court's name, where an opinion's reads "Argued … Decided
+# …"; or the order's own operative words.
+_SCOTUS_ORDER_SNIPPET_RE = re.compile(
+    r"Supreme\s+Court\s+of\s+(?:the\s+)?United\s+States\.?\s+"
+    r"(?:January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\b"
+    r"|\bIT\s+IS\s+(?:HEREBY\s+)?ORDERED\b"
+    r"|^[\W\d]*(?:the\s+)?(?:motions?|applications?|petitions?)\s+"
+    r"(?:of|for|to|by)\b"
+    r"|\b(?:motions?|applications?|petitions?)\b[^.]{0,160}?\b(?:is|are)\s+"
+    r"(?:hereby\s+)?(?:granted|denied|dismissed)\b"
+    r"|\b(?:is|are)\s+directed\s+to\s+file\b"
+    r"|\bpresented\s+to\s+(?:the\s+Chief\s+)?Justice\b"
+    r"|\b(?:certiorari|rehearing)\s+(?:granted|denied|dismissed)\b"
+    r"|\bfor\s+further\s+consideration\s+in\s+light\s+of\b"
+    r"|\b(?:dissent(?:s|ing)?|concur(?:s|ring)?|statement)\b[^.]{0,40}?"
+    r"\b(?:from|in|respecting)\s+the\s+(?:denial|grant)\b"
+    r"|\bdissent(?:s|ing)?\s+from\s+the\s+Court(?:'s|’s)\s+"
+    r"(?:decision|order|refusal)\s+to\b"
+    r"|\bthe\s+Court(?:'s|’s)?\s+(?:today\s+)?(?:issues|grants|denies)\b"
+    r"[^.]{0,60}?\b(?:stay|application|certiorari|motion|petition|"
+    r"rehearing|injunction)",
+    re.IGNORECASE,
+)
+
+# A U.S. Reports citation in a Scholar byline: "607 US 71", or "608 US __" for
+# a decision whose page is not yet fixed.  Of two listings of one writing (the
+# slip opinion and the reported one) it marks the one to keep.
+_US_REPORTS_CITE_RE = re.compile(
+    r"\b\d{1,3}\s+U\.?\s?S\.?\s+(?:\d{1,4}\b|_{2,})")
+
+# How many years before the Supreme Court's decision a lower-court decision
+# under the same caption may be and still be taken for the decision below it.
+_SCOTUS_BELOW_YEARS = 5
+
+
+def _looks_like_scotus_order(snippet: str) -> bool:
+    """Whether a Supreme Court writing's Scholar snippet reads as an order —
+    see :data:`_SCOTUS_ORDER_SNIPPET_RE`.  A per curiam opinion does not."""
+    text = re.sub(r"\s+", " ", snippet or "").strip()
+    if not text or re.search(r"\bper\s+curiam\b", text, re.IGNORECASE):
+        return False
+    return bool(_SCOTUS_ORDER_SNIPPET_RE.search(text))
+
+
+def _scholar_year(result) -> int:
+    year = _scholar_source_year(getattr(result, "source", "") or "")
+    return int(year) if year.isdigit() else 0
+
+
+def _scholar_cited_by(result) -> int:
+    return int(getattr(result, "cited_by", 0) or 0)
+
+
+def _same_caption(a: str, b: str) -> bool:
+    """Whether two case names are one caption as written, allowing for the
+    abbreviations and trimmed parties Scholar's titles vary by ("Bost v.
+    Illinois State Bd. of Elections" / "... Board of Elections")."""
+    ta, tb = set(_name_tokens(a)), set(_name_tokens(b))
+    if ta and ta == tb:
+        return True
+    return _match_tier(a, b) == 3 or _match_tier(b, a) == 3
+
+
+def _index_of(rows: list, row) -> int:
+    """Position of *row* itself in *rows* (Scholar results are dataclasses,
+    which compare equal field by field)."""
+    return next(i for i, other in enumerate(rows) if other is row)
+
+
+def _scotus_merits_first(rows: list) -> list:
+    """Reorder ranked Scholar rows so each Supreme Court case leads with its
+    merits opinion.
+
+    A case's writings are its Supreme Court rows under one caption, of any
+    year.  The one to lead them is the first that does not read as an order
+    (:func:`_looks_like_scotus_order`) — or, of the writings from that one's
+    year, the most cited, since the orders beside a merits opinion are cited
+    far less once it has been out a while.  It moves to the first of the
+    case's places and, unless it reads as an order itself, ahead of the
+    lower-court rows under that caption from the years just before it: the
+    decisions it reviewed.  Every other row keeps its place and order.
+    Scholar lists some writings twice, as the slip opinion and as reported;
+    the second listing, with the same year and snippet, is dropped.
+    """
+    def court(row) -> str:
+        return _scholar_source_to_court_id(getattr(row, "source", "") or "")
+
+    def title(row) -> str:
+        return getattr(row, "title", "") or ""
+
+    def is_order(row) -> bool:
+        return _looks_like_scotus_order(getattr(row, "snippet", "") or "")
+
+    def reported(row) -> bool:
+        segs = _scholar_source_segments(getattr(row, "source", "") or "")
+        return len(segs) >= 2 and bool(_US_REPORTS_CITE_RE.search(segs[0]))
+
+    groups: list[list] = []
+    for row in rows:
+        if court(row) != _SCOTUS_COURT_ID:
             continue
-        key = (
-            _SCOTUS_COURT_ID,
-            _scholar_source_year(getattr(result, "source", "") or ""),
-            tuple(sorted(set(_name_tokens(
-                getattr(result, "title", "") or ""
-            )))),
+        for group in groups:
+            if _same_caption(title(group[0]), title(row)):
+                group.append(row)
+                break
+        else:
+            groups.append([row])
+
+    dropped: set[int] = set()
+    for group in groups:
+        seen: set[tuple] = set()
+        kept_first = sorted(
+            group, key=lambda r: (reported(r), _scholar_cited_by(r)),
+            reverse=True,
         )
-        if key[2] and key not in group_order:
-            group_order.append(key)
-    for key in group_order:
-        positions = [
-            index for index, result in enumerate(ranked)
-            if (
-                _scholar_source_to_court_id(
-                    getattr(result, "source", "") or ""
-                ),
-                _scholar_source_year(
-                    getattr(result, "source", "") or ""
-                ),
-                tuple(sorted(set(_name_tokens(
-                    getattr(result, "title", "") or ""
-                )))),
-            ) == key
-        ]
-        if len(positions) < 2:
-            continue
-        first = positions[0]
-        winner = max(
-            positions,
-            key=lambda index: (
-                int(getattr(ranked[index], "cited_by", 0) or 0),
-                -index,
-            ),
+        for row in kept_first:
+            snippet = re.sub(
+                r"[\W_]+", " ", getattr(row, "snippet", "") or "",
+            ).strip().lower()
+            if len(snippet) < 60:
+                continue
+            key = (_scholar_year(row), snippet)
+            if key in seen:
+                dropped.add(id(row))
+            else:
+                seen.add(key)
+    out = [row for row in rows if id(row) not in dropped]
+
+    for group in groups:
+        members = [row for row in group if id(row) not in dropped]
+        candidates = [row for row in members if not is_order(row)] or members
+        year = _scholar_year(candidates[0])
+        lead = max(
+            (row for row in candidates if _scholar_year(row) == year),
+            key=lambda r: (_scholar_cited_by(r), -_index_of(out, r)),
         )
-        if winner != first:
-            ranked.insert(first, ranked.pop(winner))
-    return ranked[:limit]
+        target = min(_index_of(out, row) for row in members)
+        if year and not is_order(lead):
+            for i in range(target):
+                row = out[i]
+                below = _scholar_year(row)
+                if (court(row) != _SCOTUS_COURT_ID and below
+                        and year - _SCOTUS_BELOW_YEARS <= below <= year
+                        and _same_caption(title(row), title(lead))):
+                    target = i
+                    break
+        at = _index_of(out, lead)
+        if at != target:
+            out.insert(target, out.pop(at))
+    return out
+
+
+def _supreme_court_writing_urls(results: list, name: str, decided: str,
+                                writing: str = "merits") -> list:
+    """The Google Scholar pages that may be one Supreme Court writing — the
+    one decided *decided* (an ISO date) — from a search for its case's name,
+    likeliest first.
+
+    A caption search lists the whole family — the merits opinion and the
+    orders around it, over more than one Term — and a Scholar result shows
+    only a year.  So the year narrows it; then a snippet that prints the
+    exact date leads, and after it the merits opinion
+    (:func:`_rank_scholar_spotlight_results`) — or, for *writing* "order",
+    the writings that read as orders.  Only the page itself can say which
+    day it was decided (:func:`_page_decided_on`): a writing Scholar has not
+    got yet leaves the others of its year in the list."""
+    year = (decided or "")[:4]
+    if not year.isdigit():
+        return []
+    ranked = _rank_scholar_spotlight_results(name, results, len(results))
+    rows = [r for r in ranked
+            if _scholar_source_to_court_id(getattr(r, "source", "") or "")
+            == _SCOTUS_COURT_ID and _scholar_year(r) == int(year)]
+    try:
+        day = _dt.date.fromisoformat(decided[:10])
+        printed = f"{day:%B} {day.day}, {day.year}"
+    except ValueError:
+        printed = ""
+
+    def dated(r) -> bool:
+        return bool(printed) and printed in (r.snippet or "")
+
+    def order(r) -> bool:
+        return _looks_like_scotus_order(r.snippet)
+
+    if writing == "order":
+        rows.sort(key=lambda r: (not dated(r), not order(r)))
+    else:
+        rows.sort(key=lambda r: (not (dated(r) and not order(r)), order(r)))
+    return [r.url for r in rows]
+
+
+def _page_decided_on(fetched, decided: str) -> bool:
+    """Whether a fetched opinion page, ``(url, html)``, prints *decided* (an
+    ISO date) as the day it was decided."""
+    try:
+        import opinion_db
+        record = opinion_db.extract_record(*fetched) or {}
+    except Exception as exc:
+        print(f"[cite-pdf] reading the decision date failed: {exc}")
+        return False
+    return bool(decided) and \
+        str(record.get("date_filed") or "")[:10] == decided[:10]
 
 
 def _is_scotus_order_item(item: dict) -> bool:
@@ -5328,7 +5519,7 @@ def _cl_name_search(client, name: str, court_ids: Optional[str], *,
     if drop_scotus_orders:
         results = [it for it in results if not _is_scotus_order_item(it)]
 
-    scored: list[tuple[int, float, int, dict]] = []
+    scored: list[tuple[int, float, int, int, dict]] = []
     for it in results:
         cand = re.sub(
             r"<[^>]+>", "",
@@ -5336,17 +5527,22 @@ def _cl_name_search(client, name: str, court_ids: Optional[str], *,
         ).strip()
         score = _name_match_score(name, cand)
         if score >= _NAME_MATCH_MIN:
-            scored.append((_match_tier(name, cand),
-                           score, it.get("citeCount") or 0, it))
+            scored.append((
+                _match_tier(name, cand), score, it.get("citeCount") or 0,
+                len(_courtlistener_main_opinion(it).get("cites") or []), it,
+            ))
     # Sort by match tier first (as-captioned over swapped over one-party over
     # frequent-name — see _match_tier), so a stronger match is never crowded out
     # of the page by a more-cited but weaker one; then by closeness, then by
     # citation count (the authority signal that stands in for walking the court
     # hierarchy, so "Brown v. Board of Education", cited thousands of times,
-    # outranks a one-off "Board of Education v. Brown").  The caller's
-    # _filter_to_best_tier then drops the lower tiers once every source's
-    # results are pooled.
-    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    # outranks a one-off "Board of Education v. Brown").  Last, by how many
+    # cases the opinion cites itself: a Supreme Court case too recent to have
+    # been cited yet then leads with its merits opinion, which cites dozens,
+    # rather than an order under the same caption, which cites none.  The
+    # caller's _filter_to_best_tier then drops the lower tiers once every
+    # source's results are pooled.
+    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
     kept = scored[:limit + spare]
     # Carry through any heavily-cited swapped-caption (tier 2) match the page cap
     # cut, so a major reverse-caption precedent reaches _filter_to_best_tier even
@@ -5354,7 +5550,7 @@ def _cl_name_search(client, name: str, court_ids: Optional[str], *,
     # Texas" cases ahead of "Texas v. United States").
     kept += [t for t in scored[limit + spare:]
              if t[0] == 2 and t[2] >= _REVERSED_PARTY_MIN_CITES]
-    return [it for _tier, _score, _cites, it in kept]
+    return [it for _tier, _score, _cites, _out, it in kept]
 
 
 def _cl_name_ranked_search(client, query: str) -> list[tuple[str, dict]]:
@@ -5471,7 +5667,8 @@ def _bluebook_saved_opinion_name(db, hit: dict) -> str:
         name = simplify_historical_entity_caption(name, body)
         # The store keeps the court id under "court" (see opinion_db).
         return abbreviate_case_name(
-            name, court_state=_state_of_court(str(hit.get("court") or "")))
+            name, court_state=_state_of_court(str(hit.get("court") or "")),
+            body_text=body)
     except Exception:
         return raw
 
@@ -5535,12 +5732,56 @@ def _opinion_db_spotlight_results(db, query: str,
         scored = [row for row in scored if row[0] == best_tier]
     scored.sort(key=lambda row: (row[0], row[1], row[2], row[3]),
                 reverse=True)
+    ranked = _saved_merits_first([row[-1] for row in scored])
 
     out: list[dict] = []
-    for _tier, _score, _court, _year, hit in scored[:limit]:
+    for hit in ranked[:limit]:
         saved = dict(hit)
         saved["name"] = _bluebook_saved_opinion_name(db, saved)
         out.append(saved)
+    return out
+
+
+#: A saved Supreme Court writing at least this long (its stored record, in
+#: bytes) is an opinion: an order runs to a kilobyte or so, one with a dissent
+#: to a few, a merits opinion with its separate writings to tens.  Shorter
+#: ones may be either — a summary per curiam can be as short as a dissent.
+_SAVED_SCOTUS_OPINION_BYTES = 20_000
+
+
+def _saved_merits_first(hits: list[dict]) -> list[dict]:
+    """Saved Supreme Court writings under one caption, the merits opinion
+    first.
+
+    The writing first in line keeps its place unless another under its
+    caption is at least four times its length (the stored record's ``size``):
+    a merits opinion beside an order, which the year and name ordering can
+    put first — an order after the decision is from the same year.  The
+    longest then leads.  Two opinions of like length are two cases under one
+    caption, and stay as they are; so does every other hit."""
+    groups: list[list[dict]] = []
+    for hit in hits:
+        if str(hit.get("court") or "").strip().lower() != _SCOTUS_COURT_ID:
+            continue
+        name = str(hit.get("name") or "")
+        for group in groups:
+            if _same_caption(str(group[0].get("name") or ""), name):
+                group.append(hit)
+                break
+        else:
+            groups.append([hit])
+    out = list(hits)
+
+    def size(hit: dict) -> int:
+        return int(hit.get("size") or 0)
+
+    for group in groups:
+        first = group[0]
+        lead = max(group, key=size)
+        if size(lead) < 4 * size(first) or lead is first:
+            continue
+        at, target = _index_of(out, lead), _index_of(out, first)
+        out.insert(target, out.pop(at))
     return out
 
 
@@ -6341,6 +6582,41 @@ def _courtlistener_text_source(
     except Exception as exc:
         print(f"[pdf-text] CourtListener discovery failed: {exc}")
         return None
+
+
+# The Court's own file of one writing, in its Term's folder:
+# supremecourt.gov/opinions/25pdf/24-43_2b35.pdf — a slip opinion, or the
+# separate writings on an order.  Not a preliminary print's orders section
+# (opinions/preliminaryprint/…), a volume's worth of orders in one file.
+_SLIP_PDF_URL_RE = re.compile(r"supremecourt\.gov/opinions/\d{2}pdf/",
+                              re.IGNORECASE)
+
+
+def _slip_text_source(data: bytes, url: str,
+                      item: "Optional[dict]" = None,
+                      ) -> "Optional[_CasePdfTextSource]":
+    """A Supreme Court slip opinion's text read off its own pages: the running
+    heads, page numbers and divider rules taken out and the paragraphs put
+    back together (:func:`slip_opinion.to_clean_text`), as the slip-opinion
+    viewer's Show as Text has always done.  The T button's last resort, for
+    a writing too new for Google Scholar or CourtListener to have.  ``item``
+    names the case.  None for any other PDF, or one with no text layer."""
+    if not (data and _SLIP_PDF_URL_RE.search(url or "")):
+        return None
+    try:
+        pages, _italics = _extract_pdf_text_and_style(data)
+        text = slip_opinion.to_clean_text(pages) if pages else ""
+    except Exception as exc:
+        print(f"[cite-pdf] reading the slip opinion's own text failed: {exc}")
+        return None
+    if not text.strip():
+        return None
+    return _CasePdfTextSource(
+        # Under a PDF there is only one text to switch to, so the button says
+        # "Text"; source_label names where it came from.
+        "slip", "Text", "supremecourt.gov", url.partition("#")[0], text,
+        dict(item or {}), [], [],
+    )
 
 
 def _cl_text_record(source: "_CasePdfTextSource") -> dict:
@@ -8529,6 +8805,45 @@ class CourtListenerGUI:
         phrase_added = [0]
         phrase_done = [False]
 
+        # Supreme Court rows from the saved-opinion database and CourtListener
+        # wait for Google Scholar.  A Supreme Court case comes back as a family
+        # of writings — the merits opinion and the orders around it — and it
+        # is Scholar's page, ranked merits-first (see scholar_search below),
+        # that puts them in order.  The database answers at once and
+        # CourtListener often before Scholar, and a row never moves once
+        # shown, so a saved order or a CourtListener hit would otherwise take
+        # the top of the list from the merits opinion.  Their Supreme Court
+        # rows are held until Scholar has answered, or for at most
+        # _SPOTLIGHT_SCOTUS_HOLD_MS, and then follow its rows.  A saved
+        # opinion long enough to be a merits opinion is shown at once.
+        scholar_answered = [False]
+        scholar_returned = [False]   # its page is in, its rows on their way
+        held_scotus: list[tuple] = []
+
+        def _add_after_scholar(*args) -> None:
+            """_add_result, holding a Supreme Court row (args[1] is its court)
+            until Scholar's rows are up."""
+            if not scholar_answered[0] and args[1] == _SCOTUS_COURT_ID:
+                held_scotus.append(args)
+                return
+            _add_result(*args)
+
+        def _release_held_scotus() -> None:
+            if scholar_answered[0]:
+                return
+            scholar_answered[0] = True
+            pending = held_scotus[:]
+            del held_scotus[:]
+            for args in pending:
+                _add_result(*args)
+
+        def _release_held_scotus_late() -> None:
+            """The hold's time limit.  Once Scholar's page is in, its thread
+            releases the held rows after its own; the limit does not cut in
+            ahead of them."""
+            if not scholar_returned[0]:
+                _release_held_scotus()
+
         def _phrase_fallback() -> None:
             """Show Scholar's page as a subject search when the name pass left
             the dropdown empty — see :func:`_spotlight_phrase_page`."""
@@ -8561,6 +8876,7 @@ class CourtListenerGUI:
                 if not popup.winfo_exists():
                     return
                 if search_done[0] >= total_searches:
+                    _release_held_scotus()
                     _phrase_fallback()
                     n = len(result_rows)
                     if phrase_added[0]:
@@ -8610,14 +8926,20 @@ class CourtListenerGUI:
 
         # Launch Scholar and CL searches in parallel
         def scholar_search() -> None:
-            if not _SCHOLAR_AVAILABLE:
+            try:
+                search_scholar()
+            finally:
+                # Scholar has answered, one way or another: the Supreme Court
+                # rows held back for it follow its own rows now.
+                self.root.after(0, _release_held_scotus)
                 search_done[0] += 1
                 self.root.after(0, _update_status)
+
+        def search_scholar() -> None:
+            if not _SCHOLAR_AVAILABLE:
                 return
             fetcher = self._get_scholar()
             if fetcher is None:
-                search_done[0] += 1
-                self.root.after(0, _update_status)
                 return
             results = []
             for search_query in case_search_queries:
@@ -8630,6 +8952,7 @@ class CourtListenerGUI:
                 if candidate_results:
                     results = candidate_results
                     break
+            scholar_returned[0] = True
             # Keep the page as Scholar ranked it, before any of our filtering:
             # if the filters leave the dropdown empty, this is what the query
             # gets read as a phrase against.
@@ -8649,9 +8972,11 @@ class CourtListenerGUI:
                 # relevance order stands in for CourtListener's
                 # citation-count tiebreak — and keep only the best tier
                 # present, as _filter_to_best_tier does across the pooled CL
-                # passes.  Up to the best six are shown (the scholar bucket
-                # cap); a couple of spares are kept past those so a duplicate
-                # of a case another source already listed can be replaced.
+                # passes; then lead each Supreme Court case with its merits
+                # opinion rather than an order under the same caption.  Up
+                # to the best six are shown (the scholar bucket cap); a
+                # couple of spares are kept past those so a duplicate of a
+                # case another source already listed can be replaced.
                 results = _rank_scholar_spotlight_results(
                     query,
                     results,
@@ -8669,8 +8994,6 @@ class CourtListenerGUI:
                     _scholar_result_identity(r.url),
                     r.snippet,
                 )
-            search_done[0] += 1
-            self.root.after(0, _update_status)
 
         def cl_search() -> None:
             client = (
@@ -8804,8 +9127,8 @@ class CourtListenerGUI:
                 )
 
                 self.root.after(
-                    0, _add_result, bucket, court_id, case_name, cite_str,
-                    year, "CourtListener", make_opener(), identity,
+                    0, _add_after_scholar, bucket, court_id, case_name,
+                    cite_str, year, "CourtListener", make_opener(), identity,
                     _courtlistener_result_snippet(item),
                     make_snippet_loader(),
                 )
@@ -8884,8 +9207,16 @@ class CourtListenerGUI:
                                 ordinary()
                         return open_it
 
+                    # A saved merits opinion is up at once; a saved order
+                    # waits for Scholar like CourtListener's rows.
+                    add = (
+                        _add_result
+                        if int(hit.get("size") or 0)
+                        >= _SAVED_SCOTUS_OPINION_BYTES
+                        else _add_after_scholar
+                    )
                     self.root.after(
-                        0, _add_result, "opiniondb", court_id, name, cite,
+                        0, add, "opiniondb", court_id, name, cite,
                         year, "Opinion database", make_opener(),
                         f"scholar:{sid}" if sid else "",
                         str(hit.get("snippet") or ""),
@@ -8928,6 +9259,8 @@ class CourtListenerGUI:
         if loaded_opinion_db is not None:
             threading.Thread(target=opinion_db_search, daemon=True).start()
         threading.Thread(target=engrep_search, daemon=True).start()
+        # A slow Scholar does not keep the held Supreme Court rows off screen.
+        self.root.after(_SPOTLIGHT_SCOTUS_HOLD_MS, _release_held_scotus_late)
 
     @staticmethod
     def _win_force_foreground(popup: tk.Misc) -> bool:
@@ -9200,6 +9533,66 @@ class CourtListenerGUI:
         except (AttributeError, tk.TclError):
             pass
 
+    def open_supreme_court_pdf(self, parent, url: str, name: str, *,
+                               citation: str = "", docket: str = "",
+                               decided: str = "", writing: str = "merits",
+                               status=None) -> None:
+        """Open a Supreme Court opinion straight from supremecourt.gov — a
+        slip opinion, or the separate writings on an order — in the viewer
+        every other Supreme Court opinion opens in: the pages with their
+        strip, the text a press of T away, the case's details a press of s.
+
+        ``citation`` is the Court's own: "609 U.S. 422" once the page is
+        fixed, before that "609/2" (the preliminary print it will be in),
+        shown as "609 U.S. ___".  The text is found by name and ``decided``
+        (see _warm_case_text), ``writing`` "order" for an order's separate
+        writings.  A link to a page of its PDF — a writing partway into an
+        order's file ("26a305_4g15.pdf#page=2"), or into a preliminary
+        print's whole orders section ("606US2PP_Ord.pdf#page=143") — opens at
+        that page."""
+        status = status or self._safe_root_status
+        paged = re.fullmatch(r"(\d+)\s*U\.\s?S\.\s*(\d+)", citation.strip())
+        volume = re.fullmatch(r"(\d+)/\d+", citation.strip())
+        if paged:
+            cite = f"{paged.group(1)} U.S. {paged.group(2)}"
+        elif volume:
+            cite = f"{volume.group(1)} U.S. ___"
+        else:
+            cite = f"No. {docket}" if docket else ""
+        pdf_url = url.partition("#")[0]
+        start = _pdf_link_page_index(url)
+        item = {"caseName": name, "court_id": _SCOTUS_COURT_ID,
+                "dateFiled": decided, "docketNumber": docket,
+                "citation": [cite] if paged else []}
+        status(f"Opening {name}…")
+
+        def run() -> None:
+            try:
+                # The page is numbered in the PDF as published, cover and
+                # all: the cover comes out once the page it moves is known.
+                fetched = _fetch_pdf_bytes(pdf_url, timeout=45,
+                                           keep_cover=bool(start))
+            except Exception as exc:
+                print(f"[scotus] fetching {pdf_url} failed: {exc}")
+                fetched = None
+            if fetched is None:
+                self._post_root(lambda: status(
+                    f"Could not load {name} from supremecourt.gov."))
+                return
+            data, final_url = fetched
+            first = start
+            if first:
+                clean = _strip_preliminary_print_cover(data)
+                first = max(0, first - (_pdf_page_total(data)
+                                        - _pdf_page_total(clean)))
+                data = clean
+            self._post_root(lambda: self._show_cited_case_pdf(
+                parent, data, final_url, cite, "", name, ("cite", cite),
+                name, status, cl_item=item, decided=decided,
+                writing=writing, start_page=first or None))
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _cited_case_pdf_item(self, client, cite: str, name: str) -> dict:
         """A search-result-shaped record for a cited case, good enough for the
         PDF resolver.  CourtListener's own cluster at this citation when it has
@@ -9226,12 +9619,19 @@ class CourtListenerGUI:
     def _show_cited_case_pdf(self, parent, data: bytes, url: str, cite: str,
                              pin: str, name: str, action: tuple,
                              snippet: str, status, *,
-                             cl_item: "Optional[dict]" = None) -> None:
+                             cl_item: "Optional[dict]" = None,
+                             decided: str = "",
+                             writing: str = "merits",
+                             start_page: "Optional[int]" = None) -> None:
         """Put a cited case's scan on screen, with its text warming behind it.
 
         ``cl_item`` is the CourtListener cluster the scan was found through,
         when there was one: what the T button shows if Google Scholar has no
-        copy of the case."""
+        copy of the case.  ``decided`` and ``writing`` find the text of a
+        Supreme Court opinion opened straight from the Court by its date
+        rather than its citation (see _warm_case_text).  ``start_page`` is a
+        page of the file to open at, 0-based, where the link named one
+        itself rather than a pin cite."""
         title = f"{name} — {cite}" if name and cite else (cite or name or "PDF")
         margin = _PdfPane._MARGIN * 3 if _is_us_reports_pdf(url) else None
         host = self.root if parent is None else parent
@@ -9248,7 +9648,8 @@ class CourtListenerGUI:
         # fetched below replaces them with the real caption, the parallel
         # citations and the decision date a Bluebook filename is built from.
         named = {"data": data, "url": url, "cite": cite, "name": name,
-                 "pin": pin, "record": None, "page": None, "pin_page": None,
+                 "pin": pin, "start_page": start_page,
+                 "record": None, "page": None, "pin_page": None,
                  "text_source": None,
                  # A page of orders opened for none of them in particular:
                  # it is the page, called by its citation alone, and has no
@@ -9316,11 +9717,16 @@ class CourtListenerGUI:
         # The text is fetched now rather than when the reader asks for it, so
         # the case name opens a page already in hand — and so the window can be
         # titled with the case's real citation rather than the clicked one.
+        # A slip opinion may be too new for anyone else to have: then the PDF's
+        # own text is the text (any other scan has none to offer).
         if not named["orders_page"]:
             self._warm_case_text(cite, name, on_record=described,
                                  on_page=page_ready,
                                  on_text_source=text_source_ready,
-                                 cl_item=cl_item, scan_url=url)
+                                 cl_item=cl_item, scan_url=url,
+                                 decided=decided, writing=writing,
+                                 own_text=lambda: _slip_text_source(
+                                     data, url, cl_item))
         try:
             window = _FloatingPdfWindow(
                 self.root, data, url, title, margin=margin, app=self,
@@ -9383,14 +9789,21 @@ class CourtListenerGUI:
         Called twice: once as the window opens, on the arithmetic alone, and
         again once the pages' own numbers have been read — which corrects for a
         cover leaf.  The second is skipped if the reader has scrolled away in
-        the meantime; where they have gone is a better answer than ours."""
+        the meantime; where they have gone is a better answer than ours.  A
+        page the link named in the file itself (``start_page``) needs no
+        arithmetic, and no correcting."""
         window = named.get("window")
         pin = str(named.get("pin") or "")
-        if window is None or not pin or not window.alive():
+        start = named.get("start_page")
+        if window is None or not (pin or start is not None) \
+                or not window.alive():
             return
-        target = _scan_page_for_pin(
-            self._scan_cite_for(named), pin, named.get("cite") or "",
-            pdf_pages)
+        if start is not None:
+            target = start
+        else:
+            target = _scan_page_for_pin(
+                self._scan_cite_for(named), pin, named.get("cite") or "",
+                pdf_pages)
         if target is None or target == named.get("pin_page"):
             return
         was = named.get("pin_page")
@@ -9455,7 +9868,8 @@ class CourtListenerGUI:
     def _warm_case_text(self, cite: str, name: str, on_record=None,
                         on_page=None, on_text_source=None,
                         cl_item: "Optional[dict]" = None,
-                        scan_url: str = "") -> None:
+                        scan_url: str = "", decided: str = "",
+                        writing: str = "merits", own_text=None) -> None:
         """Fetch the cited opinion's text in the background, so the case name
         on the viewer's strip opens a page that is already in hand.  Uses the
         ordinary Google Scholar path, whose result is cached and saved to the
@@ -9480,8 +9894,19 @@ class CourtListenerGUI:
         text is taken from, since CAP scanned each of them separately and only
         one of them paginates the pages on screen.  Scholar is still tried
         first: it is the better-typeset copy, and the one every other view of
-        a case prefers."""
-        if not cite:
+        a case prefers.
+
+        ``decided`` is a Supreme Court decision's date, for an opinion opened
+        straight from the Court (its Recent SCOTUS list): too recent, often,
+        for a citation with a page to look it up by, so it is found by name
+        and date instead — ``writing`` "order" for an order's separate
+        writings rather than a merits opinion (see
+        :func:`_supreme_court_writing_urls`).  A page is kept only if it
+        prints that date: no text at all is better than the text of another
+        of the case's writings.  ``own_text`` is the last resort when nobody
+        has the writing yet — called on the worker, it returns the text the
+        PDF itself carries (:func:`_slip_text_source`), or None."""
+        if not cite and not decided:
             return
         try:
             fetcher = self._get_scholar() if _SCHOLAR_AVAILABLE else None
@@ -9503,33 +9928,73 @@ class CourtListenerGUI:
         # through names it — so the text is of the case whose pages are shown.
         case_name, year = _case_name_and_year(cl_item, name)
 
+        def keep(fetched) -> None:
+            if on_page is not None:
+                try:
+                    on_page(*fetched)
+                except Exception as exc:
+                    print(f"[cite-pdf] keeping the opinion page "
+                          f"failed: {exc}")
+            if on_record is not None:
+                self._describe_warmed_case(fetched, name, on_record)
+
+        # A reporter citation with a page to look up by — not "609 U.S. ___",
+        # a volume, nor "No. 25-332", a docket.
+        paged = bool(re.match(r"\d+\s+\D.*?\s\d+\s*$", cite or ""))
+
         def scholar() -> bool:
             """Whether Google Scholar answered with a copy of the case."""
             if fetcher is None:
                 return False
             try:
-                for lookup_cite in _citation_search_variants(cite):
+                for lookup_cite in (_citation_search_variants(cite)
+                                    if paged else ()):
                     fetched = fetcher.fetch_by_citation(
                         lookup_cite, case_name=case_name, year=year)
                     if not fetched:
                         continue
-                    if on_page is not None:
-                        try:
-                            on_page(*fetched)
-                        except Exception as exc:
-                            print(f"[cite-pdf] keeping the opinion page "
-                                  f"failed: {exc}")
-                    if on_record is not None:
-                        self._describe_warmed_case(fetched, name, on_record)
+                    keep(fetched)
                     return True
+                if decided and name:
+                    found = fetcher.search_cases(
+                        name, limit=10, courts=[_SCOTUS_COURT_ID])
+                    # A few of the likeliest, each read for its date: the
+                    # stay granted a fortnight before a per curiam Scholar
+                    # has yet to add is not the per curiam.
+                    for url in _supreme_court_writing_urls(
+                            found, name, decided, writing)[:3]:
+                        fetched = fetcher.fetch_by_url(url)
+                        if fetched and _page_decided_on(fetched, decided):
+                            keep(fetched)
+                            return True
             except Exception as exc:
-                print(f"[cite-pdf] warming the text of {cite!r} failed: {exc}")
+                print(f"[cite-pdf] warming the text of {cite or name!r} "
+                      f"failed: {exc}")
             return False
+
+        def decided_cluster() -> "Optional[dict]":
+            """CourtListener's record of the writing decided on *decided*:
+            of the Supreme Court's under this caption that day, the one
+            citing most (a merits opinion cites dozens, an order none)."""
+            if not (decided and client is not None and name):
+                return None
+            same_day = [
+                it for it in _cl_name_search(client, name, _SCOTUS_COURT_ID,
+                                             limit=10)
+                if str(it.get("dateFiled") or "")[:10] == decided[:10]
+            ]
+            if not same_day:
+                return None
+            if writing == "order":
+                return same_day[0]
+            return max(same_day, key=lambda it: len(
+                _courtlistener_main_opinion(it).get("cites") or []))
 
         def fallback() -> None:
             """The copy to show when Google Scholar has none: static.case.law's
-            text of the very pages on screen, then CourtListener's."""
-            cites = list(_citation_search_variants(cite))
+            text of the very pages on screen, then CourtListener's, then the
+            PDF's own (``own_text``)."""
+            cites = list(_citation_search_variants(cite)) if paged else []
             for parallel in (cl_item or {}).get("citation") or []:
                 parallel = re.sub(r"<[^>]+>", "", str(parallel or "")).strip()
                 if parallel and parallel not in cites:
@@ -9539,10 +10004,15 @@ class CourtListenerGUI:
                 str((cl_item or {}).get("dateFiled") or ""),
             )
             if source is None and client is not None:
+                item = cl_item
+                if not (item and (item.get("cluster_id") or item.get("id"))):
+                    item = decided_cluster() or cl_item
                 source = _courtlistener_text_source(
-                    client, _citation_search_variants(cite), name,
-                    item=cl_item,
+                    client, _citation_search_variants(cite) if paged else [],
+                    name, item=item,
                 )
+            if source is None and own_text is not None:
+                source = own_text()
             if source is None:
                 return
             try:
@@ -13564,8 +14034,12 @@ def _scholar_caption_name(blocks) -> str:
 
     def refine(name: str) -> str:
         body = _scholar_body_text(blocks)
-        return simplify_historical_entity_caption(
-            refine_caption_case(name, body), body)
+        # The prose also settles a person's surname where the given-name
+        # lists can't ("Chad Everet Brackeen" is Brackeen), which every
+        # later abbreviation of this caption — a file name, a window title
+        # — then keeps without needing the text again.
+        return name_persons_by_surname(simplify_historical_entity_caption(
+            refine_caption_case(name, body), body), body)
 
     for b in blocks[:8]:
         if b.kind != "center":
@@ -15966,6 +16440,7 @@ def _fetch_pdf_bytes(
     client=None,
     timeout: int = 30,
     max_hops: int = 3,
+    keep_cover: bool = False,
 ) -> "Optional[tuple[bytes, str]]":
     """Fetch *url* as a PDF, following a small HTML wrapper if necessary.
     file:// URLs (opinions extracted from local US Reports volumes) are read
@@ -15973,7 +16448,9 @@ def _fetch_pdf_bytes(
 
     A preliminary print's "Page Proof Pending Publication" stamp and its cover
     page are taken out here, so every path downstream — the viewer, the
-    printer, Download PDF — gets the clean document."""
+    printer, Download PDF — gets the clean document.  ``keep_cover`` leaves
+    the cover in, for a caller going to a page by its number in the PDF as
+    published (a ``#page=`` link)."""
     queue = [url]
     seen: set[str] = set()
     while queue and len(seen) < max_hops:
@@ -15990,7 +16467,7 @@ def _fetch_pdf_bytes(
                 print(f"[pdf] local file read failed ({exc}): {cur}")
                 continue
             if data is not None:
-                return _clean_reporter_pdf(data), cur
+                return _clean_reporter_pdf(data, keep_cover), cur
             continue
         resp = _pdf_get(cur, client=client, timeout=timeout)
         resp.raise_for_status()
@@ -15999,7 +16476,7 @@ def _fetch_pdf_bytes(
             resp.content, resp.headers.get("Content-Encoding", ""))
         data = _normalize_pdf_bytes(content)
         if data is not None:
-            return _clean_reporter_pdf(data), final_url
+            return _clean_reporter_pdf(data, keep_cover), final_url
         for nxt in _pdf_link_candidates_from_html(content, final_url):
             if nxt not in seen and nxt not in queue:
                 queue.append(nxt)
@@ -16209,10 +16686,34 @@ def _strip_preliminary_print_cover(data: bytes) -> bytes:
             pass
 
 
-def _clean_reporter_pdf(data: bytes) -> bytes:
+def _pdf_link_page_index(url: str) -> int:
+    """The page a PDF link's ``#page=N`` names, as a 0-based index into the
+    PDF as published — 0 when it names none."""
+    match = re.search(r"#page=(\d+)", url or "", re.IGNORECASE)
+    return max(0, int(match.group(1)) - 1) if match else 0
+
+
+def _pdf_page_total(data: bytes) -> int:
+    """How many pages the PDF *data* has; 0 if it will not open."""
+    import pypdfium2 as pdfium
+
+    try:
+        with _PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(data)
+            try:
+                return len(doc)
+            finally:
+                doc.close()
+    except Exception:
+        return 0
+
+
+def _clean_reporter_pdf(data: bytes, keep_cover: bool = False) -> bytes:
     """Everything a reporter PDF carries that is not the opinion: the
-    preliminary print's watermark, and its cover page."""
-    return _strip_preliminary_print_cover(_strip_page_proof_watermark(data))
+    preliminary print's watermark, and — unless *keep_cover* — its cover
+    page."""
+    data = _strip_page_proof_watermark(data)
+    return data if keep_cover else _strip_preliminary_print_cover(data)
 
 
 def _pdf_object_bounds(obj) -> Optional[tuple]:
@@ -17261,6 +17762,33 @@ def _wash_hex(color: str, toward_white: float) -> str:
     )
 
 
+def _rail_bands(tops, height: float, min_h: float) -> list:
+    """``[(top, bottom), …]`` for the bands of a parts rail *height* px tall:
+    each writing's band runs from where it begins (*tops*, in rail px) to
+    where the next one does, and the last to the foot of the rail.
+
+    None is left thinner than *min_h*, so a short writing — a paragraph of
+    concurrence between two long opinions, or a dissent of a page at the very
+    end — still gives the pointer something to land on.  The room comes out
+    of its neighbours: the bands are pushed apart down the rail, then packed
+    back up from its foot where that has carried the last of them off the
+    end.  A rail too short to give every band *min_h* shares it out evenly."""
+    count = len(tops)
+    if not count:
+        return []
+    height = float(height)
+    first = max(0.0, min(height, float(tops[0])))
+    min_h = max(0.0, min(float(min_h), (height - first) / count))
+    edges = [first]
+    edges += [max(first, min(height, float(top))) for top in tops[1:]]
+    edges.append(height)
+    for i in range(1, count):
+        edges[i] = max(edges[i], edges[i - 1] + min_h)
+    for i in range(count - 1, 0, -1):
+        edges[i] = min(edges[i], edges[i + 1] - min_h)
+    return list(zip(edges, edges[1:]))
+
+
 def _part_author(label: str, loose: bool = False) -> str:
     """The writer named in a part's heading — "MR. JUSTICE REHNQUIST,
     dissenting" → "Rehnquist" — or "per curiam" for an opinion issued in the
@@ -17744,6 +18272,7 @@ class _PdfPane(ttk.Frame):
     # The opinion-parts rail beside the scrollbar (see set_section_marks).
     _RAIL_W = 13        # rail width (px)
     _RAIL_TICK_H = 3    # solid marker drawn at a part's first line (px)
+    _RAIL_MIN_BAND_H = 14   # thinnest band, so a short part can be clicked (px)
     _RAIL_BG = "#f0f1f3"
     _RAIL_EDGE = "#cdd0d5"
     _RAIL_BAND_WASH = 0.80   # how far a part's band is blended toward white
@@ -18522,7 +19051,8 @@ class _PdfPane(ttk.Frame):
 
         ``sections`` is what :func:`slip_opinion.detect_sections` returned: each
         part contributes a washed band covering the stretch of the document it
-        occupies, with its kind's color, and a solid marker on its first line.
+        occupies — widened to ``_RAIL_MIN_BAND_H`` where that is too short to
+        click — with its kind's color, and a solid marker on its first line.
         Fewer than two parts is nothing to navigate between, and takes an
         existing rail away again.  Deciding *which* documents deserve a rail is
         the caller's: a PDF with no separate writing does not need one.
@@ -18589,13 +19119,11 @@ class _PdfPane(ttk.Frame):
         h = max(1, rail.winfo_height())
         w = self._RAIL_W
         rail.create_line(0, 0, 0, h, fill=self._RAIL_EDGE)
-        starts = [self._section_doc_y(sec) for sec in self._sections]
-        for i, sec in enumerate(self._sections):
-            top = starts[i] / self._content_h
-            bottom = (starts[i + 1] / self._content_h
-                      if i + 1 < len(starts) else 1.0)
-            y0 = max(0.0, min(1.0, top)) * h
-            y1 = max(y0 + 2, max(0.0, min(1.0, bottom)) * h)
+        bands = _rail_bands(
+            [self._section_doc_y(sec) / self._content_h * h
+             for sec in self._sections],
+            h, self._RAIL_MIN_BAND_H)
+        for (y0, y1), sec in zip(bands, self._sections):
             color = _PDF_PART_COLORS.get(getattr(sec, "kind", ""), "#666666")
             rail.create_rectangle(
                 2, y0, w, y1, width=0,
@@ -21040,11 +21568,12 @@ class _ScholarTextWindow:
     #: other court (see _details_panel).
     _DETAILS_VIEWS = ("Case details", "Docket", "Recent SCOTUS",
                       "Related cases", "Outline")
-    #: What the panel standing beside a scan offers.  Recent SCOTUS, Related
-    #: cases and the outline answer questions that want the room a window has;
-    #: the case's own details and the docket behind them are what a reader
-    #: looking at the pages asks for, so those two are here.
-    _SCAN_DETAILS_VIEWS = ("Case details", "Docket")
+    #: What the panel standing beside a scan offers: the case's own details
+    #: and the docket behind them, which are what a reader looking at the
+    #: pages asks for, and the Court's recent opinions, a glance at what is
+    #: new.  Related cases and the outline answer questions that want the
+    #: room a window has.
+    _SCAN_DETAILS_VIEWS = ("Case details", "Docket", "Recent SCOTUS")
     _JUSTIFY_HARD_BREAK_EXTRA_SPACES = 4
     _JUSTIFY_PAD_TAG = "justify-pad"
     _JUSTIFY_HIDE_TAG = "justify-hide"
@@ -24148,7 +24677,12 @@ class _ScholarTextWindow:
     def _draw_part_rail(self, canvas) -> None:
         """The parts as washed bands on a slim rail, each covering the stretch
         of the opinion it occupies — the scrollbar's own companion, and all the
-        width the opinion can spare."""
+        width the opinion can spare.  A writing too short to click on at that
+        scale is given a band of ``_PdfPane._RAIL_MIN_BAND_H`` instead.
+
+        What comes before the first writing — the caption and the syllabus —
+        is a band too, as the syllabus is on a scan: the top of the rail goes
+        back to the beginning of the case."""
         self._partmap_rows = []
         canvas.delete("all")
         parts = getattr(self, "_rendered_parts", None)
@@ -24157,16 +24691,21 @@ class _ScholarTextWindow:
                 or not parts or not regions):
             canvas.config(width=0)
             return
+        kinds = ("majority", "concurrence", "dissent", "separate", "syllabus")
         marks = [
             (start, parts[p].kind, parts[p].label)
             for start, _end, p in regions
-            if parts[p].kind in ("majority", "concurrence", "dissent",
-                                 "separate", "syllabus")
+            if parts[p].kind in kinds
         ]
         total = self._ypixels("end-1c")
         if len(marks) < 2 or not total:
             canvas.config(width=0)
             return
+        head, _end, p = regions[0]
+        if parts[p].kind not in kinds:
+            # Its band runs down to the first writing, so a headmatter part
+            # after the caption is taken in with it.
+            marks.insert(0, (head, parts[p].kind, parts[p].label))
         width = _PdfPane._RAIL_W
         canvas.config(width=width)
         try:
@@ -24174,13 +24713,11 @@ class _ScholarTextWindow:
         except tk.TclError:
             height = self._text.winfo_height()
         canvas.create_line(0, 0, 0, height, fill=_PdfPane._RAIL_EDGE)
-        starts = [max(0.0, self._ypixels(start) / total)
-                  for start, _k, _l in marks]
+        bands = _rail_bands(
+            [self._ypixels(start) / total * height for start, _k, _l in marks],
+            height, _PdfPane._RAIL_MIN_BAND_H)
         rows: list[tuple] = []
-        for i, (start, kind, label) in enumerate(marks):
-            top = starts[i] * height
-            bottom = (starts[i + 1] * height if i + 1 < len(starts) else height)
-            bottom = max(top + 2, bottom)
+        for (top, bottom), (start, kind, label) in zip(bands, marks):
             color = self._PARTMAP_COLORS.get(kind, "#666666")
             canvas.create_rectangle(
                 2, top, width, bottom, width=0,
@@ -24197,7 +24734,8 @@ class _ScholarTextWindow:
 
         The rail's only.  The labelled strip a case window carries prints the
         names already, so a second set flashed over the top of them would say
-        it twice; and a syllabus, being nobody's writing, is left unnamed."""
+        it twice; and a syllabus or caption, being nobody's writing, is left
+        unnamed."""
         if not getattr(self, "_chromeless", False):
             return []
         rows = []
@@ -24245,8 +24783,17 @@ class _ScholarTextWindow:
         return best
 
     def _partmap_row_at(self, y: float):
-        """The part whose band or marker covers strip height *y*."""
-        for row in getattr(self, "_partmap_rows", []):
+        """The part whose band or marker covers strip height *y*.
+
+        A part *y* falls inside wins outright.  The few pixels of slack around
+        each one only settle a click that lands between two of the labelled
+        strip's markers — on the rail, where the bands abut, the slack would
+        let the band above a short writing take clicks aimed at its top."""
+        rows = getattr(self, "_partmap_rows", [])
+        for row in rows:
+            if row[0] <= y < row[1]:
+                return row
+        for row in rows:
             if row[0] - 4 <= y <= row[1] + 4:
                 return row
         return None
@@ -24632,6 +25179,7 @@ class _ScholarTextWindow:
         name = abbreviate_case_name(
             name,
             court_state=_state_of_court(court_id, str(item.get("court") or "")),
+            body_text=opinion_body,
         )
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
@@ -26118,10 +26666,10 @@ class _ScholarTextWindow:
             # falling through to the other.
             # Which of them this panel offers is the window's to say: a case
             # window offers every view, a panel standing beside a scan the
-            # case's details and the docket behind them.  The docket is a
-            # Supreme Court view either way, so it comes off for any other
-            # court — and a panel left with one view needs no selector at all
-            # (_details_mode then reads "case").
+            # case's details, the docket behind them and the Court's recent
+            # opinions.  The docket is a Supreme Court view either way, so it
+            # comes off for any other court — and a panel left with one view
+            # needs no selector at all (_details_mode then reads "case").
             mode_values = [name for name in self._details_views
                            if name != "Docket" or self._is_scotus]
             if len(mode_values) > 1:
@@ -26665,13 +27213,43 @@ class _ScholarTextWindow:
             lines.append(("", "View on CourtListener →", url))
         return lines
 
-    def _details_lines_recent(self, decisions: list) -> list[tuple]:
-        """The recent-decisions panel: each case's name, decision date and
-        docket, the holding summary from the Court's homepage, and a link
-        opening the slip opinion in the in-app viewer."""
+    def _details_lines_recent(self, decisions: list, merits: list = (),
+                              orders: list = ()) -> list[tuple]:
+        """The Recent SCOTUS view, in two parts.
+
+        First the Court's latest merits opinions: *decisions*, the Recent
+        Decisions panel of its homepage (name, date and docket, the holding
+        in plain English); or, when that panel is empty — between Terms, and
+        on days it has been cleared — *merits*, the latest entries of the
+        Term's "Opinions of the Court" (``scotus_recent.TermOpinion``), with
+        the opinion's author and the holding the Court puts on its link.
+        Then *orders*: the latest orders that drew separate writings
+        (``scotus_recent.OrderOpinion``), each once, naming who wrote.  A
+        linked entry opens in the viewer every Supreme Court opinion opens
+        in (CourtListenerGUI.open_supreme_court_pdf)."""
+        import scotus_recent
+
+        app = self._app
+
+        def opener(url: str, name: str, description: str = "", *,
+                   citation: str = "", docket: str = "", decided: str = "",
+                   writing: str = "merits"):
+            if app is not None and hasattr(app, "open_supreme_court_pdf"):
+                return lambda: app.open_supreme_court_pdf(
+                    self._win, url, name, citation=citation, docket=docket,
+                    decided=decided, writing=writing,
+                    status=self._status_var.set)
+            return lambda: _SlipOpinionWindow(
+                self._win, url, name, self._status_var.set, app=app,
+                description=description)
+
         lines: list[tuple] = [
             ("lbl", "The Court's latest opinions, from supremecourt.gov."),
         ]
+        if decisions:
+            lines.append(("title", "Recent decisions"))
+        elif merits:
+            lines.append(("title", "Opinions of the Court"))
         for d in decisions:
             lines.append(("h", d.name))
             sub = " · ".join(p for p in (
@@ -26682,11 +27260,63 @@ class _ScholarTextWindow:
                 lines.append(("", d.description))
             lines.append((
                 "", "Open the slip opinion",
-                lambda d=d: _SlipOpinionWindow(
-                    self._win, d.opinion_url, d.name,
-                    self._status_var.set, app=self._app,
-                    description=d.description),
+                opener(d.opinion_url, d.name, d.description, docket=d.docket,
+                       decided=scotus_recent.iso_date(d.date)),
             ))
+        if not decisions:
+            for m in merits:
+                lines.append(("h", m.name))
+                sub = " · ".join(p for p in (
+                    scotus_recent.display_date(m.date),
+                    f"No. {m.docket}" if m.docket else "",
+                    scotus_recent.author_label(m.author),
+                ) if p)
+                lines.append(("lbl", sub))
+                if m.description:
+                    lines.append(("", m.description))
+                if m.opinion_url:
+                    lines.append((
+                        "", "Open the opinion",
+                        opener(m.opinion_url, m.name, m.description,
+                               citation=m.citation, docket=m.docket,
+                               decided=m.date),
+                    ))
+                    continue
+                # Listed before the Court has linked its PDF: the docket is
+                # where it will appear.
+                try:
+                    import scotus_docket
+                    docket_url = scotus_docket.official_docket_url(m.docket)
+                except Exception:
+                    docket_url = ""
+                if docket_url:
+                    lines.append(("", "Opinion not yet posted — the docket",
+                                  docket_url))
+                else:
+                    lines.append(("lbl", "Opinion not yet posted"))
+        if not (decisions or merits):
+            lines.append(("lbl", "No recent decisions were found on "
+                                 "supremecourt.gov."))
+        if orders:
+            lines.append(("title", "Opinions relating to orders"))
+        for o in orders:
+            lines.append(("h", o.name))
+            lines.append(("lbl", " · ".join(p for p in (
+                scotus_recent.display_date(o.date),
+                f"No. {o.docket}" if o.docket else "",
+            ) if p)))
+            writers = "; ".join(
+                scotus_recent.author_label(a) for a in o.authors)
+            if writers:
+                lines.append(("", f"Separate opinions: {writers}"))
+            if o.opinion_url:
+                lines.append((
+                    "", "Open the opinions",
+                    opener(o.opinion_url, o.name,
+                           f"Separate opinions: {writers}" if writers else "",
+                           citation=o.citation, docket=o.docket,
+                           decided=o.date, writing="order"),
+                ))
         return lines
 
     # ------------------------------------------------------------------
@@ -26713,7 +27343,10 @@ class _ScholarTextWindow:
 
     def _load_recent_scotus(self) -> None:
         """Fetch the Court's most recent decisions (supremecourt.gov) off-thread
-        and render them with in-app slip-opinion links."""
+        and render them with links into the Supreme Court viewer: the
+        homepage's Recent Decisions — or, when it lists none, the Term's ten
+        latest opinions of the Court — then the five latest orders with
+        separate writings."""
         self._recent_loaded = True
         self._set_details([("lbl", "Loading recent decisions…")])
 
@@ -26722,11 +27355,10 @@ class _ScholarTextWindow:
             try:
                 import scotus_recent
                 decisions = scotus_recent.fetch_recent_decisions()
-                if decisions:
-                    lines = self._details_lines_recent(decisions)
-                else:
-                    lines = [("lbl", "No recent decisions were found on "
-                                     "supremecourt.gov.")]
+                merits = ([] if decisions
+                          else scotus_recent.recent_merits_opinions(10))
+                orders = scotus_recent.recent_order_opinions(5)
+                lines = self._details_lines_recent(decisions, merits, orders)
             except Exception as exc:
                 print(f"[details] recent decisions: {exc}")
                 lines = [("lbl", f"Could not load recent decisions: {exc}")]
@@ -31534,6 +32166,9 @@ class _SlipOpinionWindow:
                  status=lambda _s: None, *, app=None,
                  description: str = "") -> None:
         self._url = url
+        # A link into a larger PDF — a writing in a preliminary print's
+        # orders section — names its page with "#page=N".
+        self._start_page = _pdf_link_page_index(url)
         self._title = title
         self._description = description
         self._app = app
@@ -31713,7 +32348,11 @@ class _SlipOpinionWindow:
                     self._post(self._show, cached)
                     return
             try:
-                fetched = _fetch_pdf_bytes(self._url, timeout=45)
+                # A #page= link counts the PDF's pages as published, cover
+                # and all.
+                fetched = _fetch_pdf_bytes(
+                    self._url, timeout=45,
+                    keep_cover=bool(self._start_page))
                 if fetched is None:
                     raise RuntimeError("supremecourt.gov did not return a PDF")
                 data, final_url = fetched
@@ -31752,6 +32391,11 @@ class _SlipOpinionWindow:
             return
         self._pane = pane
         pane.pack(side="left", fill="both", expand=True, padx=8, pady=4)
+        if self._start_page:
+            # After the pages are laid out: a pane scrolled before its first
+            # layout has nowhere to go.
+            self._win.after(
+                150, lambda: pane.scroll_to_page(self._start_page))
         self._status_var.set(
             "Scanning for citations and separate opinions…")
         threading.Thread(target=self._analyze, args=(data,),
@@ -32254,7 +32898,8 @@ def _open_scotus_citation(app: "CourtListenerGUI", parent: tk.Misc,
     California, No. 26A139, slip op. at 4 (U.S. Aug. 24, 2026)".  The Court's
     own slip opinion comes first, found in its opinion archive by the docket
     and the decision date (:func:`scotus_recent.find_slip_opinion`) and shown
-    in the slip-opinion viewer.  An order on an application is filed on the
+    in the viewer every Supreme Court opinion opens in
+    (CourtListenerGUI.open_supreme_court_pdf).  An order on an application is filed on the
     docket rather than in that archive, so failing it the case's docket page
     on supremecourt.gov — which lists every order and opinion in the case —
     opens in the browser."""
@@ -32286,11 +32931,19 @@ def _open_scotus_citation(app: "CourtListenerGUI", parent: tk.Misc,
         except Exception as exc:
             print(f"[scotus] slip-opinion lookup failed for {label!r}: {exc}")
         if match is not None and match.opinion_url:
-            def open_slip(url=match.opinion_url,
-                          title=match.name or name or label) -> None:
+            def open_slip(found=match, title=match.name or name or label
+                          ) -> None:
                 try:
-                    _SlipOpinionWindow(parent, url, title, safe_status,
-                                       app=app)
+                    if hasattr(app, "open_supreme_court_pdf"):
+                        app.open_supreme_court_pdf(
+                            parent, found.opinion_url, title,
+                            citation=found.citation,
+                            docket=found.docket or docket,
+                            decided=found.date or spec.get("date") or "",
+                            status=safe_status)
+                    else:
+                        _SlipOpinionWindow(parent, found.opinion_url, title,
+                                           safe_status, app=app)
                 except tk.TclError:
                     pass
 
@@ -33185,6 +33838,10 @@ class _StatuteWindow:
         self._neighbors: tuple = (None, None)
         self._link_actions: dict[str, tuple[str, str]] = {}
         self._link_n = 0
+        # A U.S. Code unit's table of contents shown in place of the section
+        # (us_code.UscUnit), and the section it was reached from.
+        self._unit = None
+        self._unit_from = ""
         self._win = _secondary_view_host(parent, app)
         _ensure_modern_ttk_styles(self._win)
         self._win.title(f"{doc.label} — {doc.source_name}")
@@ -33242,6 +33899,8 @@ class _StatuteWindow:
                 "source_name": doc.source_name,
                 "source_note": doc.source_note,
                 "bluebook_cite": doc.bluebook_cite(),
+                # where a U.S. Code section sits, for its breadcrumb bar
+                "crumbs": [list(c) for c in getattr(doc, "crumbs", [])],
             }
         except Exception:
             return None
@@ -33312,7 +33971,7 @@ class _StatuteWindow:
         )
         _ui_button(
             top, "Open in Browser",
-            command=lambda: webbrowser.open(self._doc.url), width=132,
+            command=lambda: webbrowser.open(self._current_url()), width=132,
         ).pack(side="right")
         self._next_btn = _ui_button(
             top, "Next § ▶", width=88, command=lambda: self._go_neighbor(1),
@@ -33328,8 +33987,16 @@ class _StatuteWindow:
             except tk.TclError:
                 pass
 
+        # Where a U.S. Code section sits in the Code — "Title 42 › Chapter 21
+        # › Subchapter I › § 1983" — each unit above it opening its table of
+        # contents here (_show_unit).  Packed by _update_crumbs when there
+        # is a trail to show.
+        self._crumb_bar = _ui_frame(win)
+        win.bind("<Alt-Up>", lambda _e: self._go_up() or "break")
+
         frame = ttk.Frame(win)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
+        self._text_frame = frame
         s = self._base_size
         fam = "Georgia"
         self._fonts = {
@@ -33381,6 +34048,8 @@ class _StatuteWindow:
                     lmargin2=margin + 22, spacing3=6,
                 )
         txt.tag_configure("jumpflash", background="#fff2a8")
+        # the section a table of contents was opened from
+        txt.tag_configure("herebg", background="#fff2a8")
         txt.tag_configure("citelink", foreground="#1a56b0")
         txt.tag_bind("citelink", "<Enter>",
                      lambda _e: txt.config(cursor="hand2"))
@@ -33429,9 +34098,13 @@ class _StatuteWindow:
             except tk.TclError:
                 pass  # modifier not supported on this platform
 
-    _ENUM_LEAD_RE = re.compile(r"((?:\((?:\d{1,3}|[a-zA-Z]{1,4})\)\s*)+)")
+    _ENUM_LEAD_RE = re.compile(
+        r"((?:\((?:\d{1,3}[A-Za-z]{0,2}|[a-zA-Z]{1,4})\)\s*)+)")
 
     def _render(self) -> None:
+        if self._unit is not None:
+            self._render_unit()
+            return
         txt = self._text
         txt.config(state="normal")
         txt.delete("1.0", "end")
@@ -33442,6 +34115,15 @@ class _StatuteWindow:
         # (position, enumerator path) per enumerated paragraph, for the
         # pin-cite jump and for citing a selection in _copy_cite
         self._anchors: list[tuple[str, tuple]] = []
+        # The U.S. Code keeps the OLRC page's own indentation, which follows
+        # the printed Code ("(2)" flush with "(d)(1)"), so an indent is not a
+        # depth there: each paragraph's subdivision is read from the page's
+        # layout instead — flush text included, so a selection in it cites
+        # the subdivision it belongs to.
+        usc_paths = (
+            us_code.statute_paths(self._doc.paras)
+            if self._doc.kind == "usc" else None
+        )
         para_styles = getattr(self._doc, "para_styles", [])
         site_formatting = bool(
             self._doc.kind == "cfr"
@@ -33462,7 +34144,14 @@ class _StatuteWindow:
             m = self._ENUM_LEAD_RE.match(text) if kind in ("body", "head") \
                 else None
             lead = m.group(1) if m else ""
-            if lead:
+            if usc_paths is not None:
+                if kind in ("body", "head"):
+                    para_path = usc_paths[para_index]
+                    self._anchors.append((txt.index("end-1c"), para_path))
+                    if (target and target_pos is None and para_path
+                            and list(para_path[:len(target)]) == target):
+                        target_pos = txt.index("end-1c")
+            elif lead:
                 # One eCFR <P> can open several nested levels separated by
                 # heading dashes, e.g. "(b) ...—(1) ..." or
                 # "(v) ...—(A) ...—(1) ...".  Use the same structural reading
@@ -33524,6 +34213,7 @@ class _StatuteWindow:
                 txt.insert("end", "\n", ("notebody", indtag))
         txt.config(state="disabled")
         self._finder.refresh()
+        self._update_crumbs()
         if target_pos:
             txt.see(target_pos)
             txt.tag_add("jumpflash", f"{target_pos} linestart",
@@ -33532,6 +34222,180 @@ class _StatuteWindow:
                 1800,
                 lambda: txt.tag_remove("jumpflash", "1.0", "end"),
             )
+
+    # ------------------------------------------------------------------
+    # The Code above a U.S. Code section
+    # ------------------------------------------------------------------
+
+    def _doc_section(self) -> str:
+        """The number of the U.S. Code section on show ("1983"), also for
+        one reopened from a bookmark."""
+        section = getattr(self._doc, "section", "")
+        if section:
+            return str(section)
+        label = str(getattr(self._doc, "label", ""))
+        return label.split("§", 1)[1].strip() if "§" in label else ""
+
+    def _current_url(self) -> str:
+        return self._unit.url if self._unit is not None else self._doc.url
+
+    def _update_crumbs(self) -> None:
+        """Show where the section or unit on show sits in the Code: the
+        units above it, each a link to its table of contents, then itself.
+        Hidden for anything that is not the U.S. Code."""
+        bar = self._crumb_bar
+        for child in bar.winfo_children():
+            child.destroy()
+        if self._unit is not None:
+            crumbs, here = self._unit.crumbs, self._unit.label
+        elif self._doc.kind == "usc" and getattr(self._doc, "crumbs", None):
+            crumbs, here = self._doc.crumbs, f"§ {self._doc_section()}"
+        else:
+            bar.pack_forget()
+            return
+        muted = "ModernMuted.TLabel" if _CTK_AVAILABLE else "TLabel"
+        for granule, label in crumbs:
+            link = ttk.Label(bar, text=us_code.crumb_label(label),
+                             foreground="#1a56b0", cursor="hand2")
+            link.bind("<Button-1>",
+                      lambda _e, g=granule: self._show_unit(g))
+            link.pack(side="left")
+            ttk.Label(bar, text="  ›  ", style=muted).pack(side="left")
+        ttk.Label(bar, text=here).pack(side="left")
+        bar.pack(fill="x", padx=16, pady=(8, 0), before=self._text_frame)
+
+    def _go_up(self) -> None:
+        """Alt+Up: the table of contents of the unit one level up."""
+        crumbs = (self._unit.crumbs if self._unit is not None
+                  else getattr(self._doc, "crumbs", None)
+                  if self._doc.kind == "usc" else None)
+        if crumbs:
+            self._show_unit(crumbs[-1][0])
+
+    def _show_unit(self, granule: str) -> None:
+        """Replace the text with a unit's table of contents, fetched in the
+        background, marking the section it was reached from."""
+        if self._unit is None:
+            self._unit_from = self._doc_section()
+        self._status_var.set("Loading the table of contents…")
+
+        def run() -> None:
+            try:
+                unit = us_code.load_unit(granule)
+            except Exception as exc:
+                self._post_status(f"Could not load that part of the Code: "
+                                  f"{exc}")
+                return
+            try:
+                self._win.after(0, self._open_unit, unit)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _post_status(self, message: str) -> None:
+        try:
+            self._win.after(0, self._status_var.set, message)
+        except tk.TclError:
+            pass
+
+    def _open_unit(self, unit) -> None:
+        self._unit = unit
+        self._win.title(f"{unit.title} U.S.C. {unit.label} — "
+                        f"{self._doc.source_name}")
+        self._src_var.set(unit.url)
+        self._notes_btn.configure(state="disabled")
+        for button in (self._prev_btn, self._next_btn):
+            button.configure(state="disabled")
+        count = sum(1 for e in unit.entries if e.kind == "section")
+        self._status_var.set(
+            f"{unit.heading} — {count} section{'s' if count != 1 else ''}"
+            if count else unit.heading)
+        self._render()
+
+    def _render_unit(self) -> None:
+        """A unit's table of contents: its heading, then its entries — the
+        groups it is divided into, each unit or section a link that opens
+        here — with the section it was reached from marked."""
+        unit = self._unit
+        txt = self._text
+        txt.config(state="normal")
+        txt.delete("1.0", "end")
+        self._anchors = []
+        txt.insert("end", unit.heading + "\n", ("sechead",))
+        here: Optional[str] = None
+        for index, entry in enumerate(unit.entries):
+            indtag = f"ind{min(entry.depth, 6)}"
+            if entry.kind == "group":
+                txt.insert("end", entry.label + "\n", ("headline", indtag))
+                continue
+            start = txt.index("end-1c")
+            if entry.kind == "section":
+                action = ("usc-sec", f"{unit.title}:{entry.section}")
+            else:
+                action = ("usc-unit", str(index))
+            txt.insert("end", entry.label,
+                       ("enum", indtag, "citelink", self._new_link(action)))
+            tail = f"  {entry.heading}" if entry.heading else ""
+            if entry.kind == "unit" and entry.first_section:
+                tail += f"  (§ {entry.first_section} et seq.)"
+            txt.insert("end", tail + "\n", (indtag,))
+            if (entry.kind == "section" and self._unit_from
+                    and entry.section.lower() == self._unit_from.lower()):
+                here = start
+        if unit.partial:
+            txt.insert("end", "More follows — open this part of the Code "
+                              "in your browser for the rest.\n", ("credit",))
+        if not unit.entries:
+            txt.insert("end", "uscode.house.gov lists no contents for this "
+                              "part of the Code.\n", ("credit",))
+        txt.config(state="disabled")
+        self._finder.refresh()
+        self._update_crumbs()
+        if here:
+            txt.tag_add("herebg", f"{here} linestart", f"{here} lineend")
+            txt.see(here)
+        else:
+            txt.yview_moveto(0.0)
+
+    def _open_section_here(self, title: str, section: str) -> None:
+        """A section chosen from a table of contents, shown in this window."""
+        self._status_var.set(f"Fetching {title} U.S.C. § {section}…")
+
+        def run() -> None:
+            try:
+                doc = us_code.load_section(title, section)
+            except Exception as exc:
+                self._post_status(str(exc))
+                return
+            try:
+                self._win.after(0, self._load_doc, doc)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_unit_entry(self, index: int) -> None:
+        """A unit chosen from a table of contents, its own contents shown
+        here."""
+        parent = self._unit
+        if parent is None or not (0 <= index < len(parent.entries)):
+            return
+        entry = parent.entries[index]
+        self._status_var.set(f"Loading {entry.label}…")
+
+        def run() -> None:
+            try:
+                unit = us_code.open_unit_entry(entry, parent)
+            except Exception as exc:
+                self._post_status(f"Could not open {entry.label}: {exc}")
+                return
+            try:
+                self._win.after(0, self._open_unit, unit)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _insert_refs(self, text: str, tags: tuple) -> None:
         """Insert paragraph text, linking citations to other U.S. Code /
@@ -33605,6 +34469,14 @@ class _StatuteWindow:
         if not action:
             return
         kind, value = action
+        # An entry in a U.S. Code table of contents opens in this window.
+        if kind == "usc-sec":
+            title, _, section = value.partition(":")
+            self._open_section_here(title, section)
+            return
+        if kind == "usc-unit":
+            self._open_unit_entry(int(value))
+            return
         if kind == "browse":
             # Cross-reference to a source we don't render in-app (e.g. a state
             # statute) — open it in the user's browser.
@@ -33688,8 +34560,10 @@ class _StatuteWindow:
         threading.Thread(target=run, daemon=True).start()
 
     def _load_doc(self, doc, highlight: tuple = ()) -> None:
-        """Show another section in this same window (prev/next nav)."""
+        """Show another section in this same window (prev/next nav, or one
+        chosen from a table of contents)."""
         self._doc = doc
+        self._unit = None
         self._highlight = tuple(highlight)
         self._has_notes = any(
             entry and str(entry[0]).startswith("note")
@@ -33727,6 +34601,15 @@ class _StatuteWindow:
         except tk.TclError:
             start, end = "1.0", "end-1c"
             selected = False
+        if self._unit is not None:
+            # A table of contents has no citation of its own to append.
+            body = _dump_statute_rtf(txt, start, end)
+            how = _copy_rich_clipboard(
+                self._win, _rtf_document(body),
+                txt.get(start, end).rstrip() + "\n")
+            what = "selection" if selected else "table of contents"
+            self._status_var.set(f"Copied {what} as {how}.")
+            return
         subs = self._pin_for(start) if selected else ()
         cite = self._doc.bluebook_cite(subs) + "."
         body = _dump_statute_rtf(txt, start, end)
@@ -33739,17 +34622,22 @@ class _StatuteWindow:
 
     def _export_rtf(self) -> None:
         """Export the section as RTF with a heading block: the citation,
-        then provenance, then the formatted text."""
+        then provenance, then the formatted text.  A table of contents on
+        show is exported the same way under its own name."""
+        unit = self._unit
+        title = (f"{unit.title} U.S.C. {unit.label}" if unit is not None
+                 else self._doc.bluebook_cite())
         head = (
             "\\pard\\qc\\sa60{\\b\\fs30 "
-            + _rtf_escape(self._doc.bluebook_cite()) + "}\\par\n"
+            + _rtf_escape(title) + "}\\par\n"
             "\\pard\\qc\\sa240{\\fs18 "
-            + _rtf_escape(f"{self._doc.source_note} — {self._doc.url}")
+            + _rtf_escape(f"{self._doc.source_note} — {self._current_url()}")
             + "}\\par\n"
         )
         body = _dump_statute_rtf(self._text, "1.0", "end-1c")
         rtf = _rtf_document(head + body)
-        default = self._doc.label.replace("§", "Sec.")
+        default = (title if unit is not None
+                   else self._doc.label.replace("§", "Sec."))
         path = filedialog.asksaveasfilename(
             defaultextension=".rtf",
             filetypes=[("Rich Text Format", "*.rtf"), ("All files", "*.*")],

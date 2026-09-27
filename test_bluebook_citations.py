@@ -17,6 +17,7 @@ from bluebook_names import (
     collapse_personal_all_caps_run,
     courtlistener_case_name,
     is_personal_all_caps_run,
+    name_persons_by_surname,
     normal_case_caption,
     refine_caption_case,
 )
@@ -80,7 +81,9 @@ from courtlistener_gui import (
 from google_scholar import (
     Block, OpinionPart, ScholarResult, Span, bears_citation, educate_quotes,
 )
-from opinion_db import OpinionDB, _gz_pack, _gz_unpack_prefix, _header_cites
+from opinion_db import (
+    OpinionDB, _gz_pack, _gz_unpack_prefix, _header_cites, extract_record,
+)
 import us_code
 
 try:
@@ -537,11 +540,12 @@ class CaptionCapitalizationTests(unittest.TestCase):
 
     def test_single_letter_initials_keep_their_capitals(self):
         # R.A.V. v. City of St. Paul, 505 U.S. 377 (1992): the spaced
-        # initials "R. A. V." collide with the small words "a" and "v".
+        # initials "R. A. V." collide with the small words "a" and "v".  (The
+        # caption's trailing ", Minnesota" goes under rule 10.2.1(f).)
         self.assertEqual(
             abbreviate_case_name(normal_case_caption(
                 "R. A. V., PETITIONER v. CITY OF ST. PAUL, MINNESOTA")),
-            "R.A.V. v. City of St. Paul, Minnesota",
+            "R.A.V. v. City of St. Paul",
         )
         self.assertEqual(
             normal_case_caption("SAMUEL A. WORCESTER v. GEORGIA"),
@@ -559,8 +563,17 @@ class CaptionCapitalizationTests(unittest.TestCase):
             "District of Columbia v. Heller",
         )
         self.assertEqual(
-            abbreviate_case_name("Walz v. Tax Comm'n OF N.Y."),
-            "Walz v. Tax Comm'n of N.Y.",
+            abbreviate_case_name(
+                "Sec'y OF State of Md. v. Joseph H. Munson Co."),
+            "Sec'y of State of Md. v. Joseph H. Munson Co.",
+        )
+        # An abbreviation that spells a small word is not one: "Or." is
+        # Oregon.
+        self.assertEqual(
+            abbreviate_case_name(
+                "Employment Division, Department of Human Resources of "
+                "Oregon v. Smith"),
+            "Emp. Div., Dep't of Hum. Res. of Or. v. Smith",
         )
         # Small words inside an all-caps run carry no casing signal and
         # keep their caps (T6 word abbreviation applies as before).
@@ -610,9 +623,11 @@ class CaptionCapitalizationTests(unittest.TestCase):
             abbreviate_case_name("Susan B. Anthony List v. Driehaus"),
             "Susan B. Anthony List v. Driehaus",
         )
+        # (Its initials close up, as adjacent single capitals do: rule
+        # 6.1(a).)
         self.assertEqual(
             abbreviate_case_name("A. H. Robins Co. v. Piccinin"),
-            "A. H. Robins Co. v. Piccinin",
+            "A.H. Robins Co. v. Piccinin",
         )
 
     def test_generational_suffix_marks_a_natural_person(self):
@@ -628,15 +643,22 @@ class CaptionCapitalizationTests(unittest.TestCase):
             self.assertEqual(abbreviate_case_name(name), name)
 
     def test_mid_name_municipal_unit_is_omitted(self):
-        # Doremus v. Bd. of Educ. of Hawthorne, 342 U.S. 429 (1952): rule
-        # 10.2.1(f) omits "city of"/"borough of" and like expressions unless
-        # they begin the party name.
+        # Doremus v. Bd. of Educ., 342 U.S. 429 (1952): rule 10.2.1(f) omits
+        # the phrase of location "of the Borough of Hawthorne" whole, as it
+        # does "of the Township of Ewing" in Everson v. Bd. of Educ.
         self.assertEqual(
             abbreviate_case_name(normal_case_caption(
                 "DOREMUS ET AL. v. BOARD OF EDUCATION OF THE BOROUGH OF "
                 "HAWTHORNE ET AL.")),
-            "Doremus v. Bd. of Educ. of Hawthorne",
+            "Doremus v. Bd. of Educ.",
         )
+        # Where that would leave a single word the place stays, and only the
+        # "city of" expression drops — the Bluebook's own example.
+        self.assertEqual(
+            abbreviate_case_name("Mayor of the City of New York v. Clark"),
+            "Mayor of N.Y. v. Clark",
+        )
+        # A party that begins with the expression keeps it.
         self.assertEqual(
             abbreviate_case_name("City of New York v. Doe"),
             "City of New York v. Doe",
@@ -665,6 +687,668 @@ class CaptionCapitalizationTests(unittest.TestCase):
                 "Standard Oil Co., Defendant-Appellant v. United States"),
             "Standard Oil Co. v. United States",
         )
+
+
+class GeographicTermTests(unittest.TestCase):
+    """Rule 10.2.1(f): "Omit all prepositional phrases of location not
+    following 'City,' or like expressions, unless the omission would leave
+    only one word in the name of a party or the location is part of a
+    business name."""
+
+    def assertNames(self, cases):
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                got = abbreviate_case_name(raw)
+                self.assertEqual(got, want)
+                # Safe to call twice.
+                self.assertEqual(abbreviate_case_name(got), got)
+
+    def test_a_phrase_of_location_is_omitted(self):
+        self.assertNames([
+            ("Brown v. Board of Education of Topeka", "Brown v. Bd. of Educ."),
+            # The rule's own example.
+            ("Surrick v. Board of Wardens of the Port of Philadelphia",
+             "Surrick v. Bd. of Wardens"),
+            ("Planned Parenthood of Southeastern Pennsylvania v. Casey",
+             "Planned Parenthood v. Casey"),
+            ("Florence v. Board of Chosen Freeholders of Burlington",
+             "Florence v. Bd. of Chosen Freeholders"),
+        ])
+
+    def test_a_city_or_township_phrase_goes_whole(self):
+        # The place follows "City", but the phrase itself follows the
+        # party's own name — so it is omitted, "City of" and all.
+        self.assertNames([
+            ("Everson v. Board of Education of the Township of Ewing",
+             "Everson v. Bd. of Educ."),
+            ("Monell v. Department of Social Services of the City of "
+             "New York", "Monell v. Dep't of Soc. Servs."),
+            ("Walz v. Tax Commission of the City of New York",
+             "Walz v. Tax Comm'n"),
+        ])
+
+    def test_the_full_supreme_court_caption_reads_the_same(self):
+        self.assertEqual(
+            abbreviate_case_name(normal_case_caption(
+                "OLIVER BROWN, ET AL. v. BOARD OF EDUCATION OF TOPEKA, "
+                "SHAWNEE COUNTY, KANSAS, ET AL.")),
+            "Brown v. Bd. of Educ.",
+        )
+
+    def test_only_the_place_goes_where_the_name_goes_on(self):
+        # The school district is the board's own name, not a place.
+        self.assertNames([
+            ("Board of Education of Independent School District No. 92 of "
+             "Pottawatomie County v. Earls",
+             "Bd. of Educ. of Indep. Sch. Dist. No. 92 v. Earls"),
+            ("Board of Education of Westside Community Schools v. Mergens",
+             "Bd. of Educ. of Westside Cmty. Schs. v. Mergens"),
+            ("Board of Regents of State Colleges v. Roth",
+             "Bd. of Regents of State Colls. v. Roth"),
+        ])
+
+    def test_a_trailing_designation_after_a_comma_goes(self):
+        self.assertNames([
+            ("Bostock v. Clayton County, Georgia",
+             "Bostock v. Clayton County"),
+            ("Kelo v. City of New London, Connecticut",
+             "Kelo v. City of New London"),
+            ("Town of Castle Rock, Colorado v. Gonzales",
+             "Town of Castle Rock v. Gonzales"),
+            ("Haycraft v. Board of Education of Jefferson County, Kentucky",
+             "Haycraft v. Bd. of Educ."),
+            # A court's own place stays; the county after it does not.
+            ("Bristol-Myers Squibb Co. v. Superior Court of California, "
+             "San Francisco County",
+             "Bristol-Myers Squibb Co. v. Superior Ct. of Cal."),
+        ])
+
+    def test_a_name_left_one_word_long_keeps_its_place(self):
+        self.assertNames([
+            ("Shapiro v. Bank of Harrisburg", "Shapiro v. Bank of Harrisburg"),
+            # Widely recognized initials count as one word, and are then what
+            # the party is called.
+            ("McCreary County, Kentucky v. American Civil Liberties Union "
+             "of Kentucky", "McCreary County v. ACLU of Ky."),
+        ])
+
+    def test_a_business_keeps_its_place(self):
+        self.assertNames([
+            ("Standard Oil Co. of New Jersey v. United States",
+             "Standard Oil Co. of N.J. v. United States"),
+            ("Riley v. National Federation of the Blind of North Carolina, "
+             "Inc.", "Riley v. Nat'l Fed'n of the Blind of N.C., Inc."),
+            ("Hackner v. Federal Reserve Bank of New York",
+             "Hackner v. Fed. Rsrv. Bank of N.Y."),
+        ])
+
+    def test_a_place_that_names_an_office_or_institution_stays(self):
+        self.assertNames([
+            ("Attorney General of New York v. Soto-Lopez",
+             "Att'y Gen. of N.Y. v. Soto-Lopez"),
+            ("Personnel Administrator of Massachusetts v. Feeney",
+             "Pers. Adm'r of Mass. v. Feeney"),
+            ("Secretary of State of Maryland v. Joseph H. Munson Co.",
+             "Sec'y of State of Md. v. Joseph H. Munson Co."),
+            ("Regents of the University of California v. Bakke",
+             "Regents of the Univ. of Cal. v. Bakke"),
+            ("School District of Abington Township v. Schempp",
+             "Sch. Dist. of Abington Twp. v. Schempp"),
+            ("Roman Catholic Archdiocese of San Juan v. Acevedo Feliciano",
+             "Roman Cath. Archdiocese of San Juan v. Acevedo Feliciano"),
+        ])
+
+    def test_a_national_designation_stays(self):
+        self.assertNames([
+            ("Boy Scouts of America v. Dale", "Boy Scouts of Am. v. Dale"),
+            ("Communist Party of the United States v. Subversive Activities "
+             "Control Board",
+             "Communist Party of the U.S. v. Subversive Activities Control "
+             "Bd."),
+        ])
+
+    def test_an_already_abbreviated_name_reads_the_same(self):
+        self.assertNames([
+            ("Planned Parenthood of Se. Pa. v. Casey",
+             "Planned Parenthood v. Casey"),
+            ("Atl. Refin. Co. v. Pub. Serv. Comm'n of N.Y.",
+             "Atl. Refin. Co. v. Pub. Serv. Comm'n"),
+            # The county that is the whole party is named in full again.
+            ("Soldal v. Cook Cnty., Ill.", "Soldal v. Cook County"),
+        ])
+
+    def test_a_tribe_keeps_the_place_it_is_named_for(self):
+        self.assertNames([
+            ("Seminole Tribe of Florida v. Florida",
+             "Seminole Tribe of Fla. v. Florida"),
+            ("Kiowa Tribe of Oklahoma v. Manufacturing Technologies, Inc.",
+             "Kiowa Tribe of Okla. v. Mfg. Techs., Inc."),
+        ])
+
+
+class CityNameTests(unittest.TestCase):
+    """Table T10's cities abbreviate inside a longer party name, and stay
+    whole when the city is the entire party (rule 10.2.2)."""
+
+    def assertNames(self, cases):
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                got = abbreviate_case_name(raw)
+                self.assertEqual(got, want)
+                self.assertEqual(abbreviate_case_name(got), got)
+
+    def test_a_city_inside_a_longer_name_is_abbreviated(self):
+        self.assertNames([
+            ("Cannon v. University of Chicago", "Cannon v. Univ. of Chi."),
+            ("Chicago Teachers Union v. Hudson",
+             "Chi. Tchrs. Union v. Hudson"),
+            ("San Francisco Arts & Athletics, Inc. v. United States Olympic "
+             "Committee",
+             "S.F. Arts & Athletics, Inc. v. U.S. Olympic Comm."),
+            ("Baltimore & Ohio Railroad Co. v. United States",
+             "Balt. & Ohio R.R. Co. v. United States"),
+            ("Miami Herald Publishing Co. v. Tornillo",
+             "Mia. Herald Publ'g Co. v. Tornillo"),
+            ("United States v. Philadelphia National Bank",
+             "United States v. Phila. Nat'l Bank"),
+            ("Board of Trade of the City of Chicago v. United States",
+             "Bd. of Trade of Chi. v. United States"),
+            ("City of Los Angeles, Department of Water & Power v. Manhart",
+             "City of L.A., Dep't of Water & Power v. Manhart"),
+        ])
+
+    def test_a_city_that_is_the_whole_party_stays_whole(self):
+        self.assertNames([
+            ("Dallas v. Stanglin", "Dallas v. Stanglin"),
+            ("Terminiello v. Chicago", "Terminiello v. Chicago"),
+            ("Los Angeles v. Lyons", "Los Angeles v. Lyons"),
+            ("McDonald v. City of Chicago", "McDonald v. City of Chicago"),
+            ("Lockyer v. City and County of San Francisco",
+             "Lockyer v. City & County of San Francisco"),
+        ])
+
+    def test_a_person_or_a_people_named_like_a_city_is_left_alone(self):
+        self.assertNames([
+            # A surname, as the whole party or after a given name.
+            ("Houston v. Lack", "Houston v. Lack"),
+            ("Sam Houston State University v. Doe",
+             "Sam Houston State Univ. v. Doe"),
+            ("Miami Tribe of Oklahoma v. United States",
+             "Miami Tribe of Okla. v. United States"),
+        ])
+
+
+class OfficeTitleTests(unittest.TestCase):
+    """An office or capacity after a party's name describes the party and is
+    omitted (rules 10.2.1(e), (g)), even where the caption gives the person's
+    surname alone."""
+
+    def assertNames(self, cases):
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(abbreviate_case_name(raw), want)
+
+    def test_an_office_after_a_lone_surname_goes(self):
+        self.assertNames([
+            ("Bowers, Attorney General of Georgia v. Hardwick",
+             "Bowers v. Hardwick"),
+            ("Roe v. Wade, District Attorney of Dallas County", "Roe v. Wade"),
+            ("Printz, Sheriff/Coroner, Ravalli County, Montana v. United "
+             "States", "Printz v. United States"),
+            ("Alexander, Director, Alabama Department of Public Safety v. "
+             "Sandoval, Individually and on Behalf of All Others Similarly "
+             "Situated", "Alexander v. Sandoval"),
+            ("Gideon v. Wainwright, Corrections Director",
+             "Gideon v. Wainwright"),
+            ("Indiana ex rel. Anderson v. Brand, Trustee",
+             "Indiana ex rel. Anderson v. Brand"),
+        ])
+
+    def test_the_office_vouches_for_an_unfamiliar_middle_name(self):
+        self.assertEqual(
+            abbreviate_case_name(
+                "Whole Woman's Health v. Austin Reeve Jackson, Judge, "
+                "District Court of Texas"),
+            "Whole Woman's Health v. Jackson",
+        )
+
+    def test_a_capacity_goes_the_same_way(self):
+        self.assertNames([
+            ("Blunt v. Spears, by Next Friend", "Blunt v. Spears"),
+            ("United States v. Edith Schlain Windsor, in her capacity as "
+             "Executor of the Estate of Thea Clara Spyer",
+             "United States v. Windsor"),
+            ("Shadi Dabit, on behalf of himself and all others similarly "
+             "situated v. Merrill Lynch, Pierce, Fenner & Smith, Inc.",
+             "Dabit v. Merrill Lynch, Pierce, Fenner & Smith, Inc."),
+        ])
+
+    def test_a_relator_named_with_an_office(self):
+        self.assertEqual(
+            abbreviate_case_name(
+                "Northern Pacific Railway Co. v. North Dakota on Rel. of "
+                "McCue, Attorney General"),
+            "N. Pac. Ry. Co. v. North Dakota ex rel. McCue",
+        )
+
+    def test_a_firm_s_designator_is_not_an_office(self):
+        self.assertNames([
+            ("Sara Lee, Inc. v. Kraft Foods", "Sara Lee, Inc. v. Kraft Foods"),
+            ("Reno, Attorney General v. American Civil Liberties Union",
+             "Reno v. ACLU"),
+        ])
+
+
+class StoredCaptionTests(unittest.TestCase):
+    """A name that reaches the abbreviator without passing a caption reader —
+    a saved record, a CourtListener caseName — cites the same as one that
+    did: its companion cases go, and a geographic party is named in full."""
+
+    def assertNames(self, cases):
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                got = abbreviate_case_name(raw)
+                self.assertEqual(got, want)
+                self.assertEqual(abbreviate_case_name(got), got)
+
+    def test_bostock(self):
+        self.assertNames([
+            ("Bostock v. Clayton County, Georgia. Altitude Express, Inc., et "
+             "al., Petitioners v. Zarda", "Bostock v. Clayton County"),
+            # As saved, already abbreviated: "Cnty." is no surname.
+            ("Bostock v. Clayton Cnty., Georgia. Altitude Express, Inc., et "
+             "al., Petitioners v. Melissa Zarda", "Bostock v. Clayton County"),
+            ("Shelby Cnty. v. Holder", "Shelby County v. Holder"),
+        ])
+
+    def test_companion_cases_go(self):
+        self.assertNames([
+            ("Perez v. Mortg. Bankers Ass'n et al. Jerome Nickols, et al., "
+             "Petitioners v. Mortg. Bankers Association",
+             "Perez v. Mortg. Bankers Ass'n"),
+            ("Olmstead v. U.S.. Green Et Al. v. Same. McInnis v. Same",
+             "Olmstead v. United States"),
+            ("Mugler v. Kansas. Same v. Same. Kan. v. Ziebold",
+             "Mugler v. Kansas"),
+            ("Riley v. California. United States, Petitioner, v. Brima Wurie",
+             "Riley v. California"),
+            ("In re Nexium Antitrust Litigation. AstraZeneca AB v. United "
+             "Food & Commercial Workers Unions",
+             "In re Nexium Antitrust Litig."),
+            ("In re Rhodium Encore LLC, Debtors. 345 Partners SPV2 LLC, "
+             "Plaintiffs, v. Nichols", "In re Rhodium Encore LLC, Debtors"),
+            ("In re MCP No. 165, Emergency Temporary Standard, 86 Fed. Reg. "
+             "61402. Massachusetts Building Trades Council v. OSHA",
+             "In re MCP No. 165, Emergency Temp. Standard, 86 Fed. Reg. "
+             "61402"),
+        ])
+
+    def test_no_cut_after_an_initial_or_inside_a_parenthesis(self):
+        for caption in (
+                "Van Kingsley Sullivan & Ronald C. Unterberger v. Kappa",
+                "In re Adoption of T.R.M., An Indian Child. & J.Q., (Nat. "
+                "Mother) v. D.R.L."):
+            with self.subTest(caption=caption):
+                self.assertEqual(_cut_companion_cases(caption), caption)
+
+    def test_a_municipal_party_named_first_is_the_party(self):
+        self.assertNames([
+            ("Lyons v. City of Los Angeles, Doe Crupi, Doe Hills",
+             "Lyons v. City of Los Angeles"),
+            ("Patel v. City of Los Angeles, a Municipal Corporation",
+             "Patel v. City of Los Angeles"),
+            ("Knick v. Twp. of Scott, Pennsylvania",
+             "Knick v. Township of Scott"),
+            ("Sadowsky v. City of N.Y.", "Sadowsky v. City of New York"),
+            # Two parties joined, not one county.
+            ("Purdue Pharma L.P. v. Kentucky & Pike County",
+             "Purdue Pharma L.P. v. Kentucky"),
+        ])
+
+
+class PartyListTests(unittest.TestCase):
+    """Only the first party on each side is cited (rule 10.2.1(a)), however
+    the caption lists the rest."""
+
+    def assertNames(self, cases):
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                got = abbreviate_case_name(raw)
+                self.assertEqual(got, want)
+                self.assertEqual(abbreviate_case_name(got), got)
+
+    def test_semicolons_separate_parties(self):
+        self.assertNames([
+            ("Jason Wolford; Alison Wolford; Atom Kasprzycki; Haw. Firearms "
+             "Coal. v. Lopez", "Wolford v. Lopez"),
+            ("Tex.; State of La., Plaintiffs-Appellees, v. U.S.; Alejandro "
+             "Mayorkas, Sec'y, U.S. Dep't of Homeland Sec.",
+             "Texas v. United States"),
+            ("Fasano v. Fed. Rsrv. Bank of N.Y.; Ron Henry; Cynthia Ramos",
+             "Fasano v. Fed. Rsrv. Bank of N.Y."),
+        ])
+
+    def test_an_in_re_matter_title_is_no_party_list(self):
+        name = ("In re MCP No. 165, Occupational Safety & Health Admin., "
+                "Interim Final Rule: Covid-19 Vaccination & Testing; "
+                "Emergency Temp. Standard")
+        self.assertIn("; Emergency Temp. Standard", abbreviate_case_name(name))
+
+    def test_a_role_designation_closes_the_first_party(self):
+        self.assertNames([
+            ("Ethel Louise Hill, Plaintiff-Appellant, v. Lockheed Martin "
+             "Logistics Mgmt., Inc., Defendant-Appellee, Equal Emp. "
+             "Opportunity Comm'n, Amicus Supporting Appellant.",
+             "Hill v. Lockheed Martin Logistics Mgmt., Inc."),
+            ("Raymond Interior Sys., Inc., Petitioner, v. Nat'l Lab. Rels. "
+             "Bd., Respondent. S. Cal. Painters & Allied Trades Dist. "
+             "Council No. 36, Intervenor.",
+             "Raymond Interior Sys., Inc. v. NLRB"),
+            ("Frigaliment Importing Co. Plaintiff v. B.N.S. Int'l Sales "
+             "Corp.", "Frigaliment Importing Co. v. B.N.S. Int'l Sales Corp."),
+            ("Pa., Complainant v. Wheeling & Belmont Bridge Co.",
+             "Pennsylvania v. Wheeling & Belmont Bridge Co."),
+        ])
+
+    def test_a_firms_designator_closes_its_name(self):
+        self.assertNames([
+            ("Suburban Restoration Co. Plaintiff-Appellant v. Acmat Corp., "
+             "Laborers' Int'l Union of N. Am., Loc. 665",
+             "Suburban Restoration Co. v. Acmat Corp."),
+            ("Leinani Deslandes & Stephanie Turner v. McDonald's USA, LLC, & "
+             "McDonald's Corp.", "Deslandes v. McDonald's USA, LLC"),
+            ("Fisher v. Swift Transp. Co. & J & D Truck Repair",
+             "Fisher v. Swift Transp. Co."),
+            # …but not before another designator.
+            ("Bear Stearns & Co., Inc. v. Smith",
+             "Bear Stearns & Co. v. Smith"),
+        ])
+
+    def test_a_person_after_a_comma_is_another_party(self):
+        self.assertNames([
+            ("Lynch v. N.J. Educ. Ass'n, Betty Kraemer, Karen Joseph",
+             "Lynch v. N.J. Educ. Ass'n"),
+            ("North Carolina v. Robert Lee Neal, & Eugene Davis",
+             "North Carolina v. Neal"),
+        ])
+
+    def test_descriptions_and_representatives_go(self):
+        # Rule 10.2.1(e).
+        self.assertNames([
+            ("Apple Computer, Inc., a California Corporation v. Microsoft "
+             "Corporation, a Delaware Corporation",
+             "Apple Comput., Inc. v. Microsoft Corp."),
+            ("Action Apartment Ass'n a Cal. Corp. v. Santa Monica Rent "
+             "Control Bd.", "Action Apartment Ass'n v. Santa Monica Rent "
+             "Control Bd."),
+            ("Louisiana, by & through its Att'y Gen., Jeff Landry v. Biden",
+             "Louisiana v. Biden"),
+            ("A.N., a Minor, by & Through Her Next Friend, J.N. v. Jackson "
+             "R-II Sch. Dist.", "A.N. v. Jackson R-II Sch. Dist."),
+            ("John P. Van Ness & Marcia His Wife v. Pacard",
+             "Van Ness v. Pacard"),
+            ("John Auvil et ux; et al. v. CBS 60 Minutes; et al.",
+             "Auvil v. CBS 60 Minutes"),
+            ("Slack Techs., LLC, fka Slack Techs., Inc. v. Pirani",
+             "Slack Techs., LLC v. Pirani"),
+        ])
+
+    def test_a_cut_never_leaves_a_parenthesis_open(self):
+        self.assertNames([
+            ("Lanter Courier v. Indus. Comm'n, et al. (Kay Whitis, "
+             "Appellee)", "Lanter Courier v. Indus. Comm'n"),
+        ])
+
+    def test_a_lowered_middle_initial_is_no_separator(self):
+        # Lorenzo v. SEC, 587 U.S. 71 (2019): Francis V. Lorenzo.
+        self.assertNames([
+            ("Francis v. Lorenzo, Petitioner v. Securities and Exchange "
+             "Commission", "Lorenzo v. SEC"),
+        ])
+        # A caption that lost its "ex dem." is left whole rather than cut
+        # to another case's name.
+        self.assertIn("Lamphire", abbreviate_case_name(
+            "Jackson v. Hart, Plaintiff in Error v. Elias Lamphire, "
+            "Defendant in Error"))
+
+
+class AcronymCaseTests(unittest.TestCase):
+    """Acronyms keep their capitals through a caption set in capitals, and
+    get them back from a title-casing pass that took them away."""
+
+    def test_a_caption_in_capitals_keeps_its_acronyms(self):
+        for raw, want in (
+                ("RENO v. ACLU", "Reno v. ACLU"),
+                ("NATIONAL BROADCASTING CO. v. SBC WARBURG, INC.",
+                 "National Broadcasting Co. v. SBC Warburg, Inc."),
+                ("UNITED FEDERATION OF TEACHERS, AFT NYSUT, AFL-CIO",
+                 "United Federation of Teachers, AFT NYSUT, AFL-CIO"),
+                ("FASANO v. FED. RSRV. BANK OF N.Y.; RON HENRY",
+                 "Fasano v. Fed. Rsrv. Bank of N.Y.; Ron Henry"),
+                ("JACKSON R-II SCH. DIST.", "Jackson R-II Sch. Dist."),
+                # An abbreviation, not an agency: its period says so.
+                ("ALLSTATE INS. CO. v. HAGUE", "Allstate Ins. Co. v. Hague"),
+                ("ST PAUL FIRE & MARINE", "St Paul Fire & Marine")):
+            with self.subTest(raw=raw):
+                self.assertEqual(normal_case_caption(raw), want)
+
+    def test_a_title_cased_acronym_is_restored(self):
+        for raw, want in (
+                ("Reno v. Aclu", "Reno v. ACLU"),
+                ("Nifla v. Becerra", "NIFLA v. Becerra"),
+                ("Deslandes v. McDonald's Usa, LLC",
+                 "Deslandes v. McDonald's USA, LLC"),
+                ("Oil, Chem. & Atomic Workers Int'l Union, Afl-cio v. Delta "
+                 "Refin. Co.",
+                 "Oil, Chem. & Atomic Workers Int'l Union, AFL-CIO v. Delta "
+                 "Refin. Co."),
+                ("Fairfax v. Cbs Corp.", "Fairfax v. CBS Corp."),
+                ("Ins v. Chadha", "INS v. Chadha"),
+                ("A&m Records, Inc. v. Napster, Inc.",
+                 "A&M Records, Inc. v. Napster, Inc."),
+                ("Whittle v. U.s.", "Whittle v. United States"),
+                ("Ware v. La. Dep't of Corr.", "Ware v. La. Dep't of Corr."),
+                ("T.m. v. Univ. of Md. Med. Sys. Corp.",
+                 "T.M. v. Univ. of Md. Med. Sys. Corp."),
+                ("Home Depot U. S. A., Inc. v. Jackson",
+                 "Home Depot U.S.A., Inc. v. Jackson"),
+                ("Lohan v. Take-two Interactive Software, Inc.",
+                 "Lohan v. Take-Two Interactive Software, Inc."),
+                # A word stays a word.
+                ("Toys R Us, Inc. v. Smith", "Toys R Us, Inc. v. Smith"),
+                ("Ng v. Sessions", "Ng v. Sessions")):
+            with self.subTest(raw=raw):
+                got = abbreviate_case_name(raw)
+                self.assertEqual(got, want)
+                self.assertEqual(abbreviate_case_name(got), got)
+
+    def test_prose_never_capitalizes_a_table_abbreviation(self):
+        # The prose's "LA" (a postal code) is no reading of "La.".
+        self.assertEqual(
+            refine_caption_case(
+                "Ware v. La. Dep't of Corr.",
+                "Ware sued in Baton Rouge, LA. The LA office responded. "
+                "LA law applies."),
+            "Ware v. La. Dep't of Corr.",
+        )
+
+    def test_a_surname_set_in_capitals_is_typography(self):
+        self.assertEqual(
+            refine_caption_case(
+                "David King v. Burwell",
+                "David KING; Douglas HURST, Plaintiffs-Appellants. The "
+                "petitioners are David KING and others. KING argues."),
+            "David King v. Burwell",
+        )
+        # A word the prose writes in lowercase is a word.
+        self.assertEqual(
+            refine_caption_case(
+                "Mellberg LLC v. Jovan Will",
+                "Jovan WILL, et al., Defendants. WILL moved to dismiss, "
+                "and the court will grant it. It will also rule."),
+            "Mellberg LLC v. Jovan Will",
+        )
+
+    def test_small_words_follow_the_prose(self):
+        # A sentence's opening "The", or a heading's "OF THE", is no reading
+        # of the caption's "of the"…
+        self.assertEqual(
+            refine_caption_case(
+                "Church of the Lukumi Babalu Aye, Inc. v. City of Hialeah",
+                "CHURCH OF THE LUKUMI BABALU AYE, INC. v. CITY OF HIALEAH. "
+                "The Lukumi Babalu Aye church leased land. Petitioner is the "
+                "Church of the Lukumi Babalu Aye, and the Lukumi faithful "
+                "gathered."),
+            "Church of the Lukumi Babalu Aye, Inc. v. City of Hialeah")
+        # …but the prose's "Di Re" still fixes a title-casing slip.
+        self.assertEqual(
+            refine_caption_case(
+                "United States v. Di re",
+                "Di Re was a passenger. The officers searched Di Re."),
+            "United States v. Di Re")
+
+    def test_an_acronym_the_opinion_defines(self):
+        body = ("Petitioners are the National Institute of Family and Life "
+                "Advocates (NIFLA) and two clinics. NIFLA argues the Act "
+                "compels speech. NIFLA is right.")
+        self.assertEqual(
+            refine_caption_case("Nifla v. Becerra", body), "NIFLA v. Becerra")
+
+    def test_each_piece_of_a_hyphenated_word(self):
+        body = ("Americo Norberto Pena-Irala was the Inspector General. "
+                "Pena-Irala had tortured Joelito. Later Pena-Irala left.")
+        self.assertEqual(
+            refine_caption_case("Filartiga v. Pena-irala", body),
+            "Filartiga v. Pena-Irala",
+        )
+
+
+class UncommonNameTests(unittest.TestCase):
+    """A person is cited by surname (rule 10.2.1(g)) even when no list knows
+    the given name: the opinion's own prose, or the Census name files, say
+    where the surname begins."""
+
+    BRACKEEN = ("Chad and Jennifer Brackeen, a non-Indian couple, fostered "
+                "A.L.M. The Brackeens then sought to adopt him. The "
+                "Brackeens' petition was opposed.")
+
+    def assertNames(self, cases, body=""):
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                got = abbreviate_case_name(raw, body_text=body)
+                self.assertEqual(got, want)
+                self.assertEqual(abbreviate_case_name(got, body_text=body),
+                                 got)
+
+    def test_the_prose_names_the_surname(self):
+        self.assertNames([("Haaland v. Chad Everet Brackeen",
+                           "Haaland v. Brackeen")], self.BRACKEEN)
+        self.assertNames([("Noem v. Pedro Vasquez Perdomo",
+                           "Noem v. Vasquez Perdomo")],
+                         "Respondent Vasquez Perdomo was detained. Vasquez "
+                         "Perdomo's claim was certified.")
+        self.assertNames([("United States v. Gary Evans Jackson",
+                           "United States v. Jackson")],
+                         "Gary Evans Jackson pleaded guilty. Jackson later "
+                         "appealed, and Jackson's sentence was vacated.")
+        # A mention that skips the middle name marks it as one.
+        self.assertNames([("Kentucky v. Hollis Deshaun King",
+                           "Kentucky v. King")],
+                         "They found respondent Hollis King in the front "
+                         "room.")
+
+    def test_without_the_prose_an_unknown_name_stays_whole(self):
+        self.assertEqual(
+            abbreviate_case_name("Kentucky v. Hollis Deshaun King"),
+            "Kentucky v. Hollis Deshaun King")
+        self.assertEqual(
+            abbreviate_case_name("Haaland v. Chad Everet Brackeen"),
+            "Haaland v. Chad Everet Brackeen")
+
+    def test_the_census_files_know_more_given_names(self):
+        self.assertNames([
+            ("Dulles v. Susanne Richter", "Dulles v. Richter"),
+            ("Lilia Twombly v. AIG Life Ins. Co.",
+             "Twombly v. AIG Life Ins. Co."),
+            ("District of Columbia v. Dick Anthony Heller",
+             "District of Columbia v. Heller"),
+        ])
+
+    def test_a_name_written_surname_first_stays_whole(self):
+        self.assertNames([
+            ("United States v. Wong Kim Ark",
+             "United States v. Wong Kim Ark"),
+            ("Weedin v. Chin Bow", "Weedin v. Chin Bow"),
+        ], "Chin Bow applied for admission. The rights of Chin Bow are "
+           "determined by statute.")
+
+    def test_an_entity_is_no_person(self):
+        self.assertNames([
+            ("Citizens United v. FEC", "Citizens United v. FEC")],
+            "Citizens United is a nonprofit. The United argument fails; "
+            "citizens may speak.")
+        self.assertNames([
+            ("Sidibe v. Sutter Health", "Sidibe v. Sutter Health")],
+            "Sutter Health operates hospitals. Health care costs rose.")
+        self.assertNames([
+            ("Murray v. Schooner Charming Betsy",
+             "Murray v. Schooner Charming Betsy")],
+            "The Charming Betsy was seized. Charming Betsy's cargo was sold.")
+        self.assertNames([
+            ("Florida Star v. B.J.F.", "Fla. Star v. B.J.F."),
+            ("Morgan Stanley v. Smith", "Morgan Stanley v. Smith"),
+            ("Barnes v. Glen Theatre", "Barnes v. Glen Theatre"),
+            ("Montoya De Hernandez v. Smith", "Montoya De Hernandez v. Smith"),
+            ("Van Ness v. Pacard", "Van Ness v. Pacard"),
+        ])
+
+    def test_titles_placeholders_and_capitals(self):
+        self.assertNames([
+            ("Whole Woman's Health v. Judge Austin Reeve Jackson",
+             "Whole Woman's Health v. Jackson"),
+            ("Fnu Tanzin v. Tanvir", "Tanzin v. Tanvir"),
+            ("David KING v. Burwell", "King v. Burwell"),
+            ("Philip Morris USA v. Williams",
+             "Philip Morris USA v. Williams"),
+            ("Murphy v. Terry Royal Warden, Okla. State Penitentiary",
+             "Murphy v. Royal"),
+        ])
+
+    def test_a_caption_kept_whole_takes_the_surname_now(self):
+        self.assertEqual(
+            name_persons_by_surname(
+                "Debra A. Haaland v. Chad Everet Brackeen", self.BRACKEEN),
+            "Debra A. Haaland v. Brackeen")
+        # A place is no person, however the prose names it.
+        self.assertEqual(
+            name_persons_by_surname("New Jersey v. T.L.O.",
+                                    "Jersey was quiet. New Jersey appealed."),
+            "New Jersey v. T.L.O.")
+
+    def test_the_scholar_caption_reads_the_opinion(self):
+        blocks = [
+            Block("center", [Span("599 U.S. 255 (2023)")]),
+            Block("center", [Span(
+                "DEBRA A. HAALAND, SECRETARY OF THE INTERIOR, et al., "
+                "Petitioners v. CHAD EVERET BRACKEEN, et al.")]),
+            Block("center", [Span("Supreme Court of United States.")]),
+            Block("para", [Span(self.BRACKEEN)]),
+        ]
+        self.assertEqual(
+            abbreviate_case_name(_scholar_caption_name(blocks)),
+            "Haaland v. Brackeen")
+
+    def test_the_opinion_database_reads_the_opinion(self):
+        html = ('<div id="gs_opinion">'
+                "<center>599 U.S. 255</center>"
+                "<center>DEBRA A. HAALAND, SECRETARY OF THE INTERIOR, "
+                "PETITIONERS v. CHAD EVERET BRACKEEN</center>"
+                "<center>Supreme Court of the United States.</center>"
+                f"<p>{self.BRACKEEN}</p>"
+                "</div>")
+        record = extract_record(
+            "https://scholar.google.com/scholar_case?case=5555", html)
+        self.assertEqual(record["name"], "Haaland v. Brackeen")
 
 
 class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
