@@ -3715,12 +3715,16 @@ class CaseWindowTests(unittest.TestCase):
 
         menu = Menu()
         app.populate_bookmarks_menu(menu, app.root)
-        # Most recently accessed first, and nothing to bookmark from here.
-        self.assertEqual(menu.items, ["18 U.S.C. § 922", "Roe v. Wade"])
+        # Most recently accessed first, and nothing to bookmark from here —
+        # then what makes and arranges the folders they can be kept in.
+        self.assertEqual(menu.items, [
+            "18 U.S.C. § 922", "Roe v. Wade",
+            "--", "New Folder…", "Organize Bookmarks…"])
 
         app._bookmarks = []
         app.populate_bookmarks_menu(menu, app.root)
-        self.assertEqual(menu.items, ["No bookmarks yet"])
+        self.assertEqual(menu.items, [
+            "No bookmarks yet", "--", "New Folder…", "Organize Bookmarks…"])
 
     def test_citation_result_uses_launching_view_parent(self):
         app = object.__new__(CourtListenerGUI)

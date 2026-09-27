@@ -34,6 +34,16 @@ class _Tk:
     TclError = Exception
     Menu = Misc = Frame = Toplevel = object
 
+    class StringVar:
+        def __init__(self, master=None, value=""):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
 
 def _base_ns(extra=None) -> dict:
     ns = {"tk": _Tk, "sys": sys, "re": re, "Optional": typing.Optional,
@@ -237,16 +247,75 @@ class _FakeFloatingWindow:
 # The Window menu
 # ---------------------------------------------------------------------------
 
-APP_NS = _load("CourtListenerGUI", ["populate_window_menu"])
+WINDOW_NAMES = ["populate_window_menu", "register_document_window",
+                "_open_windows", "_current_window", "bring_window_forward"]
+APP_NS = _load("CourtListenerGUI", WINDOW_NAMES, _load_functions(
+    ["_window_is_open", "_window_menu_label"]))
+
+
+class _Window:
+    """A top-level window, as far as the Window menu looks at one."""
+
+    def __init__(self, title="", state="normal", focus=None):
+        self._title = title
+        self.state = state
+        self.alive = True
+        self.raised = []
+        self.bindings = []
+        self._focus = focus
+
+    def winfo_toplevel(self):
+        return self
+
+    def winfo_exists(self):
+        return self.alive
+
+    def wm_state(self):
+        return self.state
+
+    def title(self, value=None):
+        return self._title if value is None else None
+
+    def deiconify(self):
+        self.raised.append("deiconify")
+
+    def lift(self):
+        self.raised.append("lift")
+
+    def focus_force(self):
+        self.raised.append("focus")
+
+    def focus_get(self):
+        return self._focus
+
+    def bind(self, sequence, func, add=None):
+        self.bindings.append((sequence, func))
+
+    def destroy(self):
+        self.alive = False
 
 
 class _App:
-    def __init__(self):
-        self.root = _FakeHost()
+    def __init__(self, root=None):
+        self.root = root or _Window("CourtListener Case Law Search")
+        self._root_hidden = False
         self._cited_pdf_windows: set = set()
         self._open_case_views: dict = {}
-        for name in ("populate_window_menu",):
+        self._document_windows: list = []
+        self.shown_main = 0
+        for name in WINDOW_NAMES:
             setattr(self, name, APP_NS[name].__get__(self))
+
+    def _show_main_window(self):
+        self.shown_main += 1
+
+    @staticmethod
+    def _win_force_foreground(win):
+        return True
+
+
+def _radios(menu):
+    return [kw for kind, kw in menu.items if kind == "radiobutton"]
 
 
 class WindowMenuTests(unittest.TestCase):
@@ -259,6 +328,120 @@ class WindowMenuTests(unittest.TestCase):
         app, menu = _App(), _FakeMenu()
         app.populate_window_menu(menu, app.root)
         self.assertNotIn("Close Window", menu.labels())
+
+
+class WindowSwitchTests(unittest.TestCase):
+    """The Window menu goes to every window open — the search window while
+    it is up, then each document's window in the order they opened — and
+    marks the one it belongs to."""
+
+    def setUp(self):
+        self.app = _App()
+        self.case = _Window("Haaland v. Brackeen, 599 U.S. 255 (2023)")
+        self.statute = _Window("18 U.S.C. § 922")
+        for win in (self.case, self.statute):
+            self.app.register_document_window(win)
+
+    def test_every_open_window_is_listed_after_the_window_s_own_items(self):
+        menu = _FakeMenu()
+        self.app.populate_window_menu(menu, self.case)
+        self.assertEqual(menu.labels(), [
+            "Close Window", None,
+            "CourtListener Case Law Search",
+            "Haaland v. Brackeen, 599 U.S. 255 (2023)",
+            "18 U.S.C. § 922"])
+
+    def test_the_window_it_belongs_to_is_marked(self):
+        menu = _FakeMenu()
+        self.app.populate_window_menu(menu, self.statute)
+        marked = menu._window_choice.get()
+        self.assertEqual(
+            [kw["label"] for kw in _radios(menu) if kw["value"] == marked],
+            ["18 U.S.C. § 922"])
+
+    def test_the_search_window_s_own_menu_marks_the_window_in_front(self):
+        # On macOS the search window's menu bar is every window's.
+        self.app.root._focus = self.statute
+        menu = _FakeMenu()
+        self.app.populate_window_menu(menu, self.app.root)
+        marked = menu._window_choice.get()
+        self.assertEqual(
+            [kw["label"] for kw in _radios(menu) if kw["value"] == marked],
+            ["18 U.S.C. § 922"])
+
+    def test_choosing_one_brings_it_forward(self):
+        menu = _FakeMenu()
+        self.app.populate_window_menu(menu, self.case)
+        _radios(menu)[2]["command"]()
+        self.assertEqual(self.statute.raised, ["deiconify", "lift", "focus"])
+
+    def test_a_hidden_search_window_is_left_off(self):
+        self.app._root_hidden = True
+        self.assertEqual(self.app._open_windows(), [self.case, self.statute])
+
+    def test_withdrawn_and_closed_windows_are_left_off(self):
+        self.case.state = "withdrawn"
+        self.statute.alive = False
+        self.assertEqual(self.app._open_windows(), [self.app.root])
+
+    def test_a_minimized_window_is_still_open(self):
+        self.case.state = "iconic"
+        self.assertIn(self.case, self.app._open_windows())
+
+    def test_a_window_is_listed_once_and_the_search_window_never_twice(self):
+        self.app.register_document_window(self.case)
+        self.app.register_document_window(self.app.root)
+        self.assertEqual(self.app._document_windows,
+                         [self.case, self.statute])
+
+    def test_a_window_leaves_the_list_when_it_closes(self):
+        sequence, gone = self.case.bindings[0]
+        self.assertEqual(sequence, "<Destroy>")
+        gone(type("Event", (), {"widget": self.case})())
+        self.assertEqual(self.app._document_windows, [self.statute])
+
+    def test_a_child_widget_closing_is_not_the_window_closing(self):
+        _sequence, gone = self.case.bindings[0]
+        gone(type("Event", (), {"widget": object()})())
+        self.assertIn(self.case, self.app._document_windows)
+
+    def test_a_long_title_is_cut_to_a_menu_s_width(self):
+        label = APP_NS["_window_menu_label"](_Window("x" * 90))
+        self.assertEqual(len(label), 70)
+        self.assertTrue(label.endswith("…"))
+
+    def test_an_untitled_window_still_has_a_name(self):
+        self.assertEqual(APP_NS["_window_menu_label"](_Window("")),
+                         "Untitled Window")
+
+    def test_the_search_window_hidden_comes_back_through_its_own_door(self):
+        self.app._root_hidden = True
+        self.app.bring_window_forward(self.app.root)
+        self.assertEqual((self.app.shown_main, self.app.root.raised), (1, []))
+
+
+class DocumentWindowRegistrationTests(unittest.TestCase):
+    """Which windows are listed: those documents open in."""
+
+    def test_every_window_with_a_window_menu_is_listed(self):
+        for helper in ("_install_history_menubar", "_install_window_menubar"):
+            body = next(ast.get_source_segment(SRC, n) for n in TREE.body
+                        if isinstance(n, ast.FunctionDef) and n.name == helper)
+            self.assertIn("_list_in_window_menu(app, win)", body)
+
+    def test_the_floating_viewer_lists_itself(self):
+        self.assertIn("_list_in_window_menu(app, self._win)",
+                      _source_of("_FloatingPdfWindow", "__init__"))
+
+    def test_the_details_panel_beside_it_is_not_a_window_of_its_own(self):
+        self.assertNotIn("_list_in_window_menu",
+                         _source_of("_FloatingPdfWindow", "_details_window"))
+
+    def test_the_search_window_carries_the_window_menu_too(self):
+        body = _source_of("CourtListenerGUI", "_build_ui")
+        self.assertIn("_add_window_cascade(menubar, self, self.root)", body)
+        self.assertLess(body.index("_add_bookmarks_cascade(menubar"),
+                        body.index("_add_window_cascade(menubar"))
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +973,131 @@ class StripIconTests(unittest.TestCase):
         # Where the accelerators are written down.
         self.assertIn("Save As…", self.body)
         self.assertIn("Print…", self.body)
+
+    def test_window_and_bookmarks_sit_at_the_right_hand_end_as_icons(self):
+        self.assertIn('self._strip_menu_button(\n            bar, "windows"',
+                      self.body)
+        self.assertIn('self._strip_menu_button(\n            bar, "bookmarks"',
+                      self.body)
+        # Window packed first from the right, so it is at the very end.
+        self.assertLess(self.body.index('bar, "windows"'),
+                        self.body.index('bar, "bookmarks"'))
+        button = _source_of("_FloatingPdfWindow", "_strip_menu_button")
+        self.assertIn('btn.pack(side="right"', button)
+        self.assertIn("image=self._strip_icons[icon]", button)
+        self.assertIn("_HoverTip(btn, lambda: tip", button)
+
+    def test_the_artwork_draws_both_icons(self):
+        art = next(ast.get_source_segment(SRC, n) for n in TREE.body
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_pdf_strip_icons")
+        self.assertIn('"bookmarks": finish(ribbon)', art)
+        self.assertIn('"windows": finish(windows)', art)
+
+
+class _StripTk(_Tk):
+    """tkinter as the strip's menu buttons use it."""
+
+    class Menu:
+        made = []
+
+        def __init__(self, master=None, tearoff=0):
+            self.posted = []
+            _StripTk.Menu.made.append(self)
+
+        def update_idletasks(self):
+            pass
+
+        def winfo_reqwidth(self):
+            return 200
+
+        def tk_popup(self, x, y):
+            self.posted.append((x, y))
+
+        def grab_release(self):
+            pass
+
+
+class _Button:
+    def winfo_rootx(self):
+        return 700
+
+    def winfo_rooty(self):
+        return 40
+
+    def winfo_width(self):
+        return 30
+
+    def winfo_height(self):
+        return 22
+
+
+STRIP_MENU_NAMES = ["_post_window_menu", "_post_bookmarks_menu",
+                    "_post_strip_menu", "_bookmark_owner", "showing_text"]
+STRIP_MENU_NS = _load("_FloatingPdfWindow", STRIP_MENU_NAMES,
+                      {"tk": _StripTk})
+
+
+class _StripApp:
+    def __init__(self):
+        self.calls = []
+
+    def populate_window_menu(self, menu, view):
+        self.calls.append(("window", menu, view))
+
+    def populate_bookmarks_menu(self, menu, view, owner=None):
+        self.calls.append(("bookmarks", menu, view, owner))
+
+
+class _StripMenuViewer:
+    def __init__(self, mode="pdf"):
+        self._app = _StripApp()
+        self._win = object()
+        self._window_btn = _Button()
+        self._bookmarks_btn = _Button()
+        self._strip_menus = {}
+        self._mode = mode
+        self._reader = (type("Reader", (), {"_bookmark_descriptor":
+                                            lambda self: None})()
+                        if mode == "text" else None)
+        self._bookmarks = object()     # whoever can bookmark the scan
+        for name in STRIP_MENU_NAMES:
+            setattr(self, name, STRIP_MENU_NS[name].__get__(self))
+
+
+class StripMenuButtonTests(unittest.TestCase):
+    def setUp(self):
+        _StripTk.Menu.made.clear()
+
+    def test_the_window_icon_drops_the_window_menu_for_this_window(self):
+        viewer = _StripMenuViewer()
+        viewer._post_window_menu()
+        kind, menu, view = viewer._app.calls[0]
+        self.assertEqual((kind, view), ("window", viewer._win))
+        # Hung from the button, its right edge on the button's.
+        self.assertEqual(menu.posted, [(700 + 30 - 200, 40 + 22)])
+
+    def test_the_bookmarks_icon_offers_the_document_on_screen(self):
+        scan = _StripMenuViewer(mode="pdf")
+        scan._post_bookmarks_menu()
+        self.assertIs(scan._app.calls[0][3], scan._bookmarks)
+        text = _StripMenuViewer(mode="text")
+        text._post_bookmarks_menu()
+        self.assertIs(text._app.calls[0][3], text._reader)
+
+    def test_each_icon_keeps_one_menu_refilled_each_time(self):
+        viewer = _StripMenuViewer()
+        viewer._post_window_menu()
+        viewer._post_window_menu()
+        viewer._post_bookmarks_menu()
+        self.assertEqual(len(_StripTk.Menu.made), 2)
+        self.assertEqual(len(viewer._app.calls), 3)
+
+    def test_no_app_to_fill_it_no_button(self):
+        viewer = _StripMenuViewer()
+        viewer._window_btn = None
+        viewer._post_window_menu()
+        self.assertEqual(viewer._app.calls, [])
 
 
 class SectionRailGateTests(unittest.TestCase):
