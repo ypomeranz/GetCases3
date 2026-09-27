@@ -596,7 +596,7 @@ class DocketFetchAndPanelTests(unittest.TestCase):
         # The panel now names its views in a tuple and drops the docket for
         # any court but the Supreme Court, rather than appending it.
         self.assertIn('_DETAILS_VIEWS = ("Case details", "Docket"', source)
-        self.assertIn('_SCAN_DETAILS_VIEWS = ("Case details", "Docket")', source)
+        self.assertIn('_SCAN_DETAILS_VIEWS = ("Case details", "Docket",', source)
         self.assertIn('if name != "Docket" or self._is_scotus', source)
         self.assertIn('if sel == "Docket":', source)
         self.assertIn('elif mode == "docket":', source)

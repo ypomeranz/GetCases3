@@ -21328,11 +21328,12 @@ class _ScholarTextWindow:
     #: other court (see _details_panel).
     _DETAILS_VIEWS = ("Case details", "Docket", "Recent SCOTUS",
                       "Related cases", "Outline")
-    #: What the panel standing beside a scan offers.  Recent SCOTUS, Related
-    #: cases and the outline answer questions that want the room a window has;
-    #: the case's own details and the docket behind them are what a reader
-    #: looking at the pages asks for, so those two are here.
-    _SCAN_DETAILS_VIEWS = ("Case details", "Docket")
+    #: What the panel standing beside a scan offers: the case's own details
+    #: and the docket behind them, which are what a reader looking at the
+    #: pages asks for, and the Court's recent opinions, a glance at what is
+    #: new.  Related cases and the outline answer questions that want the
+    #: room a window has.
+    _SCAN_DETAILS_VIEWS = ("Case details", "Docket", "Recent SCOTUS")
     _JUSTIFY_HARD_BREAK_EXTRA_SPACES = 4
     _JUSTIFY_PAD_TAG = "justify-pad"
     _JUSTIFY_HIDE_TAG = "justify-hide"
@@ -26425,10 +26426,10 @@ class _ScholarTextWindow:
             # falling through to the other.
             # Which of them this panel offers is the window's to say: a case
             # window offers every view, a panel standing beside a scan the
-            # case's details and the docket behind them.  The docket is a
-            # Supreme Court view either way, so it comes off for any other
-            # court — and a panel left with one view needs no selector at all
-            # (_details_mode then reads "case").
+            # case's details, the docket behind them and the Court's recent
+            # opinions.  The docket is a Supreme Court view either way, so it
+            # comes off for any other court — and a panel left with one view
+            # needs no selector at all (_details_mode then reads "case").
             mode_values = [name for name in self._details_views
                            if name != "Docket" or self._is_scotus]
             if len(mode_values) > 1:
