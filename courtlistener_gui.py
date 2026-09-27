@@ -24,6 +24,7 @@ import html as _html
 import importlib.util
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -1240,6 +1241,9 @@ from court_catalog import (
 )
 
 _CONFIG_PATH = Path.home() / ".config" / "courtlistener" / "config.json"
+# Where the GetCases answering the hotkey says how to reach it (see
+# single_instance).
+_INSTANCE_PATH = _CONFIG_PATH.with_name("instance.json")
 
 
 def _load_config() -> dict:
@@ -7042,6 +7046,18 @@ class CourtListenerGUI:
 
         self._quick_popup: Optional[tk.Toplevel] = None
         self._spotlight_toggle_at = 0.0
+        # When the last spotlight toggle was done: a press from before then
+        # was made while it was still being carried out (see
+        # _drain_hotkey_presses).
+        self._spotlight_toggle_done = 0.0
+        # Hotkey presses as the listener thread hands them over — the time of
+        # each — for the Tk thread to take up (see _on_global_hotkey).
+        self._hotkey_presses: "queue.SimpleQueue[float]" = queue.SimpleQueue()
+        self._hotkey_poll_started = False
+        # Set once a newer GetCases has taken the hotkey over (see
+        # _newer_instance_started).
+        self._hotkey_yielded = False
+        self._step_back_requested = False
         self._hotkey_listener = None
         self._spotlight_hotkey = _load_saved_spotlight_hotkey()
         self._root_hidden = False
@@ -8460,9 +8476,137 @@ class CourtListenerGUI:
             self._hotkey_listener.start()
         except Exception:
             self._hotkey_listener = None
+            return
+        self._start_hotkey_poll()
 
     def _on_global_hotkey(self) -> None:
-        self.root.after(0, self._toggle_quick_search_popup)
+        """The listener thread's half of a hotkey press: note when it came,
+        and return at once.
+
+        Nothing here calls into Tk.  A Tk call from this thread waits until
+        the Tk thread is free — for as long as it is busy building results or
+        a window — and while it waits, Windows holds back every keystroke the
+        keyboard hook has not yet seen, from every application, and after a
+        second or so may drop the hook for good.  The Tk thread takes the
+        press up at its next look (see :meth:`_drain_hotkey_presses`)."""
+        if self._hotkey_yielded:
+            return                  # a newer GetCases answers the hotkey now
+        self._hotkey_presses.put(time.monotonic())
+
+    def _start_hotkey_poll(self) -> None:
+        """Begin looking for hotkey presses on the Tk thread (idempotent)."""
+        if self._hotkey_poll_started:
+            return
+        self._hotkey_poll_started = True
+        try:
+            self.root.after(40, self._drain_hotkey_presses)
+        except tk.TclError:
+            self._hotkey_poll_started = False
+
+    def _drain_hotkey_presses(self) -> None:
+        """The Tk thread's half of a hotkey press: toggle the spotlight once
+        for the presses that have come in since the last look.
+
+        A press counts only if it came after the last toggle was done.  One
+        made while the app was still busy closing or opening the popup was
+        the reader asking again for what had not visibly happened yet — taken
+        as a toggle of its own, it undid the first: the popup closed, and
+        then reopened by itself.  Presses that arrive together are likewise
+        one request, and a second delivery of the same press is ignored by
+        the toggle itself."""
+        pressed: list[float] = []
+        while True:
+            try:
+                pressed.append(self._hotkey_presses.get_nowait())
+            except queue.Empty:
+                break
+        if self._step_back_requested:
+            self._step_back_requested = False
+            self._step_back_for_newer_instance()
+            if self._quit_for_newer:
+                return
+        fresh = [t for t in pressed if t > self._spotlight_toggle_done]
+        if fresh and not self._hotkey_yielded:
+            try:
+                self._toggle_quick_search_popup(pressed_at=fresh[0])
+            except Exception as exc:
+                print(f"[spotlight] hotkey toggle failed: {exc}")
+            self._spotlight_toggle_done = time.monotonic()
+        try:
+            self.root.after(40, self._drain_hotkey_presses)
+        except tk.TclError:
+            pass                    # shutting down
+
+    # ------------------------------------------------------------------
+    # One GetCases answering the hotkey at a time (see single_instance)
+    # ------------------------------------------------------------------
+
+    _quit_for_newer = False
+
+    def _claim_instance(self):
+        """Take the hotkey over from any GetCases already running — only
+        when this one has a hotkey to take it with.  Returns the channel,
+        for :func:`main` to close on the way out, or None."""
+        if self._hotkey_listener is None:
+            return None
+        import single_instance
+        channel = single_instance.InstanceChannel(
+            _INSTANCE_PATH, self._newer_instance_started)
+        try:
+            if channel.claim():
+                print("[instance] an older GetCases was running; it has "
+                      "handed over the hotkey.")
+        except Exception as exc:
+            print(f"[instance] could not check for another GetCases: {exc}")
+        return channel
+
+    def _newer_instance_started(self) -> None:
+        """Called on the instance channel's thread when a newer GetCases has
+        started.  Its presses stop being this one's at once; the rest of
+        stepping back is the Tk thread's, at its next look for presses."""
+        self._hotkey_yielded = True
+        self._step_back_requested = True
+
+    def _step_back_for_newer_instance(self) -> None:
+        """A newer GetCases answers the hotkey now: give it up here.  With
+        nothing of this one on screen — the usual case, a copy left running
+        in the background — quit too, rather than linger out of reach; with
+        windows open, keep them, and go when the last of them is closed."""
+        self._hotkey_yielded = True
+        listener, self._hotkey_listener = self._hotkey_listener, None
+        # Stopping pynput's event tap is not safe on macOS (see
+        # _setup_global_hotkey); there it keeps running, and _on_global_hotkey
+        # ignores what it hears.
+        if listener is not None and sys.platform != "darwin":
+            try:
+                listener.stop()
+            except Exception:
+                pass
+        self._close_quick_popup()
+        if self._anything_on_screen():
+            print("\nA newer GetCases has started and taken over the "
+                  "hotkey; this one closes with its last window.")
+            return
+        print("\nA newer GetCases has started; this one is closing.")
+        self._quit_for_newer = True
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def _anything_on_screen(self) -> bool:
+        """Whether any window of this app is showing (or minimized)."""
+        stack: list = [self.root]
+        while stack:
+            w = stack.pop()
+            try:
+                if (isinstance(w, (tk.Tk, tk.Toplevel))
+                        and w.state() in ("normal", "iconic", "zoomed")):
+                    return True
+                stack.extend(w.winfo_children())
+            except tk.TclError:
+                continue
+        return False
 
     def _spot_knockout_corners(self, popup: tk.Toplevel) -> None:
         """On Windows, punch the popup's square window corners out to
@@ -8522,12 +8666,14 @@ class CourtListenerGUI:
         except Exception:
             pass
 
-    def _toggle_quick_search_popup(self) -> None:
+    def _toggle_quick_search_popup(
+            self, pressed_at: "Optional[float]" = None) -> None:
         # One press = one toggle: a duplicate hotkey delivery (macOS event
         # taps can fire twice for one chord) would close the popup and
         # immediately reopen it, so a burst within the debounce window is
-        # a single toggle.
-        now = time.monotonic()
+        # a single toggle.  Measured from when the key was pressed, where
+        # that is known — not from when the Tk thread got to it.
+        now = time.monotonic() if pressed_at is None else pressed_at
         if now - self._spotlight_toggle_at < 0.3:
             return
         self._spotlight_toggle_at = now
@@ -36695,6 +36841,9 @@ def main() -> None:
     root.after(5000, _gc_tick)
 
     app = CourtListenerGUI(root)
+    # A GetCases already running — in the background, from another checkout —
+    # would answer the hotkey too, and the two spotlights fall out of step.
+    instance = app._claim_instance()
     eng_rep.warm()  # load the English Reports index in the background
 
     # Run in the background by default: rather than greeting the user with the
@@ -36729,7 +36878,11 @@ def main() -> None:
 
         threading.Thread(target=_watch_stdin, daemon=True).start()
 
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        if instance is not None:
+            instance.close()
 
 
 if __name__ == "__main__":
