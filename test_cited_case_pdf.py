@@ -308,6 +308,9 @@ APP_NS = _load(
      "_citation_search_variants": lambda cite: (cite,),
      "_case_law_text_for_scan": _case_law_text_for_scan,
      "_courtlistener_text_source": COURTLISTENER_TEXT_SOURCE,
+     # None of these scans is a Supreme Court slip opinion with its own
+     # text to fall back on.
+     "_slip_text_source": lambda data, url, item=None: None,
      "_cl_text_record": CL_TEXT_RECORD,
      "_ScholarTextWindow": _FakeReader,
      "_bluebook_display_name": _bluebook_display_name,
@@ -946,6 +949,40 @@ class CourtListenerFallbackTests(unittest.TestCase):
         reader = self._press_t(self._click())
         self.assertEqual(reader.url, "https://scholar.test/410 U.S. 113")
         self.assertNotIn("cl_text", reader.kw)
+
+    # --- a slip opinion nobody else has yet -------------------------
+    @staticmethod
+    def _own_text(calls):
+        """_slip_text_source, as for a Supreme Court slip opinion."""
+        def own(data, url, item=None):
+            calls.append((data, url))
+            return CASE_PDF_TEXT_SOURCE(
+                "slip", "Text", "supremecourt.gov", url,
+                "The slip opinion's own text", dict(item or {}), [], [],
+                None)
+        return own
+
+    def test_the_pdfs_own_text_is_the_last_resort(self):
+        CL_ITEMS.clear()
+        calls = []
+        with mock.patch.dict(APP_NS,
+                             {"_slip_text_source": self._own_text(calls)}):
+            reader = self._press_t(self._click())
+
+        self.assertEqual(calls, [(b"%PDF-1",
+                                  "https://loc.test/usrep410113.pdf")])
+        self.assertEqual(reader.kw["cl_text"], "The slip opinion's own text")
+        self.assertEqual(reader.kw["primary_source_kind"], "slip")
+        self.assertEqual(reader.kw["primary_source_label"], "supremecourt.gov")
+
+    def test_the_pdfs_own_text_waits_for_courtlistener(self):
+        calls = []
+        with mock.patch.dict(APP_NS,
+                             {"_slip_text_source": self._own_text(calls)}):
+            reader = self._press_t(self._click())
+
+        self.assertEqual(calls, [])
+        self.assertEqual(reader.kw["primary_source_kind"], "courtlistener")
 
     # --- static.case.law comes before CourtListener -----------------
     def test_the_report_on_static_case_law_is_preferred_to_courtlistener(self):

@@ -838,6 +838,13 @@ def display_date(iso: str) -> str:
     return f"{day:%B} {day.day}, {day.year}"
 
 
+def iso_date(printed: str) -> str:
+    """"June 30, 2026" (a date as the homepage prints it) → "2026-06-30";
+    "" when it is not a whole date."""
+    iso = _date_iso(printed)
+    return iso if re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso) else ""
+
+
 if __name__ == "__main__":  # pragma: no cover - offline smoke test
     import sys
 

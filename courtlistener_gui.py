@@ -4992,6 +4992,59 @@ def _scotus_merits_first(rows: list) -> list:
     return out
 
 
+def _supreme_court_writing_urls(results: list, name: str, decided: str,
+                                writing: str = "merits") -> list:
+    """The Google Scholar pages that may be one Supreme Court writing — the
+    one decided *decided* (an ISO date) — from a search for its case's name,
+    likeliest first.
+
+    A caption search lists the whole family — the merits opinion and the
+    orders around it, over more than one Term — and a Scholar result shows
+    only a year.  So the year narrows it; then a snippet that prints the
+    exact date leads, and after it the merits opinion
+    (:func:`_rank_scholar_spotlight_results`) — or, for *writing* "order",
+    the writings that read as orders.  Only the page itself can say which
+    day it was decided (:func:`_page_decided_on`): a writing Scholar has not
+    got yet leaves the others of its year in the list."""
+    year = (decided or "")[:4]
+    if not year.isdigit():
+        return []
+    ranked = _rank_scholar_spotlight_results(name, results, len(results))
+    rows = [r for r in ranked
+            if _scholar_source_to_court_id(getattr(r, "source", "") or "")
+            == _SCOTUS_COURT_ID and _scholar_year(r) == int(year)]
+    try:
+        day = _dt.date.fromisoformat(decided[:10])
+        printed = f"{day:%B} {day.day}, {day.year}"
+    except ValueError:
+        printed = ""
+
+    def dated(r) -> bool:
+        return bool(printed) and printed in (r.snippet or "")
+
+    def order(r) -> bool:
+        return _looks_like_scotus_order(r.snippet)
+
+    if writing == "order":
+        rows.sort(key=lambda r: (not dated(r), not order(r)))
+    else:
+        rows.sort(key=lambda r: (not (dated(r) and not order(r)), order(r)))
+    return [r.url for r in rows]
+
+
+def _page_decided_on(fetched, decided: str) -> bool:
+    """Whether a fetched opinion page, ``(url, html)``, prints *decided* (an
+    ISO date) as the day it was decided."""
+    try:
+        import opinion_db
+        record = opinion_db.extract_record(*fetched) or {}
+    except Exception as exc:
+        print(f"[cite-pdf] reading the decision date failed: {exc}")
+        return False
+    return bool(decided) and \
+        str(record.get("date_filed") or "")[:10] == decided[:10]
+
+
 def _is_scotus_order_item(item: dict) -> bool:
     """True for a SCOTUS "order" entry — a docket/order with no real opinion —
     which the main search routes out of the primary results and the spotlight
@@ -6529,6 +6582,41 @@ def _courtlistener_text_source(
     except Exception as exc:
         print(f"[pdf-text] CourtListener discovery failed: {exc}")
         return None
+
+
+# The Court's own file of one writing, in its Term's folder:
+# supremecourt.gov/opinions/25pdf/24-43_2b35.pdf — a slip opinion, or the
+# separate writings on an order.  Not a preliminary print's orders section
+# (opinions/preliminaryprint/…), a volume's worth of orders in one file.
+_SLIP_PDF_URL_RE = re.compile(r"supremecourt\.gov/opinions/\d{2}pdf/",
+                              re.IGNORECASE)
+
+
+def _slip_text_source(data: bytes, url: str,
+                      item: "Optional[dict]" = None,
+                      ) -> "Optional[_CasePdfTextSource]":
+    """A Supreme Court slip opinion's text read off its own pages: the running
+    heads, page numbers and divider rules taken out and the paragraphs put
+    back together (:func:`slip_opinion.to_clean_text`), as the slip-opinion
+    viewer's Show as Text has always done.  The T button's last resort, for
+    a writing too new for Google Scholar or CourtListener to have.  ``item``
+    names the case.  None for any other PDF, or one with no text layer."""
+    if not (data and _SLIP_PDF_URL_RE.search(url or "")):
+        return None
+    try:
+        pages, _italics = _extract_pdf_text_and_style(data)
+        text = slip_opinion.to_clean_text(pages) if pages else ""
+    except Exception as exc:
+        print(f"[cite-pdf] reading the slip opinion's own text failed: {exc}")
+        return None
+    if not text.strip():
+        return None
+    return _CasePdfTextSource(
+        # Under a PDF there is only one text to switch to, so the button says
+        # "Text"; source_label names where it came from.
+        "slip", "Text", "supremecourt.gov", url.partition("#")[0], text,
+        dict(item or {}), [], [],
+    )
 
 
 def _cl_text_record(source: "_CasePdfTextSource") -> dict:
@@ -9445,6 +9533,66 @@ class CourtListenerGUI:
         except (AttributeError, tk.TclError):
             pass
 
+    def open_supreme_court_pdf(self, parent, url: str, name: str, *,
+                               citation: str = "", docket: str = "",
+                               decided: str = "", writing: str = "merits",
+                               status=None) -> None:
+        """Open a Supreme Court opinion straight from supremecourt.gov — a
+        slip opinion, or the separate writings on an order — in the viewer
+        every other Supreme Court opinion opens in: the pages with their
+        strip, the text a press of T away, the case's details a press of s.
+
+        ``citation`` is the Court's own: "609 U.S. 422" once the page is
+        fixed, before that "609/2" (the preliminary print it will be in),
+        shown as "609 U.S. ___".  The text is found by name and ``decided``
+        (see _warm_case_text), ``writing`` "order" for an order's separate
+        writings.  A link to a page of its PDF — a writing partway into an
+        order's file ("26a305_4g15.pdf#page=2"), or into a preliminary
+        print's whole orders section ("606US2PP_Ord.pdf#page=143") — opens at
+        that page."""
+        status = status or self._safe_root_status
+        paged = re.fullmatch(r"(\d+)\s*U\.\s?S\.\s*(\d+)", citation.strip())
+        volume = re.fullmatch(r"(\d+)/\d+", citation.strip())
+        if paged:
+            cite = f"{paged.group(1)} U.S. {paged.group(2)}"
+        elif volume:
+            cite = f"{volume.group(1)} U.S. ___"
+        else:
+            cite = f"No. {docket}" if docket else ""
+        pdf_url = url.partition("#")[0]
+        start = _pdf_link_page_index(url)
+        item = {"caseName": name, "court_id": _SCOTUS_COURT_ID,
+                "dateFiled": decided, "docketNumber": docket,
+                "citation": [cite] if paged else []}
+        status(f"Opening {name}…")
+
+        def run() -> None:
+            try:
+                # The page is numbered in the PDF as published, cover and
+                # all: the cover comes out once the page it moves is known.
+                fetched = _fetch_pdf_bytes(pdf_url, timeout=45,
+                                           keep_cover=bool(start))
+            except Exception as exc:
+                print(f"[scotus] fetching {pdf_url} failed: {exc}")
+                fetched = None
+            if fetched is None:
+                self._post_root(lambda: status(
+                    f"Could not load {name} from supremecourt.gov."))
+                return
+            data, final_url = fetched
+            first = start
+            if first:
+                clean = _strip_preliminary_print_cover(data)
+                first = max(0, first - (_pdf_page_total(data)
+                                        - _pdf_page_total(clean)))
+                data = clean
+            self._post_root(lambda: self._show_cited_case_pdf(
+                parent, data, final_url, cite, "", name, ("cite", cite),
+                name, status, cl_item=item, decided=decided,
+                writing=writing, start_page=first or None))
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _cited_case_pdf_item(self, client, cite: str, name: str) -> dict:
         """A search-result-shaped record for a cited case, good enough for the
         PDF resolver.  CourtListener's own cluster at this citation when it has
@@ -9471,12 +9619,19 @@ class CourtListenerGUI:
     def _show_cited_case_pdf(self, parent, data: bytes, url: str, cite: str,
                              pin: str, name: str, action: tuple,
                              snippet: str, status, *,
-                             cl_item: "Optional[dict]" = None) -> None:
+                             cl_item: "Optional[dict]" = None,
+                             decided: str = "",
+                             writing: str = "merits",
+                             start_page: "Optional[int]" = None) -> None:
         """Put a cited case's scan on screen, with its text warming behind it.
 
         ``cl_item`` is the CourtListener cluster the scan was found through,
         when there was one: what the T button shows if Google Scholar has no
-        copy of the case."""
+        copy of the case.  ``decided`` and ``writing`` find the text of a
+        Supreme Court opinion opened straight from the Court by its date
+        rather than its citation (see _warm_case_text).  ``start_page`` is a
+        page of the file to open at, 0-based, where the link named one
+        itself rather than a pin cite."""
         title = f"{name} — {cite}" if name and cite else (cite or name or "PDF")
         margin = _PdfPane._MARGIN * 3 if _is_us_reports_pdf(url) else None
         host = self.root if parent is None else parent
@@ -9493,7 +9648,8 @@ class CourtListenerGUI:
         # fetched below replaces them with the real caption, the parallel
         # citations and the decision date a Bluebook filename is built from.
         named = {"data": data, "url": url, "cite": cite, "name": name,
-                 "pin": pin, "record": None, "page": None, "pin_page": None,
+                 "pin": pin, "start_page": start_page,
+                 "record": None, "page": None, "pin_page": None,
                  "text_source": None,
                  # A page of orders opened for none of them in particular:
                  # it is the page, called by its citation alone, and has no
@@ -9561,11 +9717,16 @@ class CourtListenerGUI:
         # The text is fetched now rather than when the reader asks for it, so
         # the case name opens a page already in hand — and so the window can be
         # titled with the case's real citation rather than the clicked one.
+        # A slip opinion may be too new for anyone else to have: then the PDF's
+        # own text is the text (any other scan has none to offer).
         if not named["orders_page"]:
             self._warm_case_text(cite, name, on_record=described,
                                  on_page=page_ready,
                                  on_text_source=text_source_ready,
-                                 cl_item=cl_item, scan_url=url)
+                                 cl_item=cl_item, scan_url=url,
+                                 decided=decided, writing=writing,
+                                 own_text=lambda: _slip_text_source(
+                                     data, url, cl_item))
         try:
             window = _FloatingPdfWindow(
                 self.root, data, url, title, margin=margin, app=self,
@@ -9628,14 +9789,21 @@ class CourtListenerGUI:
         Called twice: once as the window opens, on the arithmetic alone, and
         again once the pages' own numbers have been read — which corrects for a
         cover leaf.  The second is skipped if the reader has scrolled away in
-        the meantime; where they have gone is a better answer than ours."""
+        the meantime; where they have gone is a better answer than ours.  A
+        page the link named in the file itself (``start_page``) needs no
+        arithmetic, and no correcting."""
         window = named.get("window")
         pin = str(named.get("pin") or "")
-        if window is None or not pin or not window.alive():
+        start = named.get("start_page")
+        if window is None or not (pin or start is not None) \
+                or not window.alive():
             return
-        target = _scan_page_for_pin(
-            self._scan_cite_for(named), pin, named.get("cite") or "",
-            pdf_pages)
+        if start is not None:
+            target = start
+        else:
+            target = _scan_page_for_pin(
+                self._scan_cite_for(named), pin, named.get("cite") or "",
+                pdf_pages)
         if target is None or target == named.get("pin_page"):
             return
         was = named.get("pin_page")
@@ -9700,7 +9868,8 @@ class CourtListenerGUI:
     def _warm_case_text(self, cite: str, name: str, on_record=None,
                         on_page=None, on_text_source=None,
                         cl_item: "Optional[dict]" = None,
-                        scan_url: str = "") -> None:
+                        scan_url: str = "", decided: str = "",
+                        writing: str = "merits", own_text=None) -> None:
         """Fetch the cited opinion's text in the background, so the case name
         on the viewer's strip opens a page that is already in hand.  Uses the
         ordinary Google Scholar path, whose result is cached and saved to the
@@ -9725,8 +9894,19 @@ class CourtListenerGUI:
         text is taken from, since CAP scanned each of them separately and only
         one of them paginates the pages on screen.  Scholar is still tried
         first: it is the better-typeset copy, and the one every other view of
-        a case prefers."""
-        if not cite:
+        a case prefers.
+
+        ``decided`` is a Supreme Court decision's date, for an opinion opened
+        straight from the Court (its Recent SCOTUS list): too recent, often,
+        for a citation with a page to look it up by, so it is found by name
+        and date instead — ``writing`` "order" for an order's separate
+        writings rather than a merits opinion (see
+        :func:`_supreme_court_writing_urls`).  A page is kept only if it
+        prints that date: no text at all is better than the text of another
+        of the case's writings.  ``own_text`` is the last resort when nobody
+        has the writing yet — called on the worker, it returns the text the
+        PDF itself carries (:func:`_slip_text_source`), or None."""
+        if not cite and not decided:
             return
         try:
             fetcher = self._get_scholar() if _SCHOLAR_AVAILABLE else None
@@ -9748,33 +9928,73 @@ class CourtListenerGUI:
         # through names it — so the text is of the case whose pages are shown.
         case_name, year = _case_name_and_year(cl_item, name)
 
+        def keep(fetched) -> None:
+            if on_page is not None:
+                try:
+                    on_page(*fetched)
+                except Exception as exc:
+                    print(f"[cite-pdf] keeping the opinion page "
+                          f"failed: {exc}")
+            if on_record is not None:
+                self._describe_warmed_case(fetched, name, on_record)
+
+        # A reporter citation with a page to look up by — not "609 U.S. ___",
+        # a volume, nor "No. 25-332", a docket.
+        paged = bool(re.match(r"\d+\s+\D.*?\s\d+\s*$", cite or ""))
+
         def scholar() -> bool:
             """Whether Google Scholar answered with a copy of the case."""
             if fetcher is None:
                 return False
             try:
-                for lookup_cite in _citation_search_variants(cite):
+                for lookup_cite in (_citation_search_variants(cite)
+                                    if paged else ()):
                     fetched = fetcher.fetch_by_citation(
                         lookup_cite, case_name=case_name, year=year)
                     if not fetched:
                         continue
-                    if on_page is not None:
-                        try:
-                            on_page(*fetched)
-                        except Exception as exc:
-                            print(f"[cite-pdf] keeping the opinion page "
-                                  f"failed: {exc}")
-                    if on_record is not None:
-                        self._describe_warmed_case(fetched, name, on_record)
+                    keep(fetched)
                     return True
+                if decided and name:
+                    found = fetcher.search_cases(
+                        name, limit=10, courts=[_SCOTUS_COURT_ID])
+                    # A few of the likeliest, each read for its date: the
+                    # stay granted a fortnight before a per curiam Scholar
+                    # has yet to add is not the per curiam.
+                    for url in _supreme_court_writing_urls(
+                            found, name, decided, writing)[:3]:
+                        fetched = fetcher.fetch_by_url(url)
+                        if fetched and _page_decided_on(fetched, decided):
+                            keep(fetched)
+                            return True
             except Exception as exc:
-                print(f"[cite-pdf] warming the text of {cite!r} failed: {exc}")
+                print(f"[cite-pdf] warming the text of {cite or name!r} "
+                      f"failed: {exc}")
             return False
+
+        def decided_cluster() -> "Optional[dict]":
+            """CourtListener's record of the writing decided on *decided*:
+            of the Supreme Court's under this caption that day, the one
+            citing most (a merits opinion cites dozens, an order none)."""
+            if not (decided and client is not None and name):
+                return None
+            same_day = [
+                it for it in _cl_name_search(client, name, _SCOTUS_COURT_ID,
+                                             limit=10)
+                if str(it.get("dateFiled") or "")[:10] == decided[:10]
+            ]
+            if not same_day:
+                return None
+            if writing == "order":
+                return same_day[0]
+            return max(same_day, key=lambda it: len(
+                _courtlistener_main_opinion(it).get("cites") or []))
 
         def fallback() -> None:
             """The copy to show when Google Scholar has none: static.case.law's
-            text of the very pages on screen, then CourtListener's."""
-            cites = list(_citation_search_variants(cite))
+            text of the very pages on screen, then CourtListener's, then the
+            PDF's own (``own_text``)."""
+            cites = list(_citation_search_variants(cite)) if paged else []
             for parallel in (cl_item or {}).get("citation") or []:
                 parallel = re.sub(r"<[^>]+>", "", str(parallel or "")).strip()
                 if parallel and parallel not in cites:
@@ -9784,10 +10004,15 @@ class CourtListenerGUI:
                 str((cl_item or {}).get("dateFiled") or ""),
             )
             if source is None and client is not None:
+                item = cl_item
+                if not (item and (item.get("cluster_id") or item.get("id"))):
+                    item = decided_cluster() or cl_item
                 source = _courtlistener_text_source(
-                    client, _citation_search_variants(cite), name,
-                    item=cl_item,
+                    client, _citation_search_variants(cite) if paged else [],
+                    name, item=item,
                 )
+            if source is None and own_text is not None:
+                source = own_text()
             if source is None:
                 return
             try:
@@ -16466,6 +16691,21 @@ def _pdf_link_page_index(url: str) -> int:
     PDF as published — 0 when it names none."""
     match = re.search(r"#page=(\d+)", url or "", re.IGNORECASE)
     return max(0, int(match.group(1)) - 1) if match else 0
+
+
+def _pdf_page_total(data: bytes) -> int:
+    """How many pages the PDF *data* has; 0 if it will not open."""
+    import pypdfium2 as pdfium
+
+    try:
+        with _PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(data)
+            try:
+                return len(doc)
+            finally:
+                doc.close()
+    except Exception:
+        return 0
 
 
 def _clean_reporter_pdf(data: bytes, keep_cover: bool = False) -> bytes:
@@ -26985,12 +27225,22 @@ class _ScholarTextWindow:
         the opinion's author and the holding the Court puts on its link.
         Then *orders*: the latest orders that drew separate writings
         (``scotus_recent.OrderOpinion``), each once, naming who wrote.  A
-        linked entry opens in the in-app slip-opinion viewer."""
+        linked entry opens in the viewer every Supreme Court opinion opens
+        in (CourtListenerGUI.open_supreme_court_pdf)."""
         import scotus_recent
 
-        def opener(url: str, name: str, description: str = ""):
+        app = self._app
+
+        def opener(url: str, name: str, description: str = "", *,
+                   citation: str = "", docket: str = "", decided: str = "",
+                   writing: str = "merits"):
+            if app is not None and hasattr(app, "open_supreme_court_pdf"):
+                return lambda: app.open_supreme_court_pdf(
+                    self._win, url, name, citation=citation, docket=docket,
+                    decided=decided, writing=writing,
+                    status=self._status_var.set)
             return lambda: _SlipOpinionWindow(
-                self._win, url, name, self._status_var.set, app=self._app,
+                self._win, url, name, self._status_var.set, app=app,
                 description=description)
 
         lines: list[tuple] = [
@@ -27010,7 +27260,8 @@ class _ScholarTextWindow:
                 lines.append(("", d.description))
             lines.append((
                 "", "Open the slip opinion",
-                opener(d.opinion_url, d.name, d.description),
+                opener(d.opinion_url, d.name, d.description, docket=d.docket,
+                       decided=scotus_recent.iso_date(d.date)),
             ))
         if not decisions:
             for m in merits:
@@ -27026,7 +27277,9 @@ class _ScholarTextWindow:
                 if m.opinion_url:
                     lines.append((
                         "", "Open the opinion",
-                        opener(m.opinion_url, m.name, m.description),
+                        opener(m.opinion_url, m.name, m.description,
+                               citation=m.citation, docket=m.docket,
+                               decided=m.date),
                     ))
                     continue
                 # Listed before the Court has linked its PDF: the docket is
@@ -27060,7 +27313,9 @@ class _ScholarTextWindow:
                 lines.append((
                     "", "Open the opinions",
                     opener(o.opinion_url, o.name,
-                           f"Separate opinions: {writers}" if writers else ""),
+                           f"Separate opinions: {writers}" if writers else "",
+                           citation=o.citation, docket=o.docket,
+                           decided=o.date, writing="order"),
                 ))
         return lines
 
@@ -27088,9 +27343,10 @@ class _ScholarTextWindow:
 
     def _load_recent_scotus(self) -> None:
         """Fetch the Court's most recent decisions (supremecourt.gov) off-thread
-        and render them with in-app slip-opinion links: the homepage's Recent
-        Decisions — or, when it lists none, the Term's ten latest opinions of
-        the Court — then the five latest orders with separate writings."""
+        and render them with links into the Supreme Court viewer: the
+        homepage's Recent Decisions — or, when it lists none, the Term's ten
+        latest opinions of the Court — then the five latest orders with
+        separate writings."""
         self._recent_loaded = True
         self._set_details([("lbl", "Loading recent decisions…")])
 
@@ -32642,7 +32898,8 @@ def _open_scotus_citation(app: "CourtListenerGUI", parent: tk.Misc,
     California, No. 26A139, slip op. at 4 (U.S. Aug. 24, 2026)".  The Court's
     own slip opinion comes first, found in its opinion archive by the docket
     and the decision date (:func:`scotus_recent.find_slip_opinion`) and shown
-    in the slip-opinion viewer.  An order on an application is filed on the
+    in the viewer every Supreme Court opinion opens in
+    (CourtListenerGUI.open_supreme_court_pdf).  An order on an application is filed on the
     docket rather than in that archive, so failing it the case's docket page
     on supremecourt.gov — which lists every order and opinion in the case —
     opens in the browser."""
@@ -32674,11 +32931,19 @@ def _open_scotus_citation(app: "CourtListenerGUI", parent: tk.Misc,
         except Exception as exc:
             print(f"[scotus] slip-opinion lookup failed for {label!r}: {exc}")
         if match is not None and match.opinion_url:
-            def open_slip(url=match.opinion_url,
-                          title=match.name or name or label) -> None:
+            def open_slip(found=match, title=match.name or name or label
+                          ) -> None:
                 try:
-                    _SlipOpinionWindow(parent, url, title, safe_status,
-                                       app=app)
+                    if hasattr(app, "open_supreme_court_pdf"):
+                        app.open_supreme_court_pdf(
+                            parent, found.opinion_url, title,
+                            citation=found.citation,
+                            docket=found.docket or docket,
+                            decided=found.date or spec.get("date") or "",
+                            status=safe_status)
+                    else:
+                        _SlipOpinionWindow(parent, found.opinion_url, title,
+                                           safe_status, app=app)
                 except tk.TclError:
                     pass
 
