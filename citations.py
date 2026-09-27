@@ -490,12 +490,35 @@ _PLAIN_CASE_REPORTERS = {
 # named for two — Maryland's "Gill & J.", "Har. & J." — not a journal.
 # Case-sensitive: journal abbreviations are capitalized, and the broad regex
 # only ever hands us a capitalized token.
+#
+# The other sciences' journals, which an opinion cites for its facts, are
+# told by the words their titles are made of — abbreviated as the Bluebook
+# abbreviates a periodical's (table T13), or written out — none of which a
+# case reporter's title uses: "38 Epidemiologic Revs. 125", "140 Ann.
+# Internal Med. 95", "37 Health Aff. 1", "18 Homicide Stud. 3", "24 Just. Q.
+# 12", "66 Morbidity & Mortality Wkly. Rep. 1".  Some T13 words are left
+# out because a reporter shares them: Soc. (Soc. Sec. Rep. Serv.), Educ.
+# (Educ. L. Rep.), Wkly. (Wkly. Notes Cas.), Proc. (N.Y. Civ. Proc.), Ann.
+# (La. Ann., Ann. Cas.), Mag. (Mag. Cas.), Bull. (Wkly. L. Bull.).  A
+# standalone Q. is the J. rule again, and the Q.B. of the Queen's Bench is
+# not one.
+_PERIODICAL_WORDS = (
+    r"\b(?:Revs|Rsch|Stud|Sci|Med|Aff|Behav|Econ|Psych|Psychol|Pol['’]y"
+    r"|Soc['’]y|Socio|Hist|Found|Mgmt|Surv|Symp|Newsl|Contemp|Delinq"
+    r"|Compar|Commc['’]n)\."
+    r"|(?<![A-Za-z.&])Q\.(?!\s?B\.)"
+    r"|\b(?:Health|Medicine|Medical|Sciences?|Research|Studies|Quarterly"
+    r"|Reviews?|Journal|Psychiatry|Psychology|Epidemiolog[a-z]*|Pediatrics"
+    r"|Criminology|Economics|Sociology|Behavior|Prevention|Internal"
+    r"|Clinical|Morbidity|Mortality)\b"
+)
 _JOURNAL_REPORTER_RE = re.compile(
     r"L\.\s?J\.|L\.\s?Rev\.|L\.\s?Q\.|\bRev\.|(?<![A-Za-z.&])(?<!&\s)J\."
     # The Criminal Law Bulletin and Law & Contemporary Problems — "Latzer,
     # Searching Cars and Their Contents: United States v. Ross, 18 Crim. L.
     # Bull. 381" (Acevedo) was opened as the Ross the article is about.
     r"|Crim\.\s?L\.\s?Bull\.|\bProbs\."
+    r"|" + _PERIODICAL_WORDS
 )
 
 # "10 Op. Atty Gen. 382" — an opinion of the Attorney General.  Cited in a

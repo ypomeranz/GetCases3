@@ -1974,6 +1974,25 @@ def _scholar_parallel_cites(client, item: dict, exclude: str) -> list[str]:
 # before comparing reporter words against a court abbreviation.
 _REPORTER_SERIES_RE = re.compile(r"\b\d*(?:2d|3d|4th|5th|6th)\b\.?|\b\d+\b")
 
+# Reporters whose titles convey more than their abbreviations spell out, keyed
+# by the reporter's words (series dropped): the leading words of the court
+# abbreviation each one already says, and so leaves out of the parenthetical
+# (rule 10.4(b)).  The Appellate Division Reports are that court's own —
+# "154 App. Div. 413 (1913)"; the Miscellaneous Reports are New York's,
+# leaving which of its courts decided — "50 Misc. 2d 5 (Sup. Ct. 1966)"; the
+# Superior Court Reports leave the division — "(App. Div. 1990)".
+_REPORTER_CONVEYS: dict[tuple, str] = {
+    ("App.", "Div."): "N.Y. App. Div.",
+    ("A.D.",): "N.Y. App. Div.",
+    ("Misc.",): "N.Y.",
+    ("N.J.", "Super."): "N.J. Super. Ct.",
+    ("Tex.", "Crim."): "Tex. Crim. App.",
+    ("Okla.", "Crim."): "Okla. Crim. App.",
+    ("Cal.", "App.", "Supp."): "Cal. App. Dep't Super. Ct.",
+    ("App.", "D.C."): "D.C. Cir.",
+    ("U.S.", "App.", "D.C."): "D.C. Cir.",
+}
+
 _SCOTUS_REPORTERS = {"U.S.", "S. Ct.", "S.Ct.", "L. Ed.", "L. Ed. 2d", "L.Ed.", "L.Ed.2d"}
 
 
@@ -2026,8 +2045,11 @@ def _court_for_paren(citation: str, court_id: str, fallback: str = "") -> str:
       60 Fed. Cl. 600        → ()          reporter names the court
       306 Md. 556            → ()          official state reporter, highest court
       100 Cal. App. 4th 454  → ()          official reporter names the court
+      154 App. Div. 413      → ()          the Appellate Division's own reports
       75 Cal. Rptr. 2d 1     → (Ct. App.)  reporter conveys the state only
       12 N.Y.S.2d 345        → (App. Div.) reporter conveys the state only
+      400 N.Y.S.2d 5         → ()          ... and the highest court needs none
+      100 N.J. Super. 5      → (App. Div.) reporter conveys the court, not its division
       510 A.2d 562           → (Md.)       regional reporter conveys nothing
     """
     court_id = (court_id or "").strip().lower()
@@ -2053,18 +2075,27 @@ def _court_for_paren(citation: str, court_id: str, fallback: str = "") -> str:
             return ""
     if not abbr or not reporter:
         return abbr
+    # Compared as the Bluebook spells it: "Wn.2d" is the Washington Reports
+    # and "Pa. Cmwlth." the Commonwealth Court's, whatever the letters.
+    family = _reporter_family(reporter)
+    if family is not None:
+        reporter = family.canonical
     rep_tokens = [t for t in _REPORTER_SERIES_RE.sub(" ", reporter).split() if t]
     ct_tokens = abbr.split()
+    conveyed = _REPORTER_CONVEYS.get(tuple(rep_tokens), "").split()
+    if conveyed and ct_tokens[:len(conveyed)] == conveyed:
+        return " ".join(ct_tokens[len(conveyed):])
     meaningful = [t for t in ct_tokens if t != "Ct."]
     if meaningful and all(t in rep_tokens for t in meaningful):
         return ""
     if (
         rep_tokens
-        and len(ct_tokens) > 1
         and rep_tokens[0].replace(".", "").lower().startswith(
             ct_tokens[0].replace(".", "").lower()
         )
     ):
+        # The reporter names the state, leaving the court — none at all
+        # for the state's highest court: "400 N.Y.S.2d 5 (1977)".
         return " ".join(ct_tokens[1:])
     return abbr
 
@@ -26423,6 +26454,10 @@ class _ScholarTextWindow:
             if official:
                 display_cite = _respace_reporter_in_cite(official)
 
+        # The reporter as the Bluebook spells it, as every other line the app
+        # writes has it: "154 App. Div. 413" where the page prints the courts'
+        # "154 A.D. 413", "104 Wash. 2d 677" for "104 Wn.2d 677".
+        display_cite = _bluebook_reporter_spelling(display_cite)
         if court_id in ("wis", "wisctapp") or court_id.startswith("wis"):
             wi_cite = _wisconsin_display_cite(known_cites)
             if wi_cite:
@@ -26697,7 +26732,7 @@ class _ScholarTextWindow:
             # reporter with a parenthetical qualifier ("Media L. Rep. (BNA)")
             # alone — re-spacing would drop the parentheses.
             if "(" not in c:
-                c = _respace_reporter_in_cite(c)
+                c = _bluebook_reporter_spelling(_respace_reporter_in_cite(c))
             key = re.sub(r"\s+", "", c).lower()
             identity_key = re.sub(r"[^a-z0-9]", "", c.lower())
             if pos and (key in display_key
