@@ -35,6 +35,9 @@ from unittest import mock
 import citations
 import opinion_location
 import slip_opinion
+from citation_overrides import (
+    citation_identity_keys, find_override, update_overrides,
+)
 
 
 SRC = pathlib.Path(__file__).with_name("courtlistener_gui.py").read_text()
@@ -280,15 +283,32 @@ def _bluebook_display_name(item):
 TITLED: list = []            # every item a window title was built from
 
 
+SAVED_CONFIG: dict = {}    # what _load_config returns
+HEADER_COURTS: dict = {}   # opinion html -> the court its header names
+
+
+def _header_court(blocks):
+    """HEADER_COURTS' court for a page — or, stored as a callable, what
+    reading it does (raises, say)."""
+    court = HEADER_COURTS.get(blocks, "")
+    return court() if callable(court) else court
+
+
 APP_NS = _load(
     "CourtListenerGUI",
     ["open_cited_case_pdf", "_cited_case_pdf_item", "_show_cited_case_pdf",
      "_cited_pdf_window_closed", "_warm_case_text",
      "_request_cited_pdf_analysis", "_cited_filename_item",
      "_jump_to_pin", "_scan_cite_for", "_retitle_cited_pdf",
-     "_embed_cited_case_text",
+     "_embed_cited_case_text", "_cited_citation_override",
      "_describe_warmed_case", "_save_cited_pdf", "_print_cited_pdf"],
     {"_citation_link_name": lambda snippet, cite="": snippet.strip(),
+     # The court a fetched page's header names, keyed like CAPTIONS.
+     "_scholar_header_court": lambda blocks: _header_court(blocks),
+     # The citations the reader has saved: none, unless a test saves one.
+     "_load_config": lambda: dict(SAVED_CONFIG),
+     "citation_identity_keys": citation_identity_keys,
+     "find_override": find_override,
      "_cl_item_for_citation": _cl_item_for_citation,
      "_fetch_pdf_bytes": _fetch_pdf_bytes,
      "_us_reports_cite": lambda cite: (
@@ -397,6 +417,8 @@ class _App:
         self.scholar_calls = []
         self.scholar_names = []          # (case_name, year) each call had
         self._describe_warmed_case = APP_NS["_describe_warmed_case"]
+        # A static method on the app: lifted, it is a plain function.
+        self._cited_citation_override = APP_NS["_cited_citation_override"]
         for name in ("open_cited_case_pdf", "_cited_case_pdf_item",
                      "_show_cited_case_pdf", "_cited_pdf_window_closed",
                      "_warm_case_text", "_request_cited_pdf_analysis",
@@ -461,6 +483,38 @@ class CitedCasePdfTests(unittest.TestCase):
     def test_it_comes_to_the_front(self):
         self._click()
         self.assertEqual(_FakeViewer.opened[0].surfaced, 1)
+
+    MINE = "Roe v. Wade, 410 U.S. 113 (1973) (as I cite it)"
+
+    def _save(self, citation):
+        SAVED_CONFIG.clear()
+        if citation:
+            SAVED_CONFIG["citation_overrides"] = update_overrides(
+                {}, citation_identity_keys({}, "410 U.S. 113"), citation)
+
+    def test_a_citation_the_reader_saved_names_the_viewer(self):
+        self._save(self.MINE)
+        try:
+            self._click()
+        finally:
+            self._save("")
+        self.assertEqual(_FakeViewer.opened[0].title, self.MINE)
+
+    def test_an_edit_in_the_text_beside_it_renames_the_viewer(self):
+        self._click()
+        viewer = _FakeViewer.opened[0]
+        automatic = viewer.title
+        self._save(self.MINE)
+        try:
+            viewer.kw["on_citation_edited"]()
+            self.assertEqual(viewer.title, self.MINE)
+        finally:
+            self._save("")
+        # Restoring automatic Bluebooking restores the automatic name.
+        viewer.kw["on_citation_edited"]()
+        self.assertNotEqual(viewer.title, self.MINE)
+        self.assertIn("410 U.S. 113", viewer.title)
+        self.assertNotEqual(automatic, "")
 
     def test_a_us_reports_scan_gets_the_roomier_margin(self):
         self._click()
@@ -1339,10 +1393,11 @@ class WarmedCaseNameTests(unittest.TestCase):
         CAPTIONS[self.HTML] = "Manuel v. City of Joliet"
 
     def _describe(self, stored_name="Manuel v. City of Joliet, Illinois",
-                  fallback="Manuel v. City of Joliet, Ill.", html=None):
+                  fallback="Manuel v. City of Joliet, Ill.", html=None,
+                  court="scotus"):
         html = self.HTML if html is None else html
         record = {"name": stored_name, "cites": ["137 S. Ct. 911"],
-                  "year": "2017", "court": "scotus"}
+                  "year": "2017", "court": court}
         fake = types.ModuleType("opinion_db")
         fake.extract_record = lambda url, h: dict(record)
         got: list = []
@@ -1371,6 +1426,29 @@ class WarmedCaseNameTests(unittest.TestCase):
         record = self._describe(stored_name="", html="<no caption here>")
         self.assertEqual(record["name"], "Manuel v. City of Joliet, Ill.")
 
+    def test_the_header_names_a_court_the_citation_does_not(self):
+        # United States v. Republic Steel Corp., 155 F. Supp. 442 (N.D. Ill.
+        # 1957): an F. Supp. cite names no court, so the stored record had
+        # none, and the window's parenthetical went without one.
+        HEADER_COURTS[self.HTML] = "ilnd"
+        try:
+            self.assertEqual(self._describe(court="")["court"], "ilnd")
+            # A court the record already has is kept.
+            self.assertEqual(self._describe()["court"], "scotus")
+        finally:
+            HEADER_COURTS.clear()
+
+    def test_a_court_that_will_not_read_leaves_the_caption(self):
+        def unreadable():
+            raise ValueError("no header")
+        HEADER_COURTS[self.HTML] = unreadable
+        try:
+            record = self._describe(court="")
+        finally:
+            HEADER_COURTS.clear()
+        self.assertEqual(record["name"], "Manuel v. City of Joliet")
+        self.assertEqual(record["court"], "")
+
 
 class CaseNameTests(unittest.TestCase):
     """A search result carries the caption the court docketed the case under;
@@ -1384,6 +1462,12 @@ class CaseNameTests(unittest.TestCase):
         reader = _NamedReader(DOCKET_ITEM, CAPTION)
         self.assertTrue(
             reader._scan_window_title(SLIP_URL).startswith(CAPTION + " |"))
+
+    def test_unless_the_reader_has_written_the_citation_differently(self):
+        reader = _NamedReader(DOCKET_ITEM, CAPTION)
+        reader._base_citation_override = "Manuel v. Joliet, 580 U.S. 357"
+        self.assertEqual(reader._scan_window_title(SLIP_URL),
+                         "Manuel v. Joliet, 580 U.S. 357")
 
     def test_and_the_file_a_scan_is_saved_as(self):
         reader = _NamedReader(DOCKET_ITEM, CAPTION)

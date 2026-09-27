@@ -2092,6 +2092,10 @@ _ENTITY_LIST_BREAK_RE = re.compile(
 _LIST_CLOSING_DESIGNATORS = frozenset({
     "co", "cos", "corp", "inc", "ltd", "llc", "llp", "lllp", "lp", "plc",
     "pllc", "pc",
+    # …and as a caption spells them out, before anything is abbreviated:
+    # "Republic Steel Corporation, International Harvester Company, and
+    # Interlake Iron Co" is three defendants.
+    "company", "companies", "corporation", "incorporated", "limited",
 })
 
 

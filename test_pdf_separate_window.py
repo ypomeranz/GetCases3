@@ -463,7 +463,7 @@ READER_NAMES = [
     "_show_pdf_floating", "_show_pdf",
     "_floating_pdf_closed", "_text_view_alive",
     "_float_pdf_master", "_float_pdf_anchor", "_scan_window_title",
-    "_embed_text_reader",
+    "_embed_text_reader", "_retitle_pdf_float",
 ]
 
 READER_NS = _load(
@@ -622,6 +622,19 @@ class FloatingHandoffTests(unittest.TestCase):
         reader._show_pdf_floating(b"%PDF-1", "https://example.test/a.pdf")
         self.assertEqual(_FakeFloatingWindow.opened[0].title,
                          "Roe v. Wade, 410 U.S. 113 (1973)")
+
+    def test_an_edited_citation_names_it_as_the_reader_wrote_it(self):
+        reader = _Reader()
+        reader._show_pdf_floating(b"%PDF-1", "https://example.test/a.pdf")
+        window = _FakeFloatingWindow.opened[0]
+        reader._base_citation_override = "Roe v. Wade, 410 U.S. 113 (1973) (mine)"
+        window.kw["on_citation_edited"]()
+        self.assertEqual(window.titles[-1],
+                         "Roe v. Wade, 410 U.S. 113 (1973) (mine)")
+        # Undone, the automatic name comes back.
+        reader._base_citation_override = ""
+        window.kw["on_citation_edited"]()
+        self.assertEqual(window.titles[-1], "Roe v. Wade, 410 U.S. 113 (1973)")
 
     def test_it_is_renamed_when_the_pages_name_their_own_reporter(self):
         reader = _Reader()

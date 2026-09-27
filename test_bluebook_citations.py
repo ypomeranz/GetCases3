@@ -1064,6 +1064,28 @@ class PartyListTests(unittest.TestCase):
              "Bear Stearns & Co. v. Smith"),
         ])
 
+    def test_so_does_the_designator_as_a_caption_spells_it_out(self):
+        # United States v. Republic Steel Corp., 155 F. Supp. 442 (N.D. Ill.
+        # 1957): three defendants, named before anything is abbreviated.
+        self.assertNames([
+            ("United States of America v. Republic Steel Corporation, "
+             "International Harvester Company, and Interlake Iron Co",
+             "United States v. Republic Steel Corp."),
+            ("Doe v. Foo Corporation, Bar Company",
+             "Doe v. Foo Corp."),
+            # A firm named with commas is one party, and a designator after
+            # another is still the same firm's.
+            ("Doe v. Merrill Lynch, Pierce, Fenner & Smith, Incorporated",
+             "Doe v. Merrill Lynch, Pierce, Fenner & Smith, Inc."),
+            ("Doe v. Kidder, Peabody & Company", "Doe v. Kidder, Peabody & Co."),
+            ("Doe v. A.B. Dick Company, Inc.", "Doe v. A.B. Dick Co."),
+        ])
+        # And a name is the same read once or twice.
+        name = abbreviate_case_name(
+            "United States of America v. Republic Steel Corporation, "
+            "International Harvester Company")
+        self.assertEqual(abbreviate_case_name(name), name)
+
     def test_a_person_after_a_comma_is_another_party(self):
         self.assertNames([
             ("Lynch v. N.J. Educ. Ass'n, Betty Kraemer, Karen Joseph",

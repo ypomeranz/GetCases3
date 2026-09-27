@@ -721,6 +721,12 @@ class _EmbeddedCaseHost(ttk.Frame):
         if raiser is not None:
             raiser()
 
+    def citation_edited(self) -> None:
+        """Pass a citation edit on to the window that names itself."""
+        notify = getattr(self._window, "citation_edited", None)
+        if callable(notify):
+            notify()
+
     def title(self, value=None):
         if value is None:
             return self._case_title
@@ -10313,7 +10319,7 @@ class CourtListenerGUI:
         # fetched below replaces them with the real caption, the parallel
         # citations and the decision date a Bluebook filename is built from.
         named = {"data": data, "url": url, "cite": cite, "name": name,
-                 "pin": pin, "start_page": start_page,
+                 "pin": pin, "start_page": start_page, "cl_item": cl_item,
                  "record": None, "page": None, "pin_page": None,
                  "text_source": None,
                  # A page of orders opened for none of them in particular:
@@ -10403,6 +10409,7 @@ class CourtListenerGUI:
                 on_build_text=None if named["orders_page"] else (
                     lambda body: self._embed_cited_case_text(body, named)),
                 on_close=self._cited_pdf_window_closed,
+                on_citation_edited=lambda: self._retitle_cited_pdf(named),
             )
         except Exception as exc:
             status(f"Could not show the PDF of {cite}: {exc}")
@@ -10411,6 +10418,13 @@ class CourtListenerGUI:
         self._cited_pdf_windows.add(window)
         if named.get("record"):        # the text beat the scan on screen
             self._retitle_cited_pdf(named)
+        elif not named["orders_page"]:
+            # The reader's own citation for the case names it at once,
+            # before the text has said anything.
+            edited = self._cited_citation_override(
+                named, self._cited_filename_item(named))
+            if edited:
+                window.set_title(edited)
         window.surface()
         self._jump_to_pin(named)
         status(f"Showing the PDF of {cite}"
@@ -10479,13 +10493,36 @@ class CourtListenerGUI:
 
     def _retitle_cited_pdf(self, named: dict) -> None:
         """Restate a cited case's window title as its Bluebook citation, once
-        the opinion text has said what that is."""
+        the opinion text has said what that is — or as the reader has written
+        it, where the citation was edited (Edit Citation), here or before."""
         window = named.get("window")
         if window is None or not window.alive():
             return
-        title = _bluebook_display_name(self._cited_filename_item(named))
+        item = self._cited_filename_item(named)
+        title = (self._cited_citation_override(named, item)
+                 or _bluebook_display_name(item))
         if title:
             window.set_title(title)
+
+    @staticmethod
+    def _cited_citation_override(named: dict, item: dict) -> str:
+        """The citation the reader saved for the case in *named*, if any —
+        found by every identity the text window saves one under: the
+        CourtListener cluster, each reporter citation, the Scholar page."""
+        source = named.get("text_source")
+        known = dict(getattr(source, "item", None) or named.get("cl_item")
+                     or {})
+        cites = [*(item.get("citation") or []),
+                 *(known.get("citation") or [])]
+        page = named.get("page") or ("", "")
+        try:
+            keys = citation_identity_keys(
+                known, named.get("cite") or "", cites, page[0])
+            return find_override(
+                _load_config().get("citation_overrides", {}), keys)
+        except Exception as exc:
+            print(f"[cite-pdf] reading the saved citation failed: {exc}")
+            return ""
 
     def _embed_cited_case_text(self, host, named: dict):
         """Render a cited case's opinion inside its PDF viewer — what the T
@@ -10715,10 +10752,21 @@ class CourtListenerGUI:
         # so the stored record is untouched.
         record = dict(record)
         try:
-            caption = _scholar_caption_name(parse_opinion_blocks(html))
+            blocks = parse_opinion_blocks(html)
+            caption = _scholar_caption_name(blocks)
         except Exception as exc:
             print(f"[cite-pdf] reading the caption failed: {exc}")
-            caption = ""
+            blocks, caption = [], ""
+        # The court the header names, where the citation named none: a
+        # circuit's F.3d or a district court's F. Supp. — the stored record
+        # knows only the courts a reporter or "Supreme Court of the United
+        # States" gives away, and the window's parenthetical would lose the
+        # rest ("818 F.3d 1230 (11th Cir. 2016)").
+        if not record.get("court"):
+            try:
+                record["court"] = _scholar_header_court(blocks)
+            except Exception as exc:
+                print(f"[cite-pdf] reading the court failed: {exc}")
         if caption:
             record["name"] = caption
         if name and not record.get("name"):
@@ -15102,6 +15150,34 @@ def _scholar_court_id(blocks) -> str:
                 continue
             return _classify_state_court(t, courts)
     return ""
+
+
+def _scholar_trial_court(blocks) -> str:
+    """The federal district or bankruptcy court a Scholar header names, as
+    the Bluebook abbreviates it ("United States District Court N. D.
+    Illinois, E. D." → "N.D. Ill."), or "".  :func:`_scholar_court_id`
+    leaves those to this: an F. Supp. or B.R. citation says nothing of the
+    court, so its parenthetical has to (rule 10.4(a))."""
+    for b in blocks[:8]:
+        if b.kind != "center":
+            continue
+        abbr = _bluebook_federal_trial_court(
+            re.sub(r"\s+", " ", b.text()).strip())
+        if abbr:
+            return abbr
+    return ""
+
+
+def _scholar_header_court(blocks) -> str:
+    """The court a Scholar page's header names, as a CourtListener court id
+    where there is exactly one for it ("ca11", "ilnd"), else as the
+    Bluebook abbreviation — "" when the header names none."""
+    court = _scholar_court_id(blocks)
+    if court:
+        return court
+    abbr = _scholar_trial_court(blocks)
+    ids = [cid for cid, bb in _COURT_BLUEBOOK.items() if bb == abbr]
+    return ids[0] if abbr and len(ids) == 1 else abbr
 
 
 # Shared with opinion_db's caption extraction; the implementation lives in
@@ -21021,8 +21097,12 @@ class _FloatingPdfWindow:
                  on_save=None, on_print=None, on_close=None,
                  on_cite=None, on_cite_browser=None,
                  on_build_text=None, bookmarks=None,
-                 anchor: "Optional[tk.Misc]" = None) -> None:
+                 anchor: "Optional[tk.Misc]" = None,
+                 on_citation_edited=None) -> None:
         self._app = app
+        # Whoever names this window, told when the reader edits the case's
+        # citation beside the pages (see citation_edited).
+        self._on_citation_edited = on_citation_edited
         # Whoever can say what this document is for the bookmarks list, and
         # put it on or take it off: a window with no menu bar of its own keeps
         # that on the strip's menu instead.
@@ -21426,6 +21506,16 @@ class _FloatingPdfWindow:
     # ------------------------------------------------------------------
     # Contents
     # ------------------------------------------------------------------
+
+    def citation_edited(self) -> None:
+        """The case's citation was edited in the text side: the window is
+        named anew — by the edit, or, with the edit undone, as before."""
+        if self._on_citation_edited is not None:
+            try:
+                self._on_citation_edited()
+            except Exception as exc:
+                print(f"[pdf-window] renaming after a citation edit "
+                      f"failed: {exc}")
 
     def set_title(self, title: str) -> None:
         """Rename the window — what the opinion text, once it has loaded in the
@@ -23638,6 +23728,14 @@ class _ScholarTextWindow:
             app = self._app
             if app is not None and hasattr(app, "retitle_case_view"):
                 app.retitle_case_view(old_history_key, title)
+        # A reader beside a scan does not name the viewer (the scan's
+        # citation does) — but an edited citation is the reader's word on
+        # what the case is called, so the viewer hears of it; and a text
+        # window's own scan, in a viewer of its own, is renamed too.
+        notify = getattr(self._win, "citation_edited", None)
+        if callable(notify):
+            notify()
+        self._retitle_pdf_float()
         self._status_var.set(
             "Saved the custom citation for future use."
             if value else "Restored automatic Bluebooking for this opinion."
@@ -26419,14 +26517,7 @@ class _ScholarTextWindow:
                 # header — ``_scholar_court_id`` leaves those unmapped, but
                 # an F. Supp. / B.R. date parenthetical requires the court
                 # (rule 10.4(a)): "627 F. Supp. 3d 520 (M.D.N.C. 2022)".
-                for b in self._blocks[:8]:
-                    if b.kind != "center":
-                        continue
-                    abbr = _bluebook_federal_trial_court(
-                        re.sub(r"\s+", " ", b.text()).strip())
-                    if abbr:
-                        court_abbr = abbr
-                        break
+                court_abbr = _scholar_trial_court(self._blocks)
         # Rule 10.2.1(f) needs the deciding court to finish a "People of the
         # State of …" party: its own state's courts cite it as "People v.
         # Zackowitz", everyone else's as "New York v. Zackowitz".
@@ -31109,6 +31200,7 @@ class _ScholarTextWindow:
                     on_cite=self._open_pdf_cite,
                     on_cite_browser=self._open_pdf_cite_browser,
                     on_build_text=self._embed_text_reader,
+                    on_citation_edited=self._retitle_pdf_float,
                 )
                 self._pdf_float_win = win
                 holder = getattr(self._app, "_cited_pdf_windows", None)
@@ -31140,10 +31232,26 @@ class _ScholarTextWindow:
             ),
         )
 
+    def _retitle_pdf_float(self) -> None:
+        """Rename the viewer holding this window's scan — after the citation
+        was edited, here or in the text beside the scan."""
+        win = getattr(self, "_pdf_float_win", None)
+        url = getattr(self, "_pdf_url", "") or ""
+        if win is None or not url:
+            return
+        try:
+            if win.alive():
+                win.set_title(self._scan_window_title(url))
+        except tk.TclError:
+            pass
+
     def _scan_window_title(self, url: str) -> str:
         """What to call a floating viewer showing this scan: the case in
         Bluebook form, cited to the reporter these pages actually print rather
         than to every parallel reporter the case carries."""
+        edited = getattr(self, "_base_citation_override", "")
+        if edited:
+            return edited       # the reader's own citation, as written
         item = _scan_citation_item(
             self._filename_item(), url, self._shown_us_reports_cite())
         return (_bluebook_display_name(item)
