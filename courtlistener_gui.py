@@ -992,14 +992,16 @@ _STRIP_ICON_W, _STRIP_ICON_H = 16, 14
 
 
 def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
-    """Save, print, bookmark and window artwork for the floating PDF
-    viewer's strip.
+    """Save, print, history, bookmark and window artwork for the floating
+    PDF viewer's strip.
 
     Drawn with Pillow — which the viewer already needs to put a page on screen
     at all — at four times the size and reduced, so the strokes come out smooth
     at 16px.  Returned as CTkImages where CustomTkinter is in use, so a
     high-DPI display scales them; as ordinary PhotoImages otherwise.
     """
+    import math
+
     from PIL import Image, ImageDraw
 
     scale = 4
@@ -1057,6 +1059,22 @@ def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
                    fill=(0, 0, 0, 0))
     window(0.5, 5, 11, 13.5)
 
+    # History: a clock face whose rim turns back — open at the upper left,
+    # where an arrowhead points the way it winds — with the hands on it.
+    clock, draw = start()
+    cx, cy, r = 8.5 * scale, 7 * scale, 5.6 * scale
+    draw.arc((cx - r, cy - r, cx + r, cy + r), start=250, end=565,
+             fill=color, width=round(1.2 * scale))
+    tip_x, tip_y = cx + r * math.cos(math.radians(205)), cy + r * math.sin(
+        math.radians(205))
+    draw.polygon([(tip_x - 2.2 * scale, tip_y - 1.4 * scale),
+                  (tip_x + 2.0 * scale, tip_y - 1.4 * scale),
+                  (tip_x - 0.2 * scale, tip_y + 1.9 * scale)], fill=color)
+    draw.line([(cx, cy), (cx, cy - 3.3 * scale)], fill=color,
+              width=round(1.2 * scale))
+    draw.line([(cx, cy), (cx + 2.4 * scale, cy + 1.6 * scale)], fill=color,
+              width=round(1.2 * scale))
+
     def finish(image):
         small = image.resize((_STRIP_ICON_W, _STRIP_ICON_H), Image.LANCZOS)
         if _CTK_AVAILABLE:
@@ -1069,7 +1087,8 @@ def _pdf_strip_icons(widget: tk.Misc, color: str = "#3f4650") -> dict:
         return ImageTk.PhotoImage(small, master=widget)
 
     return {"save": finish(save), "print": finish(printer),
-            "bookmarks": finish(ribbon), "windows": finish(windows)}
+            "bookmarks": finish(ribbon), "windows": finish(windows),
+            "history": finish(clock)}
 
 
 def _folder_icon(master: tk.Misc, color: str = "#3f4650"):
@@ -20933,7 +20952,9 @@ class _FloatingPdfWindow:
 
     _W = 720     # preferred size, clamped to the usable desktop in _place_beside
     _H = 880
-    _MIN_W = 380
+    # Wide enough for the whole strip: its controls on the left, the History,
+    # Bookmarks and Window icons on the right.
+    _MIN_W = 400
     _MIN_H = 280
     _BAR_H = 30  # the top strip: one 22px button row plus its padding
 
@@ -21079,7 +21100,8 @@ class _FloatingPdfWindow:
 
     def _build_bar(self) -> None:
         """The one piece of chrome: save and print, then the zoom controls,
-        the document name at the right, a hairline under it and nothing else."""
+        the History, Bookmarks and Window menus at the right, a hairline under
+        it and nothing else."""
         if _CTK_AVAILABLE:
             bar = ctk.CTkFrame(self._win, fg_color=_UI["surface"],
                                corner_radius=0, height=self._BAR_H)
@@ -21090,10 +21112,28 @@ class _FloatingPdfWindow:
             bar = tk.Frame(self._win, bg=_UI["surface"])
             bar.pack(side="top", fill="x")
         self._bar = bar
-        # Save and print lead the strip, as icons: the two things a reader does
-        # with a scan besides look at it.  Tk drops an image nothing refers to,
-        # so the artwork is kept on the window.
+        # Tk drops an image nothing refers to, so the strip's artwork is kept
+        # on the window.
         self._strip_icons = _pdf_strip_icons(bar)
+        # The menus a document window carries on its menu bar and this one
+        # has no bar for, as icons at the strip's far end — words would crowd
+        # a strip this narrow — in the order a menu bar has them: History,
+        # Bookmarks, and Window at the very end, where every other window
+        # keeps it.  (Packed from the right, so the last is packed first.)
+        # They are packed before anything on the left, so they get their
+        # room first: a window too narrow for the whole strip squeezes the
+        # scale readout, not these.
+        self._window_btn = self._strip_menu_button(
+            bar, "windows", "Windows", self._post_window_menu,
+            "populate_window_menu", padx=(4, 8))
+        self._bookmarks_btn = self._strip_menu_button(
+            bar, "bookmarks", "Bookmarks", self._post_bookmarks_menu,
+            "populate_bookmarks_menu", padx=(4, 0))
+        self._history_btn = self._strip_menu_button(
+            bar, "history", "History", self._post_history_menu,
+            "populate_history_menu", padx=(4, 0))
+        # Save and print lead the strip, as icons: the two things a reader does
+        # with a scan besides look at it.
         save_btn = _ui_mini_button(bar, "", self._save, width=30,
                                    image=self._strip_icons["save"])
         save_btn.pack(side="left", padx=(8, 0), pady=4)
@@ -21124,16 +21164,6 @@ class _FloatingPdfWindow:
         self._zoom_label = zoom_lbl
         if not _CTK_AVAILABLE:
             zoom_lbl.configure(bg=_UI["surface"])  # match the strip, not a card
-        # The two menus a document window carries on its menu bar and this
-        # one has no bar for, as icons at the strip's far end — words would
-        # crowd a strip this narrow.  Window at the very end, where every
-        # other window keeps it; Bookmarks beside it.
-        self._window_btn = self._strip_menu_button(
-            bar, "windows", "Windows", self._post_window_menu,
-            "populate_window_menu", padx=(4, 8))
-        self._bookmarks_btn = self._strip_menu_button(
-            bar, "bookmarks", "Bookmarks", self._post_bookmarks_menu,
-            "populate_bookmarks_menu", padx=(4, 0))
         # The case is named in the window's own title bar, in the reporter
         # these pages print — there is nothing for the strip to repeat.
         if _CTK_AVAILABLE:
@@ -21176,6 +21206,14 @@ class _FloatingPdfWindow:
         self._post_strip_menu(
             self._window_btn, "window",
             lambda menu: self._app.populate_window_menu(menu, self._win))
+
+    def _post_history_menu(self) -> None:
+        """The cases viewed last, most recent first — the History menu every
+        other window carries (and the "Recent" the strip's right-click menu
+        keeps)."""
+        self._post_strip_menu(
+            self._history_btn, "history",
+            lambda menu: self._app.populate_history_menu(menu))
 
     def _post_bookmarks_menu(self) -> None:
         """The Bookmarks menu, its first entries for whatever is showing: the

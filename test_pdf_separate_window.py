@@ -974,25 +974,35 @@ class StripIconTests(unittest.TestCase):
         self.assertIn("Save As…", self.body)
         self.assertIn("Print…", self.body)
 
-    def test_window_and_bookmarks_sit_at_the_right_hand_end_as_icons(self):
-        self.assertIn('self._strip_menu_button(\n            bar, "windows"',
-                      self.body)
-        self.assertIn('self._strip_menu_button(\n            bar, "bookmarks"',
-                      self.body)
-        # Window packed first from the right, so it is at the very end.
+    def test_history_bookmarks_and_window_sit_at_the_right_end_as_icons(self):
+        for icon in ("windows", "bookmarks", "history"):
+            self.assertIn(
+                f'self._strip_menu_button(\n            bar, "{icon}"',
+                self.body)
+        # Packed from the right, Window first: it is at the very end, with
+        # Bookmarks then History to its left — a menu bar's order.
         self.assertLess(self.body.index('bar, "windows"'),
                         self.body.index('bar, "bookmarks"'))
+        self.assertLess(self.body.index('bar, "bookmarks"'),
+                        self.body.index('bar, "history"'))
         button = _source_of("_FloatingPdfWindow", "_strip_menu_button")
         self.assertIn('btn.pack(side="right"', button)
         self.assertIn("image=self._strip_icons[icon]", button)
         self.assertIn("_HoverTip(btn, lambda: tip", button)
 
-    def test_the_artwork_draws_both_icons(self):
+    def test_the_menu_icons_get_their_room_before_the_left_hand_controls(self):
+        # Packed ahead of everything on the left, so a window too narrow for
+        # the whole strip squeezes the scale readout rather than an icon.
+        self.assertLess(self.body.index('bar, "history"'),
+                        self.body.index('_ui_mini_button(bar, "", self._save'))
+
+    def test_the_artwork_draws_the_three_icons(self):
         art = next(ast.get_source_segment(SRC, n) for n in TREE.body
                    if isinstance(n, ast.FunctionDef)
                    and n.name == "_pdf_strip_icons")
         self.assertIn('"bookmarks": finish(ribbon)', art)
         self.assertIn('"windows": finish(windows)', art)
+        self.assertIn('"history": finish(clock)', art)
 
 
 class _StripTk(_Tk):
@@ -1033,7 +1043,8 @@ class _Button:
 
 
 STRIP_MENU_NAMES = ["_post_window_menu", "_post_bookmarks_menu",
-                    "_post_strip_menu", "_bookmark_owner", "showing_text"]
+                    "_post_history_menu", "_post_strip_menu",
+                    "_bookmark_owner", "showing_text"]
 STRIP_MENU_NS = _load("_FloatingPdfWindow", STRIP_MENU_NAMES,
                       {"tk": _StripTk})
 
@@ -1048,6 +1059,9 @@ class _StripApp:
     def populate_bookmarks_menu(self, menu, view, owner=None):
         self.calls.append(("bookmarks", menu, view, owner))
 
+    def populate_history_menu(self, menu):
+        self.calls.append(("history", menu))
+
 
 class _StripMenuViewer:
     def __init__(self, mode="pdf"):
@@ -1055,6 +1069,7 @@ class _StripMenuViewer:
         self._win = object()
         self._window_btn = _Button()
         self._bookmarks_btn = _Button()
+        self._history_btn = _Button()
         self._strip_menus = {}
         self._mode = mode
         self._reader = (type("Reader", (), {"_bookmark_descriptor":
@@ -1085,13 +1100,22 @@ class StripMenuButtonTests(unittest.TestCase):
         text._post_bookmarks_menu()
         self.assertIs(text._app.calls[0][3], text._reader)
 
+    def test_the_history_icon_drops_the_cases_viewed_last(self):
+        viewer = _StripMenuViewer()
+        viewer._post_history_menu()
+        kind, menu = viewer._app.calls[0]
+        self.assertEqual(kind, "history")
+        self.assertEqual(menu.posted, [(700 + 30 - 200, 40 + 22)])
+
     def test_each_icon_keeps_one_menu_refilled_each_time(self):
         viewer = _StripMenuViewer()
         viewer._post_window_menu()
         viewer._post_window_menu()
         viewer._post_bookmarks_menu()
-        self.assertEqual(len(_StripTk.Menu.made), 2)
-        self.assertEqual(len(viewer._app.calls), 3)
+        viewer._post_history_menu()
+        viewer._post_history_menu()
+        self.assertEqual(len(_StripTk.Menu.made), 3)
+        self.assertEqual(len(viewer._app.calls), 5)
 
     def test_no_app_to_fill_it_no_button(self):
         viewer = _StripMenuViewer()
