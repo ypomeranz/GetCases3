@@ -1291,6 +1291,8 @@ class _SavedStatuteDoc:
         self.title = str(data.get("title", ""))
         self.set_key = data.get("set_key")
         self.container = None
+        self.crumbs = [tuple(c) for c in (data.get("crumbs") or [])
+                       if len(c) == 2]
         self._kind = str(data.get("kind", "usc"))
         self._label = str(data.get("label", ""))
         self._source_name = str(data.get("source_name", ""))
@@ -33570,6 +33572,10 @@ class _StatuteWindow:
         self._neighbors: tuple = (None, None)
         self._link_actions: dict[str, tuple[str, str]] = {}
         self._link_n = 0
+        # A U.S. Code unit's table of contents shown in place of the section
+        # (us_code.UscUnit), and the section it was reached from.
+        self._unit = None
+        self._unit_from = ""
         self._win = _secondary_view_host(parent, app)
         _ensure_modern_ttk_styles(self._win)
         self._win.title(f"{doc.label} — {doc.source_name}")
@@ -33627,6 +33633,8 @@ class _StatuteWindow:
                 "source_name": doc.source_name,
                 "source_note": doc.source_note,
                 "bluebook_cite": doc.bluebook_cite(),
+                # where a U.S. Code section sits, for its breadcrumb bar
+                "crumbs": [list(c) for c in getattr(doc, "crumbs", [])],
             }
         except Exception:
             return None
@@ -33697,7 +33705,7 @@ class _StatuteWindow:
         )
         _ui_button(
             top, "Open in Browser",
-            command=lambda: webbrowser.open(self._doc.url), width=132,
+            command=lambda: webbrowser.open(self._current_url()), width=132,
         ).pack(side="right")
         self._next_btn = _ui_button(
             top, "Next § ▶", width=88, command=lambda: self._go_neighbor(1),
@@ -33713,8 +33721,16 @@ class _StatuteWindow:
             except tk.TclError:
                 pass
 
+        # Where a U.S. Code section sits in the Code — "Title 42 › Chapter 21
+        # › Subchapter I › § 1983" — each unit above it opening its table of
+        # contents here (_show_unit).  Packed by _update_crumbs when there
+        # is a trail to show.
+        self._crumb_bar = _ui_frame(win)
+        win.bind("<Alt-Up>", lambda _e: self._go_up() or "break")
+
         frame = ttk.Frame(win)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
+        self._text_frame = frame
         s = self._base_size
         fam = "Georgia"
         self._fonts = {
@@ -33766,6 +33782,8 @@ class _StatuteWindow:
                     lmargin2=margin + 22, spacing3=6,
                 )
         txt.tag_configure("jumpflash", background="#fff2a8")
+        # the section a table of contents was opened from
+        txt.tag_configure("herebg", background="#fff2a8")
         txt.tag_configure("citelink", foreground="#1a56b0")
         txt.tag_bind("citelink", "<Enter>",
                      lambda _e: txt.config(cursor="hand2"))
@@ -33818,6 +33836,9 @@ class _StatuteWindow:
         r"((?:\((?:\d{1,3}[A-Za-z]{0,2}|[a-zA-Z]{1,4})\)\s*)+)")
 
     def _render(self) -> None:
+        if self._unit is not None:
+            self._render_unit()
+            return
         txt = self._text
         txt.config(state="normal")
         txt.delete("1.0", "end")
@@ -33926,6 +33947,7 @@ class _StatuteWindow:
                 txt.insert("end", "\n", ("notebody", indtag))
         txt.config(state="disabled")
         self._finder.refresh()
+        self._update_crumbs()
         if target_pos:
             txt.see(target_pos)
             txt.tag_add("jumpflash", f"{target_pos} linestart",
@@ -33934,6 +33956,180 @@ class _StatuteWindow:
                 1800,
                 lambda: txt.tag_remove("jumpflash", "1.0", "end"),
             )
+
+    # ------------------------------------------------------------------
+    # The Code above a U.S. Code section
+    # ------------------------------------------------------------------
+
+    def _doc_section(self) -> str:
+        """The number of the U.S. Code section on show ("1983"), also for
+        one reopened from a bookmark."""
+        section = getattr(self._doc, "section", "")
+        if section:
+            return str(section)
+        label = str(getattr(self._doc, "label", ""))
+        return label.split("§", 1)[1].strip() if "§" in label else ""
+
+    def _current_url(self) -> str:
+        return self._unit.url if self._unit is not None else self._doc.url
+
+    def _update_crumbs(self) -> None:
+        """Show where the section or unit on show sits in the Code: the
+        units above it, each a link to its table of contents, then itself.
+        Hidden for anything that is not the U.S. Code."""
+        bar = self._crumb_bar
+        for child in bar.winfo_children():
+            child.destroy()
+        if self._unit is not None:
+            crumbs, here = self._unit.crumbs, self._unit.label
+        elif self._doc.kind == "usc" and getattr(self._doc, "crumbs", None):
+            crumbs, here = self._doc.crumbs, f"§ {self._doc_section()}"
+        else:
+            bar.pack_forget()
+            return
+        muted = "ModernMuted.TLabel" if _CTK_AVAILABLE else "TLabel"
+        for granule, label in crumbs:
+            link = ttk.Label(bar, text=us_code.crumb_label(label),
+                             foreground="#1a56b0", cursor="hand2")
+            link.bind("<Button-1>",
+                      lambda _e, g=granule: self._show_unit(g))
+            link.pack(side="left")
+            ttk.Label(bar, text="  ›  ", style=muted).pack(side="left")
+        ttk.Label(bar, text=here).pack(side="left")
+        bar.pack(fill="x", padx=16, pady=(8, 0), before=self._text_frame)
+
+    def _go_up(self) -> None:
+        """Alt+Up: the table of contents of the unit one level up."""
+        crumbs = (self._unit.crumbs if self._unit is not None
+                  else getattr(self._doc, "crumbs", None)
+                  if self._doc.kind == "usc" else None)
+        if crumbs:
+            self._show_unit(crumbs[-1][0])
+
+    def _show_unit(self, granule: str) -> None:
+        """Replace the text with a unit's table of contents, fetched in the
+        background, marking the section it was reached from."""
+        if self._unit is None:
+            self._unit_from = self._doc_section()
+        self._status_var.set("Loading the table of contents…")
+
+        def run() -> None:
+            try:
+                unit = us_code.load_unit(granule)
+            except Exception as exc:
+                self._post_status(f"Could not load that part of the Code: "
+                                  f"{exc}")
+                return
+            try:
+                self._win.after(0, self._open_unit, unit)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _post_status(self, message: str) -> None:
+        try:
+            self._win.after(0, self._status_var.set, message)
+        except tk.TclError:
+            pass
+
+    def _open_unit(self, unit) -> None:
+        self._unit = unit
+        self._win.title(f"{unit.title} U.S.C. {unit.label} — "
+                        f"{self._doc.source_name}")
+        self._src_var.set(unit.url)
+        self._notes_btn.configure(state="disabled")
+        for button in (self._prev_btn, self._next_btn):
+            button.configure(state="disabled")
+        count = sum(1 for e in unit.entries if e.kind == "section")
+        self._status_var.set(
+            f"{unit.heading} — {count} section{'s' if count != 1 else ''}"
+            if count else unit.heading)
+        self._render()
+
+    def _render_unit(self) -> None:
+        """A unit's table of contents: its heading, then its entries — the
+        groups it is divided into, each unit or section a link that opens
+        here — with the section it was reached from marked."""
+        unit = self._unit
+        txt = self._text
+        txt.config(state="normal")
+        txt.delete("1.0", "end")
+        self._anchors = []
+        txt.insert("end", unit.heading + "\n", ("sechead",))
+        here: Optional[str] = None
+        for index, entry in enumerate(unit.entries):
+            indtag = f"ind{min(entry.depth, 6)}"
+            if entry.kind == "group":
+                txt.insert("end", entry.label + "\n", ("headline", indtag))
+                continue
+            start = txt.index("end-1c")
+            if entry.kind == "section":
+                action = ("usc-sec", f"{unit.title}:{entry.section}")
+            else:
+                action = ("usc-unit", str(index))
+            txt.insert("end", entry.label,
+                       ("enum", indtag, "citelink", self._new_link(action)))
+            tail = f"  {entry.heading}" if entry.heading else ""
+            if entry.kind == "unit" and entry.first_section:
+                tail += f"  (§ {entry.first_section} et seq.)"
+            txt.insert("end", tail + "\n", (indtag,))
+            if (entry.kind == "section" and self._unit_from
+                    and entry.section.lower() == self._unit_from.lower()):
+                here = start
+        if unit.partial:
+            txt.insert("end", "More follows — open this part of the Code "
+                              "in your browser for the rest.\n", ("credit",))
+        if not unit.entries:
+            txt.insert("end", "uscode.house.gov lists no contents for this "
+                              "part of the Code.\n", ("credit",))
+        txt.config(state="disabled")
+        self._finder.refresh()
+        self._update_crumbs()
+        if here:
+            txt.tag_add("herebg", f"{here} linestart", f"{here} lineend")
+            txt.see(here)
+        else:
+            txt.yview_moveto(0.0)
+
+    def _open_section_here(self, title: str, section: str) -> None:
+        """A section chosen from a table of contents, shown in this window."""
+        self._status_var.set(f"Fetching {title} U.S.C. § {section}…")
+
+        def run() -> None:
+            try:
+                doc = us_code.load_section(title, section)
+            except Exception as exc:
+                self._post_status(str(exc))
+                return
+            try:
+                self._win.after(0, self._load_doc, doc)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_unit_entry(self, index: int) -> None:
+        """A unit chosen from a table of contents, its own contents shown
+        here."""
+        parent = self._unit
+        if parent is None or not (0 <= index < len(parent.entries)):
+            return
+        entry = parent.entries[index]
+        self._status_var.set(f"Loading {entry.label}…")
+
+        def run() -> None:
+            try:
+                unit = us_code.open_unit_entry(entry, parent)
+            except Exception as exc:
+                self._post_status(f"Could not open {entry.label}: {exc}")
+                return
+            try:
+                self._win.after(0, self._open_unit, unit)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _insert_refs(self, text: str, tags: tuple) -> None:
         """Insert paragraph text, linking citations to other U.S. Code /
@@ -34007,6 +34203,14 @@ class _StatuteWindow:
         if not action:
             return
         kind, value = action
+        # An entry in a U.S. Code table of contents opens in this window.
+        if kind == "usc-sec":
+            title, _, section = value.partition(":")
+            self._open_section_here(title, section)
+            return
+        if kind == "usc-unit":
+            self._open_unit_entry(int(value))
+            return
         if kind == "browse":
             # Cross-reference to a source we don't render in-app (e.g. a state
             # statute) — open it in the user's browser.
@@ -34090,8 +34294,10 @@ class _StatuteWindow:
         threading.Thread(target=run, daemon=True).start()
 
     def _load_doc(self, doc, highlight: tuple = ()) -> None:
-        """Show another section in this same window (prev/next nav)."""
+        """Show another section in this same window (prev/next nav, or one
+        chosen from a table of contents)."""
         self._doc = doc
+        self._unit = None
         self._highlight = tuple(highlight)
         self._has_notes = any(
             entry and str(entry[0]).startswith("note")
@@ -34129,6 +34335,15 @@ class _StatuteWindow:
         except tk.TclError:
             start, end = "1.0", "end-1c"
             selected = False
+        if self._unit is not None:
+            # A table of contents has no citation of its own to append.
+            body = _dump_statute_rtf(txt, start, end)
+            how = _copy_rich_clipboard(
+                self._win, _rtf_document(body),
+                txt.get(start, end).rstrip() + "\n")
+            what = "selection" if selected else "table of contents"
+            self._status_var.set(f"Copied {what} as {how}.")
+            return
         subs = self._pin_for(start) if selected else ()
         cite = self._doc.bluebook_cite(subs) + "."
         body = _dump_statute_rtf(txt, start, end)
@@ -34141,17 +34356,22 @@ class _StatuteWindow:
 
     def _export_rtf(self) -> None:
         """Export the section as RTF with a heading block: the citation,
-        then provenance, then the formatted text."""
+        then provenance, then the formatted text.  A table of contents on
+        show is exported the same way under its own name."""
+        unit = self._unit
+        title = (f"{unit.title} U.S.C. {unit.label}" if unit is not None
+                 else self._doc.bluebook_cite())
         head = (
             "\\pard\\qc\\sa60{\\b\\fs30 "
-            + _rtf_escape(self._doc.bluebook_cite()) + "}\\par\n"
+            + _rtf_escape(title) + "}\\par\n"
             "\\pard\\qc\\sa240{\\fs18 "
-            + _rtf_escape(f"{self._doc.source_note} — {self._doc.url}")
+            + _rtf_escape(f"{self._doc.source_note} — {self._current_url()}")
             + "}\\par\n"
         )
         body = _dump_statute_rtf(self._text, "1.0", "end-1c")
         rtf = _rtf_document(head + body)
-        default = self._doc.label.replace("§", "Sec.")
+        default = (title if unit is not None
+                   else self._doc.label.replace("§", "Sec."))
         path = filedialog.asksaveasfilename(
             defaultextension=".rtf",
             filetypes=[("Rich Text Format", "*.rtf"), ("All files", "*.*")],

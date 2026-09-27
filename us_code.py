@@ -175,6 +175,10 @@ class UscSection:
     # deepest container granule from the page breadcrumbs, e.g.
     # "title26-chapter48" — its table of sections gives document order
     container: str | None = None
+    # the units above the section, outermost first, as the page's navigation
+    # bar names them: ("title42", "TITLE 42"), ("title42-chapter21",
+    # "CHAPTER 21") … — see load_unit
+    crumbs: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def kind(self) -> str:
@@ -188,12 +192,26 @@ class UscSection:
             print(f"[usc-nav] no container breadcrumb found for "
                   f"§ {self.section}")
             return None, None
-        try:
-            order = _container_sections(self.container)
-        except Exception as exc:
-            print(f"[usc-nav] section list fetch failed for "
-                  f"{self.container}: {exc}")
-            return None, None
+        with _cache_lock:
+            order = _order_cache.get(self.container)
+        if order is None:
+            # The container's table of contents — the same one its
+            # breadcrumb opens, fetched once for both.
+            try:
+                order = [entry.section
+                         for entry in load_unit(self.container).entries
+                         if entry.kind == "section"]
+            except Exception as exc:
+                print(f"[usc-nav] contents of {self.container} failed: "
+                      f"{exc}")
+                order = []
+        if not order:
+            try:
+                order = _container_sections(self.container)
+            except Exception as exc:
+                print(f"[usc-nav] section list fetch failed for "
+                      f"{self.container}: {exc}")
+                return None, None
         try:
             i = next(idx for idx, s in enumerate(order)
                      if s.lower() == self.section.lower())
@@ -275,6 +293,7 @@ def load_section(title: str, section: str) -> UscSection:
         if paras:
             doc = UscSection(title=title, section=cand, url=url, paras=paras)
             doc.container = _find_container(page)
+            doc.crumbs = page_crumbs(page)[0]
             with _cache_lock:
                 _cache[key] = doc
             return doc
@@ -392,6 +411,488 @@ def _container_sections(container: str) -> list[str]:
         with _cache_lock:
             _order_cache[container] = order
     return order
+
+
+# ---------------------------------------------------------------------------
+# The Code above the section
+#
+# Every unit the Code is divided into — title, subtitle, part, chapter,
+# subchapter, subpart — has an OLRC page of its own: its heading, a table of
+# its contents, then the full text of everything in it.  The table lists the
+# unit's sections ("1983. | Civil action for deprivation of rights.") or the
+# units below it ("21. | Civil Rights | 1981"), under subheads for the groups
+# in between ("SUBCHAPTER I—GENERALLY"), and in a big chapter runs on through
+# notes, part after part.  Only that much of the page is read; the text after
+# it can run to hundreds of megabytes.  A unit with no table of its own, as
+# the lowest ones often are, is listed in its parent's under its own subhead.
+#
+# Every page's navigation bar names the units above it by page id
+# ("title42-chapter21"), so going up is exact.  A table names a unit below
+# only by its designation ("Subchapter A"); its page id follows the OLRC's
+# naming ("title26-chapter1-subchapterA", roman numerals mostly as digits),
+# and where that misses, the navigation bar of its first section names it.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UnitEntry:
+    """One line of a unit's table of contents."""
+
+    kind: str               # "group" (a subhead), "section", or "unit"
+    depth: int              # groups nest; an entry sits one in from its group
+    label: str              # "§ 1983", "Chapter 21", "SUBCHAPTER I—GENERALLY"
+    heading: str = ""       # "Civil action for deprivation of rights."
+    section: str = ""       # a section entry's number: "1983"
+    unit_kind: str = ""     # a unit entry's "chapter", "subchapter" …
+    designation: str = ""   # a unit entry's "21", "A", "IV"
+    granule: str = ""       # a unit entry's page id, as the OLRC names them
+    first_section: str = "" # a unit entry's first section, where the table
+                            # gives it
+
+
+@dataclass
+class UscUnit:
+    """A title, chapter, subchapter … of the Code, with its contents."""
+
+    title: str
+    granule: str            # "title42-chapter21"
+    url: str
+    label: str              # "Chapter 21"
+    heading: str            # "CHAPTER 21—CIVIL RIGHTS"
+    # the units above this one, outermost first: ("title42", "TITLE 42")
+    crumbs: list[tuple[str, str]] = field(default_factory=list)
+    entries: list[UnitEntry] = field(default_factory=list)
+    # the contents were read from the unit's own text and stopped short
+    partial: bool = False
+
+
+class UnitNotFound(RuntimeError, LookupError):
+    """The OLRC has no page by that id."""
+
+
+def unit_url(granule: str) -> str:
+    return (
+        "https://uscode.house.gov/view.xhtml?req=granuleid:"
+        f"USC-prelim-{granule}&num=0&edition=prelim"
+    )
+
+
+def crumb_label(label: str) -> str:
+    """A navigation-bar label as the reader shows it: "SUBCHAPTER I" →
+    "Subchapter I", "part 5" → "Part 5", "TITLE 42" → "Title 42"."""
+    words = (label or "").split(None, 1)
+    if not words:
+        return ""
+    head = words[0][:1].upper() + words[0][1:].lower()
+    return f"{head} {words[1]}" if len(words) > 1 else head
+
+
+_NAV_CRUMB_RE = re.compile(
+    r'granuleid(?:%3A|:)USC-prelim-([A-Za-z0-9\-]+)[^"]*"\s+'
+    r'class="link_class">([^<]+)</a>'
+)
+_NAV_OWN_RE = re.compile(
+    r'<span style="font-size: 11px; font-weight: bold;">([^<]*)</span>'
+)
+
+
+def page_crumbs(page_html: str) -> tuple[list[tuple[str, str]], str]:
+    """The units above a page, outermost first, as (page id, label) — and
+    the page's own label ("CHAPTER 21", "§ 1983") — from its navigation
+    bar."""
+    start = page_html.find('class="navigator"')
+    if start < 0:
+        return [], ""
+    end = page_html.find("</form>", start)
+    nav = page_html[start:end if end > 0 else len(page_html)]
+    crumbs = [(granule, _clean(label))
+              for granule, label in _NAV_CRUMB_RE.findall(nav)]
+    own = _NAV_OWN_RE.search(nav)
+    return crumbs, _clean(own.group(1)) if own else ""
+
+
+# A unit's own heading: a title's <h1>, any other unit's first structural
+# heading (<h3> mostly; title 49's subtitles are <h2>).  Its body begins at
+# the next heading field — a section's, or the first unit's inside it.
+_UNIT_HEAD_RE = re.compile(
+    r"<!--\s*field-start:(titlehead|structuralhead)\s*-->\s*"
+    r"<h[1-3]\b[^>]*>(.*?)</h[1-3]>",
+    re.DOTALL,
+)
+_UNIT_BODY_RE = re.compile(
+    r"<!--\s*field-start:(?:head|structuralhead)\s*-->")
+# The table's pieces: subheads; column labels ("Sec.", "Chap.") naming what
+# a table lists; and its rows — designation, heading and, where given, first
+# section — as <div> cells, or in some chapters (10 U.S.C. ch. 47) a <table>.
+_UNIT_TOKEN_RE = re.compile(
+    r'<h[3-5] class="(?:analysis-subhead|note-head)"[^>]*>'
+    r"(?P<group>.*?)</h[3-5]>"
+    r'|class="analysis-head-left">(?P<label>.*?)</div>'
+    r"|<tr>\s*<th\b[^>]*>(?P<thlabel>.*?)</th>(?P<threst>.*?)</tr>"
+    r'|<div class="(?:two|three)-column-analysis-style-content-left">'
+    r"(?P<left>.*?)</div>"
+    r'<div class="(?:two|three)-column-analysis-style-content-'
+    r'(?:right|center)"[^>]*>(?P<middle>.*?)</div>'
+    r'(?:<div class="three-column-analysis-style-content-right"[^>]*>'
+    r"(?P<right>.*?)</div>)?"
+    r'|<tr>\s*<td class="left">(?P<tleft>.*?)</td>\s*'
+    r'<td class="middle">(?P<tmiddle>.*?)</td>'
+    r'(?:\s*<td class="(?:middle|right)">(?P<tright>.*?)</td>)?',
+    re.DOTALL,
+)
+# A subhead that names a unit: "SUBCHAPTER I–A—INSTITUTIONALIZED PERSONS",
+# "Part A—Administration", "subpart i—general".  Others ("Editorial Notes",
+# "Amendments") head notes, not lists.
+_UNIT_DESIGNATION_RE = re.compile(
+    r"^(title|subtitle|division|subdivision|part|subpart|chapter|"
+    r"subchapter|article)\s+([A-Za-z0-9]+(?:[–-][A-Za-z0-9]+)?)\s*(?:—|$)",
+    re.IGNORECASE,
+)
+_TABLE_KINDS = (
+    ("chap", "chapter"), ("subchap", "subchapter"), ("subtitle", "subtitle"),
+    ("subpart", "subpart"), ("part", "part"), ("subdivision", "subdivision"),
+    ("division", "division"), ("article", "article"), ("sec", "section"),
+)
+_PLURALS = {"chapter": "Chapters", "subchapter": "Subchapters",
+            "subtitle": "Subtitles", "subpart": "Subparts", "part": "Parts",
+            "subdivision": "Subdivisions", "division": "Divisions",
+            "article": "Articles", "section": "Sections"}
+
+
+def _cell(fragment: str) -> str:
+    """A table cell's text, less its footnote markers."""
+    fragment = re.sub(r"<sup\b.*?</sup>", "", fragment or "",
+                      flags=re.DOTALL)
+    return _clean(fragment)
+
+
+def _fetch_unit_top(url: str, cap: int = 8_000_000) -> str:
+    """A unit page as far as its table of contents: streamed, and cut off
+    where the unit's body begins."""
+    import codecs
+
+    import requests
+
+    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30,
+                        stream=True)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    text, read, head_end = "", 0, -1
+    try:
+        resp.raise_for_status()
+        for chunk in resp.iter_content(65536):
+            read += len(chunk)
+            # Search only what is new, less a margin for a marker split
+            # between chunks.
+            start = max(0, len(text) - 200)
+            text += decoder.decode(chunk)
+            if head_end < 0:
+                head = _UNIT_HEAD_RE.search(text)
+                if head:
+                    head_end = start = head.end()
+            if head_end >= 0 and _UNIT_BODY_RE.search(
+                    text, max(start, head_end)):
+                break
+            if read > cap:
+                break
+    finally:
+        resp.close()
+    return text
+
+
+def _is_roman_list(designations: list[str]) -> bool:
+    """Whether a table's designations are roman numerals ("I", "II", "IV")
+    rather than letters ("A", "B", "C" — C and D are numerals too)."""
+    marks = [d for d in designations if d]
+    return bool(marks) and all(
+        re.fullmatch(r"[IVXLCDM]+|[ivxlcdm]+", d) for d in marks
+    ) and (any(len(d) > 1 for d in marks) or marks == ["I"]
+           or marks == ["i"])
+
+
+def _child_granule(parent: str, kind: str, designation: str,
+                   roman: bool) -> str:
+    """The page id the OLRC gives a unit listed in *parent*'s table.
+
+    A chapter's id hangs off the title whatever holds it ("title18-
+    chapter44", in part I), and so does a subtitle's, and a part's directly
+    under a title; everything else is nested under its parent.  Roman
+    numerals become digits ("SUBCHAPTER XVIII" → subchapter18)."""
+    title = parent.split("-", 1)[0]
+    mark = designation
+    if roman:
+        mark = str(_roman_to_int(designation))
+    if kind in ("chapter", "subtitle") or (kind == "part" and parent == title):
+        return f"{title}-{kind}{mark}"
+    return f"{parent}-{kind}{mark}"
+
+
+def _unit_entries(page: str, granule: str) -> list[UnitEntry]:
+    """The entries of the table of contents between a unit page's heading
+    and its body."""
+    head = _UNIT_HEAD_RE.search(page)
+    if head is None:
+        return []
+    body = _UNIT_BODY_RE.search(page, head.end())
+    region = page[head.end():body.start() if body else len(page)]
+    tokens: list[tuple] = []
+    for m in _UNIT_TOKEN_RE.finditer(region):
+        if m.group("group") is not None:
+            tokens.append(("group", _cell(m.group("group"))))
+        elif (m.group("label") or m.group("thlabel")) is not None:
+            label = _cell(m.group("label") or m.group("thlabel")).lower()
+            # a table of something else (a note's conversion table)
+            if any(label.startswith(prefix) for prefix, _k in _TABLE_KINDS):
+                # The UCMJ numbers its sections as articles too, in a
+                # column of their own: Sec. | Art. | heading.
+                articles = bool(re.search(
+                    r">\s*Art\.", m.group("threst") or ""))
+                tokens.append(("label", label, articles))
+        elif m.group("left") is not None:
+            tokens.append(("row", _cell(m.group("left")),
+                           _cell(m.group("middle")),
+                           _cell(m.group("right") or "")))
+        else:
+            tokens.append(("row", _cell(m.group("tleft")),
+                           _cell(m.group("tmiddle")),
+                           _cell(m.group("tright") or "")))
+
+    # Which rows are numerals, a table (label to label) at a time.
+    roman_blocks: dict[int, bool] = {}
+    block, marks = 0, []
+    for i, token in enumerate(tokens):
+        if token[0] == "label":
+            if marks:
+                roman_blocks[block] = _is_roman_list(marks)
+            block, marks = i, []
+        elif token[0] == "row":
+            marks.append(token[1].strip("[]. ").split(" ")[0])
+    if marks:
+        roman_blocks[block] = _is_roman_list(marks)
+
+    entries: list[UnitEntry] = []
+    group_kinds: list[str] = []   # subhead kinds, outermost first
+    group_depth = -1
+    row_kind, block, articles = "section", 0, False
+    tables: list[tuple[int, str]] = []   # (entry index, kind) per table
+    for i, token in enumerate(tokens):
+        if token[0] == "label":
+            row_kind = next((kind for prefix, kind in _TABLE_KINDS
+                             if token[1].startswith(prefix)), "section")
+            articles = token[2]
+            block = i
+            tables.append((len(entries), row_kind))
+            continue
+        if token[0] == "group":
+            m = _UNIT_DESIGNATION_RE.match(token[1])
+            if m is None:
+                continue
+            kind = m.group(1).lower()
+            if kind not in group_kinds:
+                group_kinds.append(kind)
+            group_depth = group_kinds.index(kind)
+            entries.append(UnitEntry("group", group_depth, token[1]))
+            continue
+        _row, left, middle, right = token
+        mark = left.strip("[]").rstrip(".").strip()
+        heading = middle.rstrip("]").strip()
+        depth = group_depth + 1
+        if row_kind == "section":
+            first = re.split(r"\s+to\s+|,", mark)[0].strip()
+            label = f"§ {mark}"
+            if articles and right:
+                label += f" (Art. {middle.rstrip('.').strip()})"
+                heading = right.rstrip("]").strip()
+            entries.append(UnitEntry(
+                "section", depth, label, heading,
+                section=first.replace("–", "-"),
+            ))
+        else:
+            designation = mark.split(" ")[0]
+            entries.append(UnitEntry(
+                "unit", depth,
+                f"{crumb_label(row_kind)} {designation}", heading,
+                unit_kind=row_kind, designation=designation,
+                granule=_child_granule(
+                    granule, row_kind, designation,
+                    roman_blocks.get(block, False)),
+                first_section=(right.split() or [""])[-1],
+            ))
+    # A title can list its units twice over, subtitles and then every
+    # chapter (title 26): with no subheads to tell the lists apart, each is
+    # headed with what it lists.
+    kinds = {kind for start, kind in tables
+             if any(e.kind != "group" for e in entries[start:])}
+    if len(kinds) > 1 and not any(e.kind == "group" for e in entries):
+        ends = [start for start, _kind in tables[1:]] + [len(entries)]
+        for (start, kind), end in reversed(list(zip(tables, ends))):
+            for entry in entries[start:end]:
+                entry.depth += 1
+            entries.insert(start, UnitEntry(
+                "group", 0, _PLURALS.get(kind, kind.title() + "s")))
+    # A subhead is kept only where something is listed under it.
+    kept: list[UnitEntry] = []
+    for i, entry in enumerate(entries):
+        if entry.kind == "group" and not any(
+                e.kind != "group" and e.depth > entry.depth
+                for e in entries[i + 1:
+                                 next((j for j in range(i + 1, len(entries))
+                                       if entries[j].kind == "group"
+                                       and entries[j].depth <= entry.depth),
+                                      len(entries))]):
+            continue
+        kept.append(entry)
+    return kept
+
+
+def _same_designation(text: str, label: str) -> bool:
+    """Whether a subhead ("SUBCHAPTER I—GENERALLY") heads the unit a
+    navigation bar calls *label* ("SUBCHAPTER I") — and not "SUBCHAPTER
+    I–A"."""
+    norm = lambda s: re.sub(r"\s+", " ", s or "").strip().casefold()
+    text, label = norm(text), norm(label)
+    return bool(label) and (text == label or text.startswith(label + "—")
+                            or text.startswith(label + " —"))
+
+
+def _group_in(entries: list[UnitEntry], label: str) -> list[UnitEntry]:
+    """The entries under the subhead naming *label*, one level out."""
+    for i, entry in enumerate(entries):
+        if entry.kind == "group" and _same_designation(entry.label, label):
+            out: list[UnitEntry] = []
+            for later in entries[i + 1:]:
+                if later.kind == "group" and later.depth <= entry.depth:
+                    break
+                out.append(UnitEntry(**{
+                    **later.__dict__, "depth": later.depth - entry.depth - 1,
+                }))
+            return out
+    return []
+
+
+_BODY_HEAD_RE = re.compile(
+    r"<!--\s*field-start:structuralhead\s*-->\s*"
+    r'<h[1-3] class="([a-z-]+)"[^>]*>(.*?)</h[1-3]>'
+    r'|<h3 class="section-head"[^>]*>(.*?)</h3>',
+    re.DOTALL,
+)
+_SECTION_HEAD_TEXT_RE = re.compile(
+    r"^\[?\s*§+\s*([0-9][\w\-–]*?)\.?\s+(.*?)\]?$")
+
+
+def _entries_from_body(url: str,
+                       cap: int = 6_000_000) -> tuple[list[UnitEntry], bool]:
+    """A unit's contents read off its own text — the headings of the units
+    and sections in it — for a unit no table lists.  Reads at most *cap*
+    bytes; the flag says whether it stopped short."""
+    import codecs
+
+    import requests
+
+    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30,
+                        stream=True)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    text, read, partial = "", 0, False
+    try:
+        resp.raise_for_status()
+        for chunk in resp.iter_content(65536):
+            read += len(chunk)
+            text += decoder.decode(chunk)
+            if read > cap:
+                partial = True
+                break
+    finally:
+        resp.close()
+    head = _UNIT_HEAD_RE.search(text)
+    entries: list[UnitEntry] = []
+    kinds: list[str] = []
+    depth = -1
+    for m in _BODY_HEAD_RE.finditer(text, head.end() if head else 0):
+        if m.group(1):
+            kind = m.group(1)
+            if kind not in kinds:
+                kinds.append(kind)
+            depth = kinds.index(kind)
+            entries.append(UnitEntry("group", depth, _clean(m.group(2))))
+            continue
+        sec = _SECTION_HEAD_TEXT_RE.match(_clean(m.group(3)))
+        if sec:
+            number = sec.group(1).replace("–", "-")
+            entries.append(UnitEntry(
+                "section", depth + 1, f"§ {number}", sec.group(2),
+                section=number))
+    return entries, partial
+
+
+_unit_cache: dict[str, UscUnit] = {}
+
+
+def load_unit(granule: str) -> UscUnit:
+    """A unit of the Code with its table of contents, cached.  A unit with
+    no table of its own is given the part of its parent's that lists it.
+    Raises UnitNotFound when the OLRC has no page by that id."""
+    granule = str(granule).strip()
+    with _cache_lock:
+        if granule in _unit_cache:
+            return _unit_cache[granule]
+    url = unit_url(granule)
+    try:
+        page = _fetch_unit_top(url)
+    except Exception as exc:
+        raise RuntimeError(f"uscode.house.gov: {exc}") from exc
+    head = _UNIT_HEAD_RE.search(page)
+    if head is None:
+        raise UnitNotFound(f"uscode.house.gov has no page {granule}")
+    crumbs, own = page_crumbs(page)
+    heading = _clean(head.group(2))
+    if not own:
+        own = heading.split("—", 1)[0].strip()
+    entries = _unit_entries(page, granule)
+    partial = False
+    if not any(e.kind != "group" for e in entries) and crumbs:
+        try:
+            parent = load_unit(crumbs[-1][0])
+            entries = _group_in(parent.entries, own) or entries
+        except Exception as exc:
+            print(f"[usc-unit] {granule}: parent's contents failed: {exc}")
+    if not any(e.kind != "group" for e in entries):
+        # Listed nowhere (52 U.S.C. subtitle III): read its own headings.
+        try:
+            entries, partial = _entries_from_body(url)
+        except Exception as exc:
+            print(f"[usc-unit] {granule}: reading its text failed: {exc}")
+    unit = UscUnit(
+        title=granule.split("-", 1)[0].replace("title", "", 1),
+        granule=granule, url=url, label=crumb_label(own),
+        heading=heading, crumbs=crumbs, entries=entries, partial=partial,
+    )
+    print(f"[usc-unit] {granule}: {len(entries)} entries")
+    with _cache_lock:
+        _unit_cache[granule] = unit
+    return unit
+
+
+def open_unit_entry(entry: UnitEntry, parent: UscUnit) -> UscUnit:
+    """The unit a table entry names.  Its page id is the OLRC's usual one
+    for its designation; failing that, the designation as printed
+    ("subpartII"); failing that, the one the navigation bar of its first
+    section gives it."""
+    tried: list[str] = []
+    for granule in (entry.granule,
+                    f"{entry.granule.rsplit(entry.unit_kind, 1)[0]}"
+                    f"{entry.unit_kind}{entry.designation}"):
+        if not granule or granule in tried:
+            continue
+        tried.append(granule)
+        try:
+            return load_unit(granule)
+        except UnitNotFound:
+            continue
+    if entry.first_section:
+        section = load_section(parent.title, entry.first_section)
+        for granule, label in section.crumbs:
+            if (granule not in tried and crumb_label(label).casefold()
+                    == entry.label.casefold()):
+                return load_unit(granule)
+    raise UnitNotFound(f"uscode.house.gov has no page for {entry.label}")
 
 
 # ---------------------------------------------------------------------------
