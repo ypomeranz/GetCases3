@@ -1298,6 +1298,8 @@ def _load_filename_builder():
           "abbreviate_case_name": lambda n, **_kw: n,
           "_state_of_court": lambda *_a, **_kw: "",
           "_court_for_paren": lambda cite, court_id, court: "",
+          # Reporter spacing is the respacer's own (tested) business.
+          "_respace_reporter_in_cite": lambda cite: cite,
           "_reporter_family": citations.reporter_family,
           "Optional": None}
     for key in ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE"):

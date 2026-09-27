@@ -343,6 +343,11 @@ APP_NS = _load(
      # The reader's caption reader, which names a case the way the reports do.
      "parse_opinion_blocks": lambda html: html,
      "_scholar_caption_name": lambda blocks: CAPTIONS.get(blocks, ""),
+     # The abbreviator is its own (well-tested) machinery; the caption goes
+     # through untouched here.
+     "abbreviate_case_name": lambda name, **_kw: name,
+     "_state_of_court": lambda *_a: "",
+     "_scholar_body_text": lambda blocks: "",
      "_case_law_reporter_cite": _fake_case_law_reporter_cite,
      "_static_case_law_url": _fake_static_case_law_url,
      "_cluster_citations_to_strings": lambda cites: [str(c) for c in cites],

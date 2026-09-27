@@ -1526,6 +1526,44 @@ def _defined_acronym(spelling: str, body_text: str) -> bool:
         body_text or ""))
 
 
+_PROSE_BEFORE_RE = re.compile(r"(?:^|[ \t])([A-Za-z]+)[ \t]+$")
+_PROSE_AFTER_RE = re.compile(r"^(?:['’]s)?[,;:]?[ \t]+([A-Za-z]+)")
+
+
+def _initialism_in_prose(spelling: str, body_text: str) -> bool:
+    """Whether the opinion writes *spelling* — all capitals — only in the
+    run of its prose, where the capitals are the word's own.
+
+    "…grants to KQED and other media greater access to the Santa Rita Jail"
+    is the one place KQED, Inc. v. Houchins, 546 F.2d 284 (9th Cir. 1976),
+    names the station outside its caption: between ordinary words (a
+    lowercase word just before it on the line, mixed case after), which a
+    heading, a byline ("JOHNSON, Circuit Judge") or the caption itself never
+    is.  A name is not taken this way — some opinions set a party's surname in
+    capitals as they go ("denied ROE's motion") — so a word the Census name
+    files record, as a given name or a surname, still needs the repeated
+    evidence."""
+    if not body_text or not spelling.isupper():
+        return False
+    key = spelling.lower()
+    given, surnames, _mostly_given = _census_names()
+    if key in given or key in surnames or key in _GIVEN_NAMES:
+        return False
+    found = False
+    for m in re.finditer(r"(?<![A-Za-z])%s(?![A-Za-z])" % re.escape(spelling),
+                         body_text):
+        line_start = body_text.rfind("\n", 0, m.start()) + 1
+        before = _PROSE_BEFORE_RE.search(body_text[line_start:m.start()])
+        line_end = body_text.find("\n", m.end())
+        after = _PROSE_AFTER_RE.match(
+            body_text[m.end():line_end if line_end >= 0 else None])
+        if not (before and before.group(1).islower()
+                and after and re.search(r"[a-z]", after.group(1))):
+            return False
+        found = True
+    return found
+
+
 def _reliable_caption_spelling(
     core: str, votes: dict[str, int], unanchored: bool, body_text: str = "",
 ) -> str:
@@ -1541,7 +1579,9 @@ def _reliable_caption_spelling(
         # opinion defines the acronym ("… Advocates (NIFLA)").
         if len(core) > 4 and not _defined_acronym(best, body_text):
             return ""
-        if unanchored and (votes[best] < 3 or votes[best] <= 2 * cur):
+        if unanchored and (votes[best] < 3 or votes[best] <= 2 * cur) and not (
+                cur == 0 and len(votes) == 1
+                and _initialism_in_prose(best, body_text)):
             return ""
         # One occurrence is enough when an adjacent caption word anchors it
         # in ordinary mixed-case prose ("GMAC Mortgage").  The stricter
@@ -2574,6 +2614,21 @@ _PROCEDURAL_CANON = {
 }
 
 
+# What a procedural caption says of the proceeding is not the party's name:
+# California's "In re Jesse L. Ferguson et al. on Habeas Corpus" (55 Cal. 2d
+# 663) is In re Ferguson, and "In re the Application of Jesse L. Ferguson for a
+# Writ of Habeas Corpus" is too — an application or a petition is what "In
+# re" already says (rule 10.2.1(b)).
+_WRIT_TAIL_RE = re.compile(
+    r",?\s+(?:on|upon|for)\s+"
+    r"(?:(?:an?\s+)?(?:petition|application)\s+for\s+)?"
+    r"(?:an?\s+)?(?:writs?\s+of\s+)?habeas\s+corpus\b.*$",
+    re.IGNORECASE,
+)
+_APPLICANT_RE = re.compile(
+    r"^(?:the\s+)?(?:application|petition)\s+of\s+", re.IGNORECASE)
+
+
 def _format_procedural(party: str, *, recognize_initials: bool,
                        names: _OpinionNames | None = None) -> str | None:
     """Canonicalize a procedural-phrase prefix and abbreviate the party that
@@ -2584,6 +2639,16 @@ def _format_procedural(party: str, *, recognize_initials: bool,
     if not m:
         return None
     rest = party[m.end():].strip()
+    writ = _WRIT_TAIL_RE.search(rest)
+    if writ:
+        rest = _APPLICANT_RE.sub("", rest[:writ.start()]).strip(" ,")
+    applicant = _APPLICANT_RE.match(rest)
+    # "Application of" a person is that person's matter; one of the United
+    # States "for an Order …" is cited as the application it is.
+    if applicant and _strip_given_names(
+            _strip_party_designations(rest[applicant.end():]),
+            relaxed=False) is not None:
+        rest = rest[applicant.end():]
     if not rest:
         return None
     prefix = _PROCEDURAL_CANON[re.sub(r"\s+", " ", m.group(1).lower())]

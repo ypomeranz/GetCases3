@@ -2153,11 +2153,16 @@ def _bluebook_display_name(item: dict) -> str:
     # ``_scan_cite`` says the same thing for a scan of any other reporter:
     # a Supreme Court Reporter file prints S. Ct. pages, and calling it by the
     # U.S. Reports pages it does not print misdescribes what is on screen.
-    citation_str = _bluebook_reporter_spelling(
-        item.get("_us_reports_cite")
-        or item.get("_scan_cite")
-        or _pick_citation(item.get("citation", []))
-    )
+    citation_str = (item.get("_us_reports_cite")
+                    or item.get("_scan_cite")
+                    or _pick_citation(item.get("citation", [])))
+    # Spaced as the Bluebook spaces it — Google Scholar writes "55 Cal.2d
+    # 663", the text window "55 Cal. 2d 663" — except around a parallel
+    # volume ("5 U.S. (1 Cranch) 137"), whose parentheses respacing would
+    # drop.
+    if "(" not in citation_str:
+        citation_str = _respace_reporter_in_cite(citation_str)
+    citation_str = _bluebook_reporter_spelling(citation_str)
 
     # Year from date filed
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
@@ -10914,6 +10919,18 @@ class CourtListenerGUI:
             except Exception as exc:
                 print(f"[cite-pdf] reading the court failed: {exc}")
         if caption:
+            # Abbreviated with the opinion's prose to hand, as the text window
+            # abbreviates it: the prose settles a given name no list knows —
+            # "In re Clennon Washington King on Habeas Corpus" is In re King.
+            # (Abbreviating again later changes nothing.)
+            try:
+                caption = abbreviate_case_name(
+                    caption,
+                    court_state=_state_of_court(
+                        str(record.get("court") or ""), ""),
+                    body_text=_scholar_body_text(blocks)) or caption
+            except Exception as exc:
+                print(f"[cite-pdf] abbreviating the caption failed: {exc}")
             record["name"] = caption
         if name and not record.get("name"):
             record["name"] = name
