@@ -6,6 +6,11 @@ __pycache__/
 # The shipped product, eng_rep_index.tsv.gz, lives in the repo root.
 _engr_build/
 
+# Legislative-history index build scratch (GovInfo and Congress.gov crawls,
+# their raw output, the builders).  The shipped products, crecb_index.tsv.gz
+# and debates_index.tsv.gz, live in the repo root.
+_leghist_build/
+
 # Opinion database: opinions.jsonl IS committed (the source of truth that syncs
 # via GitHub), but the local SQLite search index is derived from it and rebuilt
 # on demand, so it is never tracked.

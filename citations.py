@@ -30,6 +30,7 @@ import eng_rep
 import fed_cas
 import fed_rules
 import federal_register
+import legislative_history
 import state_statutes
 import statutes_at_large
 import us_code
@@ -2372,6 +2373,12 @@ def _id_antecedent(
             break  # something we cannot open stands in between
         if action[0] == "const":
             continue  # unpaginated — "at N" cannot be pointing here
+        if action[0] == "leghist":
+            # "132 Cong. Rec. 16823 (1986) (Senate); id., at 17607": another
+            # page of the same volume — or of the same report, or the Globe.
+            if gap > ID_NEAR_GAP:
+                break
+            return ("leghist", legislative_history.with_page(action[1], pin))
         if action[0] == "cite":
             if _id_pin_in_range(action[1], pin):
                 lead = _parallel_lead(text, window, k, pin)
@@ -2688,6 +2695,19 @@ def detect_links(
             continue
         fedcas_spans.append((start, end))
         matches.append((start, end, "fedcas", spec))
+    # Legislative history — the Congressional Record and the debates before
+    # it, committee reports and documents (see legislative_history).  Claimed
+    # ahead of the case passes: "116 Cong. Rec. 36481" has a reporter's
+    # shape, and a Scholar lookup by it finds nothing.
+    leghist_spans: list[tuple[int, int]] = []
+    for start, end, spec in legislative_history.iter_cites(text):
+        if any(start < e and s < end for s, e in recap_spans):
+            continue
+        leghist_spans.append((start, end))
+        matches.append((start, end, "leghist", spec))
+    # Recognised now, so no longer an authority that can't be opened.
+    unlinkable = [(s, e) for s, e in unlinkable
+                  if not any(s < le and ls < e for ls, le in leghist_spans)]
     # Early lower-federal reporters ("1 Sumner, 73", "35 Fed. Rep. 665"),
     # pre-normalized to the abbreviations CourtListener indexes — claimed
     # ahead of the broad reporter fallback so the normalized form wins.
@@ -2708,13 +2728,13 @@ def detect_links(
     for m in EARLY_FED_CITE_RE.finditer(text):
         if any(m.start() < e and s < m.end()
                for s, e in engrep_spans + recap_spans + fedcas_spans
-               + stat_spans + fr_spans):
+               + stat_spans + fr_spans + leghist_spans):
             continue
         efed_spans.append((m.start(), m.end()))
         matches.append((m.start(), m.end(), "cite", early_fed_cite_text(m)))
     claimed_spans = (
         engrep_spans + recap_spans + fedcas_spans + efed_spans
-        + stat_spans + fr_spans
+        + stat_spans + fr_spans + leghist_spans
     )
     for m in case_cites:
         if any(m.start() < e and s < m.end() for s, e in claimed_spans):
@@ -2863,6 +2883,9 @@ def detect_links(
             action = ("statpdf", statutes_at_large.url_for(m))
         elif kind == "fr":
             action = ("frpdf", federal_register.url_for(m))
+        elif kind == "leghist":
+            # The Record, a report, the Globe… — m is the pre-built spec.
+            action = ("leghist", m)
         elif kind == "engrep":
             # English Reports cite — reprint ("156 Eng. Rep. 145") or nominate
             # ("9 Exch. 341") — -> CommonLII scan; m is the pre-built spec.
