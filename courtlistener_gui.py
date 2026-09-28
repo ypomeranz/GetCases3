@@ -1187,6 +1187,8 @@ import eng_rep_pdf
 import fed_cas
 import fed_rules
 import federal_register
+import legislative_history
+import leghist_fetch
 import state_statutes
 import statutes_at_large
 import us_code
@@ -7244,6 +7246,11 @@ class CourtListenerGUI:
             if not url:
                 return None
             return lambda: self._open_history_pdf(url, title)
+        if kind == "leghist":
+            spec = str(payload.get("spec") or "")
+            if not spec:
+                return None
+            return lambda: _LegHistPdfWindow(self.root, spec, app=self)
         return None
 
     def _open_history_cl(
@@ -7820,6 +7827,12 @@ class CourtListenerGUI:
                 return None
             # Reopens through eng_rep_pdf's own on-disk scan cache (offline).
             return lambda: _EngRepPdfWindow(self.root, case, app=self)
+        if kind == "leghist":
+            spec = str(payload.get("spec") or "")
+            if not spec:
+                return None
+            # Reopens through leghist_fetch's own on-disk cache (offline).
+            return lambda: _LegHistPdfWindow(self.root, spec, app=self)
         if kind == "slip":
             url = str(payload.get("url") or "")
             title = str(payload.get("title") or label or url)
@@ -8846,6 +8859,15 @@ class CourtListenerGUI:
                 _open_statute_action(
                     self.root, fr_action, self._status_var.set, app=self
                 )
+                return
+
+            # 1b. Legislative history: "116 Cong. Rec. 36481", "S. Rep. No.
+            # 95-797", "Cong. Globe, 39th Cong., 1st Sess. 2765".
+            leg_action = legislative_history.parse_query(query)
+            if leg_action:
+                self._close_quick_popup()
+                _open_leghist(self.root, leg_action[1], self._status_var.set,
+                              app=self)
                 return
 
             # 1a. Statute / regulation / federal rule: "42 USC 1983(b)",
@@ -25119,6 +25141,11 @@ class _ScholarTextWindow:
         # The span outranks the bare "Id." match at the same start.
         for s, e, spec in fed_cas.iter_cites(text):
             matches.append((s, e, "fedcas", spec))
+        # Legislative history — the Record, a report, the Globe … — ahead of
+        # the case cites, which would read "116 Cong. Rec. 36481" as a
+        # reporter's (a tie goes to the match listed first).
+        matches = [(s, e, "leghist", spec) for s, e, spec
+                   in legislative_history.iter_cites(text)] + matches
         matches.sort(key=lambda t: (t[0], -t[1]))
         pos = 0
         for start, end, kind, m in matches:
@@ -25175,8 +25202,15 @@ class _ScholarTextWindow:
                         ("cite", f"{la[1]}@{_join_note_pin(pin, id_notes)}")
                         if _id_pin_in_range(la[1], pin) else None
                     )
+                elif la[0] == "leghist":
+                    # Another page of the Record volume, report or Globe
+                    # session last cited.
+                    action = ("leghist",
+                              legislative_history.with_page(la[1], pin))
                 else:
                     action = la  # statute/regulation/rule → reopen (no pin page)
+            elif kind == "leghist":
+                action = ("leghist", m)  # m is legislative_history's spec
             elif kind == "statestat":
                 # In-app for priority states (once a parser exists), else a
                 # browser link-out.  `m` here is a state_statutes.Cite record.
@@ -29562,6 +29596,10 @@ class _ScholarTextWindow:
                 self._win, value, self._status_var.set, app=self._app
             )
             return
+        if kind == "leghist":
+            _open_leghist(self._win, value, self._status_var.set,
+                          app=self._app)
+            return
         if kind == "engrep":
             _open_eng_rep(self._win, value, self._status_var.set,
                           app=self._app)
@@ -32010,6 +32048,9 @@ def _open_statute_action(parent: tk.Misc, action: tuple[str, str],
     if kind in ("statpdf", "frpdf"):
         _open_statute_pdf(parent, value, status, app=app)
         return
+    if kind == "leghist":
+        _open_leghist(parent, value, status, app=app)
+        return
     _fetch_statute_window(parent, kind, value, status, app=app,
                           on_missing=on_missing)
 
@@ -33366,6 +33407,152 @@ def _open_statute_pdf(parent: tk.Misc, url: str,
 
 
 # ---------------------------------------------------------------------------
+# Legislative history — the Congressional Record and its predecessors,
+# committee reports and documents (see legislative_history, leghist_fetch)
+# ---------------------------------------------------------------------------
+
+class _LegHistPdfWindow(_PdfWindow):
+    """The pages a legislative-history citation names, in the viewer the
+    Statutes at Large use: found and fetched by :mod:`leghist_fetch` —
+    usually a few pages cut out of a large scan — and opened at the cited
+    page.  Where no free copy can be fetched, says so and offers what the
+    browser can reach (a HathiTrust volume, a search)."""
+
+    def __init__(self, parent: tk.Misc, spec: str,
+                 status=lambda _s: None, *, app=None) -> None:
+        self._spec = spec
+        self._open_index = 0
+        self._note = ""
+        title = legislative_history.spec_label(spec) or "Legislative history"
+        super().__init__(parent, leghist_fetch.browser_url(spec) or "",
+                         title, status, app=app)
+
+    def _history_entry(self):  # overrides _PdfWindow
+        app, spec = self._app, self._spec
+        if app is None:
+            return None
+        label = legislative_history.spec_label(spec)
+        return (f"leghist:{spec}", label,
+                lambda parent=None: _LegHistPdfWindow(
+                    app.root if parent is None else parent, spec, app=app),
+                {"type": "leghist", "spec": spec, "title": label})
+
+    def _bookmark_descriptor(self):  # overrides _PdfWindow
+        if self._app is None:
+            return None
+        label = self._title or legislative_history.spec_label(self._spec)
+        return {"key": f"leghist:{self._spec}", "label": label,
+                "noun": "source",
+                "payload": {"type": "leghist", "spec": self._spec,
+                            "title": label}}
+
+    def _toggle_bookmark(self):  # overrides _PdfWindow
+        # Pages once fetched stay in leghist_fetch's own disk cache, so there
+        # is no separate copy to save alongside the bookmark.
+        app = self._app
+        if app is None or not hasattr(app, "is_bookmarked"):
+            return
+        desc = self._bookmark_descriptor()
+        if not desc:
+            return
+        if app.is_bookmarked(desc["key"]):
+            app.remove_bookmark(desc["key"])
+        else:
+            app.add_bookmark(desc)
+
+    def _fetch(self) -> None:  # overrides _PdfWindow._fetch
+        try:
+            import pypdfium2  # noqa: F401
+            from PIL import ImageTk  # noqa: F401
+        except ImportError:
+            url = self._url
+            self._reveal()
+            if url and messagebox.askyesno(
+                "PDF viewer not installed",
+                "Viewing PDFs inside the app needs two Python packages:\n\n"
+                "    pip install pypdfium2 Pillow\n\n"
+                "Open it in your web browser instead?",
+                parent=self._dialog_parent(),
+            ):
+                webbrowser.open(url)
+            self._win.destroy()
+            return
+        self._status_var.set(f"Finding {self._title}…")
+        spec = self._spec
+
+        def run() -> None:
+            try:
+                pages = leghist_fetch.fetch(spec)
+            except leghist_fetch.Unavailable as exc:
+                self._post(self._unavailable, str(exc), exc.browser_url)
+                return
+            except Exception as exc:  # the network, a malformed file
+                self._post(self._error, str(exc))
+                return
+            self._post(self._arrived, pages)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _arrived(self, pages) -> None:
+        self._url = pages.source_url or self._url
+        self._title = pages.title or self._title
+        self._open_index = pages.index
+        self._note = pages.note
+        try:
+            self._win.title(self._title)
+        except tk.TclError:
+            pass
+        self._show(pages.data)
+
+    def _show(self, data: bytes) -> None:  # overrides _PdfWindow._show
+        super()._show(data)
+        target = self._float if self._float is not None else self._pane
+        if target is not None and self._open_index:
+            index = self._open_index
+            try:
+                # After the pages are laid out: a pane scrolled before its
+                # first layout has nowhere to go.
+                self._win.after(150, lambda: target.scroll_to_page(index))
+            except tk.TclError:
+                pass
+        if self._note:
+            note = self._note
+            try:
+                self._win.after(400, lambda: self._say(note))
+            except tk.TclError:
+                pass
+
+    def _unavailable(self, message: str, browser_url: str) -> None:
+        self._reveal()
+        self._status_var.set(message)
+        parent = self._dialog_parent()
+        if browser_url:
+            if messagebox.askyesno(
+                    self._title, f"{message}\n\nLook for it in your web browser?",
+                    parent=parent):
+                webbrowser.open(browser_url)
+        else:
+            messagebox.showinfo(self._title, message, parent=parent)
+        try:
+            self._ext_status(message)
+        except tk.TclError:
+            pass
+        self._win.destroy()
+
+
+def _open_leghist(parent: tk.Misc, spec: str,
+                  status=lambda _s: None, *, app=None) -> None:
+    """Open a legislative-history citation (a ``("leghist", spec)`` action)
+    at the page it names."""
+    label = legislative_history.spec_label(spec) or "legislative history"
+    try:
+        status(f"Opening {label}…")
+    except tk.TclError:
+        pass
+    _LegHistPdfWindow(parent, spec, status, app=app)
+
+
+# ---------------------------------------------------------------------------
 # English Reports — open the CommonLII scan (cached; CloudFlare hand-off)
 # ---------------------------------------------------------------------------
 
@@ -34300,6 +34487,10 @@ def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
     kind, value = action
     if kind in ("browse", "statpdf", "frpdf"):
         url = value
+    elif kind == "leghist":
+        url = leghist_fetch.browser_url(value)
+        if not url:
+            return
     elif kind == "scotus":
         url = _scotus_docket_page_url(value)
         if not url:
@@ -34643,7 +34834,8 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
         Appendix scans, then the CourtListener text), with the pincite jump.
     """
     kind, value = action
-    if kind in _STATUTE_SOURCES or kind in ("browse", "statpdf", "frpdf"):
+    if kind in _STATUTE_SOURCES or kind in ("browse", "statpdf", "frpdf",
+                                            "leghist"):
         _open_statute_action(parent, action, status, app=app)
         return
     if kind == "engrep":
@@ -35099,9 +35291,20 @@ class _BriefCompileResolver:
     def statute_pdf_bytes(self, url: str):
         return self.pdf_bytes(url)
 
+    def leghist_pdf(self, spec: str):
+        """The pages a legislative-history citation names (see
+        leghist_fetch), or None."""
+        try:
+            return leghist_fetch.fetch(spec).data
+        except Exception as exc:
+            print(f"[compile] legislative history failed: {exc}")
+            return None
+
     def authority_label(self, kind: str, value: str) -> str:
         if kind in ("statpdf", "frpdf"):
             return _stat_cite_from_url(value)
+        if kind == "leghist":
+            return legislative_history.spec_label(value, with_pin=False)
         mod = _STATUTE_SOURCES.get(kind)
         if mod is not None:
             try:
@@ -36153,6 +36356,10 @@ class _StatuteWindow:
             _open_statute_pdf(
                 self._win, value, self._status_var.set, app=self._app
             )
+            return
+        if kind == "leghist":
+            _open_leghist(self._win, value, self._status_var.set,
+                          app=self._app)
             return
         _fetch_statute_window(
             self._win, kind, value, self._status_var.set, app=self._app

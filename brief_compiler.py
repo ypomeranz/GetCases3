@@ -36,6 +36,7 @@ from typing import Callable, Optional
 
 import bluebook_names
 import citations
+import legislative_history
 
 __all__ = [
     "Authority",
@@ -59,8 +60,9 @@ class Authority:
     ``kind`` is the citation action kind from :func:`citations.detect_links`:
     "cite" for a reporter case, "recap" for an unpublished opinion cited by
     docket / WL number, "usc"/"cfr"/"rule"/"const"/"statestat" for a statute
-    source, "statpdf" for a Statutes at Large scan, and "frpdf" for a Federal
-    Register scan. ``value`` is that action's payload. ``name``/``year`` are
+    source, "statpdf" for a Statutes at Large scan, "frpdf" for a Federal
+    Register scan, and "leghist" for legislative history (the Congressional
+    Record, a report, the Globe …). ``value`` is that action's payload. ``name``/``year`` are
     scraped from the brief only as a last-resort fallback for the file name."""
 
     kind: str
@@ -86,6 +88,8 @@ class Authority:
                 return self.value
             docket = f"No. {spec.get('docket', '')}"
             return f"{spec['name']}, {docket}" if spec.get("name") else docket
+        if self.kind == "leghist":
+            return legislative_history.spec_label(self.value) or self.value
         return self.value
 
 
@@ -165,6 +169,14 @@ def collect_authorities(text: str) -> list[Authority]:
         if kind in _TEXT_STATUTE_KINDS and str(value).count(":") >= 2:
             title, section = str(value).split(":", 2)[:2]
             key = (kind, title, section)
+        elif kind == "leghist":
+            # A report is one file however many of its pages are cited; a
+            # page of the Record is its own.
+            spec = legislative_history.parse_spec(str(value))
+            if spec.get("src") in ("rpt", "doc"):
+                spec.pop("pin", None)
+                value = legislative_history.make_spec(**spec)
+            key = (kind, str(value))
         else:
             key = (kind, str(value))
         if key in by_key:
@@ -400,6 +412,14 @@ def _resolve_statute(resolver, auth: Authority) -> _Resolved:
             else "Statutes at Large"
         )
         return _Resolved(note=f"{label} PDF could not be downloaded")
+    if auth.kind == "leghist":
+        get = getattr(resolver, "leghist_pdf", None)
+        data = get(auth.value) if get is not None else None
+        if data:
+            return _Resolved(data, ".pdf", "legislative history",
+                             stem=label or auth.label())
+        return _Resolved(note="no free copy of this legislative history "
+                              "could be downloaded")
     if auth.kind in _TEXT_STATUTE_KINDS:
         loaded = resolver.statute_text(auth.kind, auth.value)
         if loaded:
