@@ -462,6 +462,20 @@ _NONCASE_REPORTERS = {
     # no reporter is abbreviated so.  With a footnote number set in front of it
     # — "…irreparable injury.⁴ Appl. 6, 31" — it reads as volume 4, page 6.
     "appl",
+    # Congress's own record, cited in a reporter's shape — "123 Cong. Rec.
+    # 4567 (1977)", "1 Annals of Cong. 451 (1789)", "7 Reg. Deb. 123
+    # (1831)" — is debate, not decision; no case source can open it.
+    "congrec", "annalsofcong", "regdeb", "congglobe",
+    # American Law Reports annotations ("12 A.L.R.4th 611") are commentary.
+    # A case A.L.R. reprints is cited to its reporter too, which still links.
+    "alr", "alr2d", "alr3d", "alr4th", "alr5th", "alr6th", "alr7th",
+    "alrfed", "alrfed2d", "alrfed3d", "alrfed4th",
+    # A date or an old-style court parenthetical in a reporter's shape —
+    # "(daily ed. 17 Nov. 1970)", "(2 Cir. 1961)" — which the citation
+    # before it once ran on over, until a Cong. Rec. or A.L.R. cite stopped
+    # being linked and left it standing alone.
+    "cir", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
 }
 _PLAIN_CASE_REPORTERS = {
     "alaska", "idaho", "iowa", "ohio", "utah", "vermont", "wyoming",
@@ -488,8 +502,12 @@ _PLAIN_CASE_REPORTERS = {
 # lookbehind, and the "L. J." family is matched explicitly since its own J does
 # follow a period.  A J. after an ampersand is the second man of a reporter
 # named for two — Maryland's "Gill & J.", "Har. & J." — not a journal.
-# Case-sensitive: journal abbreviations are capitalized, and the broad regex
-# only ever hands us a capitalized token.
+# Case-blind, because a law review sets its sources in small capitals, which
+# a PDF's text layer carries as capitals: the article's "135 HARV. L. REV.
+# 515" is the brief's "135 Harv. L. Rev. 515" (135 Harv. L. Rev. 515 itself —
+# Driver & Kaufman — had some fifty journal cites linked as cases).  No reporter
+# is spelled with a marker in any case, and the broad regex only ever hands
+# us a capitalized token.
 #
 # The other sciences' journals, which an opinion cites for its facts, are
 # told by the words their titles are made of — abbreviated as the Bluebook
@@ -503,14 +521,19 @@ _PLAIN_CASE_REPORTERS = {
 # standalone Q. is the J. rule again, and the Q.B. of the Queen's Bench is
 # not one.
 _PERIODICAL_WORDS = (
-    r"\b(?:Revs|Rsch|Stud|Sci|Med|Aff|Behav|Econ|Psych|Psychol|Pol['’]y"
-    r"|Soc['’]y|Socio|Hist|Found|Mgmt|Surv|Symp|Newsl|Contemp|Delinq"
-    r"|Compar|Commc['’]n)\."
+    r"\b(?:Revs|Rsch|Stud|Sci|Med|Aff|Behav|Econ|Psych|Psychol|Socio|Hist"
+    r"|Found|Mgmt|Surv|Symp|Newsl|Contemp|Delinq|Compar|Comment|Just)\."
+    # T13's contractions take no period: "Pub. Pol'y", "L. & Soc'y Rev.",
+    # "Fed. Sent'g Rep.".
+    r"|\b(?:Pol['’]y|Soc['’]y|Commc['’]n|Sent['’]g)\b"
     r"|(?<![A-Za-z.&])Q\.(?!\s?B\.)"
+    # Named whole where their words give nothing away: the University of
+    # Chicago Legal Forum, The Public Interest.
+    r"|\bLegal\s?F\.|\bPub\.\s?Int\."
     r"|\b(?:Health|Medicine|Medical|Sciences?|Research|Studies|Quarterly"
     r"|Reviews?|Journal|Psychiatry|Psychology|Epidemiolog[a-z]*|Pediatrics"
     r"|Criminology|Economics|Sociology|Behavior|Prevention|Internal"
-    r"|Clinical|Morbidity|Mortality)\b"
+    r"|Clinical|Morbidity|Mortality|Probation)\b"
 )
 _JOURNAL_REPORTER_RE = re.compile(
     r"L\.\s?J\.|L\.\s?Rev\.|L\.\s?Q\.|\bRev\.|(?<![A-Za-z.&])(?<!&\s)J\."
@@ -518,7 +541,8 @@ _JOURNAL_REPORTER_RE = re.compile(
     # Searching Cars and Their Contents: United States v. Ross, 18 Crim. L.
     # Bull. 381" (Acevedo) was opened as the Ross the article is about.
     r"|Crim\.\s?L\.\s?Bull\.|\bProbs\."
-    r"|" + _PERIODICAL_WORDS
+    r"|" + _PERIODICAL_WORDS,
+    re.IGNORECASE,
 )
 
 # "10 Op. Atty Gen. 382" — an opinion of the Attorney General.  Cited in a

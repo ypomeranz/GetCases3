@@ -389,17 +389,22 @@ class CitationListTests(unittest.TestCase):
         ))
         self.assertLess(src.index("_case_law_text_source"),
                         src.index("_cl_item_for_citation"))
-        self.assertIn('primary_source_kind=cap.kind', src)
+        self.assertIn("self._open_case_law_text(", src)
+        self.assertIn('primary_source_kind=cap.kind',
+                      self._gui_src("_open_case_law_text"))
 
     def test_a_pin_cite_still_jumps_in_the_case_law_text(self):
-        src = ast.get_source_segment(SRC, next(
+        self.assertIn("w.jump_to_cite_page(cite, pin)",
+                      self._gui_src("_open_case_law_text"))
+
+    @staticmethod
+    def _gui_src(name):
+        return ast.get_source_segment(SRC, next(
             n for c in TREE.body if isinstance(c, ast.ClassDef)
             and c.name == "CourtListenerGUI"
             for n in c.body
-            if isinstance(n, ast.FunctionDef) and n.name == "_try_open_citation"
+            if isinstance(n, ast.FunctionDef) and n.name == name
         ))
-        cap = src[src.index("cap = _case_law_text_source"):]
-        self.assertIn("w.jump_to_cite_page(cite, pin)", cap)
 
 
 class FollowedCitationTests(unittest.TestCase):

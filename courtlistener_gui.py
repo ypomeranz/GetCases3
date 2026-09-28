@@ -24,6 +24,7 @@ import html as _html
 import importlib.util
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -721,6 +722,12 @@ class _EmbeddedCaseHost(ttk.Frame):
         if raiser is not None:
             raiser()
 
+    def citation_edited(self) -> None:
+        """Pass a citation edit on to the window that names itself."""
+        notify = getattr(self._window, "citation_edited", None)
+        if callable(notify):
+            notify()
+
     def title(self, value=None):
         if value is None:
             return self._case_title
@@ -1234,6 +1241,9 @@ from court_catalog import (
 )
 
 _CONFIG_PATH = Path.home() / ".config" / "courtlistener" / "config.json"
+# Where the GetCases answering the hotkey says how to reach it (see
+# single_instance).
+_INSTANCE_PATH = _CONFIG_PATH.with_name("instance.json")
 
 
 def _load_config() -> dict:
@@ -2143,11 +2153,16 @@ def _bluebook_display_name(item: dict) -> str:
     # ``_scan_cite`` says the same thing for a scan of any other reporter:
     # a Supreme Court Reporter file prints S. Ct. pages, and calling it by the
     # U.S. Reports pages it does not print misdescribes what is on screen.
-    citation_str = _bluebook_reporter_spelling(
-        item.get("_us_reports_cite")
-        or item.get("_scan_cite")
-        or _pick_citation(item.get("citation", []))
-    )
+    citation_str = (item.get("_us_reports_cite")
+                    or item.get("_scan_cite")
+                    or _pick_citation(item.get("citation", [])))
+    # Spaced as the Bluebook spaces it — Google Scholar writes "55 Cal.2d
+    # 663", the text window "55 Cal. 2d 663" — except around a parallel
+    # volume ("5 U.S. (1 Cranch) 137"), whose parentheses respacing would
+    # drop.
+    if "(" not in citation_str:
+        citation_str = _respace_reporter_in_cite(citation_str)
+    citation_str = _bluebook_reporter_spelling(citation_str)
 
     # Year from date filed
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
@@ -2168,6 +2183,12 @@ def _bluebook_display_name(item: dict) -> str:
         paren = f"({court_abbr})"
     else:
         paren = ""
+
+    # The early U.S. Reports are cited with their reporter's own volume where
+    # the case carries it (table T1): "71 U.S. (4 Wall.) 2", as the text
+    # window writes it.
+    citation_str = (_nominative_display_cite(
+        citation_str, item.get("citation") or []) or citation_str)
 
     # Assemble parts, skipping empty ones.
     # Join case name + citation with a comma, then append the parenthetical
@@ -3800,6 +3821,10 @@ def _courtlistener_pdf_fallback_item(
 # (straight or typographic apostrophe).  These cases are scans — Google Scholar
 # rarely has the text — so the app opens them straight on the official PDF.
 _FED_APPX_RE = re.compile(r"F(?:ed)?\.?\s*App['’]?x\.?", re.IGNORECASE)
+# A Federal Cases citation, however the reporter is written: "17 F. Cas. 144",
+# "17 Fed. Cas. 144", "17 F.Cas. 144".
+_FED_CAS_CITE_RE = re.compile(r"^\s*\d+\s+F(?:ed)?\.\s?Cas\.\s+\d+",
+                              re.IGNORECASE)
 
 
 def _item_is_fed_appx(item: dict) -> bool:
@@ -6866,6 +6891,64 @@ def _slip_text_source(data: bytes, url: str,
     )
 
 
+def _scholar_decision_year(fetcher, cites, name: str = "",
+                           scholar_url: str = "") -> str:
+    """The year Google Scholar's results give the case (see
+    GoogleScholarFetcher.decision_year), trying its first two citations.
+    Worker thread; "" when Scholar gives none."""
+    if fetcher is None or not hasattr(fetcher, "decision_year"):
+        return ""
+    for cite in _plain_cites(cites)[:2]:
+        try:
+            year = fetcher.decision_year(cite, case_name=name,
+                                         case_url=scholar_url)
+        except Exception as exc:
+            print(f"[year] Google Scholar lookup for {cite!r} failed: {exc}")
+            continue
+        if year:
+            return year
+    return ""
+
+
+def _case_law_decision_year(cites) -> str:
+    """The year of the Caselaw Access Project's decision date for the case
+    at any of *cites* (its first four).  Worker thread; "" when CAP has
+    none."""
+    for cite in _plain_cites(cites)[:4]:
+        cap = _case_law_metadata(cite)
+        decided = str((cap or {}).get("decision_date") or "")
+        if len(decided) >= 4 and decided[:4].isdigit():
+            return decided[:4]
+    return ""
+
+
+def _plain_cites(cites) -> list[str]:
+    """*cites* without markup, blanks or repeats, in order."""
+    plain = (re.sub(r"<[^>]+>", "", str(c or "")).strip() for c in cites or ())
+    return list(dict.fromkeys(c for c in plain if c))
+
+
+def _fallback_decision_year(cites, name: str = "", scholar_url: str = "",
+                            fetcher=None, client=None,
+                            item: "Optional[dict]" = None) -> str:
+    """The year a case was decided, from outside its opinion — for one whose
+    own page prints none, as the early U.S. Reports do ("71 U.S. 2 (____)"
+    is Ex parte Milligan, 1866).  Google Scholar's results first, the byline
+    of the very result the text came from; then CourtListener's cluster;
+    then the Caselaw Access Project.  Worker thread; "" when none of them
+    knows."""
+    year = _scholar_decision_year(fetcher, cites, name, scholar_url)
+    plain = _plain_cites(cites)
+    if not year and client is not None and plain:
+        try:
+            _court, year = _ScholarTextWindow._cl_court_and_year(
+                client, plain[0], dict(item or {}), name=name)
+        except Exception as exc:
+            print(f"[year] CourtListener lookup failed: {exc}")
+            year = ""
+    return year or _case_law_decision_year(plain)
+
+
 def _cl_text_record(source: "_CasePdfTextSource") -> dict:
     """The pieces a Bluebook name is made of, read off CourtListener's text.
 
@@ -7036,6 +7119,18 @@ class CourtListenerGUI:
 
         self._quick_popup: Optional[tk.Toplevel] = None
         self._spotlight_toggle_at = 0.0
+        # When the last spotlight toggle was done: a press from before then
+        # was made while it was still being carried out (see
+        # _drain_hotkey_presses).
+        self._spotlight_toggle_done = 0.0
+        # Hotkey presses as the listener thread hands them over — the time of
+        # each — for the Tk thread to take up (see _on_global_hotkey).
+        self._hotkey_presses: "queue.SimpleQueue[float]" = queue.SimpleQueue()
+        self._hotkey_poll_started = False
+        # Set once a newer GetCases has taken the hotkey over (see
+        # _newer_instance_started).
+        self._hotkey_yielded = False
+        self._step_back_requested = False
         self._hotkey_listener = None
         self._spotlight_hotkey = _load_saved_spotlight_hotkey()
         self._root_hidden = False
@@ -8454,9 +8549,137 @@ class CourtListenerGUI:
             self._hotkey_listener.start()
         except Exception:
             self._hotkey_listener = None
+            return
+        self._start_hotkey_poll()
 
     def _on_global_hotkey(self) -> None:
-        self.root.after(0, self._toggle_quick_search_popup)
+        """The listener thread's half of a hotkey press: note when it came,
+        and return at once.
+
+        Nothing here calls into Tk.  A Tk call from this thread waits until
+        the Tk thread is free — for as long as it is busy building results or
+        a window — and while it waits, Windows holds back every keystroke the
+        keyboard hook has not yet seen, from every application, and after a
+        second or so may drop the hook for good.  The Tk thread takes the
+        press up at its next look (see :meth:`_drain_hotkey_presses`)."""
+        if self._hotkey_yielded:
+            return                  # a newer GetCases answers the hotkey now
+        self._hotkey_presses.put(time.monotonic())
+
+    def _start_hotkey_poll(self) -> None:
+        """Begin looking for hotkey presses on the Tk thread (idempotent)."""
+        if self._hotkey_poll_started:
+            return
+        self._hotkey_poll_started = True
+        try:
+            self.root.after(40, self._drain_hotkey_presses)
+        except tk.TclError:
+            self._hotkey_poll_started = False
+
+    def _drain_hotkey_presses(self) -> None:
+        """The Tk thread's half of a hotkey press: toggle the spotlight once
+        for the presses that have come in since the last look.
+
+        A press counts only if it came after the last toggle was done.  One
+        made while the app was still busy closing or opening the popup was
+        the reader asking again for what had not visibly happened yet — taken
+        as a toggle of its own, it undid the first: the popup closed, and
+        then reopened by itself.  Presses that arrive together are likewise
+        one request, and a second delivery of the same press is ignored by
+        the toggle itself."""
+        pressed: list[float] = []
+        while True:
+            try:
+                pressed.append(self._hotkey_presses.get_nowait())
+            except queue.Empty:
+                break
+        if self._step_back_requested:
+            self._step_back_requested = False
+            self._step_back_for_newer_instance()
+            if self._quit_for_newer:
+                return
+        fresh = [t for t in pressed if t > self._spotlight_toggle_done]
+        if fresh and not self._hotkey_yielded:
+            try:
+                self._toggle_quick_search_popup(pressed_at=fresh[0])
+            except Exception as exc:
+                print(f"[spotlight] hotkey toggle failed: {exc}")
+            self._spotlight_toggle_done = time.monotonic()
+        try:
+            self.root.after(40, self._drain_hotkey_presses)
+        except tk.TclError:
+            pass                    # shutting down
+
+    # ------------------------------------------------------------------
+    # One GetCases answering the hotkey at a time (see single_instance)
+    # ------------------------------------------------------------------
+
+    _quit_for_newer = False
+
+    def _claim_instance(self):
+        """Take the hotkey over from any GetCases already running — only
+        when this one has a hotkey to take it with.  Returns the channel,
+        for :func:`main` to close on the way out, or None."""
+        if self._hotkey_listener is None:
+            return None
+        import single_instance
+        channel = single_instance.InstanceChannel(
+            _INSTANCE_PATH, self._newer_instance_started)
+        try:
+            if channel.claim():
+                print("[instance] an older GetCases was running; it has "
+                      "handed over the hotkey.")
+        except Exception as exc:
+            print(f"[instance] could not check for another GetCases: {exc}")
+        return channel
+
+    def _newer_instance_started(self) -> None:
+        """Called on the instance channel's thread when a newer GetCases has
+        started.  Its presses stop being this one's at once; the rest of
+        stepping back is the Tk thread's, at its next look for presses."""
+        self._hotkey_yielded = True
+        self._step_back_requested = True
+
+    def _step_back_for_newer_instance(self) -> None:
+        """A newer GetCases answers the hotkey now: give it up here.  With
+        nothing of this one on screen — the usual case, a copy left running
+        in the background — quit too, rather than linger out of reach; with
+        windows open, keep them, and go when the last of them is closed."""
+        self._hotkey_yielded = True
+        listener, self._hotkey_listener = self._hotkey_listener, None
+        # Stopping pynput's event tap is not safe on macOS (see
+        # _setup_global_hotkey); there it keeps running, and _on_global_hotkey
+        # ignores what it hears.
+        if listener is not None and sys.platform != "darwin":
+            try:
+                listener.stop()
+            except Exception:
+                pass
+        self._close_quick_popup()
+        if self._anything_on_screen():
+            print("\nA newer GetCases has started and taken over the "
+                  "hotkey; this one closes with its last window.")
+            return
+        print("\nA newer GetCases has started; this one is closing.")
+        self._quit_for_newer = True
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def _anything_on_screen(self) -> bool:
+        """Whether any window of this app is showing (or minimized)."""
+        stack: list = [self.root]
+        while stack:
+            w = stack.pop()
+            try:
+                if (isinstance(w, (tk.Tk, tk.Toplevel))
+                        and w.state() in ("normal", "iconic", "zoomed")):
+                    return True
+                stack.extend(w.winfo_children())
+            except tk.TclError:
+                continue
+        return False
 
     def _spot_knockout_corners(self, popup: tk.Toplevel) -> None:
         """On Windows, punch the popup's square window corners out to
@@ -8516,12 +8739,14 @@ class CourtListenerGUI:
         except Exception:
             pass
 
-    def _toggle_quick_search_popup(self) -> None:
+    def _toggle_quick_search_popup(
+            self, pressed_at: "Optional[float]" = None) -> None:
         # One press = one toggle: a duplicate hotkey delivery (macOS event
         # taps can fire twice for one chord) would close the popup and
         # immediately reopen it, so a burst within the debounce window is
-        # a single toggle.
-        now = time.monotonic()
+        # a single toggle.  Measured from when the key was pressed, where
+        # that is known — not from when the Tk thread got to it.
+        now = time.monotonic() if pressed_at is None else pressed_at
         if now - self._spotlight_toggle_at < 0.3:
             return
         self._spotlight_toggle_at = now
@@ -8709,7 +8934,22 @@ class CourtListenerGUI:
                             label = f"{name}, {cite}" if name else cite
                             self._post_root(self._notify_lookup_miss,
                                             f"No case found for {label}.")
-                    threading.Thread(target=run, daemon=True).start()
+
+                    def as_text() -> None:
+                        threading.Thread(target=run, daemon=True).start()
+
+                    # The case's own pages first, as a search result opens:
+                    # the scan is up the moment it is found, and the text
+                    # comes in behind it — Google Scholar's, or failing that
+                    # static.case.law's or CourtListener's — for T to show.
+                    # With no scan anywhere, the text opens instead.  The
+                    # Federal Appendix keeps its own scan route, as a search
+                    # result's does.
+                    action = ("cite", f"{cite}@{pin}" if pin else cite)
+                    if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
+                            self.root, action, query, self._status_var.set,
+                            fallback=as_text, name=name):
+                        as_text()
                     return
 
             # 3. Fallback: show spotlight dropdown with search results
@@ -8722,6 +8962,9 @@ class CourtListenerGUI:
 
         entry.bind("<Return>", _submit)
         entry.bind("<Escape>", _dismiss)
+        # For the results dropdown, which takes Return over once it shows: a
+        # query edited there is still read the way a fresh one is here.
+        popup._spotlight_submit = _submit
 
         def _grab_focus(attempt: int = 0) -> None:
             try:
@@ -9425,12 +9668,19 @@ class CourtListenerGUI:
                 _on_key(type("E", (), {"keysym": "Return"})())
                 return
             if current:
-                # New (or edited) query, or no still-valid selection: retract
-                # the current dropdown and run a fresh search in the spotlight
-                # interface rather than opening a stale row or jumping to the
-                # main window.
+                # New (or edited) query, or no still-valid selection: read it
+                # the way the search bar reads a fresh one — a citation opens
+                # its case ("Ex parte Merryman, 17 F. Cas. 144"), a statute its
+                # section — and only a plain query retracts the dropdown for a
+                # fresh search, rather than opening a stale row or jumping to
+                # the main window.
                 self._spotlight_empty_returns = 0
-                self._show_spotlight_dropdown(popup, border, entry, current)
+                submit = getattr(popup, "_spotlight_submit", None)
+                if submit is not None:
+                    submit()
+                else:
+                    self._show_spotlight_dropdown(popup, border, entry,
+                                                  current)
                 return
             # Empty search bar: open the main window only on the second
             # consecutive Return.
@@ -10313,7 +10563,7 @@ class CourtListenerGUI:
         # fetched below replaces them with the real caption, the parallel
         # citations and the decision date a Bluebook filename is built from.
         named = {"data": data, "url": url, "cite": cite, "name": name,
-                 "pin": pin, "start_page": start_page,
+                 "pin": pin, "start_page": start_page, "cl_item": cl_item,
                  "record": None, "page": None, "pin_page": None,
                  "text_source": None,
                  # A page of orders opened for none of them in particular:
@@ -10403,6 +10653,7 @@ class CourtListenerGUI:
                 on_build_text=None if named["orders_page"] else (
                     lambda body: self._embed_cited_case_text(body, named)),
                 on_close=self._cited_pdf_window_closed,
+                on_citation_edited=lambda: self._retitle_cited_pdf(named),
             )
         except Exception as exc:
             status(f"Could not show the PDF of {cite}: {exc}")
@@ -10411,6 +10662,13 @@ class CourtListenerGUI:
         self._cited_pdf_windows.add(window)
         if named.get("record"):        # the text beat the scan on screen
             self._retitle_cited_pdf(named)
+        elif not named["orders_page"]:
+            # The reader's own citation for the case names it at once,
+            # before the text has said anything.
+            edited = self._cited_citation_override(
+                named, self._cited_filename_item(named))
+            if edited:
+                window.set_title(edited)
         window.surface()
         self._jump_to_pin(named)
         status(f"Showing the PDF of {cite}"
@@ -10479,13 +10737,36 @@ class CourtListenerGUI:
 
     def _retitle_cited_pdf(self, named: dict) -> None:
         """Restate a cited case's window title as its Bluebook citation, once
-        the opinion text has said what that is."""
+        the opinion text has said what that is — or as the reader has written
+        it, where the citation was edited (Edit Citation), here or before."""
         window = named.get("window")
         if window is None or not window.alive():
             return
-        title = _bluebook_display_name(self._cited_filename_item(named))
+        item = self._cited_filename_item(named)
+        title = (self._cited_citation_override(named, item)
+                 or _bluebook_display_name(item))
         if title:
             window.set_title(title)
+
+    @staticmethod
+    def _cited_citation_override(named: dict, item: dict) -> str:
+        """The citation the reader saved for the case in *named*, if any —
+        found by every identity the text window saves one under: the
+        CourtListener cluster, each reporter citation, the Scholar page."""
+        source = named.get("text_source")
+        known = dict(getattr(source, "item", None) or named.get("cl_item")
+                     or {})
+        cites = [*(item.get("citation") or []),
+                 *(known.get("citation") or [])]
+        page = named.get("page") or ("", "")
+        try:
+            keys = citation_identity_keys(
+                known, named.get("cite") or "", cites, page[0])
+            return find_override(
+                _load_config().get("citation_overrides", {}), keys)
+        except Exception as exc:
+            print(f"[cite-pdf] reading the saved citation failed: {exc}")
+            return ""
 
     def _embed_cited_case_text(self, host, named: dict):
         """Render a cited case's opinion inside its PDF viewer — what the T
@@ -10601,7 +10882,13 @@ class CourtListenerGUI:
                     print(f"[cite-pdf] keeping the opinion page "
                           f"failed: {exc}")
             if on_record is not None:
-                self._describe_warmed_case(fetched, name, on_record)
+                # A page that prints no year ("71 U.S. 2 (____)") gets one
+                # from where the page was found, or failing that elsewhere.
+                self._describe_warmed_case(
+                    fetched, name, on_record,
+                    year_for=lambda cites, case: _fallback_decision_year(
+                        cites, case, fetched[0], fetcher=fetcher,
+                        client=client, item=cl_item))
 
         # A reporter citation with a page to look up by — not "609 U.S. ___",
         # a volume, nor "No. 25-332", a docket.
@@ -10612,8 +10899,11 @@ class CourtListenerGUI:
             if fetcher is None:
                 return False
             try:
+                # Not for Federal Cases: Scholar finds hardly any by
+                # citation, so their text is static.case.law's (fallback).
                 for lookup_cite in (_citation_search_variants(cite)
-                                    if paged else ()):
+                                    if paged and not _FED_CAS_CITE_RE.search(
+                                        cite or "") else ()):
                     fetched = fetcher.fetch_by_citation(
                         lookup_cite, case_name=case_name, year=year)
                     if not fetched:
@@ -10695,8 +10985,11 @@ class CourtListenerGUI:
         threading.Thread(target=run, daemon=True).start()
 
     @staticmethod
-    def _describe_warmed_case(fetched, name: str, on_record) -> None:
-        """Read the caption, citations and date off a fetched opinion page."""
+    def _describe_warmed_case(fetched, name: str, on_record,
+                              year_for=None) -> None:
+        """Read the caption, citations and date off a fetched opinion page.
+        ``year_for(cites, name)`` supplies the year when the page prints
+        none (see _fallback_decision_year)."""
         try:
             import opinion_db
             page_url, html = fetched
@@ -10715,14 +11008,47 @@ class CourtListenerGUI:
         # so the stored record is untouched.
         record = dict(record)
         try:
-            caption = _scholar_caption_name(parse_opinion_blocks(html))
+            blocks = parse_opinion_blocks(html)
+            caption = _scholar_caption_name(blocks)
         except Exception as exc:
             print(f"[cite-pdf] reading the caption failed: {exc}")
-            caption = ""
+            blocks, caption = [], ""
+        # The court the header names, where the citation named none: a
+        # circuit's F.3d or a district court's F. Supp. — the stored record
+        # knows only the courts a reporter or "Supreme Court of the United
+        # States" gives away, and the window's parenthetical would lose the
+        # rest ("818 F.3d 1230 (11th Cir. 2016)").
+        if not record.get("court"):
+            try:
+                record["court"] = _scholar_header_court(blocks)
+            except Exception as exc:
+                print(f"[cite-pdf] reading the court failed: {exc}")
         if caption:
+            # Abbreviated with the opinion's prose to hand, as the text window
+            # abbreviates it: the prose settles a given name no list knows —
+            # "In re Clennon Washington King on Habeas Corpus" is In re King.
+            # (Abbreviating again later changes nothing.)
+            try:
+                caption = abbreviate_case_name(
+                    caption,
+                    court_state=_state_of_court(
+                        str(record.get("court") or ""), ""),
+                    body_text=_scholar_body_text(blocks)) or caption
+            except Exception as exc:
+                print(f"[cite-pdf] abbreviating the caption failed: {exc}")
             record["name"] = caption
         if name and not record.get("name"):
             record["name"] = name
+        if (year_for is not None and not record.get("year")
+                and not record.get("date_filed")):
+            try:
+                year = year_for(list(record.get("cites") or []),
+                                str(record.get("name") or ""))
+            except Exception as exc:
+                print(f"[cite-pdf] finding the year elsewhere failed: {exc}")
+                year = ""
+            if year:
+                record["year"] = year
         try:
             on_record(record)
         except Exception as exc:
@@ -10888,6 +11214,28 @@ class CourtListenerGUI:
         threading.Thread(target=run, daemon=True).start()
         return True
 
+    def _open_case_law_text(self, parent, cap: "_CasePdfTextSource",
+                            cite: str, pin: str, prefetch_pdf: bool = True,
+                            retry_url: str = "") -> None:
+        """Open static.case.law's text of a case in a window of its own, at
+        the pin cite's page, and — where Google Scholar found the case but
+        its page would not load — retrying Scholar's copy behind it."""
+        try:
+            w = _ScholarTextWindow(
+                parent, self, "", "", item=dict(cap.item),
+                cl_text=cap.text, cl_parts=list(cap.parts),
+                cl_blocks=list(cap.blocks), prefetch_pdf=prefetch_pdf,
+                primary_source_label=cap.source_label,
+                primary_source_url=cap.source_url,
+                primary_source_kind=cap.kind,
+            )
+            if pin:
+                w.jump_to_cite_page(cite, pin)
+            if retry_url:
+                w._retry_scholar_link(cite, pin, retry_url)
+        except tk.TclError:
+            pass
+
     def _try_open_citation(self, name: str, cite: str, pin: str,
                            fetcher, client, prefetch_pdf: bool = True,
                            view_parent: "Optional[tk.Misc]" = None,
@@ -10918,6 +11266,17 @@ class CourtListenerGUI:
                         target_parent, u, t, self._status_var.set, app=self,
                     )
                 )
+                return True
+        # Federal Cases likewise: Google Scholar finds hardly any by citation
+        # (not Corfield v. Coryell, 6 F. Cas. 546, nor Ex parte Merryman, 17
+        # F. Cas. 144), and asking it took four searches — some sixteen
+        # seconds — before static.case.law, which holds the whole reporter,
+        # answered in two.  So static.case.law is asked first.
+        if _FED_CAS_CITE_RE.search(cite):
+            cap = _case_law_text_source([cite], name)
+            if cap is not None:
+                self._post_root(lambda: self._open_case_law_text(
+                    target_parent, cap, cite, pin, prefetch_pdf))
                 return True
         if fetcher is not None:
             result = None
@@ -10978,24 +11337,8 @@ class CourtListenerGUI:
                 retry_url = ""
         cap = _case_law_text_source([cite], name) if cite else None
         if cap is not None:
-            def open_case_law() -> None:
-                try:
-                    w = _ScholarTextWindow(
-                        target_parent, self, "", "", item=dict(cap.item),
-                        cl_text=cap.text, cl_parts=list(cap.parts),
-                        cl_blocks=list(cap.blocks), prefetch_pdf=prefetch_pdf,
-                        primary_source_label=cap.source_label,
-                        primary_source_url=cap.source_url,
-                        primary_source_kind=cap.kind,
-                    )
-                    if pin:
-                        w.jump_to_cite_page(cite, pin)
-                    if retry_url:
-                        w._retry_scholar_link(cite, pin, retry_url)
-                except tk.TclError:
-                    pass
-
-            self._post_root(open_case_law)
+            self._post_root(lambda: self._open_case_law_text(
+                target_parent, cap, cite, pin, prefetch_pdf, retry_url))
             return True
         if client is not None:
             try:
@@ -15102,6 +15445,34 @@ def _scholar_court_id(blocks) -> str:
                 continue
             return _classify_state_court(t, courts)
     return ""
+
+
+def _scholar_trial_court(blocks) -> str:
+    """The federal district or bankruptcy court a Scholar header names, as
+    the Bluebook abbreviates it ("United States District Court N. D.
+    Illinois, E. D." → "N.D. Ill."), or "".  :func:`_scholar_court_id`
+    leaves those to this: an F. Supp. or B.R. citation says nothing of the
+    court, so its parenthetical has to (rule 10.4(a))."""
+    for b in blocks[:8]:
+        if b.kind != "center":
+            continue
+        abbr = _bluebook_federal_trial_court(
+            re.sub(r"\s+", " ", b.text()).strip())
+        if abbr:
+            return abbr
+    return ""
+
+
+def _scholar_header_court(blocks) -> str:
+    """The court a Scholar page's header names, as a CourtListener court id
+    where there is exactly one for it ("ca11", "ilnd"), else as the
+    Bluebook abbreviation — "" when the header names none."""
+    court = _scholar_court_id(blocks)
+    if court:
+        return court
+    abbr = _scholar_trial_court(blocks)
+    ids = [cid for cid, bb in _COURT_BLUEBOOK.items() if bb == abbr]
+    return ids[0] if abbr and len(ids) == 1 else abbr
 
 
 # Shared with opinion_db's caption extraction; the implementation lives in
@@ -21021,8 +21392,12 @@ class _FloatingPdfWindow:
                  on_save=None, on_print=None, on_close=None,
                  on_cite=None, on_cite_browser=None,
                  on_build_text=None, bookmarks=None,
-                 anchor: "Optional[tk.Misc]" = None) -> None:
+                 anchor: "Optional[tk.Misc]" = None,
+                 on_citation_edited=None) -> None:
         self._app = app
+        # Whoever names this window, told when the reader edits the case's
+        # citation beside the pages (see citation_edited).
+        self._on_citation_edited = on_citation_edited
         # Whoever can say what this document is for the bookmarks list, and
         # put it on or take it off: a window with no menu bar of its own keeps
         # that on the strip's menu instead.
@@ -21426,6 +21801,16 @@ class _FloatingPdfWindow:
     # ------------------------------------------------------------------
     # Contents
     # ------------------------------------------------------------------
+
+    def citation_edited(self) -> None:
+        """The case's citation was edited in the text side: the window is
+        named anew — by the edit, or, with the edit undone, as before."""
+        if self._on_citation_edited is not None:
+            try:
+                self._on_citation_edited()
+            except Exception as exc:
+                print(f"[pdf-window] renaming after a citation edit "
+                      f"failed: {exc}")
 
     def set_title(self, title: str) -> None:
         """Rename the window — what the opinion text, once it has loaded in the
@@ -23638,6 +24023,14 @@ class _ScholarTextWindow:
             app = self._app
             if app is not None and hasattr(app, "retitle_case_view"):
                 app.retitle_case_view(old_history_key, title)
+        # A reader beside a scan does not name the viewer (the scan's
+        # citation does) — but an edited citation is the reader's word on
+        # what the case is called, so the viewer hears of it; and a text
+        # window's own scan, in a viewer of its own, is renamed too.
+        notify = getattr(self._win, "citation_edited", None)
+        if callable(notify):
+            notify()
+        self._retitle_pdf_float()
         self._status_var.set(
             "Saved the custom citation for future use."
             if value else "Restored automatic Bluebooking for this opinion."
@@ -26419,14 +26812,7 @@ class _ScholarTextWindow:
                 # header — ``_scholar_court_id`` leaves those unmapped, but
                 # an F. Supp. / B.R. date parenthetical requires the court
                 # (rule 10.4(a)): "627 F. Supp. 3d 520 (M.D.N.C. 2022)".
-                for b in self._blocks[:8]:
-                    if b.kind != "center":
-                        continue
-                    abbr = _bluebook_federal_trial_court(
-                        re.sub(r"\s+", " ", b.text()).strip())
-                    if abbr:
-                        court_abbr = abbr
-                        break
+                court_abbr = _scholar_trial_court(self._blocks)
         # Rule 10.2.1(f) needs the deciding court to finish a "People of the
         # State of …" party: its own state's courts cite it as "People v.
         # Zackowitz", everyone else's as "New York v. Zackowitz".
@@ -26792,38 +27178,43 @@ class _ScholarTextWindow:
         case_name = bb.get("name", "")
         item = dict(self._item)
         candidate_cites = [cite, *self._header_cites, *(item.get("citation") or [])]
-        client = None
+        client = fetcher = None
         if need_year or need_court:
             try:
                 if self._app is not None and self._app._token_var.get().strip():
                     client = self._app._get_client()
             except Exception:
                 client = None
+        if need_year:
+            try:
+                if self._app is not None and _SCHOLAR_AVAILABLE:
+                    fetcher = self._app._get_scholar()
+            except Exception:
+                fetcher = None
+        scholar_url = getattr(self, "_scholar_url", "") or ""
 
         def run() -> None:
             reference_name = (
                 _case_law_name_for_cites(candidate_cites)
                 if need_caption_case else ""
             )
-            court_id = year = ""
-            if client is not None:
-                if need_year or need_court:
-                    try:
-                        court_id, year = self._cl_court_and_year(
-                            client, cite, item, name=case_name)
-                    except Exception as exc:
-                        print(f"[bb-enrich] CourtListener lookup failed: {exc}")
+            # The year the page doesn't print ("71 U.S. 2 (____)"): Google
+            # Scholar's results give it first, the byline of the very result
+            # the text came from; then CourtListener's cluster (asked once,
+            # for the court as well); then the Caselaw Access Project.
+            year = (_scholar_decision_year(
+                fetcher, candidate_cites, case_name, scholar_url)
+                if need_year else "")
+            court_id = ""
+            if client is not None and (need_court or (need_year and not year)):
+                try:
+                    court_id, cl_year = self._cl_court_and_year(
+                        client, cite, item, name=case_name)
+                    year = year or (cl_year if need_year else "")
+                except Exception as exc:
+                    print(f"[bb-enrich] CourtListener lookup failed: {exc}")
             if need_year and not year:
-                # No CourtListener year (no token, or no cluster match):
-                # CAP's decision_date covers the early U.S. Reports, whose
-                # Scholar pages print no year at all ("2 U.S. 409 (____)").
-                for c in candidate_cites[:4]:
-                    c = re.sub(r"<[^>]+>", "", str(c or "")).strip()
-                    cap = _case_law_metadata(c) if c else None
-                    d = str((cap or {}).get("decision_date") or "")
-                    if len(d) >= 4 and d[:4].isdigit():
-                        year = d[:4]
-                        break
+                year = _case_law_decision_year(candidate_cites)
             new_court = bb.get("court", "")
             if need_court and court_id:
                 new_court = _court_for_paren(
@@ -31109,6 +31500,7 @@ class _ScholarTextWindow:
                     on_cite=self._open_pdf_cite,
                     on_cite_browser=self._open_pdf_cite_browser,
                     on_build_text=self._embed_text_reader,
+                    on_citation_edited=self._retitle_pdf_float,
                 )
                 self._pdf_float_win = win
                 holder = getattr(self._app, "_cited_pdf_windows", None)
@@ -31140,10 +31532,26 @@ class _ScholarTextWindow:
             ),
         )
 
+    def _retitle_pdf_float(self) -> None:
+        """Rename the viewer holding this window's scan — after the citation
+        was edited, here or in the text beside the scan."""
+        win = getattr(self, "_pdf_float_win", None)
+        url = getattr(self, "_pdf_url", "") or ""
+        if win is None or not url:
+            return
+        try:
+            if win.alive():
+                win.set_title(self._scan_window_title(url))
+        except tk.TclError:
+            pass
+
     def _scan_window_title(self, url: str) -> str:
         """What to call a floating viewer showing this scan: the case in
         Bluebook form, cited to the reporter these pages actually print rather
         than to every parallel reporter the case carries."""
+        edited = getattr(self, "_base_citation_override", "")
+        if edited:
+            return edited       # the reader's own citation, as written
         item = _scan_citation_item(
             self._filename_item(), url, self._shown_us_reports_cite())
         return (_bluebook_display_name(item)
@@ -36587,6 +36995,9 @@ def main() -> None:
     root.after(5000, _gc_tick)
 
     app = CourtListenerGUI(root)
+    # A GetCases already running — in the background, from another checkout —
+    # would answer the hotkey too, and the two spotlights fall out of step.
+    instance = app._claim_instance()
     eng_rep.warm()  # load the English Reports index in the background
 
     # Run in the background by default: rather than greeting the user with the
@@ -36621,7 +37032,11 @@ def main() -> None:
 
         threading.Thread(target=_watch_stdin, daemon=True).start()
 
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        if instance is not None:
+            instance.close()
 
 
 if __name__ == "__main__":

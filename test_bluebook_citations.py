@@ -1064,6 +1064,28 @@ class PartyListTests(unittest.TestCase):
              "Bear Stearns & Co. v. Smith"),
         ])
 
+    def test_so_does_the_designator_as_a_caption_spells_it_out(self):
+        # United States v. Republic Steel Corp., 155 F. Supp. 442 (N.D. Ill.
+        # 1957): three defendants, named before anything is abbreviated.
+        self.assertNames([
+            ("United States of America v. Republic Steel Corporation, "
+             "International Harvester Company, and Interlake Iron Co",
+             "United States v. Republic Steel Corp."),
+            ("Doe v. Foo Corporation, Bar Company",
+             "Doe v. Foo Corp."),
+            # A firm named with commas is one party, and a designator after
+            # another is still the same firm's.
+            ("Doe v. Merrill Lynch, Pierce, Fenner & Smith, Incorporated",
+             "Doe v. Merrill Lynch, Pierce, Fenner & Smith, Inc."),
+            ("Doe v. Kidder, Peabody & Company", "Doe v. Kidder, Peabody & Co."),
+            ("Doe v. A.B. Dick Company, Inc.", "Doe v. A.B. Dick Co."),
+        ])
+        # And a name is the same read once or twice.
+        name = abbreviate_case_name(
+            "United States of America v. Republic Steel Corporation, "
+            "International Harvester Company")
+        self.assertEqual(abbreviate_case_name(name), name)
+
     def test_a_person_after_a_comma_is_another_party(self):
         self.assertNames([
             ("Lynch v. N.J. Educ. Ass'n, Betty Kraemer, Karen Joseph",
@@ -1565,6 +1587,35 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
             "In re Title, Ballot Title & Submission Clause for 2015-2016 #156",
         )
 
+    def test_a_habeas_matter_is_cited_by_the_petitioners_surname(self):
+        # In re Ferguson, 55 Cal. 2d 663 (1961), captioned "In re JESSE L.
+        # FERGUSON et al. on Habeas Corpus": what the caption says of the
+        # proceeding, the others joined, and the given names all go.
+        for caption, want in (
+            ("In re Jesse L. Ferguson et al. on Habeas Corpus.",
+             "In re Ferguson"),
+            ("In re Robert Jones, Petitioner, on Habeas Corpus",
+             "In re Jones"),
+            ("In re Robert Jones on Petition for Writ of Habeas Corpus",
+             "In re Jones"),
+            ("In the Matter of the Application of John Doe for a Writ of "
+             "Habeas Corpus", "In re Doe"),
+            ("Ex parte Jesse L. Ferguson on Habeas Corpus",
+             "Ex parte Ferguson"),
+            # "Application of" and "Petition of" a person are "In re"
+            # (rule 10.2.1(b)) …
+            ("In re Application of Jesse Ferguson", "In re Ferguson"),
+            ("In re Petition of John Smith", "In re Smith"),
+        ):
+            with self.subTest(caption=caption):
+                self.assertEqual(abbreviate_case_name(caption), want)
+        # … but the government's application for an order stays one.
+        self.assertTrue(abbreviate_case_name(
+            "In re Application of the United States for an Order Pursuant "
+            "to 18 U.S.C. 2703(d)").startswith("In re Application of the U.S."))
+        for kept in ("In re Gault", "In re Grand Jury Subpoena"):
+            self.assertEqual(abbreviate_case_name(kept), kept)
+
     def test_multiple_party_words_are_omitted(self):
         # Rule 10.2.1(a): "et Wife", "et vir", "and Others" drop.
         self.assertEqual(
@@ -1735,6 +1786,36 @@ class RefineCaptionCaseTests(unittest.TestCase):
             refine_caption_case(name, body),
             "US Dominion, Inc. v. Byrne.",
         )
+
+    def test_one_initialism_in_running_prose_is_enough(self):
+        # KQED, Inc. v. Houchins, 546 F.2d 284 (9th Cir. 1976): the caption
+        # is all capitals, and the prose names the station once, in a
+        # separate opinion — between ordinary words.
+        body = ("The district court granted a preliminary injunction.\n"
+                "It is argued that the injunction grants to KQED and other "
+                "media greater access to the Santa Rita Jail than the "
+                "public has.")
+        self.assertEqual(refine_caption_case("Kqed, Inc. v. Houchins", body),
+                         "KQED, Inc. v. Houchins")
+        self.assertEqual(
+            refine_caption_case("Nbc v. Smith",
+                                "The network, as noted by NBC, was there."),
+            "NBC v. Smith")
+
+    def test_but_not_a_name_nor_capitals_outside_the_prose(self):
+        # Some opinions set a party's surname in capitals as they go.
+        self.assertEqual(
+            refine_caption_case("Roe v. Wade",
+                                "The motion was made by ROE and her counsel."),
+            "Roe v. Wade")
+        for body in (
+                "KQED, INC., et al., Plaintiffs\nThe station sued.",
+                "Before the court:\nKQED sued the sheriff over access.",
+                "It grants to KQED and other media access; Kqed is not."):
+            with self.subTest(body=body):
+                self.assertEqual(
+                    refine_caption_case("Kqed, Inc. v. Houchins", body),
+                    "Kqed, Inc. v. Houchins")
 
     def test_body_confirms_title_case_where_us_is_a_word(self):
         name = normal_case_caption("TOYS R US, INC. v. SMITH")
@@ -2547,16 +2628,34 @@ class NominativeCitationSearchTests(unittest.TestCase):
              call("75 U.S. 168", case_name="", year="")],
         )
 
+    def test_federal_cases_go_to_static_case_law_first(self):
+        # Google Scholar finds hardly any Federal Cases by citation; asking it
+        # first cost sixteen seconds before static.case.law answered.
+        win = object.__new__(CourtListenerGUI)
+        win.root = object()
+        win._post_root = Mock()
+        fetcher = Mock()
+        with patch("courtlistener_gui._case_law_text_source",
+                   return_value=Mock()) as by_cite:
+            self.assertTrue(win._try_open_citation(
+                "Ex parte Merryman", "17 F. Cas. 144", "", fetcher, None))
+        by_cite.assert_called_once_with(["17 F. Cas. 144"], "Ex parte Merryman")
+        fetcher.fetch_by_citation.assert_not_called()
+        win._post_root.assert_called_once()
+
     def test_direct_lookup_retries_federal_cases_alias_after_scholar_miss(self):
+        # static.case.law without the case: Scholar under both spellings.
         win = object.__new__(CourtListenerGUI)
         win.root = object()
         win._post_root = Mock()
         fetcher = Mock()
         fetcher.fetch_by_citation.side_effect = [None, ("url", "html")]
 
-        self.assertTrue(
-            win._try_open_citation("", "18 Fed. Cas. 9", "", fetcher, None)
-        )
+        with patch("courtlistener_gui._case_law_text_source",
+                   return_value=None):
+            self.assertTrue(
+                win._try_open_citation("", "18 Fed. Cas. 9", "", fetcher, None)
+            )
         self.assertEqual(
             fetcher.fetch_by_citation.call_args_list,
             [call("18 Fed. Cas. 9", case_name="", year=""),
