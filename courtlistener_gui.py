@@ -2184,6 +2184,12 @@ def _bluebook_display_name(item: dict) -> str:
     else:
         paren = ""
 
+    # The early U.S. Reports are cited with their reporter's own volume where
+    # the case carries it (table T1): "71 U.S. (4 Wall.) 2", as the text
+    # window writes it.
+    citation_str = (_nominative_display_cite(
+        citation_str, item.get("citation") or []) or citation_str)
+
     # Assemble parts, skipping empty ones.
     # Join case name + citation with a comma, then append the parenthetical
     # with a space only (no comma before it).
@@ -3815,6 +3821,10 @@ def _courtlistener_pdf_fallback_item(
 # (straight or typographic apostrophe).  These cases are scans — Google Scholar
 # rarely has the text — so the app opens them straight on the official PDF.
 _FED_APPX_RE = re.compile(r"F(?:ed)?\.?\s*App['’]?x\.?", re.IGNORECASE)
+# A Federal Cases citation, however the reporter is written: "17 F. Cas. 144",
+# "17 Fed. Cas. 144", "17 F.Cas. 144".
+_FED_CAS_CITE_RE = re.compile(r"^\s*\d+\s+F(?:ed)?\.\s?Cas\.\s+\d+",
+                              re.IGNORECASE)
 
 
 def _item_is_fed_appx(item: dict) -> bool:
@@ -6881,6 +6891,64 @@ def _slip_text_source(data: bytes, url: str,
     )
 
 
+def _scholar_decision_year(fetcher, cites, name: str = "",
+                           scholar_url: str = "") -> str:
+    """The year Google Scholar's results give the case (see
+    GoogleScholarFetcher.decision_year), trying its first two citations.
+    Worker thread; "" when Scholar gives none."""
+    if fetcher is None or not hasattr(fetcher, "decision_year"):
+        return ""
+    for cite in _plain_cites(cites)[:2]:
+        try:
+            year = fetcher.decision_year(cite, case_name=name,
+                                         case_url=scholar_url)
+        except Exception as exc:
+            print(f"[year] Google Scholar lookup for {cite!r} failed: {exc}")
+            continue
+        if year:
+            return year
+    return ""
+
+
+def _case_law_decision_year(cites) -> str:
+    """The year of the Caselaw Access Project's decision date for the case
+    at any of *cites* (its first four).  Worker thread; "" when CAP has
+    none."""
+    for cite in _plain_cites(cites)[:4]:
+        cap = _case_law_metadata(cite)
+        decided = str((cap or {}).get("decision_date") or "")
+        if len(decided) >= 4 and decided[:4].isdigit():
+            return decided[:4]
+    return ""
+
+
+def _plain_cites(cites) -> list[str]:
+    """*cites* without markup, blanks or repeats, in order."""
+    plain = (re.sub(r"<[^>]+>", "", str(c or "")).strip() for c in cites or ())
+    return list(dict.fromkeys(c for c in plain if c))
+
+
+def _fallback_decision_year(cites, name: str = "", scholar_url: str = "",
+                            fetcher=None, client=None,
+                            item: "Optional[dict]" = None) -> str:
+    """The year a case was decided, from outside its opinion — for one whose
+    own page prints none, as the early U.S. Reports do ("71 U.S. 2 (____)"
+    is Ex parte Milligan, 1866).  Google Scholar's results first, the byline
+    of the very result the text came from; then CourtListener's cluster;
+    then the Caselaw Access Project.  Worker thread; "" when none of them
+    knows."""
+    year = _scholar_decision_year(fetcher, cites, name, scholar_url)
+    plain = _plain_cites(cites)
+    if not year and client is not None and plain:
+        try:
+            _court, year = _ScholarTextWindow._cl_court_and_year(
+                client, plain[0], dict(item or {}), name=name)
+        except Exception as exc:
+            print(f"[year] CourtListener lookup failed: {exc}")
+            year = ""
+    return year or _case_law_decision_year(plain)
+
+
 def _cl_text_record(source: "_CasePdfTextSource") -> dict:
     """The pieces a Bluebook name is made of, read off CourtListener's text.
 
@@ -8866,7 +8934,22 @@ class CourtListenerGUI:
                             label = f"{name}, {cite}" if name else cite
                             self._post_root(self._notify_lookup_miss,
                                             f"No case found for {label}.")
-                    threading.Thread(target=run, daemon=True).start()
+
+                    def as_text() -> None:
+                        threading.Thread(target=run, daemon=True).start()
+
+                    # The case's own pages first, as a search result opens:
+                    # the scan is up the moment it is found, and the text
+                    # comes in behind it — Google Scholar's, or failing that
+                    # static.case.law's or CourtListener's — for T to show.
+                    # With no scan anywhere, the text opens instead.  The
+                    # Federal Appendix keeps its own scan route, as a search
+                    # result's does.
+                    action = ("cite", f"{cite}@{pin}" if pin else cite)
+                    if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
+                            self.root, action, query, self._status_var.set,
+                            fallback=as_text, name=name):
+                        as_text()
                     return
 
             # 3. Fallback: show spotlight dropdown with search results
@@ -8879,6 +8962,9 @@ class CourtListenerGUI:
 
         entry.bind("<Return>", _submit)
         entry.bind("<Escape>", _dismiss)
+        # For the results dropdown, which takes Return over once it shows: a
+        # query edited there is still read the way a fresh one is here.
+        popup._spotlight_submit = _submit
 
         def _grab_focus(attempt: int = 0) -> None:
             try:
@@ -9582,12 +9668,19 @@ class CourtListenerGUI:
                 _on_key(type("E", (), {"keysym": "Return"})())
                 return
             if current:
-                # New (or edited) query, or no still-valid selection: retract
-                # the current dropdown and run a fresh search in the spotlight
-                # interface rather than opening a stale row or jumping to the
-                # main window.
+                # New (or edited) query, or no still-valid selection: read it
+                # the way the search bar reads a fresh one — a citation opens
+                # its case ("Ex parte Merryman, 17 F. Cas. 144"), a statute its
+                # section — and only a plain query retracts the dropdown for a
+                # fresh search, rather than opening a stale row or jumping to
+                # the main window.
                 self._spotlight_empty_returns = 0
-                self._show_spotlight_dropdown(popup, border, entry, current)
+                submit = getattr(popup, "_spotlight_submit", None)
+                if submit is not None:
+                    submit()
+                else:
+                    self._show_spotlight_dropdown(popup, border, entry,
+                                                  current)
                 return
             # Empty search bar: open the main window only on the second
             # consecutive Return.
@@ -10789,7 +10882,13 @@ class CourtListenerGUI:
                     print(f"[cite-pdf] keeping the opinion page "
                           f"failed: {exc}")
             if on_record is not None:
-                self._describe_warmed_case(fetched, name, on_record)
+                # A page that prints no year ("71 U.S. 2 (____)") gets one
+                # from where the page was found, or failing that elsewhere.
+                self._describe_warmed_case(
+                    fetched, name, on_record,
+                    year_for=lambda cites, case: _fallback_decision_year(
+                        cites, case, fetched[0], fetcher=fetcher,
+                        client=client, item=cl_item))
 
         # A reporter citation with a page to look up by — not "609 U.S. ___",
         # a volume, nor "No. 25-332", a docket.
@@ -10800,8 +10899,11 @@ class CourtListenerGUI:
             if fetcher is None:
                 return False
             try:
+                # Not for Federal Cases: Scholar finds hardly any by
+                # citation, so their text is static.case.law's (fallback).
                 for lookup_cite in (_citation_search_variants(cite)
-                                    if paged else ()):
+                                    if paged and not _FED_CAS_CITE_RE.search(
+                                        cite or "") else ()):
                     fetched = fetcher.fetch_by_citation(
                         lookup_cite, case_name=case_name, year=year)
                     if not fetched:
@@ -10883,8 +10985,11 @@ class CourtListenerGUI:
         threading.Thread(target=run, daemon=True).start()
 
     @staticmethod
-    def _describe_warmed_case(fetched, name: str, on_record) -> None:
-        """Read the caption, citations and date off a fetched opinion page."""
+    def _describe_warmed_case(fetched, name: str, on_record,
+                              year_for=None) -> None:
+        """Read the caption, citations and date off a fetched opinion page.
+        ``year_for(cites, name)`` supplies the year when the page prints
+        none (see _fallback_decision_year)."""
         try:
             import opinion_db
             page_url, html = fetched
@@ -10934,6 +11039,16 @@ class CourtListenerGUI:
             record["name"] = caption
         if name and not record.get("name"):
             record["name"] = name
+        if (year_for is not None and not record.get("year")
+                and not record.get("date_filed")):
+            try:
+                year = year_for(list(record.get("cites") or []),
+                                str(record.get("name") or ""))
+            except Exception as exc:
+                print(f"[cite-pdf] finding the year elsewhere failed: {exc}")
+                year = ""
+            if year:
+                record["year"] = year
         try:
             on_record(record)
         except Exception as exc:
@@ -11099,6 +11214,28 @@ class CourtListenerGUI:
         threading.Thread(target=run, daemon=True).start()
         return True
 
+    def _open_case_law_text(self, parent, cap: "_CasePdfTextSource",
+                            cite: str, pin: str, prefetch_pdf: bool = True,
+                            retry_url: str = "") -> None:
+        """Open static.case.law's text of a case in a window of its own, at
+        the pin cite's page, and — where Google Scholar found the case but
+        its page would not load — retrying Scholar's copy behind it."""
+        try:
+            w = _ScholarTextWindow(
+                parent, self, "", "", item=dict(cap.item),
+                cl_text=cap.text, cl_parts=list(cap.parts),
+                cl_blocks=list(cap.blocks), prefetch_pdf=prefetch_pdf,
+                primary_source_label=cap.source_label,
+                primary_source_url=cap.source_url,
+                primary_source_kind=cap.kind,
+            )
+            if pin:
+                w.jump_to_cite_page(cite, pin)
+            if retry_url:
+                w._retry_scholar_link(cite, pin, retry_url)
+        except tk.TclError:
+            pass
+
     def _try_open_citation(self, name: str, cite: str, pin: str,
                            fetcher, client, prefetch_pdf: bool = True,
                            view_parent: "Optional[tk.Misc]" = None,
@@ -11129,6 +11266,17 @@ class CourtListenerGUI:
                         target_parent, u, t, self._status_var.set, app=self,
                     )
                 )
+                return True
+        # Federal Cases likewise: Google Scholar finds hardly any by citation
+        # (not Corfield v. Coryell, 6 F. Cas. 546, nor Ex parte Merryman, 17
+        # F. Cas. 144), and asking it took four searches — some sixteen
+        # seconds — before static.case.law, which holds the whole reporter,
+        # answered in two.  So static.case.law is asked first.
+        if _FED_CAS_CITE_RE.search(cite):
+            cap = _case_law_text_source([cite], name)
+            if cap is not None:
+                self._post_root(lambda: self._open_case_law_text(
+                    target_parent, cap, cite, pin, prefetch_pdf))
                 return True
         if fetcher is not None:
             result = None
@@ -11189,24 +11337,8 @@ class CourtListenerGUI:
                 retry_url = ""
         cap = _case_law_text_source([cite], name) if cite else None
         if cap is not None:
-            def open_case_law() -> None:
-                try:
-                    w = _ScholarTextWindow(
-                        target_parent, self, "", "", item=dict(cap.item),
-                        cl_text=cap.text, cl_parts=list(cap.parts),
-                        cl_blocks=list(cap.blocks), prefetch_pdf=prefetch_pdf,
-                        primary_source_label=cap.source_label,
-                        primary_source_url=cap.source_url,
-                        primary_source_kind=cap.kind,
-                    )
-                    if pin:
-                        w.jump_to_cite_page(cite, pin)
-                    if retry_url:
-                        w._retry_scholar_link(cite, pin, retry_url)
-                except tk.TclError:
-                    pass
-
-            self._post_root(open_case_law)
+            self._post_root(lambda: self._open_case_law_text(
+                target_parent, cap, cite, pin, prefetch_pdf, retry_url))
             return True
         if client is not None:
             try:
@@ -27046,38 +27178,43 @@ class _ScholarTextWindow:
         case_name = bb.get("name", "")
         item = dict(self._item)
         candidate_cites = [cite, *self._header_cites, *(item.get("citation") or [])]
-        client = None
+        client = fetcher = None
         if need_year or need_court:
             try:
                 if self._app is not None and self._app._token_var.get().strip():
                     client = self._app._get_client()
             except Exception:
                 client = None
+        if need_year:
+            try:
+                if self._app is not None and _SCHOLAR_AVAILABLE:
+                    fetcher = self._app._get_scholar()
+            except Exception:
+                fetcher = None
+        scholar_url = getattr(self, "_scholar_url", "") or ""
 
         def run() -> None:
             reference_name = (
                 _case_law_name_for_cites(candidate_cites)
                 if need_caption_case else ""
             )
-            court_id = year = ""
-            if client is not None:
-                if need_year or need_court:
-                    try:
-                        court_id, year = self._cl_court_and_year(
-                            client, cite, item, name=case_name)
-                    except Exception as exc:
-                        print(f"[bb-enrich] CourtListener lookup failed: {exc}")
+            # The year the page doesn't print ("71 U.S. 2 (____)"): Google
+            # Scholar's results give it first, the byline of the very result
+            # the text came from; then CourtListener's cluster (asked once,
+            # for the court as well); then the Caselaw Access Project.
+            year = (_scholar_decision_year(
+                fetcher, candidate_cites, case_name, scholar_url)
+                if need_year else "")
+            court_id = ""
+            if client is not None and (need_court or (need_year and not year)):
+                try:
+                    court_id, cl_year = self._cl_court_and_year(
+                        client, cite, item, name=case_name)
+                    year = year or (cl_year if need_year else "")
+                except Exception as exc:
+                    print(f"[bb-enrich] CourtListener lookup failed: {exc}")
             if need_year and not year:
-                # No CourtListener year (no token, or no cluster match):
-                # CAP's decision_date covers the early U.S. Reports, whose
-                # Scholar pages print no year at all ("2 U.S. 409 (____)").
-                for c in candidate_cites[:4]:
-                    c = re.sub(r"<[^>]+>", "", str(c or "")).strip()
-                    cap = _case_law_metadata(c) if c else None
-                    d = str((cap or {}).get("decision_date") or "")
-                    if len(d) >= 4 and d[:4].isdigit():
-                        year = d[:4]
-                        break
+                year = _case_law_decision_year(candidate_cites)
             new_court = bb.get("court", "")
             if need_court and court_id:
                 new_court = _court_for_paren(

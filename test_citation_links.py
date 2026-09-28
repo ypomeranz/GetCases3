@@ -1351,6 +1351,8 @@ def _load_filename_builder():
           "_court_for_paren": lambda cite, court_id, court: "",
           # Reporter spacing is the respacer's own (tested) business.
           "_respace_reporter_in_cite": lambda cite: cite,
+          # …and so is the early U.S. Reports' "5 U.S. (1 Cranch) 137".
+          "_nominative_display_cite": lambda cite, citations: "",
           "_reporter_family": citations.reporter_family,
           "Optional": None}
     for key in ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE"):

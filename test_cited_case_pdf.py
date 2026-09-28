@@ -107,6 +107,17 @@ def _load_dataclass(name: str, extra=None):
     return ns[name]
 
 
+def _module_value(name: str):
+    """A module-level constant of courtlistener_gui, evaluated from its own
+    assignment (the module itself needs tkinter to import)."""
+    node = next(n for n in TREE.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == name
+                        for t in n.targets))
+    ns = {"re": re}
+    exec(ast.get_source_segment(SRC, node), ns)
+    return ns[name]
+
+
 def _load_function(name: str, extra=None):
     """Exec one module-level function into a stub namespace."""
     src = next((ast.get_source_segment(SRC, n) for n in TREE.body
@@ -325,6 +336,8 @@ APP_NS = _load(
      "_follow_brief_action": lambda *a, **kw: TEXT_OPENS.append((a, kw)),
      "_open_citation_in_browser": lambda *a: None,
      "_SCHOLAR_AVAILABLE": True,
+     # The Federal Cases pattern, as the module defines it.
+     "_FED_CAS_CITE_RE": _module_value("_FED_CAS_CITE_RE"),
      "_citation_search_variants": lambda cite: (cite,),
      "_case_law_text_for_scan": _case_law_text_for_scan,
      "_courtlistener_text_source": COURTLISTENER_TEXT_SOURCE,

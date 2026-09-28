@@ -544,6 +544,12 @@ def _byline_year(source: str) -> str:
     return years[-1] if years else ""
 
 
+def _scholar_case_id(url: str) -> str:
+    """The ``case=`` id of a Scholar opinion URL, or ""."""
+    m = re.search(r"[?&]case=(\d+)", url or "")
+    return m.group(1) if m else ""
+
+
 _CASE_NAME_H3_RE = re.compile(
     r"<h3\b[^>]*\bid\s*=\s*[\"']?gsl_case_name\b[^>]*>(.*?)</h3>",
     re.IGNORECASE | re.DOTALL,
@@ -1843,6 +1849,9 @@ class GoogleScholarFetcher:
         # rankings change, and re-searching identical queries within a
         # session is the case worth optimizing).
         self._search_cache: dict[tuple[str, tuple[str, ...]], list[ScholarResult]] = {}
+        # The results bearing each citation looked up (fetch_by_citation), kept
+        # for the year their bylines give — see decision_year.
+        self._cited_search_cache: dict[str, list[ScholarResult]] = {}
 
         # The scholar_case URL found on the results page when the opinion page
         # then failed to load (search succeeded, case page didn't) — consumed
@@ -2009,6 +2018,8 @@ class GoogleScholarFetcher:
         # by citation exactly.  When several results bear it, several cases
         # begin on that page, and the name decides which is meant.
         bearing = self._cited_results(resp.text, citation)
+        if _RESULTS_PAGE_RE.search(resp.text):
+            self._cited_search_cache[citation] = bearing
         pick = self._pick_cited(bearing, case_name, year)
         if pick is None:
             if not bearing:
@@ -2045,6 +2056,46 @@ class GoogleScholarFetcher:
         if not self.last_fetch_absent():
             self._post_search_failure = case_url
         return None
+
+    def decision_year(self, citation: str, case_name: str = "",
+                      case_url: str = "") -> str:
+        """The year Google Scholar's results give the case at *citation* —
+        the end of its byline, "71 US 2, 18 L. Ed. 281 - Supreme Court, 1866"
+        — for an opinion whose own page prints none ("71 U.S. 2 (____)").
+
+        The results :meth:`fetch_by_citation` already had are used when there
+        are some; otherwise the same search is made, once.  *case_url*, the
+        case's own Scholar page, picks its result when several cases begin on
+        the cited page, and a page Scholar lists under none of them gets no
+        year rather than a neighbor's; without it *case_name* picks.  "" when
+        Scholar gives no year (or can't be reached)."""
+        citation = (citation or "").strip()
+        if not citation:
+            return ""
+        bearing = self._cited_search_cache.get(citation)
+        if bearing is None:
+            phrase = f'"{citation}"'
+            search_url = (
+                f"{SCHOLAR_BASE}/scholar?q={quote_plus(phrase)}&as_sdt=4")
+            print(f"[scholar] searching {search_url} (for the year)")
+            try:
+                resp = self._get(search_url)
+            except Exception as exc:
+                print(f"[scholar] search request failed: {exc}")
+                return ""
+            if not _RESULTS_PAGE_RE.search(resp.text):
+                return ""               # no results page: no answer yet
+            bearing = self._cited_results(resp.text, citation)
+            self._cited_search_cache[citation] = bearing
+        wanted = _scholar_case_id(case_url)
+        if wanted:
+            pick = next((r for r in bearing
+                         if _scholar_case_id(r.url) == wanted), None)
+        else:
+            name = self._usable_name(case_name)
+            pick = (self._pick_cited(bearing, name) if name
+                    else bearing[0] if len(bearing) == 1 else None)
+        return _byline_year(pick.source) if pick is not None else ""
 
     def cached_by_citation(
         self, citation: str, case_name: str = "",
