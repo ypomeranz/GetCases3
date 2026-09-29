@@ -262,7 +262,7 @@ class SidePanelKeyTests(unittest.TestCase):
         self.assertIn('if name != "Docket" or self._is_scotus', src)
         self.assertIn("reader._details_views = _ScholarTextWindow."
                       "_SCAN_DETAILS_VIEWS",
-                      _method_source("_FloatingPdfWindow", "_details_window"))
+                      _method_source("_FloatingPdfWindow", "_details_column"))
 
     def test_the_docket_comes_from_the_court_and_scotusblog(self):
         src = _method_source("_ScholarTextWindow", "_load_scotus_docket")

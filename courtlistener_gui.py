@@ -275,6 +275,27 @@ def _work_area(widget: tk.Misc) -> tuple[int, int, int, int]:
         return 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
 
 
+#: A window manager's geometry string, "860x620+40+30" — a position may be
+#: negative ("+-8+0") for a window reaching off the left of the screen.
+_WM_GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)$")
+
+
+def _window_zoomed(win) -> bool:
+    """Whether *win* is maximized, as far as its platform says: Windows (and
+    Tk on macOS) through its state, X11 through the -zoomed attribute."""
+    try:
+        if str(win.state()) == "zoomed":
+            return True
+    except (AttributeError, tk.TclError):
+        pass
+    try:
+        if bool(win.attributes("-zoomed")):
+            return True
+    except (AttributeError, tk.TclError, TypeError, ValueError):
+        pass
+    return False
+
+
 def _fit_toplevel_geometry(
     win: tk.Misc,
     width: int,
@@ -21562,9 +21583,10 @@ class _FloatingPdfWindow:
     behind a full window of chrome, the page gets a window of its own — one
     quiet strip along the top carrying the zoom controls and the document's
     name, and the page under it on a small margin.  Nothing else: no button
-    bar, no side panels, no status line.  Save and Print stay reachable from
-    the strip's context menu and the usual accelerators, and Ctrl/Cmd-F
-    searches the page whenever the PDF has a text layer.
+    bar, no status line — and the case's details only when asked for, in a
+    column the window grows to hold (the "s" key).  Save and Print stay
+    reachable from the strip's context menu and the usual accelerators, and
+    Ctrl/Cmd-F searches the page whenever the PDF has a text layer.
 
     Always a real top-level window, never a page in the shared tabbed case
     window — floating clear of the reader is the whole point of the mode.
@@ -21619,13 +21641,16 @@ class _FloatingPdfWindow:
         # soon as pages are in hand.  P is on the strip throughout, greyed
         # until there is something for it to show.
         self._scan_search: "Optional[bool]" = True if data is not None else None
-        # The case-details panel, in a window of its own beside this one (the
-        # "s" key).  Kept once built and hidden rather than destroyed, so
-        # opening it again costs neither a rebuild nor a second lookup, and
-        # the geometry this window last had, so following it about does not
-        # re-place the panel on every unrelated <Configure>.
-        self._details_win: "Optional[tk.Toplevel]" = None
-        self._details_geom: tuple = ()
+        # The case-details panel (the "s" key), in a column along this
+        # window's right-hand side.  Kept once built and unpacked rather than
+        # destroyed, so opening it again costs neither a rebuild nor a second
+        # lookup.  What the window grew by to hold it — the width, and how far
+        # it stepped left to keep the panel in view — is given back when it
+        # goes; the width asked for is what _when_resized waits to land.
+        self._details_side: "Optional[tk.Misc]" = None
+        self._details_open = False
+        self._details_grew: "Optional[tuple]" = None
+        self._details_resize_target: "Optional[int]" = None
 
         # ``parent`` owns this window's lifetime — Tk destroys a toplevel with
         # its master, so a viewer meant to outlive the reader that opened it is
@@ -21642,8 +21667,11 @@ class _FloatingPdfWindow:
         # first use and refilled on every one after.
         self._strip_menus: dict = {}
         self._build_bar()
+        # Packed from the left, so the case's details can stand to its right
+        # in a column of their own, and its width can be held while the
+        # window grows to make room for them (see _open_details).
         self._body = ttk.Frame(self._win)
-        self._body.pack(side="top", fill="both", expand=True)
+        self._body.pack(side="left", fill="both", expand=True)
         # A window of its own, so the other windows' Window menus list it.
         _list_in_window_menu(app, self._win)
 
@@ -21672,11 +21700,9 @@ class _FloatingPdfWindow:
         _bind_find_keys(self._win, self._find_open,
                         lambda: self._find_step(+1),
                         lambda: self._find_step(-1))
-        # Bare "s" opens the case's details beside the window — over the pages
+        # Bare "s" opens the case's details beside the pages — over the pages
         # as much as over the text, since it is the same case either way.
         self._win.bind("<KeyPress-s>", self._details_shortcut)
-        # The panel stands against this window, so it goes where this one goes.
-        self._win.bind("<Configure>", self._on_geometry, add="+")
         self._win.bind("<Destroy>", self._on_destroy, add="+")
         if data is None:
             # A window with no scan to show — a case the reporter interface
@@ -22338,15 +22364,19 @@ class _FloatingPdfWindow:
             self.scroll_to_page(page, y_pt)
 
     # ------------------------------------------------------------------
-    # The case's details, in a panel standing beside the window
+    # The case's details, in a column along the window's right-hand side
     # ------------------------------------------------------------------
 
-    _DETAILS_GAP = 10   # px between this window and the panel beside it
+    _DETAILS_RULE_W = 1   # the hairline between the pages and the panel
+    # How far left of the desktop's left-hand edge a window's inside may start
+    # and still count as on that desktop — the frame of a window pushed
+    # against the edge, as the case window allows for it.
+    _DETAILS_SLACK = 16
 
     def _details_shortcut(self, event=None):
         """The bare "s" key, over the pages as much as over the text: show
-        this case's details beside the window, or put them away again.  Left
-        to the keyboard while a field that takes typing has it."""
+        this case's details beside them, or put them away again.  Left to the
+        keyboard while a field that takes typing has it."""
         try:
             focused = self._win.focus_get()
         except (KeyError, tk.TclError):
@@ -22357,12 +22387,8 @@ class _FloatingPdfWindow:
         return "break"
 
     def details_showing(self) -> bool:
-        """Whether the details panel is on screen beside this window."""
-        win = self._details_win
-        try:
-            return win is not None and bool(win.winfo_ismapped())
-        except tk.TclError:
-            return False
+        """Whether the details panel is open in this window."""
+        return self._details_open and self._details_side is not None
 
     def toggle_details(self) -> None:
         """The panel's switch — the "s" key, the strip's panel icon, and Case
@@ -22413,9 +22439,21 @@ class _FloatingPdfWindow:
         fetched.  A case whose text has not arrived says so on the strip and
         leaves the key to be pressed again; a document with no text side at
         all (the Statutes at Large, an English report) has no case details to
-        show and stays as it is."""
-        win = self._details_win
-        if win is None:
+        show and stays as it is.
+
+        The panel opens inside this window, in a column along its right-hand
+        side, and the window grows by that column's width to hold it: the
+        pages — or the text — keep exactly the room they had, so nothing on
+        them is re-fitted, re-wrapped or re-rendered.  Their width is held
+        while the window grows and the column is packed into the room it
+        made, since Tk lays the two changes out in separate passes and the
+        window manager answers a resize in its own time.  Only a window with
+        no room to grow — maximized, or as wide as the desktop already —
+        gives the panel its width out of the pages instead."""
+        if self.details_showing():
+            return
+        side = self._details_side
+        if side is None:
             if not self.has_text_side():
                 return
             reader = self._build_reader()
@@ -22423,57 +22461,93 @@ class _FloatingPdfWindow:
                 self._flash("Case details not ready")
                 return
             try:
-                win = self._details_window(reader)
+                side = self._details_column(reader)
             except Exception as exc:
                 print(f"[pdf-window] the details panel could not open: {exc}")
                 return
-            self._details_win = win
+            self._details_side = side
+        self._details_open = True
+        self._mark_details_btn(True)
         try:
             self._win.update_idletasks()
         except tk.TclError:
             pass
-        self._details_geom = ()
-        self._place_details()
-        try:
-            win.deiconify()
-            win.lift()
-        except tk.TclError:
-            self._details_win = None
+        width = self._details_width() + self._DETAILS_RULE_W
+        grow = self._details_growth(width)
+        if grow is not None and self._pin_body_width():
+            spec, shift = grow
+            try:
+                self._win.geometry(spec)
+            except tk.TclError:
+                self._unpin_body_width()
+                grow = None
+        else:
+            grow = None
+        if grow is None:
+            # Nowhere to grow (or pages not laid out yet, with no width to
+            # keep): the panel takes its width from the pages.
+            self._pack_details(True)
             return
-        self._mark_details_btn(True)
+        self._details_grew = (width, shift, spec)
+        self._details_resize_target = int(spec.split("x", 1)[0])
+
+        def made_room() -> None:
+            if self._details_open:     # not put away again meanwhile
+                self._pack_details(True)
+            self._unpin_body_width()
+
+        self._when_resized(made_room)
 
     def _hide_details(self) -> None:
-        """Put the panel away — withdrawn, not destroyed, so bringing it back
-        costs neither a rebuild nor a second lookup."""
-        win = self._details_win
-        if win is not None:
-            try:
-                win.withdraw()
-            except tk.TclError:
-                self._details_win = None
+        """Put the panel away — unpacked, not destroyed, so bringing it back
+        costs neither a rebuild nor a second lookup — and give back what the
+        window grew by to hold it: the column's width, and the step left it
+        took to keep the panel in view, unless it has been moved since.  The
+        pages' width is held across it, as it was on the way in."""
+        was_open = self._details_open
+        self._details_open = False
         self._mark_details_btn(False)
-        return None
-
-    def _details_window(self, reader) -> tk.Toplevel:
-        """A window holding this case's details panel, built by the opinion
-        that owns them.  Mastered on this window, so it is closed with the
-        case it belongs to; it opens on the case's own details and, for a
-        Supreme Court case, offers the docket behind them (see
-        ``_ScholarTextWindow._details_panel``)."""
-        win = _ui_toplevel(self._win)
-        _ensure_modern_ttk_styles(win)
-        win.title("Case Details")
+        if not was_open:
+            return None
+        grew, self._details_grew = self._details_grew, None
         try:
-            if self._win.winfo_viewable():
-                win.transient(self._win)   # a panel of this window's, not a peer
+            self._win.update_idletasks()
         except tk.TclError:
             pass
-        body = ttk.Frame(win)
-        body.pack(fill="both", expand=True)
+        spec = self._details_shrink(grew) if grew is not None else None
+        held = spec is not None and self._pin_body_width()
+        # Unpacked before the window shrinks: the other way round the pages
+        # would be squeezed into what is left beside the panel.
+        self._pack_details(False)
+        if spec is not None:
+            try:
+                self._win.geometry(spec)
+            except tk.TclError:
+                spec = None
+        if spec is None:
+            if held:
+                self._unpin_body_width()
+            return None
+        self._details_resize_target = int(spec.split("x", 1)[0])
+        self._when_resized(self._unpin_body_width)
+        return None
+
+    def _details_column(self, reader):
+        """The column holding this case's details panel, along the window's
+        right-hand side behind a hairline, built by the opinion that owns
+        them: it opens on the case's own details and, for a Supreme Court
+        case, offers the docket behind them (see
+        ``_ScholarTextWindow._details_panel``).  Built once, and not packed
+        here — _open_details says when it stands in the window."""
+        side = ttk.Frame(self._win)
+        rule = tk.Frame(side, width=self._DETAILS_RULE_W, bg=_UI["border"])
+        rule.pack(side="left", fill="y")
+        host = ttk.Frame(side)
+        host.pack(side="left", fill="both", expand=True)
         # A chromeless reader builds no panel of its own — it has neither the
         # checkbox nor the key for one — so this is the panel, and it is built
         # here, in this window.
-        reader._details_host = body
+        reader._details_host = host
         reader._details_views = _ScholarTextWindow._SCAN_DETAILS_VIEWS
         reader._details_panel().pack(fill="both", expand=True)
         reader._details_on = True
@@ -22482,63 +22556,161 @@ class _FloatingPdfWindow:
         except (AttributeError, tk.TclError):
             pass
         reader._refresh_details_view()
-        for seq in ("<KeyPress-s>", "<Escape>") + _accel_sequences("w"):
-            try:
-                win.bind(seq, lambda _e: self._hide_details() or "break")
-            except tk.TclError:
-                pass    # modifier not supported on this platform
-        win.protocol("WM_DELETE_WINDOW", self._hide_details)
-        return win
+        # Esc with the panel in hand puts it away, as it did the window the
+        # panel used to stand in; "s" and the close keys are the window's.
+        _bind_recursive(side, "<Escape>",
+                        lambda _e: self._hide_details() or "break")
+        return side
+
+    def _pack_details(self, on: bool) -> None:
+        """Stand the details column against the window's right-hand edge,
+        beside the pages, or take it out again.  While it is in, the window
+        will not be made narrower than the pages' least width beside it."""
+        side = self._details_side
+        if side is None:
+            return
+        try:
+            if on:
+                side.pack(side="right", fill="y", before=self._body)
+                self._win.minsize(self._MIN_W + self._details_width()
+                                  + self._DETAILS_RULE_W, self._MIN_H)
+            else:
+                side.pack_forget()
+                self._win.minsize(self._MIN_W, self._MIN_H)
+        except tk.TclError:
+            pass
 
     def _details_width(self) -> int:
         """The panel's own width — the column it is given in a case window."""
         width = getattr(self._reader, "_details_panel_w", 0)
         return int(width) if width else _ScholarTextWindow._DETAILS_PANEL_W
 
-    def _place_details(self) -> None:
-        """Stand the panel against this window's right-hand edge and match its
-        height.  Beside the window, never inside it: nothing here is resized,
-        re-laid out or re-rendered by opening it.  A maximized window has
-        nothing to its right, so there the panel goes against the right of the
-        desktop, over the edge of the pages rather than moving them."""
-        win = self._details_win
-        if win is None:
-            return
+    def _pin_body_width(self) -> bool:
+        """Hold the pages at the width they have now, so the two-step layout
+        of opening or closing the panel cannot re-fit them in between.  False
+        where they are not laid out yet, with nothing to hold."""
+        body = self._body
         try:
-            x0, y0 = self._win.winfo_rootx(), self._win.winfo_rooty()
-            w, h = self._win.winfo_width(), self._win.winfo_height()
+            width = body.winfo_width()
+            if width <= 1:
+                return False
+            body.configure(width=width)
+            body.pack_propagate(False)
+            body.pack_configure(expand=False)
         except tk.TclError:
-            return
-        left, top, work_w, work_h = _work_area(self._win)
-        pw = self._details_width()
-        h = max(self._MIN_H, min(h, work_h))
-        x = x0 + w + self._DETAILS_GAP
-        if x + pw > left + work_w:      # maximized, or no room to the right
-            x = max(left, left + work_w - pw)
-        y = max(top, min(y0, top + work_h - h))
+            return False
+        return True
+
+    def _unpin_body_width(self) -> None:
+        """Let the pages follow the window's width again.  Their share is what
+        they were held at — the window changed by exactly the panel's column
+        — so this changes nothing on screen."""
+        body = self._body
         try:
-            win.geometry(f"{pw}x{int(h)}+{int(x)}+{int(y)}")
+            body.pack_propagate(True)
+            body.pack_configure(expand=True)
+            body.configure(width=0)    # back to taking what pack gives it
         except tk.TclError:
             pass
 
-    def _on_geometry(self, event) -> None:
-        """This window moved or was resized: bring the panel along with it.
-        Only this window's own <Configure> counts — the event fires for every
-        child — and only one that changed something, so nothing is re-placed
-        on an event that says the window is where it already was."""
-        if getattr(event, "widget", None) is not self._win:
-            return
-        if not self.details_showing():
-            return
+    def _details_growth(self, width: int) -> "Optional[tuple[str, int]]":
+        """The geometry giving this window *width* more on its right, and how
+        far it stepped left for it — or None where there is no room to grow:
+        a maximized window, or one the desktop could not hold with the panel
+        beside it.
+
+        The window grows to the right.  Where that would run past the
+        desktop's right-hand edge — the panel opening out of sight — the
+        window steps left, just far enough to keep it in view; the pages move
+        with it, whole and unchanged.  A window on a screen _work_area does
+        not describe (a second monitor it cannot see) simply grows.  The
+        window manager's own geometry string is kept to, as the case window
+        keeps to it: one rebuilt from winfo_x/y drifts by the title bar."""
+        win = self._win
+        if _window_zoomed(win):
+            return None
         try:
-            geom = (self._win.winfo_rootx(), self._win.winfo_rooty(),
-                    self._win.winfo_width(), self._win.winfo_height())
+            spec = str(win.wm_geometry())
+            current = win.winfo_width()
+            rootx = win.winfo_rootx()
+        except (AttributeError, tk.TclError):
+            return None
+        match = _WM_GEOMETRY_RE.match(spec)
+        if not match or current <= 1:
+            return None
+        new_width = current + width
+        x, y = match.group(3), match.group(4)
+        shift = 0
+        left, _top, work_w, _work_h = _work_area(win)
+        if left - self._DETAILS_SLACK <= rootx < left + work_w:
+            if new_width > work_w:
+                return None
+            shift = max(0, rootx + new_width - (left + work_w))
+            if shift and x.startswith("+"):
+                x = f"+{int(x[1:]) - shift}"
+            else:
+                shift = 0
+        return f"{new_width}x{match.group(2)}{x}{y}", shift
+
+    def _details_shrink(self, grew: tuple) -> "Optional[str]":
+        """The geometry giving back what _details_growth gave: the column's
+        width and, where the window stepped left for it and is still where it
+        was put, the step.  None for a window maximized since, which has
+        nothing to give back until it is restored."""
+        width, shift, put = grew
+        win = self._win
+        if _window_zoomed(win):
+            return None
+        try:
+            spec = str(win.wm_geometry())
+            current = win.winfo_width()
+        except (AttributeError, tk.TclError):
+            return None
+        match = _WM_GEOMETRY_RE.match(spec)
+        if not match or current <= 1:
+            return None
+        x, y = match.group(3), match.group(4)
+        placed = _WM_GEOMETRY_RE.match(put)
+        if (shift and placed is not None and x.startswith("+")
+                and (x, y) == (placed.group(3), placed.group(4))):
+            x = f"+{int(x[1:]) + shift}"
+        return f"{max(self._MIN_W, current - width)}x{match.group(2)}{x}{y}"
+
+    def _when_resized(self, done, tries: int = 20, step_ms: int = 15) -> None:
+        """Run *done* once the window has taken the width last asked for — or
+        after a moment, should the window manager decline to give it.
+
+        A new window size is recorded before its children are laid out again,
+        and the re-layout is only queued; packing the panel in between would
+        have it share out the *old* width.  So the pending layout is flushed
+        first — safe here, because the pages' width is held across it."""
+        target = self._details_resize_target
+
+        def finish() -> None:
+            try:
+                self._win.update_idletasks()
+            except tk.TclError:
+                pass
+            done()
+
+        def check(n: int = 0) -> None:
+            try:
+                landed = (target is None
+                          or abs(self._win.winfo_width() - target) <= 2)
+            except tk.TclError:
+                return
+            if landed or n >= tries:
+                finish()
+                return
+            try:
+                self._win.after(step_ms, check, n + 1)
+            except tk.TclError:
+                pass
+
+        try:
+            self._win.after(1, check)
         except tk.TclError:
-            return
-        if geom == self._details_geom:
-            return
-        self._details_geom = geom
-        self._place_details()
+            finish()
 
     def _sync_bar(self) -> None:
         """Point the strip at whichever surface is showing: T becomes P, Fit
@@ -22752,7 +22924,8 @@ class _FloatingPdfWindow:
         self._closing = True
         self._pane = None
         self._text_host = self._reader = None
-        self._details_win = None    # a child of this window; already gone
+        self._details_side = None   # a child of this window; already gone
+        self._details_open = False
         self._flash_after = None
         if self._on_close is not None:
             try:
