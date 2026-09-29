@@ -116,9 +116,29 @@ class LookupFormTests(unittest.TestCase):
                                  ("E.D. Smith", "ed-smith"),
                                  ("H. & McH.", "h-mch"),
                                  ("Serg. & Rawle", "serg-rawl"),
-                                 ("Louisiana Annual", "la-ann")):
+                                 ("Louisiana Annual", "la-ann"),
+                                 ("Sandf. Ch.", "sand-ch"),
+                                 ("Sandf.", "sand-ch")):
             with self.subTest(reporter=reporter):
                 self.assertEqual(case_law_reporter_slug(reporter), folder)
+
+    def test_sandfords_chancery_as_old_opinions_cite_it(self):
+        # "Sandf. Ch." and the bare "Sandf." are Sandford's Chancery
+        # Reports, the Bluebook's "Sand. Ch.".
+        for text, cite, lookup in (
+            ("Smith v. Jones, 4 Sandf. Ch. 123", "4 Sandf. Ch. 123",
+             "4 Sand. Ch. 123"),
+            ("Smith v. Jones, 2 Sandf. Ch., 97", "2 Sandf. Ch. 97",
+             "2 Sand. Ch. 97"),
+            ("Smith v. Jones, 1 Sandf. Ch. R., 409", "1 Sandf. Ch. 409",
+             "1 Sand. Ch. 409"),
+            ("Smith v. Jones, 3 Sandf., 5", "3 Sandf. 5", "3 Sand. Ch. 5"),
+        ):
+            with self.subTest(text=text):
+                self.assertLookedUpAs(text, cite, lookup)
+                self.assertEqual(
+                    gui._static_case_law_url(cite),
+                    gui._static_case_law_url(lookup))
 
     def test_the_renumbered_reports_in_their_official_series(self):
         for text, official in (

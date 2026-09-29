@@ -409,6 +409,12 @@ class ForgetCopyTests(unittest.TestCase):
                 {"payload": {"type": "slip", "url": "https://s/1.pdf"}})
             delete.assert_called_once_with("https://s/1.pdf")
 
+    def test_so_is_a_cited_case_s_scan(self):
+        with patch("courtlistener_gui._bookmark_pdf_delete") as delete:
+            courtlistener_gui._forget_bookmark_copy(
+                {"payload": {"type": "cited", "url": "https://c/2.pdf"}})
+            delete.assert_called_once_with("https://c/2.pdf")
+
 
 class OrganizerSourceTests(unittest.TestCase):
     """The pieces of the Organize Bookmarks window easier read than driven
@@ -436,6 +442,110 @@ class OrganizerSourceTests(unittest.TestCase):
         app._bookmark_organizer = Open()
         app.show_bookmark_organizer()
         self.assertEqual(Open.surfaced, 1)
+
+
+class _Recorder:
+    """Stands in for a window class: records how it was opened."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+
+class EverySourceTests(_Base):
+    """Whatever is open can be bookmarked, as pages or as text."""
+
+    def setUp(self):
+        super().setUp()
+        self.app._status_var = type("Var", (), {"set": lambda _s, _t: None})()
+
+    def test_a_statutes_at_large_page_is_a_source_to_bookmark(self):
+        win = object.__new__(courtlistener_gui._PdfWindow)
+        win._app, win._is_case = self.app, False
+        win._url = "https://www.govinfo.gov/link/statute/124/119"
+        win._title = "124 Stat. 119"
+        desc = win._bookmark_descriptor()
+        self.assertEqual(desc["key"], f"pdf:{win._url}")
+        self.assertEqual(desc["noun"], "source")
+        self.assertIs(desc["payload"]["is_case"], False)
+
+    def test_and_reopens_as_one(self):
+        opened = _Recorder()
+        self.app.add_bookmark({
+            "key": "pdf:https://g/statute/124/119", "label": "124 Stat. 119",
+            "noun": "source",
+            "payload": {"type": "pdf", "url": "https://g/statute/124/119",
+                        "title": "124 Stat. 119", "is_case": False}})
+        entry = self.app._bookmark_entry("pdf:https://g/statute/124/119")
+        with patch("courtlistener_gui._PdfWindow", opened):
+            self.app._bookmark_opener_from_entry(entry)()
+        (_args, kwargs), = opened.calls
+        self.assertIs(kwargs["is_case"], False)
+        self.assertTrue(kwargs["local_pdf"])
+
+    def test_a_case_scan_saved_before_still_reopens_as_a_case(self):
+        opened = _Recorder()
+        entry = {"key": "pdf:u", "label": "Roe",
+                 "payload": {"type": "pdf", "url": "u", "title": "Roe"}}
+        with patch("courtlistener_gui._PdfWindow", opened):
+            self.app._bookmark_opener_from_entry(entry)()
+        self.assertIs(opened.calls[0][1]["is_case"], True)
+
+    def test_a_cited_case_s_scan_reopens_through_its_own_window(self):
+        reopened = []
+        self.app._reopen_cited_scan = lambda payload, label: reopened.append(
+            (payload["url"], label))
+        entry = {"key": "pdf:https://c/2.pdf", "label": "Roe v. Wade",
+                 "payload": {"type": "cited", "url": "https://c/2.pdf",
+                             "cite": "410 U.S. 113"}}
+        self.app._bookmark_opener_from_entry(entry)()
+        self.assertEqual(reopened, [("https://c/2.pdf", "Roe v. Wade")])
+
+    def _viewer(self, mode="pdf", reader=None, bookmarks=None, host=None):
+        viewer = object.__new__(courtlistener_gui._FloatingPdfWindow)
+        viewer._app, viewer._mode = self.app, mode
+        viewer._reader, viewer._bookmarks = reader, bookmarks
+        viewer._text_host = host
+        return viewer
+
+    def test_the_text_on_screen_bookmarks_the_opinion(self):
+        reader, scan = _Owner(self.app), _Owner(self.app, key="pdf:u")
+        viewer = self._viewer("text", reader=reader, bookmarks=scan)
+        self.assertIs(viewer._bookmark_owner(), reader)
+
+    def test_the_pages_on_screen_bookmark_the_scan(self):
+        reader, scan = _Owner(self.app), _Owner(self.app, key="pdf:u")
+        viewer = self._viewer("pdf", reader=reader, bookmarks=scan)
+        self.assertIs(viewer._bookmark_owner(), scan)
+
+    def test_pages_found_for_a_text_window_bookmark_its_case(self):
+        reader = _Owner(self.app)
+        self.assertIs(self._viewer("pdf", reader=reader)._bookmark_owner(),
+                      reader)
+
+    def test_a_document_built_into_the_text_side_bookmarks_itself(self):
+        # A slip opinion in a reporter window: no opinion reader, only the
+        # document registered for the frame it was built in.
+        host, slip = object(), _Owner(self.app, key="slip:u")
+        self.app._open_case_views[id(host)] = {"owner": slip, "view": host}
+        viewer = self._viewer("pdf", host=host)
+        self.assertIs(viewer._bookmark_owner(), slip)
+
+    def test_with_nothing_to_bookmark_there_is_nothing(self):
+        self.assertIsNone(self._viewer("pdf")._bookmark_owner())
+
+    def test_a_slip_opinion_s_text_is_bookmarked_as_the_slip_opinion(self):
+        slip = _Owner(self.app, key="slip:u", label="Trump v. Anderson")
+        text = object.__new__(courtlistener_gui._SlipTextWindow)
+        text._bookmarks = slip
+        self.assertEqual(text._bookmark_descriptor()["key"], "slip:u")
+        text._toggle_bookmark()
+        self.assertEqual(slip.toggled, 1)
+        self.assertTrue(self.app.is_bookmarked("slip:u"))
+        text._bookmarks = None
+        self.assertIsNone(text._bookmark_descriptor())
 
 
 if __name__ == "__main__":

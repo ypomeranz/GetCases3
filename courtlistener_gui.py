@@ -489,9 +489,11 @@ def _drop_menu_children(menu) -> None:
 def _forget_bookmark_copy(entry: dict) -> None:
     """Delete the local copy a bookmark reopened from, once it is no longer
     bookmarked anywhere: the scan saved beside it (a case's PDF, a slip
-    opinion) — the only copy kept outside the bookmark itself."""
+    opinion, a Statutes at Large page) — the only copy kept outside the
+    bookmark itself."""
     payload = entry.get("payload") if isinstance(entry, dict) else None
-    if isinstance(payload, dict) and payload.get("type") in ("pdf", "slip"):
+    if isinstance(payload, dict) and payload.get("type") in (
+            "pdf", "slip", "cited"):
         _bookmark_pdf_delete(str(payload.get("url") or ""))
 
 
@@ -1458,6 +1460,69 @@ def _bookmark_pdf_delete(url: str) -> None:
         _bookmark_pdf_path(url).unlink()
     except OSError:
         pass
+
+
+class _CitedScanBookmark:
+    """What bookmarks a case's scan in the window a citation opened it in
+    (see CourtListenerGUI._show_cited_case_pdf) while the pages are showing —
+    the text side has the opinion's own bookmark.  The scan is saved beside
+    the bookmark, so it reopens offline, in the same kind of window, with
+    its text looked for behind it again."""
+
+    def __init__(self, app, named: dict) -> None:
+        self._app = app
+        self._named = named
+
+    def _label(self) -> str:
+        """What the window is called now — the case in Bluebook form, once
+        its text has said what that is."""
+        named = self._named
+        window = named.get("window")
+        try:
+            title = window.current_title() if window is not None else ""
+        except (AttributeError, tk.TclError):
+            title = ""
+        name, cite = str(named.get("name") or ""), str(named.get("cite") or "")
+        fallback = f"{name} — {cite}" if name and cite else (cite or name)
+        return re.sub(r"\s+", " ", title or fallback).strip()
+
+    def _bookmark_descriptor(self) -> Optional[dict]:
+        named = self._named
+        url = str(named.get("url") or "")
+        if self._app is None or not url:
+            return None
+        label = self._label() or url
+        start = named.get("start_page")
+        cl_item = named.get("cl_item")
+        return {
+            "key": f"pdf:{url}",
+            "label": label,
+            "noun": "case",
+            "payload": {
+                "type": "cited", "url": url, "title": label,
+                "cite": str(named.get("cite") or ""),
+                "name": str(named.get("name") or ""),
+                "cl_item": dict(cl_item) if isinstance(cl_item, dict) else {},
+                "decided": str(named.get("decided") or ""),
+                "writing": str(named.get("writing") or "merits"),
+                "start_page": start if isinstance(start, int) else None,
+            },
+        }
+
+    def _toggle_bookmark(self) -> None:
+        app = self._app
+        if app is None or not hasattr(app, "is_bookmarked"):
+            return
+        desc = self._bookmark_descriptor()
+        if not desc:
+            return
+        url = desc["payload"]["url"]
+        if app.is_bookmarked(desc["key"]):
+            app.remove_bookmark(desc["key"])
+            _bookmark_pdf_delete(url)   # drop the saved local copy
+        else:
+            _bookmark_pdf_save(url, self._named.get("data"))  # a local copy
+            app.add_bookmark(desc)
 
 
 # --- opinion-block (de)serialization for offline case copies ---------------
@@ -8003,9 +8068,15 @@ class CourtListenerGUI:
         if kind == "pdf":
             url = str(payload.get("url") or "")
             title = str(payload.get("title") or label or url)
+            is_case = payload.get("is_case", True) is not False
             return lambda: _PdfWindow(
                 self.root, url, title, self._status_var.set, app=self,
-                is_case=True, local_pdf=str(_bookmark_pdf_path(url)))
+                is_case=is_case, local_pdf=str(_bookmark_pdf_path(url)))
+        if kind == "cited":
+            if not str(payload.get("url") or ""):
+                return None
+            saved = dict(payload)
+            return lambda: self._reopen_cited_scan(saved, label)
         if kind == "statute":
             doc = payload.get("doc")
             if not isinstance(doc, dict):
@@ -8040,6 +8111,70 @@ class CourtListenerGUI:
             return lambda: _SlipOpinionWindow(
                 self.root, url, title, app=self, description=desc)
         return None
+
+    def _reopen_cited_scan(self, payload: dict, label: str = "") -> None:
+        """Reopen a case's scan bookmarked in the window a citation opened it
+        in (see _CitedScanBookmark): from the copy saved with the bookmark, in
+        the same kind of window, its text looked for behind it again.  Where
+        that copy has gone the scan is fetched again from where it came, and
+        failing that the case is looked up afresh by its citation."""
+        url = str(payload.get("url") or "")
+        cite = str(payload.get("cite") or "")
+        name = str(payload.get("name") or "")
+        cl_item = payload.get("cl_item")
+        cl_item = dict(cl_item) if isinstance(cl_item, dict) and cl_item else None
+        start = payload.get("start_page")
+        start = start if isinstance(start, int) and start >= 0 else None
+        decided = str(payload.get("decided") or "")
+        writing = str(payload.get("writing") or "merits")
+        label = label or str(payload.get("title") or "") or cite or name
+        status = self._safe_root_status
+        self.touch_bookmark(f"pdf:{url}")
+        watch = self.watch_load(self.root, label, cite=cite)
+
+        def look_up() -> None:
+            watch.finish()
+            if cite:
+                self.open_cited_case_pdf(self.root, ("cite", cite), name,
+                                         status, name=name)
+            else:
+                status(f"Could not reopen {label}.")
+
+        def find() -> None:
+            data = _bookmark_pdf_read(url)
+            if data is None:
+                try:
+                    fetched = _fetch_pdf_bytes(url, timeout=30)
+                except Exception as exc:
+                    print(f"[bookmark] fetching {url} again failed: {exc}")
+                    fetched = None
+                data = fetched[0] if fetched else None
+            if watch.cancelled:
+                return
+            if data is None:
+                self._post_root(look_up)
+                return
+            # Measured here, off the Tk thread (see _measure_pdf_pages).
+            meta = _measure_pdf_pages(data)
+            if watch.cancelled:
+                return
+            self._post_root(lambda: self._show_cited_case_pdf(
+                self.root, data, url, cite, "", name, ("cite", cite), name,
+                status, cl_item=cl_item, decided=decided, writing=writing,
+                start_page=start, watch=watch, page_meta=meta))
+
+        def run() -> None:
+            with _watching(watch):
+                try:
+                    find()
+                except Exception as exc:     # never leave a window waiting
+                    print(f"[bookmark] reopening {label!r} failed: {exc}")
+                    problem = str(exc) or type(exc).__name__
+                    self._post_root(lambda: (
+                        status(f"Could not reopen {label}: {problem}"),
+                        watch.fail(f"Something went wrong: {problem}")))
+
+        threading.Thread(target=run, daemon=True).start()
 
     def populate_bookmarks_menu(self, menu: tk.Menu, view=None,
                                 owner=None) -> None:
@@ -10924,7 +11059,9 @@ class CourtListenerGUI:
                  # A page of orders opened for none of them in particular:
                  # it is the page, called by its citation alone, and has no
                  # text to show — any would be one order's, and name it.
-                 "orders_page": bool((cl_item or {}).get("_orders_page"))}
+                 "orders_page": bool((cl_item or {}).get("_orders_page")),
+                 # How its text is found, kept for a bookmark to reopen by.
+                 "decided": decided, "writing": writing}
 
         def described(record: dict) -> None:
             """The text has loaded: name the window properly."""
@@ -11009,6 +11146,7 @@ class CourtListenerGUI:
                     lambda body: self._embed_cited_case_text(body, named)),
                 on_close=self._cited_pdf_window_closed,
                 on_citation_edited=lambda: self._retitle_cited_pdf(named),
+                bookmarks=_CitedScanBookmark(self, named),
                 geometry=geometry, page_meta=page_meta,
             )
         except Exception as exc:
@@ -21995,7 +22133,7 @@ class _LoadWatch:
     _load_bytes); everything else belongs to the Tk thread.
     """
 
-    SLOW_MS = 3000          # how long a load may take before its window shows
+    SLOW_MS = 7500          # how long a load may take before its window shows
     TEXT_PATIENCE_S = 90    # how long the text is waited for before saying so
     _SHOWN_STEPS = 6        # how many of the steps already taken are listed
     _BYTES_EVERY = 0.2      # seconds between updates of the byte count
@@ -22732,11 +22870,27 @@ class _FloatingPdfWindow:
 
     def _bookmark_owner(self):
         """Whatever can bookmark what this window is showing: the opinion when
-        the text is up, the document behind the pages when it is not."""
-        if self.showing_text() and hasattr(
-                self._reader, "_bookmark_descriptor"):
-            return self._reader
-        return self._bookmarks
+        the text is up, the document behind the pages when it is not.  With
+        no one named for the pages, it is what the window was built around:
+        the opinion a text-only window later found a scan for, or a document
+        built into its text side that is not an opinion (a slip opinion)."""
+        reader = (self._reader
+                  if hasattr(self._reader, "_bookmark_descriptor") else None)
+        if self.showing_text() and reader is not None:
+            return reader
+        if self._bookmarks is not None:
+            return self._bookmarks
+        if reader is not None:
+            return reader
+        app, host = self._app, self._text_host
+        if host is not None and hasattr(app, "_viewer_for_host"):
+            try:
+                owner = app._viewer_for_host(host)
+            except Exception:
+                owner = None
+            if hasattr(owner, "_bookmark_descriptor"):
+                return owner
+        return None
 
     def _sync_bar_menu(self) -> None:
         """Rebuild the strip menu below Save and Print.
@@ -22834,6 +22988,13 @@ class _FloatingPdfWindow:
             self._win.title(title)
         except tk.TclError:
             pass
+
+    def current_title(self) -> str:
+        """What the window is called now."""
+        try:
+            return str(self._win.title())
+        except tk.TclError:
+            return ""
 
     def set_pdf(self, data: bytes, url: str, title: str = "",
                 *, margin: Optional[int] = None,
@@ -32740,6 +32901,9 @@ class _ScholarTextWindow:
                     on_cite_browser=self._open_pdf_cite_browser,
                     on_build_text=self._embed_text_reader,
                     on_citation_edited=self._retitle_pdf_float,
+                    # The pages are this case's: bookmarked from them, it is
+                    # this case that is bookmarked.
+                    bookmarks=self,
                 )
                 self._pdf_float_win = win
                 holder = getattr(self._app, "_cited_pdf_windows", None)
@@ -33445,6 +33609,9 @@ class _PdfWindow:
         self._watch = (app.watch_load(parent, title)
                        if self._reporter and hasattr(app, "watch_load")
                        else None)
+        # What the menu bar's Bookmarks cascade bookmarks, should this window
+        # show the pages itself (see CourtListenerGUI._viewer_for_host).
+        self._win._secondary_owner = self
         self._history_menubar = (
             _install_history_menubar(self._app, self._win)
             if self._is_case else
@@ -33541,13 +33708,18 @@ class _PdfWindow:
                 payload)
 
     def _bookmark_descriptor(self) -> Optional[dict]:
-        if not self._is_case or self._app is None:
+        if self._app is None:
             return None
+        payload = {"type": "pdf", "url": self._url, "title": self._title}
+        if not self._is_case:
+            # A Statutes at Large or Federal Register page: reopened as one,
+            # with no case text to look for behind it.
+            payload["is_case"] = False
         return {
             "key": f"pdf:{self._url}",
             "label": self._title,
-            "noun": "case",
-            "payload": {"type": "pdf", "url": self._url, "title": self._title},
+            "noun": "case" if self._is_case else "source",
+            "payload": payload,
         }
 
     def _toggle_bookmark(self) -> None:
@@ -35178,10 +35350,14 @@ class _SlipTextWindow:
 
     def __init__(
         self, parent: tk.Misc, title: str, text: str, *, app=None,
+        bookmarks=None,
     ) -> None:
         self._app = app
         self._title = title
         self._source_text = text
+        # The slip opinion this is the text of: bookmarking the text
+        # bookmarks it.
+        self._bookmarks = bookmarks
         win = _secondary_view_host(parent, app)
         _ensure_modern_ttk_styles(win)
         win.title(f"{title} — Text")
@@ -35216,11 +35392,20 @@ class _SlipTextWindow:
                 _SlipTextWindow(
                     app.root if parent is None else parent,
                     source._title, source._source_text, app=app,
+                    bookmarks=source._bookmarks,
                 )
             app.register_secondary_window(
                 self, win, f"slip-text:{id(self)}", f"{title} — Text",
                 reopen,
             )
+
+    def _bookmark_descriptor(self) -> Optional[dict]:
+        owner = self._bookmarks
+        return owner._bookmark_descriptor() if owner is not None else None
+
+    def _toggle_bookmark(self) -> None:
+        if self._bookmarks is not None:
+            self._bookmarks._toggle_bookmark()
 
     def _select_all(self, _e=None) -> str:
         self._text.tag_add("sel", "1.0", "end-1c")
@@ -35601,7 +35786,8 @@ class _SlipOpinionWindow:
     def _show_text(self) -> None:
         if self._clean_text is not None:
             _SlipTextWindow(
-                self._win, self._title, self._clean_text, app=self._app
+                self._win, self._title, self._clean_text, app=self._app,
+                bookmarks=self,
             )
             return
         if not self._pages:
@@ -35628,7 +35814,8 @@ class _SlipOpinionWindow:
         self._status_var.set("Text ready.")
         if self._clean_text is not None:
             _SlipTextWindow(
-                self._win, self._title, self._clean_text, app=self._app
+                self._win, self._title, self._clean_text, app=self._app,
+                bookmarks=self,
             )
 
 

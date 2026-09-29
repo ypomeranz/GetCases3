@@ -1131,6 +1131,7 @@ class _StripViewer:
         self._reader = reader
         self._mode = mode
         self._recent_menu = recent
+        self._text_host = None     # nothing built into the text side
         # What has_text_side/details_showing read: a viewer with an opinion
         # behind it offers the case's details on the menu; one showing only
         # pages has none to offer.

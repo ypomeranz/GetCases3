@@ -150,8 +150,8 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
 - **Right-click** a citation on a scan to open it in your web browser instead.
 
 You can keep clicking while something loads. Each link loads on its own, so a
-slow one does not hold up the others. When a document takes more than a few
-seconds, a **status window** appears where the document will open. It shows
+slow one does not hold up the others. When a document takes more than about
+seven seconds, a **status window** appears where the document will open. It shows
 what is being tried ("Checking the Library of Congress's scan of the U.S.
 Reports…"), how much of the file has downloaded, and how long it has taken. The
 document then opens in its place. If nothing can be found, the window says so and
@@ -185,8 +185,10 @@ History and bookmarking.
 - **History:** the last 15 documents you opened. At the bottom, below a line,
   the Supreme Court's latest opinions and opinions relating to orders, listed by
   case name and date.
-- **Bookmarks:** bookmark what you are looking at and organize bookmarks into
-  folders. A bookmark keeps a local copy, so it reopens even offline.
+- **Bookmarks:** bookmark what you are looking at — a case, statute, rule or
+  other source, whether its pages or its text are showing — and organize
+  bookmarks into folders. A bookmark keeps a local copy, so it reopens even
+  offline.
 - **Window:** switch between open windows. Windows are independent; closing
   one never closes the windows you opened from it.
 
