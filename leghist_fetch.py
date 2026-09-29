@@ -67,6 +67,21 @@ class Unavailable(Exception):
 _SESSION = None
 _SESSION_LOCK = threading.Lock()
 
+#: Told what a fetch is doing, when set: ``on_step(text)`` as it tries each
+#: source and ``on_bytes(done, total)`` as a file comes in (``total`` 0 where
+#: the server does not say).  The GUI points these at its status reporting,
+#: which knows from the calling thread which load, if any, is being watched.
+on_step = None
+on_bytes = None
+
+
+def _tell(hook, *args) -> None:
+    if hook is not None:
+        try:
+            hook(*args)
+        except Exception:
+            pass
+
 
 def _session():
     global _SESSION
@@ -112,15 +127,22 @@ def _get_pdf(url: str, *, max_bytes: int = 150_000_000) -> tuple[bytes, str]:
     if cached is not None:
         meta = _cached_meta("whole:" + url)
         return cached, meta.get("final", url)
+    host = urllib.parse.urlparse(url).hostname or "the source"
+    _tell(on_step, f"Downloading from {host.removeprefix('www.')}…")
     r = _session().get(url, timeout=TIMEOUT, stream=True)
     try:
         if r.status_code != 200:
             raise Unavailable(f"HTTP {r.status_code}")
         final = r.url
+        try:
+            size = int(r.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            size = 0
         chunks, total = [], 0
         for chunk in r.iter_content(1 << 16):
             chunks.append(chunk)
             total += len(chunk)
+            _tell(on_bytes, total, size)
             if total > max_bytes:
                 raise Unavailable("the file is too large to fetch whole")
         data = b"".join(chunks)
@@ -157,6 +179,7 @@ def _cut(url: str, first: int, last: int, *, whole_ok: bool = True) -> tuple[byt
     cached = _cached(key)
     if cached is not None:
         return cached, int(_cached_meta(key).get("total") or 0)
+    _tell(on_step, "Cutting the cited pages out of the scan…")
     try:
         pdf = pdf_range.open_url(url, session=_session(), timeout=TIMEOUT)
         total = pdf.page_count()
@@ -266,6 +289,7 @@ def _find_printed_page(data: bytes, page: int, guess: int, total: int) -> Option
 # ---------------------------------------------------------------------------
 
 def _cr(s: dict) -> Pages:
+    _tell(on_step, "Finding the page in GovInfo's Congressional Record…")
     vol = int(s.get("vol") or 0)
     page = str(s.get("page") or "")
     m = re.fullmatch(r"([SHEDA]?)(\d+)", page)
@@ -385,6 +409,7 @@ def _debates(s: dict) -> Pages:
     # (from the printing headed "History of Congress") comes some pages on
     # — so more pages after it are cut, and the reader is told.
     two_printings = s.get("src") == "annals" and int(s.get("vol") or 0) in (1, 2)
+    _tell(on_step, "Finding the page in the Library of Congress's scans…")
     pages, at = lh.debates_pages(s, BEFORE, 14 if two_printings else AFTER)
     if not pages:
         raise Unavailable(
@@ -489,6 +514,7 @@ def _paper(s: dict) -> Pages:
     congs = [int(s["cong"])] if s.get("cong") else [
         int(c) for c in str(s.get("congs") or "").split(",") if c.strip()]
     tried = []
+    _tell(on_step, "Asking GovInfo for it…")
     for cong in congs:
         spec = dict(s, cong=cong)
         spec.pop("congs", None)
@@ -499,6 +525,7 @@ def _paper(s: dict) -> Pages:
             except Exception:
                 continue
             return _at_pin(data, spec, "GovInfo", final.split("#")[0])
+    _tell(on_step, "Searching the Internet Archive…")
     for cong in congs:
         spec = dict(s, cong=cong)
         spec.pop("congs", None)
@@ -506,6 +533,7 @@ def _paper(s: dict) -> Pages:
         if found is not None:
             return found
     label = lh.spec_label(dict(s, cong=congs[0] if congs else 0), with_pin=False)
+    _tell(on_step, "Searching HathiTrust's catalogue…")
     hathi = _hathitrust(dict(s, cong=congs[0] if congs else 0))
     if hathi:
         raise Unavailable(

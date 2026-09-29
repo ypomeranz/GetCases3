@@ -265,8 +265,10 @@ class WhereItIsAskedTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 HOST_NS = _load(
-    "CourtListenerGUI", ["new_case_view_host", "_reporter_text_host"],
-    {"_FloatingPdfWindow": lambda *a, **kw: _StubViewer(*a, **kw)},
+    "CourtListenerGUI", ["new_case_view_host", "_reporter_text_host",
+                         "_take_text_watch"],
+    {"_FloatingPdfWindow": lambda *a, **kw: _StubViewer(*a, **kw),
+     "_toplevel_path": _load_functions(["_toplevel_path"])["_toplevel_path"]},
 )
 
 
@@ -288,7 +290,9 @@ class _HostApp:
         self.root = _Widget()
         self._cited_pdf_windows: set = set()
         self.secondary: list = []
-        for name in ("new_case_view_host", "_reporter_text_host"):
+        self._load_watches: list = []
+        for name in ("new_case_view_host", "_reporter_text_host",
+                     "_take_text_watch"):
             setattr(self, name, HOST_NS[name].__get__(self))
 
     def new_secondary_view_host(self, parent):
@@ -706,7 +710,8 @@ class ScanTitleTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 PDFWIN_NAMES = ["_hand_to_viewer", "_viewer_closed", "_dialog_parent",
-                "_reveal", "_say", "_show", "_reporter_analysis"]
+                "_reveal", "_say", "_show", "_reporter_analysis",
+                "_end_watch"]
 
 
 class _HandoffViewer:
@@ -910,6 +915,104 @@ class ScanWindowChromeTests(unittest.TestCase):
         win = _ScanWindow(reporter=False)
         win._reveal()
         self.assertFalse(win._win.shown)
+
+
+class _FakeWatch:
+    """A slow document's status window (``_LoadWatch``), as far as the window
+    that finally shows the document asks it anything."""
+
+    def __init__(self, anchor_path="", phase="text", cancelled=False,
+                 geometry="700x800+40+50"):
+        self.anchor_path = anchor_path
+        self.phase = phase
+        self.cancelled = cancelled
+        self.geometry = geometry
+        self.done = False
+        self.handed = self.finished = 0
+
+    def hand_off(self):
+        self.handed += 1
+        self.done = True
+        return self.geometry
+
+    def finish(self):
+        self.finished += 1
+        self.done = True
+
+
+TOPLEVEL_PATH = _load_functions(["_toplevel_path"])["_toplevel_path"]
+
+
+class SlowDocumentHandOffTests(unittest.TestCase):
+    """A document slow to come has had a status window standing where it will
+    open: it opens in that window's place, and the window goes."""
+
+    def setUp(self):
+        _StubViewer.made.clear()
+        _HandoffViewer.made.clear()
+
+    def test_a_scan_opens_where_its_status_window_stood(self):
+        win = _ScanWindow()
+        watch = win._watch = _FakeWatch(phase="scan")
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made[0].kw["geometry"], watch.geometry)
+        self.assertEqual(watch.handed, 1)
+        self.assertIsNone(win._watch)
+
+    def test_with_its_pages_measured_before_it_came(self):
+        win = _ScanWindow()
+        win._show(b"%PDF-1.4", [(612, 792, (0, 0, 1, 1))])
+        self.assertEqual(_HandoffViewer.made[0].kw["page_meta"],
+                         [(612, 792, (0, 0, 1, 1))])
+
+    def test_a_scan_the_reader_stopped_waiting_for_is_let_go(self):
+        win = _ScanWindow()
+        win._watch = _FakeWatch(phase="scan", cancelled=True)
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made, [])
+        self.assertTrue(win._win.destroyed)
+
+    def test_a_panel_this_window_shows_itself_ends_the_wait(self):
+        # The CloudFlare hand-off, an error: this window says it from here.
+        win = _ScanWindow()
+        watch = win._watch = _FakeWatch(phase="scan")
+        win._reveal()
+        self.assertEqual(watch.finished, 1)
+        self.assertIsNone(win._watch)
+
+    def test_text_found_for_a_case_with_no_scan_opens_where_it_waited(self):
+        app = _HostApp()
+        parent = _Widget()
+        watch = _FakeWatch(TOPLEVEL_PATH(parent))
+        app._load_watches.append(watch)
+        app.new_case_view_host(parent)
+        self.assertEqual(_StubViewer.made[0].kw["geometry"], watch.geometry)
+        self.assertEqual(watch.handed, 1)
+
+    def test_but_not_a_load_from_another_window(self):
+        app = _HostApp()
+        watch = _FakeWatch(TOPLEVEL_PATH(_Widget()))
+        app._load_watches.append(watch)
+        app.new_case_view_host(_Widget())
+        self.assertEqual(_StubViewer.made[0].kw["geometry"], "")
+        self.assertEqual(watch.handed, 0)
+
+    def test_nor_one_still_looking_for_its_scan(self):
+        app = _HostApp()
+        parent = _Widget()
+        watch = _FakeWatch(TOPLEVEL_PATH(parent), phase="scan")
+        app._load_watches.append(watch)
+        app.new_case_view_host(parent)
+        self.assertEqual(watch.handed, 0)
+
+    def test_the_oldest_waiting_there_is_the_one_answered(self):
+        app = _HostApp()
+        parent = _Widget()
+        first = _FakeWatch(TOPLEVEL_PATH(parent), geometry="1x1+1+1")
+        second = _FakeWatch(TOPLEVEL_PATH(parent), geometry="2x2+2+2")
+        app._load_watches.extend([first, second])
+        app.new_case_view_host(parent)
+        self.assertEqual((first.handed, second.handed), (1, 0))
 
 
 class WindowIndependenceTests(unittest.TestCase):
