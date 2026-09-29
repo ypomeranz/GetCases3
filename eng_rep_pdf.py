@@ -117,7 +117,9 @@ class CloudflareChallenge(Exception):
 
 
 class OriginError(Exception):
-    """CloudFlare was passed but the origin returned an error (status code)."""
+    """The site refused the request without a CloudFlare check (status
+    code): the origin's own error, or a CloudFlare rule that blocks rather
+    than checks.  Nothing passed in Firefox changes it."""
 
     def __init__(self, status: int):
         super().__init__(f"origin returned HTTP {status}")
@@ -692,8 +694,12 @@ def is_cached(year: int, num: int) -> bool:
 # Fetch
 # ---------------------------------------------------------------------------
 
-_CHALLENGE_MARKERS = (b"Just a moment", b"challenge-platform",
-                      b"cf-browser-verification", b"__cf_chl")
+#: What marks CloudFlare's check page where a response lacks the
+#: ``cf-mitigated`` header.  Not CloudFlare's ``/cdn-cgi/challenge-platform/``
+#: script: CloudFlare puts that into every page it serves, the page saying a
+#: request is blocked included.
+_CHALLENGE_MARKERS = (b"Just a moment", b"cf-browser-verification",
+                      b"__cf_chl")
 
 #: The (profile, clearance value) CloudFlare accepted last for each site,
 #: tried first next time.  Harmless when wrong -- it is just tried first and,
@@ -702,17 +708,24 @@ _CHALLENGE_MARKERS = (b"Just a moment", b"challenge-platform",
 _LAST_GOOD: Optional[dict] = None
 
 
-def _is_challenge(status: int, body: bytes) -> bool:
+def _is_challenge(status: int, body: bytes, cf_mitigated: str = "") -> bool:
+    """Whether a response is CloudFlare's check rather than the page asked
+    for.  CloudFlare says so in the ``cf-mitigated: challenge`` header of
+    every check it serves; the check page's own markers are the fallback.
+    A 403 with neither is a refusal, not a check."""
+    if cf_mitigated.strip().lower() == "challenge":
+        return True
     return status in (403, 503) and any(mk in body for mk in _CHALLENGE_MARKERS)
 
 
-def _get(url: str, headers: dict, cookies: dict) -> "tuple[int, bytes]":
+def _get(url: str, headers: dict, cookies: dict) -> "tuple[int, bytes, str]":
     """One GET through curl_cffi under Firefox's TLS fingerprint:
-    ``(status, body)``."""
+    ``(status, body, cf-mitigated header)``."""
     from curl_cffi import requests as creq
     resp = creq.get(url, headers=headers, cookies=cookies,
                     impersonate=_impersonate_target(), timeout=_TIMEOUT)
-    return resp.status_code, resp.content or b""
+    return (resp.status_code, resp.content or b"",
+            resp.headers.get("cf-mitigated") or "")
 
 
 #: What Firefox asks for when it follows a link.
@@ -731,8 +744,9 @@ def fetch_cleared(url: str, site: str, *, referer: str, web_url: str) -> bytes:
     Raises :class:`FetchUnavailable` when in-app fetching isn't possible (the
     caller links out), :class:`CloudflareChallenge` carrying *web_url* -- the
     page for the reader to pass the check on -- when the user must clear the
-    check in Firefox, or :class:`OriginError` when CloudFlare let the request
-    through and the site itself refused it.
+    check in Firefox, or :class:`OriginError` when the site refused the
+    request without a check -- the origin's own error, or a CloudFlare rule
+    that blocks rather than checks.
 
     Every Firefox profile holding a live-looking clearance is a candidate,
     tried freshest first with its own cookies under its own Firefox's
@@ -765,7 +779,7 @@ def fetch_cleared(url: str, site: str, *, referer: str, web_url: str) -> bytes:
             "Referer": referer,
         }
         try:
-            status, data = _get(url, headers, cand.cookies)
+            status, data, cf_mitigated = _get(url, headers, cand.cookies)
         except Exception as exc:
             raise OriginError(0) from exc
 
@@ -774,7 +788,7 @@ def fetch_cleared(url: str, site: str, *, referer: str, web_url: str) -> bytes:
                           site: (str(cand.db), cand.value)}
             return data
 
-        if _is_challenge(status, data):
+        if _is_challenge(status, data, cf_mitigated):
             # CloudFlare no longer honours this clearance (dropped early, or
             # obtained by a Firefox since updated) -- on to the next profile.
             print(f"[eng_rep_pdf] CloudFlare refused the {site} clearance "
