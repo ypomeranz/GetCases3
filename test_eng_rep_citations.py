@@ -255,6 +255,28 @@ class ViewerTests(unittest.TestCase):
         win._turn_to_pin(None)
         self.assertIn("isn't marked", win._say.call_args.args[0])
 
+    def test_a_refused_clearance_reaches_the_panel(self):
+        win = object.__new__(gui._EngRepPdfWindow)
+        win._case = mock.Mock(year=1854, num=296, web_url="https://c/296.html")
+        win._status_var, win._watch = mock.Mock(), None
+        win._post = lambda fn, *args: fn(*args)
+        win._need_clearance = mock.Mock()
+        ua = eng_rep_pdf._user_agent_for("157")
+
+        class Inline:
+            def __init__(self, target=None, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with mock.patch.object(gui.threading, "Thread", Inline), \
+                mock.patch.object(eng_rep_pdf, "fetch_pdf", side_effect=
+                                  eng_rep_pdf.CloudflareChallenge(
+                                      "https://c/296.html", ua)):
+            win._fetch()
+        win._need_clearance.assert_called_once_with("https://c/296.html", ua)
+
     def test_passing_the_check_in_firefox_loads_the_scan(self):
         win = object.__new__(gui._EngRepPdfWindow)
         win._win = mock.Mock()

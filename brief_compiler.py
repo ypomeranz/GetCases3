@@ -439,9 +439,10 @@ def _resolve_statute(resolver, auth: Authority) -> _Resolved:
                                  "official source", stem=label or title)
         return _Resolved(note="could not load the section text")
     if auth.kind == "sec":
-        # HathiTrust admits browsers, not scripts: where to read it instead.
-        return _Resolved(note="SEC decision — HathiTrust's scan opens only in "
-                              "a web browser: " + sec_decisions.page_url(auth.value))
+        # Like the English Reports, not bundled — HathiTrust's CloudFlare
+        # check stands in front of the scan: where to read it instead.
+        return _Resolved(note="SEC decision — HathiTrust scan not bundled; "
+                              "read it at " + sec_decisions.page_url(auth.value))
     return _Resolved(note=_NOTE_ONLY.get(auth.kind, "not a downloadable source"))
 
 

@@ -136,6 +136,15 @@ class _Widget:
     def deiconify(self):
         self.shown = True
 
+    def withdraw(self):
+        self.shown = False
+
+    def winfo_viewable(self):
+        return self.shown
+
+    def wm_geometry(self):
+        return "820x900+40+60"
+
     def after(self, _ms, fn=None, *args):
         if fn is not None:
             fn(*args)
@@ -813,6 +822,20 @@ class ScanHandoffTests(unittest.TestCase):
         win = _ScanWindow()
         win._show(b"%PDF-1.4")
         self.assertFalse(win._win.shown)
+
+    def test_a_window_that_asked_for_a_cloudflare_check_gives_the_pages_its_place(self):
+        # It showed the hand-off panel; the check has since been passed.
+        win = _ScanWindow()
+        win._reveal()
+        self.assertTrue(win._win.shown)
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made[0].kw["geometry"], "820x900+40+60")
+        self.assertFalse(win._win.shown)
+
+    def test_one_never_shown_leaves_the_viewer_where_it_would_go(self):
+        win = _ScanWindow()
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made[0].kw["geometry"], "")
 
     def test_statutes_at_large_gets_no_switch_to_offer(self):
         win = _ScanWindow()

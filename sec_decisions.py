@@ -21,8 +21,10 @@ Rows, tab-separated:
     d  vol  page a decision begins on  its year (0: the pages don't say)
 
 HathiTrust lets people, not scripts, turn its pages (a CloudFlare check
-stands in front of them), so a citation opens HathiTrust's own viewer, in
-the web browser, at the cited page.
+stands in front of them).  So a citation's pages are fetched with the
+clearance the reader obtains by passing that check in Firefox (see
+:mod:`sec_pdf`) — or, where the reader would rather, opened in HathiTrust's
+own viewer, in the web browser, at the cited page (:func:`page_url`).
 
 A citation is linked only in a volume the series has (1-58) and on a page
 the volume prints.  Each becomes a *spec* — ``{"vol": 8, "page": 893,
@@ -167,6 +169,16 @@ def decision_start(vol: int, page: int) -> int:
     firsts = _index().starts.get(vol) or []
     i = bisect.bisect_right(firsts, page) - 1
     return firsts[i] if i >= 0 else 0
+
+
+def decision_end(vol: int, page: int) -> int:
+    """The last page the decision holding *page* can run to: the page the
+    next decision begins on — a decision may end partway down the page its
+    successor opens on — or, for the volume's last decision, the volume's
+    last page (0: not known)."""
+    firsts = _index().starts.get(vol) or []
+    i = bisect.bisect_right(firsts, page)
+    return firsts[i] if i < len(firsts) else last_page(vol)
 
 
 def decision_year(vol: int, page: int) -> int:

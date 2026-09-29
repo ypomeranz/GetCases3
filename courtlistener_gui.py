@@ -1224,6 +1224,7 @@ import federal_register
 import legislative_history
 import leghist_fetch
 import sec_decisions
+import sec_pdf
 import state_statutes
 import statutes_at_large
 import us_code
@@ -8110,6 +8111,13 @@ class CourtListenerGUI:
             desc = str(payload.get("description") or "")
             return lambda: _SlipOpinionWindow(
                 self.root, url, title, app=self, description=desc)
+        if kind == "sec":
+            spec = str(payload.get("spec") or "")
+            if not spec:
+                return None
+            # Reopens through sec_pdf's own on-disk page cache (offline).
+            return lambda: _open_sec(self.root, spec, self._status_var.set,
+                                     app=self)
         return None
 
     def _reopen_cited_scan(self, payload: dict, label: str = "") -> None:
@@ -22070,6 +22078,7 @@ def _load_watched() -> bool:
 # the calling thread's watch, so a download reports to the load it is part
 # of, and to nothing when no load is being watched.
 us_reports_pdf.on_step = leghist_fetch.on_step = _load_step
+sec_pdf.on_step = _load_step
 us_reports_pdf.on_bytes = leghist_fetch.on_bytes = _load_bytes
 
 
@@ -34108,6 +34117,15 @@ class _PdfWindow:
         wants_text = self._can_discover_text and not self._text_lookup_empty
         watch, self._watch = getattr(self, "_watch", None), None
         geometry = (watch.hand_off() if watch is not None else None) or ""
+        # This window on screen — it showed a CloudFlare panel, and the check
+        # has since been passed — is where the reader is looking: the pages
+        # open in its place, and it steps aside again.
+        try:
+            shown = bool(self._win.winfo_viewable())
+            if shown and not geometry:
+                geometry = str(self._win.wm_geometry())
+        except (AttributeError, tk.TclError):
+            shown = False
         try:
             viewer = _FloatingPdfWindow(
                 app.root if app is not None else self._win,
@@ -34131,6 +34149,11 @@ class _PdfWindow:
         self._float = viewer
         if app is not None and hasattr(app, "_cited_pdf_windows"):
             app._cited_pdf_windows.add(viewer)
+        if shown:
+            try:
+                self._win.withdraw()
+            except (AttributeError, tk.TclError):
+                pass
         viewer.surface()
         self._reporter_analysis(viewer, data)
         return True
@@ -34964,20 +34987,376 @@ def _open_leghist(parent: tk.Misc, spec: str,
 
 
 # ---------------------------------------------------------------------------
-# The SEC's Decisions and Reports — the cited page of HathiTrust's scan
+# Pages behind a CloudFlare check: fetched with Firefox's clearance, or not
 # ---------------------------------------------------------------------------
+
+class _CloudflarePdfWindow(_PdfWindow):
+    """A viewer for pages kept behind a CloudFlare check that admits people,
+    not scripts — the English Reports on CommonLII, the SEC's Decisions and
+    Reports on HathiTrust.  The pages are fetched with the clearance the
+    reader obtained by passing the check in Firefox (see eng_rep_pdf).  With
+    none CloudFlare accepts, the window asks: open the page in Firefox and
+    pass the check there — the pages then load here by themselves — or open
+    it in the browser instead.  Each subclass names its site, says where its
+    page is, and words the panels."""
+
+    #: The site, as the reader knows it: "CommonLII", "HathiTrust".
+    _SITE_NAME = ""
+
+    def _site_url(self) -> str:
+        """The page to open outside the app — in Firefox, to pass the
+        check, or in the browser instead."""
+        return self._url
+
+    def _clearance_mark(self) -> tuple:
+        """What changes when the reader passes the site's check in Firefox
+        (see eng_rep_pdf.clearance_mark)."""
+        return eng_rep_pdf.clearance_mark()
+
+    def _handoff_text(self) -> str:
+        """The CloudFlare panel's explanation."""
+        return ""
+
+    def _handoff_waiting_text(self) -> str:
+        """The status once Firefox is open on the check."""
+        return "Pass the check in Firefox — the scan loads here then."
+
+    def _link_out_text(self, has_ff: bool) -> str:
+        """The explanation when the pages can't be fetched here at all."""
+        return ""
+
+    def _clear_body(self) -> None:
+        for child in self._body.winfo_children():
+            child.destroy()
+
+    def _refused_text(self, refused_ua: str) -> str:
+        """Why the panel is up though Firefox holds a clearance: CloudFlare
+        refused it from the app.  An old one it has simply stopped honouring
+        wants the check passed again; one from a Firefox newer than
+        curl_cffi can imitate is refused however often it is passed."""
+        m = re.search(r"Firefox/(\d+)", refused_ua or "")
+        imitated = eng_rep_pdf.imitated_firefox_major()
+        if m and imitated and int(m.group(1)) > int(imitated):
+            return ("\n\nFirefox holds a clearance, but CloudFlare turned the "
+                    f"app away when it used it.  Your Firefox is version "
+                    f"{m.group(1)}, and the curl_cffi package the app imitates "
+                    f"Firefox with goes up to version {imitated}: CloudFlare "
+                    "can tell the difference, and is likely to refuse the app "
+                    "again however often the check is passed.  Updating "
+                    "curl_cffi (pip install -U curl_cffi) will help once it "
+                    "catches up — until then, open it in your browser "
+                    "instead.")
+        return ("\n\nFirefox holds a clearance from an earlier check, but "
+                "CloudFlare no longer accepts it from the app: pass the check "
+                "again in Firefox.")
+
+    def _need_clearance(self, web_url: str, refused_ua: str = "") -> None:
+        """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
+        and try again by itself the moment Firefox holds a new clearance.
+        *refused_ua*: see eng_rep_pdf.CloudflareChallenge."""
+        self._reveal()
+        self._clear_body()
+        self._status_var.set(f"{self._SITE_NAME} needs a CloudFlare check.")
+        frame = ttk.Frame(self._body)
+        frame.pack(fill="both", expand=True, padx=24, pady=24)
+        text = self._handoff_text()
+        if refused_ua:
+            text += self._refused_text(refused_ua)
+        ttk.Label(
+            frame, wraplength=560, justify="left", text=text,
+        ).pack(anchor="w", pady=(0, 16))
+        row = ttk.Frame(frame)
+        row.pack(anchor="w")
+
+        def open_ff() -> None:
+            if eng_rep_pdf.open_in_firefox(web_url):
+                self._status_var.set(self._handoff_waiting_text())
+            else:
+                eng_rep_pdf.open_in_browser(web_url)
+
+        def retry() -> None:
+            self._clearance_watch = None
+            self._clear_body()
+            self._fetch()
+
+        self._watch_for_clearance(retry)
+
+        ttk.Button(row, text="Open in Firefox", command=open_ff).pack(side="left")
+        ttk.Button(row, text="Retry", command=retry).pack(side="left", padx=8)
+        ttk.Button(row, text="Open in browser instead",
+                   command=lambda: (eng_rep_pdf.open_in_browser(self._site_url()),
+                                    self._win.destroy())).pack(side="left")
+
+    #: How long the hand-off panel waits for a new clearance before leaving it
+    #: to the Retry button, and how often it looks.
+    _CLEARANCE_WAIT = 600.0
+    _CLEARANCE_POLL = 3.0
+
+    def _watch_for_clearance(self, retry) -> None:
+        """Call *retry* once Firefox holds a clearance for the site it did
+        not hold when the panel went up — the reader has passed the check —
+        for as long as the panel is showing (up to ten minutes).  Only the
+        clearance the reader obtains is used; nothing here answers the
+        check."""
+        token = object()
+        self._clearance_watch = token
+
+        def watching() -> bool:
+            return getattr(self, "_clearance_watch", None) is token
+
+        def stop(event) -> None:
+            if event.widget is self._win:
+                self._clearance_watch = None
+
+        try:
+            self._win.bind("<Destroy>", stop, add="+")
+        except tk.TclError:
+            return
+
+        def load() -> None:
+            if watching():
+                self._say("CloudFlare check passed — loading the scan…")
+                retry()
+
+        def run() -> None:
+            try:
+                mark = self._clearance_mark()
+            except Exception as exc:
+                print(f"[cloudflare] can't watch Firefox's cookies: {exc}")
+                return
+            deadline = time.monotonic() + self._CLEARANCE_WAIT
+            while watching() and time.monotonic() < deadline:
+                time.sleep(self._CLEARANCE_POLL)
+                try:
+                    changed = self._clearance_mark() != mark
+                except Exception:
+                    return
+                if changed:
+                    self._post(load)
+                    return
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _link_out(self) -> None:
+        """In-app fetch isn't possible here (Firefox or a dependency
+        missing).  Offer the page on the site instead — in Firefox, when
+        it's installed, or the browser."""
+        self._reveal()
+        self._clear_body()
+        web_url = self._site_url()
+        has_ff = eng_rep_pdf.firefox_available()
+        frame = ttk.Frame(self._body)
+        frame.pack(fill="both", expand=True, padx=24, pady=24)
+        ttk.Label(frame, wraplength=560, justify="left",
+                  text=self._link_out_text(has_ff)).pack(
+            anchor="w", pady=(0, 16))
+        row = ttk.Frame(frame)
+        row.pack(anchor="w")
+        if has_ff:
+            ttk.Button(
+                row, text="Open in Firefox",
+                command=lambda: (eng_rep_pdf.open_in_firefox(web_url),
+                                 self._status_var.set("Opened in Firefox.")),
+            ).pack(side="left")
+        ttk.Button(
+            row, text="Open in browser",
+            command=lambda: (eng_rep_pdf.open_in_browser(web_url),
+                             self._status_var.set("Opened in your browser.")),
+        ).pack(side="left", padx=8)
+        self._status_var.set(
+            f"In-app viewing unavailable — open on {self._SITE_NAME}.")
+
+
+# ---------------------------------------------------------------------------
+# The SEC's Decisions and Reports — the cited pages of HathiTrust's scan
+# ---------------------------------------------------------------------------
+
+class _SecPdfWindow(_CloudflarePdfWindow):
+    """A decision in the SEC's Decisions and Reports, in the viewer: its
+    pages from HathiTrust's scan (see sec_pdf), opened at the page cited.
+
+    HathiTrust stands behind a CloudFlare check, so the pages are fetched as
+    the English Reports' are, with the clearance the reader obtained by
+    passing the check in Firefox.  Until there is one, the window asks
+    whether to open the page in Firefox to pass the check — the pages then
+    load here by themselves — or to read it in the browser instead."""
+
+    _SITE_NAME = "HathiTrust"
+
+    def __init__(self, parent: tk.Misc, spec: str,
+                 status=lambda _s: None, *, app=None) -> None:
+        self._spec = spec
+        self._open_index = 0
+        self._note = ""
+        title = sec_decisions.spec_label(spec) or "SEC decision"
+        super().__init__(parent, sec_decisions.page_url(spec), title,
+                         status, app=app, is_case=True)
+
+    def _history_entry(self):  # overrides _PdfWindow
+        # One entry a decision: reopening it goes back to the page last
+        # opened.
+        app, spec = self._app, self._spec
+        if app is None:
+            return None
+        return (f"sec:{sec_decisions.base_spec(spec)}", self._title,
+                lambda parent=None: _SecPdfWindow(
+                    app.root if parent is None else parent, spec, app=app),
+                {"type": "sec", "spec": spec})
+
+    def _bookmark_descriptor(self):  # overrides _PdfWindow
+        if self._app is None:
+            return None
+        return {"key": f"sec:{sec_decisions.base_spec(self._spec)}",
+                "label": self._title, "noun": "decision",
+                "payload": {"type": "sec", "spec": self._spec}}
+
+    def _toggle_bookmark(self):  # overrides _PdfWindow
+        # Pages once fetched stay in sec_pdf's own disk cache, so there is
+        # no separate copy to save alongside the bookmark.
+        app = self._app
+        if app is None or not hasattr(app, "is_bookmarked"):
+            return
+        desc = self._bookmark_descriptor()
+        if not desc:
+            return
+        if app.is_bookmarked(desc["key"]):
+            app.remove_bookmark(desc["key"])
+        else:
+            app.add_bookmark(desc)
+
+    def _site_url(self) -> str:  # overrides _CloudflarePdfWindow
+        # The page cited, in HathiTrust's own viewer.
+        return sec_decisions.page_url(self._spec)
+
+    def _clearance_mark(self) -> tuple:  # overrides _CloudflarePdfWindow
+        return eng_rep_pdf.clearance_mark(sec_pdf.SITE)
+
+    def _handoff_text(self) -> str:  # overrides _CloudflarePdfWindow
+        return ("HathiTrust is behind a CloudFlare check.\n\n"
+                "To read this decision in the app, click “Open in Firefox” "
+                "and pass the “Verify you are human” check there — the pages "
+                "load here as soon as you have (or click “Retry”).  Once "
+                "cleared, SEC decisions load straight in the app, and their "
+                "pages are kept so you won't be asked for them again.\n\n"
+                "Or click “Open in browser instead” to read it on "
+                "HathiTrust's own site.")
+
+    def _handoff_waiting_text(self) -> str:  # overrides _CloudflarePdfWindow
+        return "Pass the check in Firefox — the pages load here then."
+
+    def _link_out_text(self, has_ff: bool) -> str:  # overrides _CloudflarePdfWindow
+        msg = ("This decision can't be fetched inside the app here.\n\n"
+               "Open it on HathiTrust instead: the page cited opens in "
+               "HathiTrust's own viewer.")
+        needs = []
+        if not has_ff:
+            needs.append("Firefox")
+        if not eng_rep_pdf.deps_present():
+            needs.append("the curl_cffi package (pip install curl_cffi)")
+        if needs:
+            msg += ("\n\nTo read SEC decisions in the app, install "
+                    + " and ".join(needs) + ".")
+        return msg
+
+    def _fetch(self) -> None:  # overrides _PdfWindow._fetch
+        try:
+            import pypdfium2  # noqa: F401
+            from PIL import ImageTk  # noqa: F401
+        except ImportError:
+            self._reveal()
+            if messagebox.askyesno(
+                "PDF viewer not installed",
+                "Viewing PDFs inside the app needs two Python packages:\n\n"
+                "    pip install pypdfium2 Pillow\n\n"
+                "Open this decision on HathiTrust instead?",
+                parent=self._dialog_parent(),
+            ):
+                eng_rep_pdf.open_in_browser(self._site_url())
+            self._win.destroy()
+            return
+        self._status_var.set(f"Loading {self._title} from HathiTrust…")
+        spec = self._spec
+
+        def run() -> None:
+            try:
+                with _watching(self._watch):
+                    pages = sec_pdf.fetch(spec)
+                    # Measured here, off the Tk thread.
+                    meta = _measure_pdf_pages(pages.data)
+            except eng_rep_pdf.CloudflareChallenge as exc:
+                self._post(self._need_clearance, exc.web_url, exc.refused_ua)
+                return
+            except eng_rep_pdf.FetchUnavailable:
+                self._post(self._link_out)
+                return
+            except eng_rep_pdf.OriginError as exc:
+                self._post(self._error,
+                           f"HathiTrust returned an error (HTTP {exc.status})."
+                           if exc.status else "HathiTrust could not be reached.")
+                return
+            except Exception as exc:  # no page index, a malformed file
+                self._post(self._error, str(exc))
+                return
+            self._post(self._arrived, pages, meta)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _arrived(self, pages, meta=None) -> None:
+        self._open_index = pages.index
+        self._note = pages.note
+        self._show(pages.data, meta)
+
+    def _show(self, data: bytes, meta=None) -> None:  # overrides _PdfWindow._show
+        super()._show(data, meta)
+        target = self._float if self._float is not None else self._pane
+        if target is not None and self._open_index:
+            index = self._open_index
+            try:
+                # After the pages are laid out: a pane scrolled before its
+                # first layout has nowhere to go.
+                self._win.after(150, lambda: target.scroll_to_page(index))
+            except tk.TclError:
+                pass
+        if target is not None and self._note:
+            note = self._note
+            try:
+                self._win.after(400, lambda: self._say(note))
+            except tk.TclError:
+                pass
+
+    def _error(self, msg: str) -> None:  # overrides _PdfWindow._error
+        self._reveal()      # ends the load's status window too
+        self._status_var.set(f"{self._title}: {msg}")
+        if messagebox.askyesno(
+            "SEC decision",
+            f"{msg}\n\nOpen this decision on HathiTrust, in your web "
+            "browser, instead?",
+            parent=self._dialog_parent(),
+        ):
+            eng_rep_pdf.open_in_browser(self._site_url())
+        self._win.destroy()
+
 
 def _open_sec(parent: tk.Misc, spec: str,
               status=lambda _s: None, *, app=None) -> None:
     """Open a citation to the SEC's Decisions and Reports (a ``("sec",
-    spec)`` action) at the cited page of HathiTrust's scan, in the web
-    browser.  HathiTrust's CloudFlare check admits people, not scripts, so
-    the pages can't be fetched into a viewer of the app's own; the browser
-    passes the check, and HathiTrust's viewer turns the pages.
+    spec)`` action) at the page cited: HathiTrust's scan of the decision, in
+    the app's viewer (see _SecPdfWindow) — which, until the reader has passed
+    HathiTrust's CloudFlare check in Firefox, asks whether to do that or to
+    read the page in the web browser instead.
 
-    Kept in History like a document opened here, one entry a decision:
-    reopening it goes back to the page last opened."""
+    A page the index can't place in the scans can only be looked for: the
+    series' catalogue record opens in the browser, kept in History like a
+    document opened here."""
     label = sec_decisions.spec_label(spec) or "the SEC decision"
+    window = sec_pdf.page_window(spec)
+    if window.vol and sec_decisions.locate(window.vol, window.pin) is not None:
+        try:
+            status(f"Opening {label}…")
+        except tk.TclError:
+            pass
+        _SecPdfWindow(parent, spec, status, app=app)
+        return
     webbrowser.open(sec_decisions.page_url(spec))
     try:
         status(f"Opened {label} at HathiTrust, in your web browser.")
@@ -34995,12 +35374,14 @@ def _open_sec(parent: tk.Misc, spec: str,
 # English Reports — open the CommonLII scan (cached; CloudFlare hand-off)
 # ---------------------------------------------------------------------------
 
-class _EngRepPdfWindow(_PdfWindow):
+class _EngRepPdfWindow(_CloudflarePdfWindow):
     """The in-app viewer for an English Reports scan from CommonLII.  Reuses the
     Statutes-at-Large PDF pane (centered, zoomable, Download/Print) but fetches
     through :mod:`eng_rep_pdf` — disk cache first, then a ``curl_cffi`` fetch
     using Firefox's CloudFlare clearance.  When there is no clearance yet it
     shows a hand-off panel that opens the case in Firefox and offers Retry."""
+
+    _SITE_NAME = "CommonLII"
 
     def __init__(self, parent: tk.Misc, case: "eng_rep.ERCase",
                  status=lambda _s: None, *, app=None, pin: str = "",
@@ -35083,7 +35464,7 @@ class _EngRepPdfWindow(_PdfWindow):
                     meta = _measure_pdf_pages(data)
                 self._post(self._show, data, meta)
             except eng_rep_pdf.CloudflareChallenge as exc:
-                self._post(self._need_clearance, exc.web_url)
+                self._post(self._need_clearance, exc.web_url, exc.refused_ua)
             except eng_rep_pdf.FetchUnavailable:
                 self._post(self._link_out)
             except eng_rep_pdf.OriginError as exc:
@@ -35129,111 +35510,20 @@ class _EngRepPdfWindow(_PdfWindow):
             return
         self._say(f"Opened at page {pin}.")
 
-    def _clear_body(self) -> None:
-        for child in self._body.winfo_children():
-            child.destroy()
+    def _site_url(self) -> str:  # overrides _CloudflarePdfWindow
+        # The *case page*, not the hotlink-blocked .pdf: the scan loads when
+        # it is clicked from there.
+        return self._case.web_url
 
-    def _need_clearance(self, web_url: str) -> None:
-        """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
-        and try again by itself the moment Firefox holds a new clearance."""
-        self._reveal()
-        self._clear_body()
-        self._status_var.set("CommonLII needs a CloudFlare check.")
-        frame = ttk.Frame(self._body)
-        frame.pack(fill="both", expand=True, padx=24, pady=24)
-        ttk.Label(
-            frame, wraplength=560, justify="left",
-            text=("CommonLII is behind a CloudFlare check.\n\n"
-                  "To view this scan in the app, click “Open in Firefox” and "
-                  "pass the “Just a moment…” check there — the scan loads here "
-                  "as soon as you have (or click “Retry”).  Once cleared, this "
-                  "and other English Reports cases load straight in the app "
-                  "(and are cached so you won't be asked again)."),
-        ).pack(anchor="w", pady=(0, 16))
-        row = ttk.Frame(frame)
-        row.pack(anchor="w")
+    def _handoff_text(self) -> str:  # overrides _CloudflarePdfWindow
+        return ("CommonLII is behind a CloudFlare check.\n\n"
+                "To view this scan in the app, click “Open in Firefox” and "
+                "pass the “Just a moment…” check there — the scan loads here "
+                "as soon as you have (or click “Retry”).  Once cleared, this "
+                "and other English Reports cases load straight in the app "
+                "(and are cached so you won't be asked again).")
 
-        def open_ff() -> None:
-            if eng_rep_pdf.open_in_firefox(web_url):
-                self._status_var.set(
-                    "Pass the check in Firefox — the scan loads here then.")
-            else:
-                eng_rep_pdf.open_in_browser(web_url)
-
-        def retry() -> None:
-            self._clearance_watch = None
-            self._clear_body()
-            self._fetch()
-
-        self._watch_for_clearance(retry)
-
-        ttk.Button(row, text="Open in Firefox", command=open_ff).pack(side="left")
-        ttk.Button(row, text="Retry", command=retry).pack(side="left", padx=8)
-        ttk.Button(row, text="Open in browser instead",
-                   command=lambda: (eng_rep_pdf.open_in_browser(self._case.web_url),
-                                    self._win.destroy())).pack(side="left")
-
-    #: How long the hand-off panel waits for a new clearance before leaving it
-    #: to the Retry button, and how often it looks.
-    _CLEARANCE_WAIT = 600.0
-    _CLEARANCE_POLL = 3.0
-
-    def _watch_for_clearance(self, retry) -> None:
-        """Call *retry* once Firefox holds a CommonLII clearance it did not
-        hold when the panel went up — the reader has passed the check — for
-        as long as the panel is showing (up to ten minutes).  Only the
-        clearance the reader obtains is used; nothing here answers the
-        check."""
-        token = object()
-        self._clearance_watch = token
-
-        def watching() -> bool:
-            return getattr(self, "_clearance_watch", None) is token
-
-        def stop(event) -> None:
-            if event.widget is self._win:
-                self._clearance_watch = None
-
-        try:
-            self._win.bind("<Destroy>", stop, add="+")
-        except tk.TclError:
-            return
-
-        def load() -> None:
-            if watching():
-                self._say("CloudFlare check passed — loading the scan…")
-                retry()
-
-        def run() -> None:
-            try:
-                mark = eng_rep_pdf.clearance_mark()
-            except Exception as exc:
-                print(f"[eng_rep_pdf] can't watch Firefox's cookies: {exc}")
-                return
-            deadline = time.monotonic() + self._CLEARANCE_WAIT
-            while watching() and time.monotonic() < deadline:
-                time.sleep(self._CLEARANCE_POLL)
-                try:
-                    changed = eng_rep_pdf.clearance_mark() != mark
-                except Exception:
-                    return
-                if changed:
-                    self._post(load)
-                    return
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _link_out(self) -> None:
-        """In-app fetch isn't possible here (Firefox or a dependency missing).
-        Offer the same hand-off as the CloudFlare panel: open the case page on
-        CommonLII — the *main site*, so the scan's hotlink check passes when you
-        click through to it — preferring Firefox when it's installed."""
-        self._reveal()
-        self._clear_body()
-        web_url = self._case.web_url
-        has_ff = eng_rep_pdf.firefox_available()
-        frame = ttk.Frame(self._body)
-        frame.pack(fill="both", expand=True, padx=24, pady=24)
+    def _link_out_text(self, has_ff: bool) -> str:  # overrides _CloudflarePdfWindow
         msg = ("This English Reports scan can't be fetched inside the app "
                "here.\n\nOpen the case on CommonLII and click through to the "
                "scan there: the site only serves the PDF when you arrive from "
@@ -35242,22 +35532,7 @@ class _EngRepPdfWindow(_PdfWindow):
         if not has_ff:
             msg += ("\n\nFor in-app viewing (cached, no repeat checks), install "
                     "Firefox and run:\n\n    pip install curl_cffi browser_cookie3")
-        ttk.Label(frame, wraplength=560, justify="left", text=msg).pack(
-            anchor="w", pady=(0, 16))
-        row = ttk.Frame(frame)
-        row.pack(anchor="w")
-        if has_ff:
-            ttk.Button(
-                row, text="Open in Firefox",
-                command=lambda: (eng_rep_pdf.open_in_firefox(web_url),
-                                 self._status_var.set("Opened in Firefox.")),
-            ).pack(side="left")
-        ttk.Button(
-            row, text="Open in browser",
-            command=lambda: (eng_rep_pdf.open_in_browser(web_url),
-                             self._status_var.set("Opened in your browser.")),
-        ).pack(side="left", padx=8)
-        self._status_var.set("In-app viewing unavailable — open on CommonLII.")
+        return msg
 
     def _error(self, msg: str) -> None:  # overrides _PdfWindow._error
         """Origin error fallback — open the CommonLII *case page* (not the

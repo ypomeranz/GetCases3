@@ -530,11 +530,14 @@ class FetchTests(unittest.TestCase):
                          self._candidate("b", "july", "154")])
         self.assertEqual(cm.exception.web_url, self.WEB)
         self.assertEqual(len(self.requests), 2)   # both were tried
+        # The freshest clearance, as sent: the panel says why it was refused.
+        self.assertIn("Firefox/156.0", cm.exception.refused_ua)
 
     def test_no_clearance_anywhere_asks_without_a_request(self):
-        with self.assertRaises(eng_rep_pdf.CloudflareChallenge):
+        with self.assertRaises(eng_rep_pdf.CloudflareChallenge) as cm:
             self._fetch([])
         self.assertEqual(self.requests, [])
+        self.assertEqual(cm.exception.refused_ua, "")
 
     def test_an_origin_error_is_reported_not_retried_with_another_cookie(self):
         # CloudFlare was passed; the origin said 404.  Another profile's
