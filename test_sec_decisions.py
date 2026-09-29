@@ -1,21 +1,17 @@
 """The SEC's Decisions and Reports: read as opinions cite them ("8 S.E.C. 893,
 915-921"), found in the shipped page index (every printed page of the 58
-volumes placed in HathiTrust's scans), and opened at the cited page — in the
-app's viewer, from HathiTrust's scan (see test_sec_pdf), or at HathiTrust in
-the web browser.
+volumes placed in HathiTrust's scans), and opened at HathiTrust, in the web
+browser, at the cited page.
 
 The citations are from SEC v. Chenery Corp., 332 U.S. 194, 197-98 (1947),
 and from decisions whose citations and years are well known.
 """
 
 import json
-import os
 import pathlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-
-os.environ.setdefault("GETCASES_SKIP_DEPENDENCY_PROMPT", "1")
 
 import brief_compiler
 import citations
@@ -195,54 +191,30 @@ class BriefCompilerTests(unittest.TestCase):
                       resolved.note)
 
 
-#: The viewer itself — the tests below put a recorder in its place.
-SEC_PDF_WINDOW = courtlistener_gui._SecPdfWindow
-
-
 class GuiTests(unittest.TestCase):
     def setUp(self):
-        self.opened = []            # pages the web browser was asked for
-        self.windows = []           # (args, kwargs) each viewer opened with
-        for target, attr, effect in (
-                (courtlistener_gui.webbrowser, "open", self.opened.append),
-                (courtlistener_gui, "_SecPdfWindow",
-                 lambda *a, **kw: self.windows.append((a, kw)))):
-            patcher = patch.object(target, attr, side_effect=effect)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        self.opened = []
+        patcher = patch.object(courtlistener_gui.webbrowser, "open",
+                               side_effect=self.opened.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.app = SimpleNamespace(root=object(), record_case_view=Mock())
 
-    def test_a_citation_opens_the_cited_pages_in_the_viewer(self):
+    def test_a_citation_opens_the_cited_page_in_the_browser(self):
         status = Mock()
         courtlistener_gui._open_sec(None, sec.make_spec(8, 893, 915), status, app=self.app)
-        (args, kwargs), = self.windows
-        self.assertEqual(args[1], sec.make_spec(8, 893, 915))
-        self.assertIs(kwargs["app"], self.app)
-        self.assertEqual(self.opened, [])
+        self.assertEqual(self.opened,
+                         ["https://babel.hathitrust.org/cgi/pt?id=osu.32435025999830&seq=935"])
         self.assertIn("8 S.E.C. 893, 915 (1941)", status.call_args[0][0])
 
-    def test_a_page_the_index_cannot_place_opens_the_catalogue(self):
-        with patch.object(sec, "locate", return_value=None):
-            courtlistener_gui._open_sec(None, sec.make_spec(8, 893, 915), app=self.app)
-        self.assertEqual(self.windows, [])
-        self.assertEqual(self.opened, [sec.CATALOG_URL])
-        key, label, reopen, payload = self.app.record_case_view.call_args[0]
-        self.assertEqual(key, f"sec:{sec.make_spec(8, 893)}")
-        self.assertEqual(payload, {"type": "sec", "spec": sec.make_spec(8, 893, 915)})
-
-    def _window(self, spec):
-        win = object.__new__(SEC_PDF_WINDOW)
-        win._app, win._spec, win._title = self.app, spec, sec.spec_label(spec)
-        return win
-
     def test_history_keeps_one_entry_a_decision(self):
-        key, label, reopen, payload = self._window(
-            sec.make_spec(8, 893, 915))._history_entry()
+        courtlistener_gui._open_sec(None, sec.make_spec(8, 893, 915), app=self.app)
+        key, label, reopen, payload = self.app.record_case_view.call_args[0]
         self.assertEqual(key, f"sec:{sec.make_spec(8, 893)}")
         self.assertEqual(label, "8 S.E.C. 893, 915 (1941)")
         self.assertEqual(payload, {"type": "sec", "spec": sec.make_spec(8, 893, 915)})
         reopen()
-        self.assertEqual(self.windows[0][0][1], sec.make_spec(8, 893, 915))
+        self.assertEqual(len(self.opened), 2)
 
     def test_history_reopens_it_after_a_restart(self):
         fake = SimpleNamespace(root=object(), _status_var=Mock())
@@ -252,22 +224,12 @@ class GuiTests(unittest.TestCase):
             opener()
         self.assertEqual(open_sec.call_args[0][1], sec.make_spec(10, 200))
 
-    def test_a_decision_is_bookmarked_and_reopens_from_the_bookmark(self):
-        desc = self._window(sec.make_spec(8, 893, 915))._bookmark_descriptor()
-        self.assertEqual(desc["key"], f"sec:{sec.make_spec(8, 893)}")
-        self.assertEqual(desc["noun"], "decision")
-        fake = SimpleNamespace(root=object(), _status_var=Mock())
-        opener = courtlistener_gui.CourtListenerGUI._bookmark_opener_from_entry(
-            fake, desc)
-        with patch.object(courtlistener_gui, "_open_sec") as open_sec:
-            opener()
-        self.assertEqual(open_sec.call_args[0][1], sec.make_spec(8, 893, 915))
-
     def test_briefs_and_scans_open_it_too(self):
         # A brief's link, a scan's link and Spotlight's all go this way.
         courtlistener_gui._follow_brief_action(
             self.app, None, ("sec", sec.make_spec(10, 200)), Mock())
-        self.assertEqual([a[1] for a, _kw in self.windows], [sec.make_spec(10, 200)])
+        self.assertEqual(self.opened,
+                         ["https://babel.hathitrust.org/cgi/pt?id=osu.32435056042609&seq=218"])
         self.assertEqual(courtlistener_gui._brief_action_category("sec"), "case")
         self.assertIn("sec", courtlistener_gui._SPOTLIGHT_CASE_ACTIONS)
 

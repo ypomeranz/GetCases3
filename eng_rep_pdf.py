@@ -67,11 +67,6 @@ All of this is optional: ``curl_cffi`` and Firefox may be absent, in which case
 :func:`can_fetch` is False and the caller falls back to simply opening the
 citation in the user's browser.
 
-The same clearance machinery serves any site behind CloudFlare that Firefox
-can pass: :func:`fetch_cleared` takes the site's cookie host, and
-:mod:`sec_pdf` fetches HathiTrust's pages of the SEC's Decisions and Reports
-through it.
-
 No tkinter here -- the GUI drives the user-facing hand-off/retry; this module is
 the headless fetch+cache engine.  Run ``python -X utf8 eng_rep_pdf.py`` to see
 every profile, its clearance and the UA it will be sent under, and to fetch a
@@ -113,7 +108,7 @@ class CloudflareChallenge(Exception):
     Firefox.  ``web_url`` is the page to open for them to do so.
     ``refused_ua``, where Firefox did hold a clearance, is the User-Agent it
     was sent under: CloudFlare turned the app away though the check had been
-    passed (see :func:`imitated_firefox_major`)."""
+    passed."""
 
     def __init__(self, web_url: str, refused_ua: str = ""):
         super().__init__("CloudFlare challenge")
@@ -283,15 +278,6 @@ def can_fetch() -> bool:
 
 
 _IMPERSONATE_CACHE: Optional[str] = None
-
-
-def imitated_firefox_major() -> Optional[str]:
-    """The Firefox version whose connection curl_cffi imitates ("147"), or
-    None.  CloudFlare compares the connection with the version a clearance
-    was obtained under, so a Firefox newer than this can pass the check and
-    still see the app refused with its clearance."""
-    m = re.fullmatch(r"firefox(\d+)", _impersonate_target())
-    return m.group(1) if m else None
 
 
 def _impersonate_target() -> str:
@@ -570,8 +556,8 @@ def _read_cookies_sqlite(db: Path, domain_substr: str) -> dict:
 
 
 class Clearance(NamedTuple):
-    """One Firefox profile's clearance for a site (CommonLII, HathiTrust),
-    with everything that has to travel with it: the profile's whole cookie
+    """One Firefox profile's clearance for a site (CommonLII), with
+    everything that has to travel with it: the profile's whole cookie
     set for the site and the User-Agent of the Firefox that runs that
     profile."""
 
@@ -611,7 +597,7 @@ def _browser_cookie3_clearance(site: str = COMMONLII) -> Optional[Clearance]:
 
 def _firefox_clearances(site: str = COMMONLII) -> "list[Clearance]":
     """Every Firefox profile's live-looking clearance for *site* (a cookie
-    host: "commonlii", "hathitrust"), freshest first -- the order
+    host, as "commonlii"), freshest first -- the order
     :func:`fetch_cleared` tries them in.
 
     Searches every known Firefox profile location and reads cookies.sqlite
@@ -652,12 +638,6 @@ def _firefox_clearances(site: str = COMMONLII) -> "list[Clearance]":
         if extra is not None:
             out.append(extra)
     return out
-
-
-def clearances(site: str = COMMONLII) -> "list[Clearance]":
-    """The clearances :func:`fetch_cleared` would try for *site*, read once
-    -- for a caller fetching many files, to hand to each fetch."""
-    return _firefox_clearances(site)
 
 
 def clearance_mark(site: str = COMMONLII) -> tuple:
@@ -744,19 +724,15 @@ def _is_pdf(data: bytes) -> bool:
     return data[:4] == b"%PDF"
 
 
-def fetch_cleared(url: str, site: str, *, referer: str, web_url: str,
-                  want=_is_pdf, candidates=None) -> bytes:
-    """GET *url* from a site behind CloudFlare under the clearance Firefox
-    holds for it -- *site* is the cookie host ("commonlii", "hathitrust") --
-    and return the body, which *want* must accept (a PDF, by default).
+def fetch_cleared(url: str, site: str, *, referer: str, web_url: str) -> bytes:
+    """GET the PDF *url* from a site behind CloudFlare under the clearance
+    Firefox holds for it -- *site* is the cookie host ("commonlii").
 
     Raises :class:`FetchUnavailable` when in-app fetching isn't possible (the
     caller links out), :class:`CloudflareChallenge` carrying *web_url* -- the
     page for the reader to pass the check on -- when the user must clear the
     check in Firefox, or :class:`OriginError` when CloudFlare let the request
-    through and the site itself refused it.  *candidates*, from
-    :func:`clearances`, spares a caller fetching many files from reading
-    Firefox's cookies again for each.
+    through and the site itself refused it.
 
     Every Firefox profile holding a live-looking clearance is a candidate,
     tried freshest first with its own cookies under its own Firefox's
@@ -771,8 +747,7 @@ def fetch_cleared(url: str, site: str, *, referer: str, web_url: str,
     if not can_fetch():
         raise FetchUnavailable()
 
-    candidates = list(_firefox_clearances(site) if candidates is None
-                      else candidates)
+    candidates = list(_firefox_clearances(site))
     if not candidates:
         # No clearance anywhere -- the user has to pass the check in Firefox.
         raise CloudflareChallenge(web_url)
@@ -794,7 +769,7 @@ def fetch_cleared(url: str, site: str, *, referer: str, web_url: str,
         except Exception as exc:
             raise OriginError(0) from exc
 
-        if status == 200 and want(data):
+        if status == 200 and _is_pdf(data):
             _LAST_GOOD = {**(_LAST_GOOD or {}),
                           site: (str(cand.db), cand.value)}
             return data

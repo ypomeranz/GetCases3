@@ -50,7 +50,7 @@ it for you.
 | `pypdfium2`, `Pillow` | Showing scans inside the app (without them, scans open in your browser) |
 | `customtkinter` | The modern look (optional) |
 | `pynput` | The **Ctrl+Space** shortcut that works from any application |
-| `curl_cffi`, `browser_cookie3` | English Reports and SEC decision scans inside the app (with Firefox, below) |
+| `curl_cffi`, `browser_cookie3` | English Reports scans (with Firefox, below) |
 | `selenium` | Reaching Google Scholar through Firefox when Google blocks the app |
 
 ### 3. Get a free CourtListener API token
@@ -143,16 +143,10 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
   viewer. A **legislative history** citation opens the cited pages of the
   Congressional Record, the committee report and so on.
 - A citation to the **SEC's Decisions and Reports** (`8 S.E.C. 893, 915`, and
-  the short form `8 S.E.C. at 917`) opens the decision's pages from
-  HathiTrust's scan, at the cited page. HathiTrust puts a CloudFlare check in
-  front of its scans, so the first time GetCases asks what you want: **Open in
-  Firefox** to pass the check there (the pages then load in GetCases by
-  themselves, and later decisions load straight in), or **Open in browser
-  instead** to read the page on HathiTrust's own site. Loading them in GetCases
-  needs [Firefox](#firefox) and the `curl_cffi` package. A decision longer than
-  24 pages opens with the 24 around the cited page. Pages once loaded are kept,
-  so they open again without the network. The decision is listed in History,
-  and can be bookmarked.
+  the short form `8 S.E.C. at 917`) opens HathiTrust's scan of the volume at
+  the cited page, **in your web browser**. HathiTrust lets people, not apps,
+  turn its pages, so the first time it may ask you to pass a quick check there.
+  The decision is listed in History, to open again.
 - **Right-click** a citation on a scan to open it in your web browser instead.
 
 You can keep clicking while something loads. Each link loads on its own, so a
@@ -318,15 +312,13 @@ saved and reused, with pinpoint pages still added automatically.
 Installing [Firefox](https://www.mozilla.org/firefox/) (free) turns on two
 things:
 
-1. **English Reports and SEC decision scans inside the app.** CommonLII, which
-   hosts the English Reports, and HathiTrust, which hosts the SEC's Decisions
-   and Reports, put a CloudFlare check ("Just a moment…", "Verify you are
-   human") in front of their scans. Pass that check once in Firefox (GetCases
-   offers to open the page there for you), and GetCases reuses Firefox's
-   clearance to download the scans itself. This needs the `curl_cffi` and
-   `browser_cookie3` packages. When the clearance expires, GetCases asks you to
-   pass the check in Firefox again. Without Firefox, both open in your web
-   browser.
+1. **English Reports scans inside the app.** CommonLII, which hosts the English
+   Reports, puts a CloudFlare "Just a moment…" check in front of its scans. Pass
+   that check once in Firefox (open any English Reports case there), and
+   GetCases reuses Firefox's clearance to download the scans itself. This needs
+   the `curl_cffi` and `browser_cookie3` packages. When the clearance expires,
+   GetCases asks you to pass the check in Firefox again. Without Firefox, English
+   Reports cases open in your web browser.
 2. **Google Scholar when Google blocks the app.** Heavy use can make Google
    Scholar answer with an "unusual traffic" challenge. With Firefox and the
    `selenium` package installed, GetCases then fetches Scholar pages through a
@@ -430,8 +422,7 @@ automatic matching that can go wrong. In particular:
 | Scans open in the browser instead of the app | Install `pypdfium2` and `Pillow` |
 | "CourtListener" results missing | Add your API token under **Settings → API Token…** |
 | Google Scholar returns nothing, or says it is blocked | Wait a few minutes, or set up [Firefox and selenium](#firefox) |
-| English Reports or an SEC decision ask you to "pass the check in Firefox" | Click **Open in Firefox**, let the check finish there, and the scan loads by itself (or click **Retry**) |
-| The check is passed in Firefox, but GetCases keeps asking | CloudFlare also compares how Firefox connects, and `curl_cffi` may not yet imitate your version of Firefox. Update `curl_cffi` (`pip install -U curl_cffi`), or click **Open in browser instead** |
+| English Reports ask you to "pass the check in Firefox" | Open any English Reports case in Firefox, let the check finish, then try again |
 | PDF export says LaTeX was not found | Install a [LaTeX distribution](#a-latex-distribution), or save the `.tex` source instead |
 | A document seems stuck | Its status window shows what is being tried; **Stop waiting** abandons it |
 
