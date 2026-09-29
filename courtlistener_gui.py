@@ -25130,8 +25130,9 @@ class _ScholarTextWindow:
 
         # Supreme Court cases: open the Oyez case-details panel from the start
         # (the checkbox above defaults on and the window is sized to fit it).
-        # Not in the floating viewer, which is narrow by design and cannot grow
-        # a column for it — "s" still opens it there if the reader wants it.
+        # Not in the floating viewer, which opens on the page alone — "s"
+        # opens the panel there, the window growing to hold it (see
+        # _FloatingPdfWindow._open_details).
         if self._is_scotus and not self._chromeless:
             self._toggle_details()
 
