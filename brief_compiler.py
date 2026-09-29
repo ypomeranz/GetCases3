@@ -37,6 +37,7 @@ from typing import Callable, Optional
 import bluebook_names
 import citations
 import legislative_history
+import sec_decisions
 
 __all__ = [
     "Authority",
@@ -61,8 +62,9 @@ class Authority:
     "cite" for a reporter case, "recap" for an unpublished opinion cited by
     docket / WL number, "usc"/"cfr"/"rule"/"const"/"statestat" for a statute
     source, "statpdf" for a Statutes at Large scan, "frpdf" for a Federal
-    Register scan, and "leghist" for legislative history (the Congressional
-    Record, a report, the Globe …). ``value`` is that action's payload. ``name``/``year`` are
+    Register scan, "leghist" for legislative history (the Congressional
+    Record, a report, the Globe …), and "sec" for a decision in the SEC's
+    Decisions and Reports. ``value`` is that action's payload. ``name``/``year`` are
     scraped from the brief only as a last-resort fallback for the file name."""
 
     kind: str
@@ -90,6 +92,8 @@ class Authority:
             return f"{spec['name']}, {docket}" if spec.get("name") else docket
         if self.kind == "leghist":
             return legislative_history.spec_label(self.value) or self.value
+        if self.kind == "sec":
+            return sec_decisions.spec_label(self.value, with_pin=False) or self.value
         return self.value
 
 
@@ -177,6 +181,10 @@ def collect_authorities(text: str) -> list[Authority]:
                 spec.pop("pin", None)
                 value = legislative_history.make_spec(**spec)
             key = (kind, str(value))
+        elif kind == "sec":
+            # One entry a decision, however many of its pages are cited.
+            value = sec_decisions.base_spec(str(value))
+            key = (kind, value)
         else:
             key = (kind, str(value))
         if key in by_key:
@@ -430,6 +438,10 @@ def _resolve_statute(resolver, auth: Authority) -> _Resolved:
                 return _Resolved((header + body).encode("utf-8"), ".txt",
                                  "official source", stem=label or title)
         return _Resolved(note="could not load the section text")
+    if auth.kind == "sec":
+        # HathiTrust admits browsers, not scripts: where to read it instead.
+        return _Resolved(note="SEC decision — HathiTrust's scan opens only in "
+                              "a web browser: " + sec_decisions.page_url(auth.value))
     return _Resolved(note=_NOTE_ONLY.get(auth.kind, "not a downloadable source"))
 
 

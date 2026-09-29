@@ -1,10 +1,10 @@
 # GetCases
 
 GetCases is a desktop research tool for American case law, plus statutes,
-regulations, legislative history and the old English Reports. Look a case up by
-name or citation and it opens the **scanned pages of the printed reporter**, with
-the opinion's text a keystroke away. Every citation in it is a link to the next
-case, statute or report.
+regulations, legislative history, SEC decisions and the old English Reports.
+Look a case up by name or citation and it opens the **scanned pages of the
+printed reporter**, with the opinion's text a keystroke away. Every citation in
+it is a link to the next case, statute or report.
 
 It runs on Windows, macOS and Linux and draws only on free public sources
 (CourtListener, Google Scholar, Harvard's Caselaw Access Project, the Library of
@@ -95,6 +95,7 @@ Press **Ctrl+Space** and type one of these, then press Enter:
 | A statute, regulation or rule | `42 USC 1983`, `29 CFR 1614.105`, `FRE 404` |
 | The Federal Register | `88 Fed. Reg. 382` |
 | Legislative history | `116 Cong. Rec. 36481`, `S. Rep. No. 95-797` |
+| An SEC decision | `8 S.E.C. 893, 915` |
 | The English Reports | `156 Eng. Rep. 145` |
 
 A citation opens straight away. A name shows a list of matching cases; choose one
@@ -141,6 +142,11 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
 - A **statute, regulation, court rule or the Constitution** opens in a statute
   viewer. A **legislative history** citation opens the cited pages of the
   Congressional Record, the committee report and so on.
+- A citation to the **SEC's Decisions and Reports** (`8 S.E.C. 893, 915`, and
+  the short form `8 S.E.C. at 917`) opens HathiTrust's scan of the volume at
+  the cited page, **in your web browser**. HathiTrust lets people, not apps,
+  turn its pages, so the first time it may ask you to pass a quick check there.
+  The decision is listed in History, to open again.
 - **Right-click** a citation on a scan to open it in your web browser instead.
 
 You can keep clicking while something loads. Each link loads on its own, so a
@@ -347,6 +353,7 @@ opinion begin on a page of their own. GetCases finds an installed LaTeX by itsel
 | [Cornell LII](https://www.law.cornell.edu/) | The Federal Rules (Civil, Criminal, Evidence, Appellate, Bankruptcy) |
 | State legislatures | California and Florida statutes in the app; other states' statute citations open on the state's official site |
 | [Congress.gov](https://www.congress.gov/), the [Internet Archive](https://archive.org/), [HathiTrust](https://www.hathitrust.org/) | The Annals of Congress, Register of Debates and Congressional Globe; older reports and documents |
+| [HathiTrust](https://www.hathitrust.org/) | The SEC's Decisions and Reports (1934 to 2006), opened at the cited page; the page index was built from the [HathiTrust Research Center](https://analytics.hathitrust.org/)'s Extracted Features |
 | [CommonLII](http://www.commonlii.org/) | The English Reports (cases from 1220 to 1865) |
 
 ---
@@ -373,6 +380,11 @@ automatic matching that can go wrong. In particular:
 - **The right case is found by matching,** by citation first and by name when
   it must. Two cases can begin on the same page, and similar names can be
   confused. Glance at the caption to confirm you have the case you meant.
+- **A citation to the SEC's Decisions and Reports can land a page off.**
+  GetCases places each printed page in HathiTrust's scan from the page numbers
+  the scans print, which it reads for nearly every page; beside a folded table
+  or chart the placement can be a page or two out. Its years for SEC decisions
+  are read the same way, from the decision's first page.
 - **Coverage has gaps.** The Caselaw Access Project ends with volumes published
   in 2018. The newest cases may not have reporter pages yet. Google Scholar lacks
   some unpublished and some state decisions. Some sources occasionally go
@@ -422,5 +434,6 @@ Project, the Library of Congress, the U.S. Government Publishing Office
 (GovInfo), the Supreme Court of the United States, Oyez, SCOTUSblog, the Office
 of the Law Revision Counsel, the Office of the Federal Register (eCFR), Cornell's
 Legal Information Institute, the California and Florida legislatures,
-Congress.gov, the Internet Archive, HathiTrust and CommonLII. All content remains
+Congress.gov, the Internet Archive, HathiTrust (and the HathiTrust Research
+Center) and CommonLII. All content remains
 the property of its owners.

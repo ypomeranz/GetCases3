@@ -31,6 +31,7 @@ import fed_cas
 import fed_rules
 import federal_register
 import legislative_history
+import sec_decisions
 import state_statutes
 import statutes_at_large
 import us_code
@@ -2379,6 +2380,12 @@ def _id_antecedent(
             if gap > ID_NEAR_GAP:
                 break
             return ("leghist", legislative_history.with_page(action[1], pin))
+        if action[0] == "sec":
+            # "8 S.E.C. 893, 915 …; id., at 917": another page of the
+            # decision — if the decision can run to it.
+            if sec_decisions.pin_in_range(action[1], pin):
+                return ("sec", sec_decisions.with_page(action[1], pin))
+            continue
         if action[0] == "cite":
             if _id_pin_in_range(action[1], pin):
                 lead = _parallel_lead(text, window, k, pin)
@@ -2614,7 +2621,9 @@ def detect_links(
       * ``("statpdf", url)`` — a Statutes at Large scan,
       * ``("frpdf", url)`` — a Federal Register scan,
       * ``("scotus", spec)`` — a Supreme Court decision cited by docket
-        number (see :func:`iter_scotus_docket_cites`).
+        number (see :func:`iter_scotus_docket_cites`),
+      * ``("sec", spec)`` — a decision in the SEC's Decisions and Reports
+        (see :mod:`sec_decisions`).
 
     Unlike the opinion reader this works over the whole document at once, so a
     short form ("410 U.S. at 152") or an ``Id.`` resolves against citations that
@@ -2705,9 +2714,20 @@ def detect_links(
             continue
         leghist_spans.append((start, end))
         matches.append((start, end, "leghist", spec))
+    # The SEC's Decisions and Reports ("8 S.E.C. 893, 915") — an agency's
+    # reporter, not a court's, so claimed ahead of the case passes: a
+    # Scholar lookup by it finds nothing.  They open at HathiTrust (see
+    # sec_decisions).
+    sec_spans: list[tuple[int, int]] = []
+    for start, end, spec in sec_decisions.iter_cites(text):
+        if any(start < e and s < end for s, e in recap_spans + leghist_spans):
+            continue
+        sec_spans.append((start, end))
+        matches.append((start, end, "sec", spec))
     # Recognised now, so no longer an authority that can't be opened.
     unlinkable = [(s, e) for s, e in unlinkable
-                  if not any(s < le and ls < e for ls, le in leghist_spans)]
+                  if not any(s < le and ls < e
+                             for ls, le in leghist_spans + sec_spans)]
     # Early lower-federal reporters ("1 Sumner, 73", "35 Fed. Rep. 665"),
     # pre-normalized to the abbreviations CourtListener indexes — claimed
     # ahead of the broad reporter fallback so the normalized form wins.
@@ -2728,13 +2748,13 @@ def detect_links(
     for m in EARLY_FED_CITE_RE.finditer(text):
         if any(m.start() < e and s < m.end()
                for s, e in engrep_spans + recap_spans + fedcas_spans
-               + stat_spans + fr_spans + leghist_spans):
+               + stat_spans + fr_spans + leghist_spans + sec_spans):
             continue
         efed_spans.append((m.start(), m.end()))
         matches.append((m.start(), m.end(), "cite", early_fed_cite_text(m)))
     claimed_spans = (
         engrep_spans + recap_spans + fedcas_spans + efed_spans
-        + stat_spans + fr_spans + leghist_spans
+        + stat_spans + fr_spans + leghist_spans + sec_spans
     )
     for m in case_cites:
         if any(m.start() < e and s < m.end() for s, e in claimed_spans):
@@ -2755,8 +2775,9 @@ def detect_links(
     # Short forms ("Roe, 410 U.S. at 152") resolve to the case's full citation.
     for m in _iter_short_cites(text):
         # A WL short form ("2014 WL 1922831 at *5") overlapping a RECAP span
-        # would outrank it (same start, longer) — the RECAP action wins.
-        if any(m.start() < e and s < m.end() for s, e in recap_spans):
+        # would outrank it (same start, longer) — the RECAP action wins; and
+        # "8 S.E.C. at 915" is the SEC decision's page, not a case's.
+        if any(m.start() < e and s < m.end() for s, e in recap_spans + sec_spans):
             continue
         pages = index.get((
             m.group(1), reporter_key(m.group(2)),
@@ -2894,6 +2915,10 @@ def detect_links(
             # Federal Cases case number -> CourtListener lookup at click
             # time; m is the pre-built JSON spec ({"no", "name"}).
             action = ("fedcas", m)
+        elif kind == "sec":
+            # The SEC's Decisions and Reports -> the cited page at
+            # HathiTrust; m is sec_decisions' spec ({"vol", "page", "pin"}).
+            action = ("sec", m)
         else:  # pragma: no cover - defensive
             action = None
         if action is not None:
@@ -2931,11 +2956,13 @@ def detect_links(
                 recent.append((("cite", base), span_end, segments[0][0]))
             else:
                 span_start = start
-                if kind in ("scotus", "recap"):
-                    # A decision cited by docket or WL number is named like
-                    # any other — "Trump v. California, No. 26A139 (…)",
-                    # "Hoffman, 2025 WL 1504376, at *4" — and the link takes
-                    # the name in, and a WL cite's pin and parenthetical.
+                if kind in ("scotus", "recap", "sec"):
+                    # A decision cited by docket or WL number, or in the
+                    # SEC's reporter, is named like any other — "Trump v.
+                    # California, No. 26A139 (…)", "Hoffman, 2025 WL
+                    # 1504376, at *4", "Federal Water Serv. Corp., 8 S.E.C.
+                    # 893" — and the link takes the name in, and a WL
+                    # cite's pin and parenthetical.
                     name_start = _case_name_start(text, start, floor, italic)
                     if name_start is not None:
                         span_start = name_start

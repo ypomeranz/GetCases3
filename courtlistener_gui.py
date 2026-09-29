@@ -1221,6 +1221,7 @@ import fed_rules
 import federal_register
 import legislative_history
 import leghist_fetch
+import sec_decisions
 import state_statutes
 import statutes_at_large
 import us_code
@@ -7347,6 +7348,12 @@ class CourtListenerGUI:
             if not spec:
                 return None
             return lambda: _LegHistPdfWindow(self.root, spec, app=self)
+        if kind == "sec":
+            spec = str(payload.get("spec") or "")
+            if not spec:
+                return None
+            return lambda: _open_sec(self.root, spec, self._status_var.set,
+                                     app=self)
         return None
 
     def _open_history_cl(
@@ -9123,6 +9130,16 @@ class CourtListenerGUI:
                 self._close_quick_popup()
                 _open_leghist(self.root, leg_action[1], self._status_var.set,
                               app=self)
+                return
+
+            # 1c. The SEC's Decisions and Reports: "8 S.E.C. 893, 915" —
+            # at HathiTrust, not the case search, which would read "S.E.C."
+            # as a court's reporter and find nothing.
+            sec_action = sec_decisions.parse_query(query)
+            if sec_action:
+                self._close_quick_popup()
+                _open_sec(self.root, sec_action[1], self._status_var.set,
+                          app=self)
                 return
 
             # 1a. Statute / regulation / federal rule: "42 USC 1983(b)",
@@ -26266,11 +26283,14 @@ class _ScholarTextWindow:
         # The span outranks the bare "Id." match at the same start.
         for s, e, spec in fed_cas.iter_cites(text):
             matches.append((s, e, "fedcas", spec))
-        # Legislative history — the Record, a report, the Globe … — ahead of
-        # the case cites, which would read "116 Cong. Rec. 36481" as a
-        # reporter's (a tie goes to the match listed first).
-        matches = [(s, e, "leghist", spec) for s, e, spec
-                   in legislative_history.iter_cites(text)] + matches
+        # Legislative history — the Record, a report, the Globe … — and the
+        # SEC's Decisions and Reports ahead of the case cites, which would
+        # read "116 Cong. Rec. 36481" and "8 S.E.C. 893" as a reporter's (a
+        # tie goes to the match listed first).
+        matches = ([(s, e, "leghist", spec) for s, e, spec
+                    in legislative_history.iter_cites(text)]
+                   + [(s, e, "sec", spec) for s, e, spec
+                      in sec_decisions.iter_cites(text)] + matches)
         matches.sort(key=lambda t: (t[0], -t[1]))
         pos = 0
         for start, end, kind, m in matches:
@@ -26332,10 +26352,18 @@ class _ScholarTextWindow:
                     # session last cited.
                     action = ("leghist",
                               legislative_history.with_page(la[1], pin))
+                elif la[0] == "sec":
+                    # Another page of the SEC decision last cited, if it
+                    # can run to it.
+                    action = (("sec", sec_decisions.with_page(la[1], pin))
+                              if sec_decisions.pin_in_range(la[1], pin)
+                              else None)
                 else:
                     action = la  # statute/regulation/rule → reopen (no pin page)
             elif kind == "leghist":
                 action = ("leghist", m)  # m is legislative_history's spec
+            elif kind == "sec":
+                action = ("sec", m)  # m is sec_decisions' spec
             elif kind == "statestat":
                 # In-app for priority states (once a parser exists), else a
                 # browser link-out.  `m` here is a state_statutes.Cite record.
@@ -30721,6 +30749,9 @@ class _ScholarTextWindow:
             _open_leghist(self._win, value, self._status_var.set,
                           app=self._app)
             return
+        if kind == "sec":
+            _open_sec(self._win, value, self._status_var.set, app=self._app)
+            return
         if kind == "engrep":
             _open_eng_rep(self._win, value, self._status_var.set,
                           app=self._app)
@@ -33004,7 +33035,8 @@ _CFR_SECREF_RE = re.compile(
     r"((?:\((?:\d{1,3}|[ivxIVX]{2,4}|[a-zA-Z]{1,3})\))*)"
 )
 
-_SPOTLIGHT_CASE_ACTIONS = frozenset(("cite", "engrep", "recap", "fedcas"))
+_SPOTLIGHT_CASE_ACTIONS = frozenset(("cite", "engrep", "recap", "fedcas",
+                                     "sec"))
 
 
 def _spotlight_case_action(
@@ -34760,6 +34792,34 @@ def _open_leghist(parent: tk.Misc, spec: str,
 
 
 # ---------------------------------------------------------------------------
+# The SEC's Decisions and Reports — the cited page of HathiTrust's scan
+# ---------------------------------------------------------------------------
+
+def _open_sec(parent: tk.Misc, spec: str,
+              status=lambda _s: None, *, app=None) -> None:
+    """Open a citation to the SEC's Decisions and Reports (a ``("sec",
+    spec)`` action) at the cited page of HathiTrust's scan, in the web
+    browser.  HathiTrust's CloudFlare check admits people, not scripts, so
+    the pages can't be fetched into a viewer of the app's own; the browser
+    passes the check, and HathiTrust's viewer turns the pages.
+
+    Kept in History like a document opened here, one entry a decision:
+    reopening it goes back to the page last opened."""
+    label = sec_decisions.spec_label(spec) or "the SEC decision"
+    webbrowser.open(sec_decisions.page_url(spec))
+    try:
+        status(f"Opened {label} at HathiTrust, in your web browser.")
+    except tk.TclError:
+        pass
+    if app is not None and hasattr(app, "record_case_view"):
+        root = getattr(app, "root", parent)
+        app.record_case_view(
+            f"sec:{sec_decisions.base_spec(spec)}", label,
+            lambda: _open_sec(root, spec, app=app),
+            {"type": "sec", "spec": spec})
+
+
+# ---------------------------------------------------------------------------
 # English Reports — open the CommonLII scan (cached; CloudFlare hand-off)
 # ---------------------------------------------------------------------------
 
@@ -35684,8 +35744,8 @@ def _open_eng_rep_case(parent: tk.Misc, case: "eng_rep.ERCase",
 
 #: Categories used to colour-code highlights by what the citation points at.
 def _brief_action_category(kind: str) -> str:
-    if kind in ("cite", "url", "engrep", "recap", "fedcas", "scotus"):
-        return "case"  # English Reports, RECAP and Federal Cases too
+    if kind in ("cite", "url", "engrep", "recap", "fedcas", "scotus", "sec"):
+        return "case"  # English Reports, RECAP, Federal Cases, SEC decisions
     if kind == "const":
         return "const"
     return "statute"
@@ -35703,6 +35763,8 @@ def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
         url = leghist_fetch.browser_url(value)
         if not url:
             return
+    elif kind == "sec":
+        url = sec_decisions.page_url(value)
     elif kind == "scotus":
         url = _scotus_docket_page_url(value)
         if not url:
@@ -36049,6 +36111,9 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
     if kind in _STATUTE_SOURCES or kind in ("browse", "statpdf", "frpdf",
                                             "leghist"):
         _open_statute_action(parent, action, status, app=app)
+        return
+    if kind == "sec":
+        _open_sec(parent, value, status, app=app)
         return
     if kind == "engrep":
         _open_eng_rep(parent, value, status, app=app)
@@ -36532,6 +36597,8 @@ class _BriefCompileResolver:
             return _stat_cite_from_url(value)
         if kind == "leghist":
             return legislative_history.spec_label(value, with_pin=False)
+        if kind == "sec":
+            return sec_decisions.spec_label(value, with_pin=False)
         mod = _STATUTE_SOURCES.get(kind)
         if mod is not None:
             try:
@@ -37588,6 +37655,9 @@ class _StatuteWindow:
             _open_leghist(self._win, value, self._status_var.set,
                           app=self._app)
             return
+        if kind == "sec":
+            _open_sec(self._win, value, self._status_var.set, app=self._app)
+            return
         _fetch_statute_window(
             self._win, kind, value, self._status_var.set, app=self._app
         )
@@ -38433,6 +38503,7 @@ def main() -> None:
     # would answer the hotkey too, and the two spotlights fall out of step.
     instance = app._claim_instance()
     eng_rep.warm()  # load the English Reports index in the background
+    sec_decisions.warm()  # and the SEC Decisions and Reports' page index
 
     # Run in the background by default: rather than greeting the user with the
     # full search window, GetCases starts hidden and waits.  Ctrl+Space opens
