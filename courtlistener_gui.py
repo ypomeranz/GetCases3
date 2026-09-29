@@ -414,6 +414,17 @@ def _history_button(app, parent_frame):
     return btn
 
 
+def _menu_window(menu) -> "Optional[tk.Misc]":
+    """The window a menu belongs to: the first of its masters that is not a
+    menu itself — a menu bar's cascade hangs from the bar, and the bar from
+    the window (a menu is a toplevel of its own to Tk, so its
+    ``winfo_toplevel`` is no help)."""
+    widget = menu
+    while widget is not None and isinstance(widget, tk.Menu):
+        widget = getattr(widget, "master", None)
+    return widget
+
+
 def _add_bookmarks_cascade(menubar: tk.Menu, app, win: tk.Misc) -> None:
     """Append a "Bookmarks" cascade to *menubar*: the current document's
     bookmark/unbookmark toggle first, then the saved bookmarks ordered by
@@ -7090,6 +7101,61 @@ def _mac_activate_app(allow_osascript: bool = True) -> bool:
         return False
 
 
+def _fetch_recent_scotus() -> tuple:
+    """The Court's latest opinions, as the Recent SCOTUS lists show them:
+    ``(decisions, merits, orders)`` — the homepage's Recent Decisions, or,
+    when it lists none, the Term's ten latest opinions of the Court; then the
+    five latest orders that drew separate writings.  Worker thread: this
+    waits on supremecourt.gov whenever scotus_recent's cache has gone
+    stale."""
+    import scotus_recent
+    decisions = scotus_recent.fetch_recent_decisions()
+    merits = [] if decisions else scotus_recent.recent_merits_opinions(10)
+    orders = scotus_recent.recent_order_opinions(5)
+    return decisions, merits, orders
+
+
+def _recent_scotus_menu_rows(decisions, merits, orders, *,
+                             most_opinions: int = 10,
+                             most_orders: int = 5) -> "tuple[list, list]":
+    """What a History menu lists of *decisions*, *merits* and *orders* (see
+    _fetch_recent_scotus): ``(opinions, orders)``, newest first, each row the
+    case name, the date as printed ("June 30, 2026") and what
+    CourtListenerGUI.open_supreme_court_pdf needs to open it.  Only what the
+    Court has put a PDF up for can be opened, so only that is listed."""
+    import scotus_recent
+
+    def row(name, date, url, *, docket="", decided="", citation="",
+            writing="merits") -> dict:
+        return {"name": name, "date": date, "url": url, "docket": docket,
+                "decided": decided, "citation": citation, "writing": writing}
+
+    opinions = [row(d.name, d.date, d.opinion_url, docket=d.docket,
+                    decided=scotus_recent.iso_date(d.date))
+                for d in decisions if d.opinion_url]
+    if not decisions:
+        opinions = [row(m.name, scotus_recent.display_date(m.date),
+                        m.opinion_url, docket=m.docket, decided=m.date,
+                        citation=m.citation)
+                    for m in merits if m.opinion_url]
+    on_orders = [row(o.name, scotus_recent.display_date(o.date),
+                     o.opinion_url, docket=o.docket, decided=o.date,
+                     citation=o.citation, writing="order")
+                 for o in orders if o.opinion_url]
+    return opinions[:most_opinions], on_orders[:most_orders]
+
+
+def _recent_scotus_menu_label(name: str, date: str, width: int = 72) -> str:
+    """"Trump v. Slaughter — June 29, 2026": a History menu's line for one
+    of the Court's opinions, the name shortened, never the date, to keep it
+    within *width* — the width the menu's case history is cut to."""
+    tail = f" — {date}" if date else ""
+    room = max(12, width - len(tail))
+    if len(name) > room:
+        name = name[:room - 1].rstrip() + "…"
+    return name + tail
+
+
 class CourtListenerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -7151,6 +7217,12 @@ class CourtListenerGUI:
         # dropdown every case window carries: {"key", "label", "reopen"}.
         # Deduped by key (a re-view moves the case to the front), capped.
         self._case_history: list[dict] = self._load_case_history()
+        # The Court's latest opinions and opinions relating to orders, listed
+        # at the foot of every History menu (see _add_recent_scotus_to_menu):
+        # (opinions, orders) once read, None before; read off the Tk thread.
+        self._recent_scotus_rows: "Optional[tuple[list, list]]" = None
+        self._recent_scotus_at = 0.0
+        self._recent_scotus_loading = False
 
         # Bookmarked cases/statutes/rules, for the "Bookmarks" menu and the
         # tab right-click menu.  Each entry keeps a local copy of the document
@@ -7364,7 +7436,9 @@ class CourtListenerGUI:
                 break
 
     def populate_history_menu(self, menu: tk.Menu) -> None:
-        """Fill *menu* with the current case-history entries."""
+        """Fill *menu* with the current case-history entries, and under a
+        line at its foot the Court's latest opinions (see
+        _add_recent_scotus_to_menu)."""
         try:
             menu.delete(0, "end")
         except tk.TclError:
@@ -7374,19 +7448,14 @@ class CourtListenerGUI:
         for e in self._case_history:
             label = e["label"]
             if len(label) > 72:
-                label = label[:69] + "..."
+                label = label[:69] + "…"
             menu.add_command(label=label, command=e["reopen"])
+        self._add_recent_scotus_to_menu(menu)
 
     def post_history_menu(self, widget: tk.Misc) -> None:
         """Drop the last-viewed-cases menu below *widget* (a History button)."""
         menu = tk.Menu(widget, tearoff=0)
-        if not self._case_history:
-            menu.add_command(label="No cases viewed yet", state="disabled")
-        for e in self._case_history:
-            label = e["label"]
-            if len(label) > 72:
-                label = label[:69] + "…"
-            menu.add_command(label=label, command=e["reopen"])
+        self.populate_history_menu(menu)
         try:
             menu.tk_popup(widget.winfo_rootx(),
                           widget.winfo_rooty() + widget.winfo_height())
@@ -7395,6 +7464,106 @@ class CourtListenerGUI:
                 menu.grab_release()
             except tk.TclError:
                 pass
+
+    # ------------------------------------------------------------------
+    # The Court's latest opinions, at the foot of every History menu
+    # ------------------------------------------------------------------
+
+    #: How long the list stands before it is read again — from
+    #: scotus_recent's own cache, which goes back to supremecourt.gov only
+    #: every few hours, so a History menu opened days into a session still
+    #: lists the Court's latest.
+    _RECENT_SCOTUS_MENU_TTL = 30 * 60
+    #: How long after finding nothing (offline, say) it is tried again.
+    _RECENT_SCOTUS_MENU_RETRY = 5 * 60
+
+    def _refresh_recent_scotus_menu(self, force: bool = False) -> None:
+        """Read the Court's latest opinions for the History menus, off the
+        Tk thread, unless a read is under way or the last one is recent.
+        A menu never waits for it: it lists what was last read, and the
+        next menu opened lists what this finds."""
+        if self._recent_scotus_loading:
+            return
+        rows = self._recent_scotus_rows
+        wait = (self._RECENT_SCOTUS_MENU_TTL if rows and (rows[0] or rows[1])
+                else self._RECENT_SCOTUS_MENU_RETRY)
+        if (not force and self._recent_scotus_at
+                and time.time() - self._recent_scotus_at < wait):
+            return
+        self._recent_scotus_loading = True
+
+        def run() -> None:
+            try:
+                found = _recent_scotus_menu_rows(*_fetch_recent_scotus())
+            except Exception as exc:
+                print(f"[history] recent Supreme Court opinions: {exc}")
+                found = ([], [])
+            self._post_root(self._recent_scotus_menu_read, found)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _recent_scotus_menu_read(self, found: "tuple[list, list]") -> None:
+        """Keep what a read found — unless it found nothing where the last
+        read found something: a failed fetch is better answered by the list
+        from an hour ago than by none."""
+        self._recent_scotus_loading = False
+        self._recent_scotus_at = time.time()
+        rows = self._recent_scotus_rows
+        if found[0] or found[1] or not (rows and (rows[0] or rows[1])):
+            self._recent_scotus_rows = found
+
+    def _add_recent_scotus_to_menu(self, menu: tk.Menu) -> None:
+        """The foot of a History menu: under a line, the Court's latest
+        opinions and then its latest opinions relating to orders — the
+        Recent SCOTUS side panel's two lists — each by case name and date,
+        opening in the viewer every Supreme Court opinion opens in, placed
+        beside the window the menu belongs to."""
+        # Once the event loop is running: the read posts its answer back
+        # through it, and the main window's menu is first filled before the
+        # loop has started.
+        try:
+            self.root.after_idle(self._refresh_recent_scotus_menu)
+        except tk.TclError:
+            pass
+        rows = self._recent_scotus_rows
+        try:
+            menu.add_separator()
+            if rows is None:
+                menu.add_command(label="Loading recent Supreme Court opinions…",
+                                 state="disabled")
+                return
+            opinions, orders = rows
+            if not (opinions or orders):
+                menu.add_command(
+                    label="No recent Supreme Court opinions could be loaded",
+                    state="disabled")
+                return
+            for heading, entries in (
+                    ("Recent Supreme Court opinions", opinions),
+                    ("Opinions relating to orders", orders)):
+                if not entries:
+                    continue
+                menu.add_command(label=heading, state="disabled")
+                for row in entries:
+                    menu.add_command(
+                        label=_recent_scotus_menu_label(row["name"], row["date"]),
+                        command=lambda r=row, m=menu:
+                            self._open_recent_scotus_row(r, m))
+        except tk.TclError:
+            pass
+
+    def _open_recent_scotus_row(self, row: dict, menu: tk.Misc) -> None:
+        """Open one of the History menu's Supreme Court opinions."""
+        parent = _menu_window(menu)
+        try:
+            if parent is None or not parent.winfo_exists():
+                parent = self.root
+        except tk.TclError:
+            parent = self.root
+        self.open_supreme_court_pdf(
+            parent, row["url"], row["name"], citation=row["citation"],
+            docket=row["docket"], decided=row["decided"],
+            writing=row["writing"])
 
     # ------------------------------------------------------------------
     # Bookmarks (the "Bookmarks" menu and each tab's right-click toggle)
@@ -29036,11 +29205,7 @@ class _ScholarTextWindow:
         def run() -> None:
             title = "Recent Supreme Court Decisions"
             try:
-                import scotus_recent
-                decisions = scotus_recent.fetch_recent_decisions()
-                merits = ([] if decisions
-                          else scotus_recent.recent_merits_opinions(10))
-                orders = scotus_recent.recent_order_opinions(5)
+                decisions, merits, orders = _fetch_recent_scotus()
                 lines = self._details_lines_recent(decisions, merits, orders)
             except Exception as exc:
                 print(f"[details] recent decisions: {exc}")
