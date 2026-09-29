@@ -119,10 +119,20 @@ def _module_value(name: str):
 
 
 class _Widget:
+    # Tk names a window by a path it never gives out again (".!toplevel2").
+    # A stub's default name is its address, which Python hands the next stub
+    # once this one is collected, and two windows would share one name.
+    _made = 0
+
     def __init__(self, top=None):
+        _Widget._made += 1
+        self._path = f".!toplevel{_Widget._made}"
         self._top = top
         self.destroyed = False
         self.shown = False
+
+    def __str__(self):
+        return self._path
 
     def winfo_exists(self):
         return not self.destroyed
