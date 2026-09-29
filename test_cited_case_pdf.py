@@ -22,6 +22,7 @@ absent on a headless run) and driven against stubs.
 """
 
 import ast
+import contextlib
 import dataclasses
 import pathlib
 import re
@@ -331,6 +332,11 @@ APP_NS = _load(
          else citations.state_nominative_cites(cite)),
      "_pin_display": lambda pin: pin,
      "_is_us_reports_pdf": lambda url: "usrep" in (url or "").lower(),
+     # A load's progress goes to its status window (see _LoadWatch); here,
+     # only the watch the app hands out records what it was told.
+     "_watching": lambda watch: contextlib.nullcontext(watch),
+     "_load_step": lambda text: None,
+     "_measure_pdf_pages": lambda data: MEASURED.get(data),
      "_PdfPane": type("_PdfPane", (), {"_MARGIN": 18}),
      "_FloatingPdfWindow": lambda *a, **kw: _FakeViewer(*a, **kw),
      "_follow_brief_action": lambda *a, **kw: TEXT_OPENS.append((a, kw)),
@@ -382,6 +388,32 @@ TEXT_OPENS: list = []
 FILENAMES: list = []
 PRINTED: list = []
 CAPTIONS: dict = {}          # opinion html -> what its caption reads as
+MEASURED: dict = {}          # pdf bytes -> the pages' measurements
+
+
+class _FakeWatch:
+    """A slow document's status window (_LoadWatch), recording what the load
+    told it."""
+
+    def __init__(self, parent, label, cite=""):
+        self.parent, self.label, self.cite = parent, label, cite
+        self.cancelled = False
+        self.claimed = False
+        self.geometry = None        # where its window stood, if it showed
+        self.told: list = []        # ("to_text" | "fail" | "finish", text)
+
+    def hand_off(self):
+        self.told.append(("hand_off", ""))
+        return self.geometry
+
+    def to_text(self, reason):
+        self.told.append(("to_text", reason))
+
+    def fail(self, message):
+        self.told.append(("fail", message))
+
+    def finish(self):
+        self.told.append(("finish", ""))
 
 
 class _FakeViewer:
@@ -446,6 +478,11 @@ class _App:
             setattr(self, name, APP_NS[name].__get__(self))
 
     # --- collaborators ---
+    def watch_load(self, parent, label, cite=""):
+        self.watches = getattr(self, "watches", []) + [
+            _FakeWatch(parent, label, cite)]
+        return self.watches[-1]
+
     def _get_client(self):
         return "client"
 
@@ -591,6 +628,78 @@ class CitedCasePdfTests(unittest.TestCase):
         self._click(fallback=fallback)
         self.assertEqual(_FakeViewer.opened, [])
         fallback.assert_called_once_with()
+
+    # --- a slow document's status window (see _LoadWatch) ---
+
+    def test_the_load_is_watched_under_the_case_s_name(self):
+        self._click()
+        (watch,) = self.app.watches
+        self.assertEqual((watch.label, watch.cite),
+                         ("Roe v. Wade, 410 U.S. 113", "410 U.S. 113"))
+
+    def test_the_scan_opens_where_its_status_window_stood(self):
+        watch_load = self.app.watch_load
+
+        def slow(parent, label, cite=""):
+            watch = watch_load(parent, label, cite)
+            watch.geometry = "720x880+900+40"
+            return watch
+
+        self.app.watch_load = slow
+        self._click()
+        self.assertEqual(_FakeViewer.opened[0].kw["geometry"],
+                         "720x880+900+40")
+        self.assertIn(("hand_off", ""), self.app.watches[0].told)
+
+    def test_or_where_the_viewer_would_have_gone_had_it_come_quickly(self):
+        self._click()
+        self.assertEqual(_FakeViewer.opened[0].kw["geometry"], "")
+
+    def test_its_pages_are_measured_before_the_viewer_opens(self):
+        MEASURED[b"%PDF-1"] = [(612.0, 792.0, (0.0, 0.0, 1.0, 1.0))]
+        try:
+            self._click()
+        finally:
+            MEASURED.clear()
+        self.assertEqual(_FakeViewer.opened[0].kw["page_meta"],
+                         [(612.0, 792.0, (0.0, 0.0, 1.0, 1.0))])
+
+    def test_a_case_the_reader_stopped_waiting_for_is_let_go(self):
+        watch_load = self.app.watch_load
+
+        def given_up(parent, label, cite=""):
+            watch = watch_load(parent, label, cite)
+            watch.cancelled = True
+            return watch
+
+        self.app.watch_load = given_up
+        fallback = mock.Mock()
+        self._click(fallback=fallback)
+        self.assertEqual(_FakeViewer.opened, [])
+        fallback.assert_not_called()
+
+    def test_no_scan_waits_on_the_text_that_falls_back_to(self):
+        self.app._resolves = False
+
+        def takes_it_up():
+            self.app.watches[0].claimed = True   # as a text lookup does
+
+        self._click(fallback=takes_it_up)
+        told = self.app.watches[0].told
+        self.assertEqual(told[0][0], "to_text")
+        self.assertNotIn(("finish", ""), told)
+
+    def test_a_fallback_that_will_not_say_how_it_ends_ends_the_wait(self):
+        self.app._resolves = False
+        self._click(fallback=mock.Mock())
+        self.assertEqual([t for t, _ in self.app.watches[0].told],
+                         ["to_text", "finish"])
+
+    def test_no_scan_and_nothing_to_fall_back_to_says_so(self):
+        self.app._resolves = False
+        self._click()
+        self.assertEqual(self.app.watches[0].told,
+                         [("fail", "No scan of it could be found.")])
 
     def test_a_scan_that_will_not_download_falls_back_too(self):
         FETCHED.clear()

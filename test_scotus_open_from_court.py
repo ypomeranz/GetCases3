@@ -127,6 +127,26 @@ class PanelLinkTests(unittest.TestCase):
 
 RAW, CLEAN = b"%PDF-raw", b"%PDF-clean"
 FINAL = "https://www.supremecourt.gov/opinions/final.pdf"
+#: The pages' measurements, taken on the worker thread (_measure_pdf_pages).
+MEASURED = [(612.0, 792.0, (0.0, 0.0, 1.0, 1.0))]
+
+
+class FakeWatch:
+    """A slow document's status window (_LoadWatch), as the opener uses it."""
+
+    def __init__(self, parent, label, cite=""):
+        self.parent, self.label, self.cite = parent, label, cite
+        self.cancelled = False
+        self.failures: list = []
+
+    def step(self, text):
+        pass
+
+    def received(self, done, total):
+        pass
+
+    def fail(self, message):
+        self.failures.append(message)
 
 
 class OpenFromTheCourtTests(unittest.TestCase):
@@ -134,10 +154,17 @@ class OpenFromTheCourtTests(unittest.TestCase):
              docket="", decided="", writing="merits", fetched=(RAW, FINAL),
              cover=False):
         self.shown, self.statuses, self.fetches = [], [], []
+        self.watches: list = []
+
+        def watch_load(parent, label, cite=""):
+            self.watches.append(FakeWatch(parent, label, cite))
+            return self.watches[-1]
+
         gui = SimpleNamespace(
             _safe_root_status=self.statuses.append,
             _post_root=lambda fn: fn(),
-            _show_cited_case_pdf=lambda *a, **kw: self.shown.append((a, kw)))
+            _show_cited_case_pdf=lambda *a, **kw: self.shown.append((a, kw)),
+            watch_load=watch_load)
 
         def fetch(pdf_url, timeout=30, keep_cover=False, **_kw):
             self.fetches.append((pdf_url, keep_cover))
@@ -150,7 +177,9 @@ class OpenFromTheCourtTests(unittest.TestCase):
                 patch("courtlistener_gui._strip_preliminary_print_cover",
                       side_effect=lambda data: CLEAN if cover else data), \
                 patch("courtlistener_gui._pdf_page_total",
-                      side_effect=lambda data: pages[data]):
+                      side_effect=lambda data: pages[data]), \
+                patch("courtlistener_gui._measure_pdf_pages",
+                      return_value=MEASURED):
             CourtListenerGUI.open_supreme_court_pdf(
                 gui, "parent", url, name, citation=citation, docket=docket,
                 decided=decided, writing=writing)
@@ -175,7 +204,38 @@ class OpenFromTheCourtTests(unittest.TestCase):
                         "court_id": "scotus", "dateFiled": "2026-06-30",
                         "docketNumber": "24-43", "citation": []},
             "decided": "2026-06-30", "writing": "merits",
-            "start_page": None})
+            "start_page": None, "watch": self.watches[0],
+            "page_meta": MEASURED})
+
+    def test_a_slow_one_gets_a_status_window_named_for_it(self):
+        url = "https://www.supremecourt.gov/opinions/25pdf/24-43_2b35.pdf"
+        self.open(url, citation="609/2", docket="24-43",
+                  decided="2026-06-30")
+        (watch,) = self.watches
+        self.assertEqual((watch.parent, watch.label, watch.cite),
+                         ("parent", "West Virginia v. B. P. J.",
+                          "609 U.S. ___"))
+
+    def test_one_the_reader_stopped_waiting_for_is_let_go(self):
+        class Cancelled(FakeWatch):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.cancelled = True    # "Stop waiting" was pressed
+
+        self.shown = []
+        gui = SimpleNamespace(
+            _safe_root_status=lambda _s: None, _post_root=lambda fn: fn(),
+            _show_cited_case_pdf=lambda *a, **kw: self.shown.append(a),
+            watch_load=lambda parent, label, cite="": Cancelled(
+                parent, label, cite))
+        with patch("courtlistener_gui.threading.Thread", Now), \
+                patch("courtlistener_gui._fetch_pdf_bytes",
+                      return_value=(RAW, FINAL)), \
+                patch("courtlistener_gui._measure_pdf_pages") as measure:
+            CourtListenerGUI.open_supreme_court_pdf(
+                gui, "parent", "https://www.supremecourt.gov/o.pdf", "NRSC")
+        self.assertEqual(self.shown, [])
+        measure.assert_not_called()
 
     def test_a_writing_in_the_orders_section_opens_at_its_page(self):
         # "#page=143" counts the cover; the viewer shows the pages without.
@@ -218,6 +278,9 @@ class OpenFromTheCourtTests(unittest.TestCase):
         self.assertEqual(self.shown, [])
         self.assertEqual(self.statuses[-1],
                          "Could not load NRSC v. FEC from supremecourt.gov.")
+        # …and so does its status window, if it was slow enough to have one.
+        self.assertEqual(self.watches[0].failures,
+                         ["Could not load NRSC v. FEC from supremecourt.gov."])
 
 
 class StartPageTests(unittest.TestCase):

@@ -1153,7 +1153,11 @@ class OneColumnGutterTests(unittest.TestCase):
 
 PLACE_NS = _load(
     "_FloatingPdfWindow", ["_place_beside"],
-    {"_work_area": lambda _w: (0, 0, 1600, 900)},
+    {"_work_area": lambda _w: (0, 0, 1600, 900),
+     # The arithmetic itself, shared with a slow document's status window so
+     # that the document opens where that window stood.
+     "_beside_geometry": _load_function(
+         "_beside_geometry", {"_work_area": lambda _w: (0, 0, 1600, 900)})},
 )
 
 

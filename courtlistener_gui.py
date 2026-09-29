@@ -275,6 +275,27 @@ def _work_area(widget: tk.Misc) -> tuple[int, int, int, int]:
         return 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
 
 
+#: A window manager's geometry string, "860x620+40+30" — a position may be
+#: negative ("+-8+0") for a window reaching off the left of the screen.
+_WM_GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)$")
+
+
+def _window_zoomed(win) -> bool:
+    """Whether *win* is maximized, as far as its platform says: Windows (and
+    Tk on macOS) through its state, X11 through the -zoomed attribute."""
+    try:
+        if str(win.state()) == "zoomed":
+            return True
+    except (AttributeError, tk.TclError):
+        pass
+    try:
+        if bool(win.attributes("-zoomed")):
+            return True
+    except (AttributeError, tk.TclError, TypeError, ValueError):
+        pass
+    return False
+
+
 def _fit_toplevel_geometry(
     win: tk.Misc,
     width: int,
@@ -412,6 +433,17 @@ def _history_button(app, parent_frame):
     btn = _ui_button(parent_frame, "History ▾", width=100)
     btn.configure(command=lambda: app.post_history_menu(btn))
     return btn
+
+
+def _menu_window(menu) -> "Optional[tk.Misc]":
+    """The window a menu belongs to: the first of its masters that is not a
+    menu itself — a menu bar's cascade hangs from the bar, and the bar from
+    the window (a menu is a toplevel of its own to Tk, so its
+    ``winfo_toplevel`` is no help)."""
+    widget = menu
+    while widget is not None and isinstance(widget, tk.Menu):
+        widget = getattr(widget, "master", None)
+    return widget
 
 
 def _add_bookmarks_cascade(menubar: tk.Menu, app, win: tk.Misc) -> None:
@@ -1189,6 +1221,7 @@ import fed_rules
 import federal_register
 import legislative_history
 import leghist_fetch
+import sec_decisions
 import state_statutes
 import statutes_at_large
 import us_code
@@ -7090,6 +7123,61 @@ def _mac_activate_app(allow_osascript: bool = True) -> bool:
         return False
 
 
+def _fetch_recent_scotus() -> tuple:
+    """The Court's latest opinions, as the Recent SCOTUS lists show them:
+    ``(decisions, merits, orders)`` — the homepage's Recent Decisions, or,
+    when it lists none, the Term's ten latest opinions of the Court; then the
+    five latest orders that drew separate writings.  Worker thread: this
+    waits on supremecourt.gov whenever scotus_recent's cache has gone
+    stale."""
+    import scotus_recent
+    decisions = scotus_recent.fetch_recent_decisions()
+    merits = [] if decisions else scotus_recent.recent_merits_opinions(10)
+    orders = scotus_recent.recent_order_opinions(5)
+    return decisions, merits, orders
+
+
+def _recent_scotus_menu_rows(decisions, merits, orders, *,
+                             most_opinions: int = 10,
+                             most_orders: int = 5) -> "tuple[list, list]":
+    """What a History menu lists of *decisions*, *merits* and *orders* (see
+    _fetch_recent_scotus): ``(opinions, orders)``, newest first, each row the
+    case name, the date as printed ("June 30, 2026") and what
+    CourtListenerGUI.open_supreme_court_pdf needs to open it.  Only what the
+    Court has put a PDF up for can be opened, so only that is listed."""
+    import scotus_recent
+
+    def row(name, date, url, *, docket="", decided="", citation="",
+            writing="merits") -> dict:
+        return {"name": name, "date": date, "url": url, "docket": docket,
+                "decided": decided, "citation": citation, "writing": writing}
+
+    opinions = [row(d.name, d.date, d.opinion_url, docket=d.docket,
+                    decided=scotus_recent.iso_date(d.date))
+                for d in decisions if d.opinion_url]
+    if not decisions:
+        opinions = [row(m.name, scotus_recent.display_date(m.date),
+                        m.opinion_url, docket=m.docket, decided=m.date,
+                        citation=m.citation)
+                    for m in merits if m.opinion_url]
+    on_orders = [row(o.name, scotus_recent.display_date(o.date),
+                     o.opinion_url, docket=o.docket, decided=o.date,
+                     citation=o.citation, writing="order")
+                 for o in orders if o.opinion_url]
+    return opinions[:most_opinions], on_orders[:most_orders]
+
+
+def _recent_scotus_menu_label(name: str, date: str, width: int = 72) -> str:
+    """"Trump v. Slaughter — June 29, 2026": a History menu's line for one
+    of the Court's opinions, the name shortened, never the date, to keep it
+    within *width* — the width the menu's case history is cut to."""
+    tail = f" — {date}" if date else ""
+    room = max(12, width - len(tail))
+    if len(name) > room:
+        name = name[:room - 1].rstrip() + "…"
+    return name + tail
+
+
 class CourtListenerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -7151,6 +7239,15 @@ class CourtListenerGUI:
         # dropdown every case window carries: {"key", "label", "reopen"}.
         # Deduped by key (a re-view moves the case to the front), capped.
         self._case_history: list[dict] = self._load_case_history()
+        # The Court's latest opinions and opinions relating to orders, listed
+        # at the foot of every History menu (see _add_recent_scotus_to_menu):
+        # (opinions, orders) once read, None before; read off the Tk thread.
+        self._recent_scotus_rows: "Optional[tuple[list, list]]" = None
+        self._recent_scotus_at = 0.0
+        self._recent_scotus_loading = False
+        # Documents the reader asked for that are still on their way, oldest
+        # first (see watch_load and _LoadWatch).
+        self._load_watches: list = []
 
         # Bookmarked cases/statutes/rules, for the "Bookmarks" menu and the
         # tab right-click menu.  Each entry keeps a local copy of the document
@@ -7251,6 +7348,12 @@ class CourtListenerGUI:
             if not spec:
                 return None
             return lambda: _LegHistPdfWindow(self.root, spec, app=self)
+        if kind == "sec":
+            spec = str(payload.get("spec") or "")
+            if not spec:
+                return None
+            return lambda: _open_sec(self.root, spec, self._status_var.set,
+                                     app=self)
         return None
 
     def _open_history_cl(
@@ -7364,7 +7467,9 @@ class CourtListenerGUI:
                 break
 
     def populate_history_menu(self, menu: tk.Menu) -> None:
-        """Fill *menu* with the current case-history entries."""
+        """Fill *menu* with the current case-history entries, and under a
+        line at its foot the Court's latest opinions (see
+        _add_recent_scotus_to_menu)."""
         try:
             menu.delete(0, "end")
         except tk.TclError:
@@ -7374,19 +7479,14 @@ class CourtListenerGUI:
         for e in self._case_history:
             label = e["label"]
             if len(label) > 72:
-                label = label[:69] + "..."
+                label = label[:69] + "…"
             menu.add_command(label=label, command=e["reopen"])
+        self._add_recent_scotus_to_menu(menu)
 
     def post_history_menu(self, widget: tk.Misc) -> None:
         """Drop the last-viewed-cases menu below *widget* (a History button)."""
         menu = tk.Menu(widget, tearoff=0)
-        if not self._case_history:
-            menu.add_command(label="No cases viewed yet", state="disabled")
-        for e in self._case_history:
-            label = e["label"]
-            if len(label) > 72:
-                label = label[:69] + "…"
-            menu.add_command(label=label, command=e["reopen"])
+        self.populate_history_menu(menu)
         try:
             menu.tk_popup(widget.winfo_rootx(),
                           widget.winfo_rooty() + widget.winfo_height())
@@ -7395,6 +7495,106 @@ class CourtListenerGUI:
                 menu.grab_release()
             except tk.TclError:
                 pass
+
+    # ------------------------------------------------------------------
+    # The Court's latest opinions, at the foot of every History menu
+    # ------------------------------------------------------------------
+
+    #: How long the list stands before it is read again — from
+    #: scotus_recent's own cache, which goes back to supremecourt.gov only
+    #: every few hours, so a History menu opened days into a session still
+    #: lists the Court's latest.
+    _RECENT_SCOTUS_MENU_TTL = 30 * 60
+    #: How long after finding nothing (offline, say) it is tried again.
+    _RECENT_SCOTUS_MENU_RETRY = 5 * 60
+
+    def _refresh_recent_scotus_menu(self, force: bool = False) -> None:
+        """Read the Court's latest opinions for the History menus, off the
+        Tk thread, unless a read is under way or the last one is recent.
+        A menu never waits for it: it lists what was last read, and the
+        next menu opened lists what this finds."""
+        if self._recent_scotus_loading:
+            return
+        rows = self._recent_scotus_rows
+        wait = (self._RECENT_SCOTUS_MENU_TTL if rows and (rows[0] or rows[1])
+                else self._RECENT_SCOTUS_MENU_RETRY)
+        if (not force and self._recent_scotus_at
+                and time.time() - self._recent_scotus_at < wait):
+            return
+        self._recent_scotus_loading = True
+
+        def run() -> None:
+            try:
+                found = _recent_scotus_menu_rows(*_fetch_recent_scotus())
+            except Exception as exc:
+                print(f"[history] recent Supreme Court opinions: {exc}")
+                found = ([], [])
+            self._post_root(self._recent_scotus_menu_read, found)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _recent_scotus_menu_read(self, found: "tuple[list, list]") -> None:
+        """Keep what a read found — unless it found nothing where the last
+        read found something: a failed fetch is better answered by the list
+        from an hour ago than by none."""
+        self._recent_scotus_loading = False
+        self._recent_scotus_at = time.time()
+        rows = self._recent_scotus_rows
+        if found[0] or found[1] or not (rows and (rows[0] or rows[1])):
+            self._recent_scotus_rows = found
+
+    def _add_recent_scotus_to_menu(self, menu: tk.Menu) -> None:
+        """The foot of a History menu: under a line, the Court's latest
+        opinions and then its latest opinions relating to orders — the
+        Recent SCOTUS side panel's two lists — each by case name and date,
+        opening in the viewer every Supreme Court opinion opens in, placed
+        beside the window the menu belongs to."""
+        # Once the event loop is running: the read posts its answer back
+        # through it, and the main window's menu is first filled before the
+        # loop has started.
+        try:
+            self.root.after_idle(self._refresh_recent_scotus_menu)
+        except tk.TclError:
+            pass
+        rows = self._recent_scotus_rows
+        try:
+            menu.add_separator()
+            if rows is None:
+                menu.add_command(label="Loading recent Supreme Court opinions…",
+                                 state="disabled")
+                return
+            opinions, orders = rows
+            if not (opinions or orders):
+                menu.add_command(
+                    label="No recent Supreme Court opinions could be loaded",
+                    state="disabled")
+                return
+            for heading, entries in (
+                    ("Recent Supreme Court opinions", opinions),
+                    ("Opinions relating to orders", orders)):
+                if not entries:
+                    continue
+                menu.add_command(label=heading, state="disabled")
+                for row in entries:
+                    menu.add_command(
+                        label=_recent_scotus_menu_label(row["name"], row["date"]),
+                        command=lambda r=row, m=menu:
+                            self._open_recent_scotus_row(r, m))
+        except tk.TclError:
+            pass
+
+    def _open_recent_scotus_row(self, row: dict, menu: tk.Misc) -> None:
+        """Open one of the History menu's Supreme Court opinions."""
+        parent = _menu_window(menu)
+        try:
+            if parent is None or not parent.winfo_exists():
+                parent = self.root
+        except tk.TclError:
+            parent = self.root
+        self.open_supreme_court_pdf(
+            parent, row["url"], row["name"], citation=row["citation"],
+            docket=row["docket"], decided=row["decided"],
+            writing=row["writing"])
 
     # ------------------------------------------------------------------
     # Bookmarks (the "Bookmarks" menu and each tab's right-click toggle)
@@ -8074,17 +8274,79 @@ class CourtListenerGUI:
         return self.new_secondary_view_host(parent)
 
     def _reporter_text_host(self, parent: tk.Misc):
-        """A text-only reporter window's body, or None if one cannot open."""
+        """A text-only reporter window's body, or None if one cannot open.
+
+        A case whose scan could not be found opens here on its text — where
+        the status window of its load stands, if it was slow enough to have
+        one (see _take_text_watch)."""
+        watch = self._take_text_watch(parent)
+        geometry = (watch.hand_off() if watch is not None else None) or ""
         try:
             viewer = _FloatingPdfWindow(
                 self.root, None, "", "", app=self,
                 on_close=self._cited_pdf_window_closed,
-                anchor=parent if parent is not self.root else None)
+                anchor=parent if parent is not self.root else None,
+                geometry=geometry)
         except Exception as exc:
             print(f"[reporter] could not open a text window: {exc}")
             return None
         self._cited_pdf_windows.add(viewer)   # nothing else holds it
         return viewer.text_host()
+
+    # ------------------------------------------------------------------
+    # Documents on their way (see _LoadWatch)
+    # ------------------------------------------------------------------
+
+    def watch_load(self, parent, label: str, *, cite: str = "") -> "_LoadWatch":
+        """Start watching a document the reader asked for from *parent*'s
+        window — one that is slow to come gets a window of its own, saying
+        what is being tried, where the document will open."""
+        watch = _LoadWatch(self, parent, label, cite=cite)
+        self._load_watches.append(watch)
+        return watch
+
+    def _load_watch_ended(self, watch) -> None:
+        """A load is over — arrived, given up, or come to nothing."""
+        try:
+            self._load_watches.remove(watch)
+        except ValueError:
+            pass
+
+    def claim_text_load(self, parent, cite: str) -> "Optional[_LoadWatch]":
+        """The load from *parent*'s window waiting on the text of *cite* —
+        its scan could not be found (see _LoadWatch.to_text) — taken up by
+        the lookup now starting to find that text, which says how it ends
+        (end_text_load).  None when no load is waiting on it."""
+        path = _toplevel_path(parent)
+        for watch in self._load_watches:
+            if (watch.phase == "text" and not watch.done
+                    and not watch.claimed and watch.cite == cite
+                    and watch.anchor_path == path):
+                watch.claimed = True
+                return watch
+        return None
+
+    @staticmethod
+    def end_text_load(watch, failure: str = "") -> None:
+        """How a text lookup that took up a load (claim_text_load) ended:
+        *failure* says why nothing opened; without one it opened — in the
+        load's own window, usually, which has already gone."""
+        if watch is None:
+            return
+        if failure:
+            watch.fail(failure)
+        else:
+            watch.finish()
+
+    def _take_text_watch(self, parent) -> "Optional[_LoadWatch]":
+        """The load a text window now opening from *parent*'s window answers:
+        the oldest of those from there still waiting on text."""
+        path = _toplevel_path(parent)
+        for watch in self._load_watches:
+            if (watch.phase == "text" and not watch.done
+                    and watch.anchor_path == path):
+                return watch
+        return None
 
     def window_master(self, parent: tk.Misc) -> tk.Misc:
         """What a new window's lifetime hangs on.
@@ -8868,6 +9130,16 @@ class CourtListenerGUI:
                 self._close_quick_popup()
                 _open_leghist(self.root, leg_action[1], self._status_var.set,
                               app=self)
+                return
+
+            # 1c. The SEC's Decisions and Reports: "8 S.E.C. 893, 915" —
+            # at HathiTrust, not the case search, which would read "S.E.C."
+            # as a court's reporter and find nothing.
+            sec_action = sec_decisions.parse_query(query)
+            if sec_action:
+                self._close_quick_popup()
+                _open_sec(self.root, sec_action[1], self._status_var.set,
+                          app=self)
                 return
 
             # 1a. Statute / regulation / federal rule: "42 USC 1983(b)",
@@ -10385,18 +10657,36 @@ class CourtListenerGUI:
             except tk.TclError:
                 pass
 
+        label = name or cite
+        # Slow to come, the case gets a window of its own saying what is
+        # being tried, where it will open (see _LoadWatch); the lookup runs on
+        # a thread of its own, so the window it was clicked in goes on
+        # answering meanwhile.
+        watch = self.watch_load(
+            parent, f"{name}, {cite}" if name and cite not in name
+            else label, cite=cite)
+
         def give_up(reason: str) -> None:
             safe_status(reason)
-            if fallback is not None:
-                try:
-                    fallback()
-                except tk.TclError:
-                    pass
+            if watch.cancelled:
+                return          # the reader stopped waiting for it
+            if fallback is None:
+                watch.fail("No scan of it could be found.")
+                return
+            watch.to_text("No scan of it could be found — looking for its "
+                          "text instead…")
+            try:
+                fallback()
+            except tk.TclError:
+                pass
+            if not watch.claimed:
+                # Opened some way that will not say how it ends: this watch
+                # has nothing more it can tell.
+                watch.finish()
 
-        label = name or cite
         safe_status(f"Looking for a PDF of {label}…")
 
-        def run() -> None:
+        def find() -> None:
             url = ""
             item: dict = {}
             try:
@@ -10406,12 +10696,15 @@ class CourtListenerGUI:
                 url = self._resolve_pdf_url(client, item) or ""
             except Exception as exc:
                 print(f"[cite-pdf] resolving {cite!r} failed: {exc}")
+            if watch.cancelled:
+                return
             if not url and item.get("_page_mates"):
                 message = (f"{item['_page_mates']} cases begin at {cite} — "
                            "can't tell which, so nothing opened")
 
                 def refuse() -> None:
                     safe_status(message)
+                    watch.fail(message)
                     self._spotlight_notify(message, duration_ms=6000)
 
                 self._post_root(refuse)
@@ -10422,12 +10715,19 @@ class CourtListenerGUI:
                     fetched = _fetch_pdf_bytes(url, client=client, timeout=30)
                 except Exception as exc:
                     print(f"[cite-pdf] fetching {url} failed: {exc}")
+            if watch.cancelled:
+                return
             if fetched is None:
                 self._post_root(
                     lambda: give_up(f"No PDF found for {label} — "
                                     "opening the text instead."))
                 return
             data, final_url = fetched
+            # Measured here rather than as the viewer opens on the Tk thread,
+            # where a long scan would hold up every window for seconds.
+            meta = _measure_pdf_pages(data)
+            if watch.cancelled:
+                return
             # An order picked off a page of them is named for its own case;
             # the page shown for no one order in it, for none.
             shown_name = ("" if item.get("_orders_page")
@@ -10438,9 +10738,21 @@ class CourtListenerGUI:
             self._post_root(
                 lambda: self._show_cited_case_pdf(
                     parent, data, final_url, cite, pin, shown_name, action,
-                    snippet, safe_status, cl_item=item,
+                    snippet, safe_status, cl_item=item, watch=watch,
+                    page_meta=meta,
                 )
             )
+
+        def run() -> None:
+            with _watching(watch):
+                try:
+                    find()
+                except Exception as exc:     # never leave a window waiting
+                    print(f"[cite-pdf] looking for {cite!r} failed: {exc}")
+                    problem = str(exc) or type(exc).__name__
+                    self._post_root(lambda: (
+                        safe_status(f"Could not open {label}: {problem}"),
+                        watch.fail(f"Something went wrong: {problem}")))
 
         threading.Thread(target=run, daemon=True).start()
         return True
@@ -10502,8 +10814,9 @@ class CourtListenerGUI:
                 "dateFiled": decided, "docketNumber": docket,
                 "citation": [cite] if paged else []}
         status(f"Opening {name}…")
+        watch = self.watch_load(parent, name or cite, cite=cite)
 
-        def run() -> None:
+        def fetch() -> None:
             try:
                 # The page is numbered in the PDF as published, cover and
                 # all: the cover comes out once the page it moves is known.
@@ -10512,9 +10825,12 @@ class CourtListenerGUI:
             except Exception as exc:
                 print(f"[scotus] fetching {pdf_url} failed: {exc}")
                 fetched = None
+            if watch.cancelled:
+                return
             if fetched is None:
-                self._post_root(lambda: status(
-                    f"Could not load {name} from supremecourt.gov."))
+                failure = f"Could not load {name} from supremecourt.gov."
+                self._post_root(lambda: (status(failure),
+                                         watch.fail(failure)))
                 return
             data, final_url = fetched
             first = start
@@ -10523,10 +10839,17 @@ class CourtListenerGUI:
                 first = max(0, first - (_pdf_page_total(data)
                                         - _pdf_page_total(clean)))
                 data = clean
+            # Measured here, off the Tk thread (see _measure_pdf_pages).
+            meta = _measure_pdf_pages(data)
             self._post_root(lambda: self._show_cited_case_pdf(
                 parent, data, final_url, cite, "", name, ("cite", cite),
                 name, status, cl_item=item, decided=decided,
-                writing=writing, start_page=first or None))
+                writing=writing, start_page=first or None, watch=watch,
+                page_meta=meta))
+
+        def run() -> None:
+            with _watching(watch):
+                fetch()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -10538,6 +10861,7 @@ class CourtListenerGUI:
         citation and the case name alone."""
         item: dict = {}
         if client is not None:
+            _load_step(f"Looking {cite} up on CourtListener…")
             try:
                 item = dict(_cl_item_for_citation(client, cite, name=name) or {})
             except Exception as exc:
@@ -10559,7 +10883,9 @@ class CourtListenerGUI:
                              cl_item: "Optional[dict]" = None,
                              decided: str = "",
                              writing: str = "merits",
-                             start_page: "Optional[int]" = None) -> None:
+                             start_page: "Optional[int]" = None,
+                             watch: "Optional[_LoadWatch]" = None,
+                             page_meta: "Optional[list]" = None) -> None:
         """Put a cited case's scan on screen, with its text warming behind it.
 
         ``cl_item`` is the CourtListener cluster the scan was found through,
@@ -10568,7 +10894,14 @@ class CourtListenerGUI:
         Supreme Court opinion opened straight from the Court by its date
         rather than its citation (see _warm_case_text).  ``start_page`` is a
         page of the file to open at, 0-based, where the link named one
-        itself rather than a pin cite."""
+        itself rather than a pin cite.  ``watch`` is the load that brought
+        the scan (see _LoadWatch): a case the reader stopped waiting for is
+        let go, and one slow enough to have had a status window opens in its
+        place.  ``page_meta``, the pages' measurements taken on the worker
+        thread (see _measure_pdf_pages)."""
+        if watch is not None and watch.cancelled:
+            return
+        geometry = (watch.hand_off() if watch is not None else None) or ""
         title = f"{name} — {cite}" if name and cite else (cite or name or "PDF")
         margin = _PdfPane._MARGIN * 3 if _is_us_reports_pdf(url) else None
         host = self.root if parent is None else parent
@@ -10676,6 +11009,7 @@ class CourtListenerGUI:
                     lambda body: self._embed_cited_case_text(body, named)),
                 on_close=self._cited_pdf_window_closed,
                 on_citation_edited=lambda: self._retitle_cited_pdf(named),
+                geometry=geometry, page_meta=page_meta,
             )
         except Exception as exc:
             status(f"Could not show the PDF of {cite}: {exc}")
@@ -12999,6 +13333,7 @@ class CourtListenerGUI:
             by redirecting to a "page not found" that itself returns 200, and
             taken for the scan, that page stood between the reader and the
             Library of Congress copy behind it."""
+            _load_step(_resolve_step_text(label, url))
             try:
                 session = (
                     client._session if _is_courtlistener_url(url)
@@ -13084,6 +13419,10 @@ class CourtListenerGUI:
                 if url is not None:
                     _remember_us_reports_cite(cite)
                     return url
+            if m and (us_reports_pdf.has_volume(int(m.group(1)))
+                      or int(m.group(1)) >= us_reports_pdf.SC_DOWNLOAD_MIN):
+                _load_step(f"Looking for {cite} in the Supreme Court's own "
+                           "volume of the U.S. Reports…")
             local_pdf = us_reports_pdf.extract_citation(cite)
             if local_pdf is not None:
                 url = local_pdf.as_uri()
@@ -13131,6 +13470,7 @@ class CourtListenerGUI:
         # Gather EVERY citation we know — the search result often exposes only
         # one (frequently a nominative reporter like "19 How. 393"), while the
         # parallel U.S./F. cite that finds a PDF lives on the cluster record.
+        _load_step("Gathering the case's parallel citations…")
         all_cites = _gather_all_citations(client, item)
         print(f"[resolve] citations to try: {all_cites}")
         known_us = next(
@@ -13150,6 +13490,8 @@ class CourtListenerGUI:
             _US_CITE_RE.search(c) or _SCT_CITE_RE.search(c)
             for c in all_cites
         )
+        if is_scotus:
+            _load_step("Asking CourtListener for the U.S. Reports citation…")
         us_from_sct = _us_reports_cite_via_courtlistener(client, all_cites)
         if us_from_sct and us_from_sct not in all_cites:
             print(f"[resolve] S. Ct. cite resolved to U.S. Reports cite: "
@@ -13174,6 +13516,8 @@ class CourtListenerGUI:
         #      (see ``_orders_page``).  Anything else stops here, every rung
         #      below being a guess — the last one opened another case.
         if known_us:
+            _load_step(f"Checking static.case.law for other cases at "
+                       f"{known_us}…")
             page_cases = _case_law_page_cases(known_us)
             if len(page_cases) > 1:
                 chosen = (
@@ -13203,6 +13547,7 @@ class CourtListenerGUI:
         #      parallel cite before giving up; when more than one reporter scan
         #      exists, keep all of them for the case window's PDF menu.
         if not is_scotus:
+            _load_step("Checking static.case.law's scans of the reports…")
             choices = _case_law_pdf_choices_for_cites(
                 all_cites, expected_name=expected_name)
             if choices:
@@ -13226,6 +13571,7 @@ class CourtListenerGUI:
         if opinion_id:
             try:
                 print(f"[resolve] fetching opinion {opinion_id} for local_path")
+                _load_step("Asking CourtListener for its stored copy…")
                 fetched_op = client.get_opinion(int(opinion_id))
                 print(f"[resolve] opinion local_path = {fetched_op.get('local_path')!r}")
                 print(f"[resolve] opinion download_url = {fetched_op.get('download_url')!r}")
@@ -13258,6 +13604,8 @@ class CourtListenerGUI:
         if cluster_id:
             try:
                 print(f"[resolve] fetching cluster {cluster_id}")
+                _load_step("Going through CourtListener's record of the "
+                           "case…")
                 cluster = client.get_cluster(int(cluster_id), fields="sub_opinions")
                 print(f"[resolve] sub_opinions = {cluster.get('sub_opinions')!r}")
                 for op_url in cluster.get("sub_opinions", []):
@@ -13280,6 +13628,7 @@ class CourtListenerGUI:
         # downloadable path on their saved Scholar/CourtListener record.  The
         # Court's term archive is authoritative and carries the released PDF.
         if is_scotus and not skip_metadata_fallback:
+            _load_step("Checking the Supreme Court's slip-opinion archive…")
             slip_url = _scotus_slip_pdf_url(item, all_cites)
             if slip_url:
                 return slip_url
@@ -13287,6 +13636,8 @@ class CourtListenerGUI:
             # 7. If the saved item was too sparse to expose CourtListener ids,
             # resolve it by citation or SCOTUS name + year/docket, then rerun
             # the existing PDF ladder for that exact cluster.
+            _load_step("Looking the case up on CourtListener by name and "
+                       "date…")
             target = _courtlistener_pdf_fallback_item(
                 client, item, all_cites,
             )
@@ -13319,6 +13670,8 @@ class CourtListenerGUI:
                         "[resolve] Google Scholar fallback unavailable: "
                         f"{exc}"
                     )
+            _load_step("Looking for a U.S. Reports citation in Google Scholar "
+                       "and in later opinions…")
             recovered_us = _late_scotus_us_reports_cite(
                 client, fetcher, item, all_cites,
             )
@@ -17901,8 +18254,9 @@ def _pdf_link_candidates_from_html(data: bytes, base_url: str) -> list[str]:
     return found
 
 
-def _pdf_get(url: str, client=None, timeout: int = 30):
-    """GET *url* using the CourtListener session only for CourtListener hosts."""
+def _pdf_get(url: str, client=None, timeout: int = 30, stream: bool = False):
+    """GET *url* using the CourtListener session only for CourtListener hosts.
+    ``stream`` leaves the body to be read as it comes (see _read_pdf_body)."""
     session = (
         client._session
         if client is not None and _is_courtlistener_url(url)
@@ -17919,7 +18273,81 @@ def _pdf_get(url: str, client=None, timeout: int = 30):
         auth = getattr(session, "headers", {}).get("Authorization")
         if auth:
             headers["Authorization"] = auth
+    if stream:
+        return session.get(url, timeout=timeout, allow_redirects=True,
+                           headers=headers, stream=True)
     return session.get(url, timeout=timeout, allow_redirects=True, headers=headers)
+
+
+def _resolve_step_text(label: str, url: str) -> str:
+    """What checking one copy of a case's scan is called in a slow load's
+    window (see _LoadWatch): the resolver's own label for the copy, in the
+    reader's words."""
+    if label.startswith("GovInfo"):
+        return "Checking GovInfo's scan of the U.S. Reports…"
+    if label.startswith("LOC"):
+        return "Checking the Library of Congress's scan of the U.S. Reports…"
+    if label.startswith("static.case.law"):
+        return "Checking static.case.law's scan…"
+    if label.startswith("local_path"):
+        return "Checking CourtListener's stored copy…"
+    if label.startswith("download_url"):
+        return f"Checking the court's own copy ({_source_name(url)})…"
+    return f"Checking {_source_name(url)}…"
+
+
+def _read_pdf_body(resp) -> bytes:
+    """The whole body of *resp*, telling a watched load (see _LoadWatch) how
+    much of it has come in as it comes."""
+    iter_content = getattr(resp, "iter_content", None)
+    if iter_content is None or not _load_watched():
+        return resp.content
+    try:
+        total = int((getattr(resp, "headers", None) or {}).get(
+            "Content-Length") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    chunks: list[bytes] = []
+    done = 0
+    _load_bytes(0, total)
+    for chunk in iter_content(chunk_size=1 << 16):
+        if chunk:
+            chunks.append(chunk)
+            done += len(chunk)
+            _load_bytes(done, total)
+    return b"".join(chunks)
+
+
+def _source_name(url: str) -> str:
+    """Where a file comes from, as a reader knows the place: "the Library of
+    Congress", "static.case.law" — the host name, for one not known here."""
+    host = (urllib.parse.urlparse(url or "").hostname or "").lower()
+    for suffix, name in (
+            ("loc.gov", "the Library of Congress"),
+            ("govinfo.gov", "GovInfo"),
+            ("supremecourt.gov", "supremecourt.gov"),
+            ("case.law", "static.case.law"),
+            ("courtlistener.com", "CourtListener"),
+            ("archive.org", "the Internet Archive"),
+            ("congress.gov", "Congress.gov"),
+            ("commonlii.org", "CommonLII")):
+        if host == suffix or host.endswith("." + suffix):
+            return name
+    return host.removeprefix("www.") or "the source"
+
+
+def _measure_pdf_pages(data: bytes) -> "Optional[list]":
+    """The pages' measurements a PDF pane takes as it opens (see
+    _PdfPane.measure_pdf), taken on the calling worker thread instead, so
+    the Tk thread — every window's — is not held while a long scan is
+    measured.  None when they could not be taken; the pane then takes them
+    itself."""
+    try:
+        _load_step("Preparing the pages…")
+        return _PdfPane.measure_pdf(data)
+    except Exception as exc:
+        print(f"[pdf] measuring the pages failed: {exc}")
+        return None
 
 
 def _maybe_decode_pdf_response(data: bytes, encoding: str) -> bytes:
@@ -17971,11 +18399,24 @@ def _fetch_pdf_bytes(
             if data is not None:
                 return _clean_reporter_pdf(data, keep_cover), cur
             continue
-        resp = _pdf_get(cur, client=client, timeout=timeout)
-        resp.raise_for_status()
-        final_url = getattr(resp, "url", None) or cur
+        watched = _load_watched()
+        if watched:
+            _load_step(f"Downloading from {_source_name(cur)}…")
+            resp = _pdf_get(cur, client=client, timeout=timeout, stream=True)
+        else:
+            resp = _pdf_get(cur, client=client, timeout=timeout)
+        try:
+            resp.raise_for_status()
+            final_url = getattr(resp, "url", None) or cur
+            body = _read_pdf_body(resp) if watched else resp.content
+        finally:
+            if watched:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
         content = _maybe_decode_pdf_response(
-            resp.content, resp.headers.get("Content-Encoding", ""))
+            body, resp.headers.get("Content-Encoding", ""))
         data = _normalize_pdf_bytes(content)
         if data is not None:
             return _clean_reporter_pdf(data, keep_cover), final_url
@@ -19789,7 +20230,8 @@ class _PdfPane(ttk.Frame):
                  margin: Optional[int] = None,
                  link_style: str = "tint",
                  uniform_crop: bool = False,
-                 autofit: bool = False, on_zoom=None) -> None:
+                 autofit: bool = False, on_zoom=None,
+                 meta: "Optional[list]" = None) -> None:
         super().__init__(parent)
         self._disposed = False
         # Told the new percentage whenever the zoom changes, however it was
@@ -19884,20 +20326,16 @@ class _PdfPane(ttk.Frame):
         # (independent of zoom), so the wide blank margins of court PDFs are
         # cropped to a small, even margin.  The layout is (re)built from this
         # cached metadata whenever the window resizes or the zoom changes.
-        self._meta: list[tuple] = []  # (w_pt, h_pt, frac_box)
+        # Rendering every page takes a while on a long scan — seconds, all of
+        # it with the Tk thread held — so a caller that fetched the pages on a
+        # worker thread measures them there (``meta``, see measure_pdf) and
+        # hands the answer over; only one that did not is measured here.
         with _PDFIUM_LOCK:
-            for i in range(len(self._doc)):
-                page = self._doc[i]
-                try:
-                    w_pt, h_pt = page.get_size()
-                    try:
-                        lo = page.render(scale=self._BBOX_SCALE).to_pil()
-                        frac = self._content_frac(lo)
-                    except Exception:
-                        frac = (0.0, 0.0, 1.0, 1.0)
-                finally:
-                    page.close()
-                self._meta.append((w_pt, h_pt, frac))
+            count = len(self._doc)
+        if meta is not None and len(meta) == count:
+            self._meta: list[tuple] = [tuple(m) for m in meta]
+        else:
+            self._meta = self._measure(self._doc)
         if uniform_crop:
             self._apply_uniform_crop()
 
@@ -20184,7 +20622,52 @@ class _PdfPane(ttk.Frame):
         self._refit_after = None
         self.fit_to_view()
 
-    def _content_frac(self, img) -> tuple:
+    @classmethod
+    def _measure(cls, doc) -> list:
+        """(width pt, height pt, content box) for every page of *doc*, from a
+        quick low-resolution render.  PDFium's lock is taken a page at a time
+        — the renders on other threads go on between them — and the ink
+        profile is read outside it."""
+        full = (0.0, 0.0, 1.0, 1.0)
+        meta: list[tuple] = []
+        with _PDFIUM_LOCK:
+            count = len(doc)
+        for i in range(count):
+            lo = None
+            with _PDFIUM_LOCK:
+                page = doc[i]
+                try:
+                    w_pt, h_pt = page.get_size()
+                    try:
+                        lo = page.render(scale=cls._BBOX_SCALE).to_pil()
+                    except Exception:
+                        lo = None
+                finally:
+                    page.close()
+            try:
+                frac = cls._content_frac(lo) if lo is not None else full
+            except Exception:
+                frac = full
+            meta.append((w_pt, h_pt, frac))
+        return meta
+
+    @classmethod
+    def measure_pdf(cls, pdf_bytes: bytes) -> list:
+        """The measurements a pane takes of *pdf_bytes* as it opens (see
+        _measure), taken on whatever thread calls this — a worker's, so the
+        pane that shows the pages need not take them on the Tk thread."""
+        import pypdfium2 as pdfium
+
+        with _PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(pdf_bytes)
+        try:
+            return cls._measure(doc)
+        finally:
+            with _PDFIUM_LOCK:
+                doc.close()
+
+    @classmethod
+    def _content_frac(cls, img) -> tuple:
         """Fractional content box (l, t, r, b in 0..1) of `img` — the area
         holding actual text/figures, found from row/column ink projections so
         scanner speckle in the margins doesn't defeat the crop.  Returns the
@@ -20195,18 +20678,18 @@ class _PdfPane(ttk.Frame):
         if W < 8 or H < 8:
             return full
         mask = img.convert("L").point(
-            lambda p: 255 if p < self._INK_THRESH else 0)
+            lambda p: 255 if p < cls._INK_THRESH else 0)
         cols = mask.resize((W, 1), Image.BOX).tobytes()  # avg ink per column
         rows = mask.resize((1, H), Image.BOX).tobytes()  # avg ink per row
 
         def span(profile, n):
-            idx = [k for k, v in enumerate(profile) if v > self._PROFILE_MIN]
+            idx = [k for k, v in enumerate(profile) if v > cls._PROFILE_MIN]
             return (idx[0], idx[-1] + 1) if idx else (0, n)
 
         l, r = span(cols, W)
         t, b = span(rows, H)
-        fl, ft = l / W - self._PAD_FRAC, t / H - self._PAD_FRAC
-        fr, fb = r / W + self._PAD_FRAC, b / H + self._PAD_FRAC
+        fl, ft = l / W - cls._PAD_FRAC, t / H - cls._PAD_FRAC
+        fr, fb = r / W + cls._PAD_FRAC, b / H + cls._PAD_FRAC
         fl, ft = max(0.0, fl), max(0.0, ft)
         fr, fb = min(1.0, fr), min(1.0, fb)
         # Ignore implausible crops (blank page, or so tight it's likely noise).
@@ -20216,10 +20699,10 @@ class _PdfPane(ttk.Frame):
         # plus sparse text at the opposite edge.  Projection cropping may then
         # look confident while cutting off edge characters. Treat those one-side
         # crops as uncertain and leave the page whole.
-        if (ft <= self._PAD_FRAC and fb >= 1.0 - self._PAD_FRAC
+        if (ft <= cls._PAD_FRAC and fb >= 1.0 - cls._PAD_FRAC
                 and (fl > 0.03 or fr < 0.97)):
             return full
-        if (fl <= self._PAD_FRAC and fr >= 1.0 - self._PAD_FRAC
+        if (fl <= cls._PAD_FRAC and fr >= 1.0 - cls._PAD_FRAC
                 and (ft > 0.03 or fb < 0.97)):
             return full
         return (fl, ft, fr, fb)
@@ -21385,6 +21868,513 @@ def _is_redacted_case_pdf(url: "Optional[str]") -> bool:
     return "case.law" in (url or "").lower()
 
 
+def _beside_geometry(win: tk.Misc, anchor: "Optional[tk.Misc]", width: int,
+                     height: int, min_width: int, min_height: int) -> str:
+    """Where a document window opens: beside the window it was opened from
+    rather than over it.  The left of the desktop is where it goes — to that
+    window's left when there is room there, to its right when there is not,
+    and against the left edge when neither side can hold it."""
+    left, top, work_w, work_h = _work_area(win)
+    w = max(min_width, min(width, max(min_width, work_w - 32)))
+    h = max(min_height, min(height, max(min_height, work_h - 72)))
+    x = left + 16
+    y = top + 24
+    try:
+        if anchor is not None and anchor.winfo_exists():
+            anchor.update_idletasks()
+            ax, aw = anchor.winfo_rootx(), anchor.winfo_width()
+            if ax - left >= w + 24:
+                x = ax - w - 12           # room to the reader's left
+            elif left + work_w - (ax + aw) >= w + 24:
+                x = ax + aw + 12          # …or to its right
+            y = max(top + 16,
+                    min(anchor.winfo_rooty(), top + work_h - h - 24))
+    except tk.TclError:
+        pass
+    return f"{w}x{h}+{int(x)}+{int(y)}"
+
+
+# ---------------------------------------------------------------------------
+# A document on its way: what it is doing — and, when it is slow, a window of
+# its own saying so, standing where the document will open
+# ---------------------------------------------------------------------------
+
+#: The load the running thread reports to, set with ``_watching`` and read by
+#: ``_load_step`` and ``_load_bytes`` — so the lookups and downloads a load
+#: runs through can say what they are doing without being handed anything.
+_LOAD_WATCH = threading.local()
+
+
+def _load_step(text: str) -> None:
+    """Say what the load running on this thread is trying now ("Checking the
+    Library of Congress's scan…").  Nothing, on a thread no load is being
+    watched on."""
+    watch = getattr(_LOAD_WATCH, "watch", None)
+    if watch is not None:
+        watch.step(text)
+
+
+def _load_bytes(done: int, total: int) -> None:
+    """Say how much of a file the load running on this thread has received:
+    *done* bytes of *total* (0 where the server did not say)."""
+    watch = getattr(_LOAD_WATCH, "watch", None)
+    if watch is not None:
+        watch.received(done, total)
+
+
+def _load_watched() -> bool:
+    """Whether a load is being watched on this thread."""
+    return getattr(_LOAD_WATCH, "watch", None) is not None
+
+
+# The volume downloads and the legislative-history fetches say what they are
+# doing through hooks of their own (they know nothing of the GUI); these read
+# the calling thread's watch, so a download reports to the load it is part
+# of, and to nothing when no load is being watched.
+us_reports_pdf.on_step = leghist_fetch.on_step = _load_step
+us_reports_pdf.on_bytes = leghist_fetch.on_bytes = _load_bytes
+
+
+class _watching:
+    """``with _watching(watch):`` — what runs inside reports to *watch*."""
+
+    def __init__(self, watch) -> None:
+        self._watch = watch
+        self._before = None
+
+    def __enter__(self):
+        self._before = getattr(_LOAD_WATCH, "watch", None)
+        _LOAD_WATCH.watch = self._watch
+        return self._watch
+
+    def __exit__(self, *_exc) -> bool:
+        _LOAD_WATCH.watch = self._before
+        return False
+
+
+def _toplevel_path(widget) -> str:
+    """The Tk path of the window *widget* is in ("" for none)."""
+    try:
+        return str(widget.winfo_toplevel()) if widget is not None else ""
+    except (AttributeError, tk.TclError):
+        return ""
+
+
+def _size_label(n: int) -> str:
+    """"840 KB", "3.4 MB": a byte count as a reader reads one."""
+    if n < 1_000_000:
+        return f"{max(1, round(n / 1000))} KB"
+    return f"{n / 1_000_000:.1f} MB"
+
+
+class _LoadWatch:
+    """One document the reader asked for, on its way.
+
+    Most arrive in a moment, and nothing of this is ever seen.  One still on
+    its way after SLOW_MS gets a window of its own, standing where the
+    document will open: what is being tried now and what has been tried
+    already, how much of the file has come in and how long it has all taken.
+    When the document arrives it opens in that window's place — at the size
+    and spot the window has then, moved or not (see hand_off).  When nothing
+    can be found the window says so, and why, so the reader knows to stop
+    waiting; and "Stop waiting" gives the document up, letting go of
+    anything that arrives for it afterwards.
+
+    A load runs on a thread of its own, so a slow one holds nothing else up:
+    the window it was asked for from goes on answering, and a link followed
+    from there meanwhile gets a watch — and, if it is slow too, a window — of
+    its own.  The window takes no focus from the one the reader is working
+    in.
+
+    Two phases.  First the pages ("scan"); a case with no scan anywhere then
+    falls back to its text (see to_text), which a text window opening from
+    the same window picks up (CourtListenerGUI.new_case_view_host) and a text
+    lookup coming to nothing reports (CourtListenerGUI.end_text_load).
+
+    ``step`` and ``received`` may be called from any thread (_load_step,
+    _load_bytes); everything else belongs to the Tk thread.
+    """
+
+    SLOW_MS = 3000          # how long a load may take before its window shows
+    TEXT_PATIENCE_S = 90    # how long the text is waited for before saying so
+    _SHOWN_STEPS = 6        # how many of the steps already taken are listed
+    _BYTES_EVERY = 0.2      # seconds between updates of the byte count
+    _CASCADE = 26           # px between the windows of loads under way at once
+    _WRAP = 400             # px the window's lines wrap at
+
+    def __init__(self, app, parent, label: str, *, cite: str = "") -> None:
+        self._app = app
+        self._root = app.root
+        self.label = re.sub(r"\s+", " ", label or "").strip() or "the document"
+        self.cite = cite
+        # The window it was asked for from: where this one stands beside, and
+        # how a text window opening from there is known to be this load's.
+        self._parent = parent
+        self.anchor_path = _toplevel_path(parent)
+        self.phase = "scan"
+        self.done = False
+        self.cancelled = False
+        self.failed = False
+        # Taken up by the text lookup it fell back to, which will say how
+        # that ends (CourtListenerGUI.claim_text_load).
+        self.claimed = False
+        self._now = ""
+        self._steps: list[str] = []
+        self._bytes: "Optional[tuple[int, int]]" = None
+        self._bytes_at = 0.0
+        self._started = time.monotonic()
+        self._text_since = 0.0
+        self._win = None
+        self._vars: dict = {}
+        self._bar = None
+        self._button = None
+        self._tick_after = None
+        self._timer = None
+        try:
+            self._timer = self._root.after(self.SLOW_MS, self._show)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    # --- reports from the load's own thread ---------------------------------
+
+    def step(self, text: str) -> None:
+        """What the load is trying now.  Any thread."""
+        self._post(self._set_step, str(text))
+
+    def received(self, done: int, total: int) -> None:
+        """How much of the file has come in.  Any thread; at most a few
+        updates a second go to the window, and always the last one."""
+        now = time.monotonic()
+        if not (total and done >= total) and now - self._bytes_at < self._BYTES_EVERY:
+            return
+        self._bytes_at = now
+        self._post(self._set_bytes, int(done), int(total or 0))
+
+    def _post(self, fn, *args) -> None:
+        try:
+            self._root.after(0, fn, *args)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    # --- the load's end, told on the Tk thread --------------------------------
+
+    def to_text(self, reason: str) -> None:
+        """No scan of the case could be found: the text is looked for instead,
+        and this waits for that — for the text window it will open in this
+        one's place, or the word that there is none."""
+        if self.done:
+            return
+        self.phase = "text"
+        self._text_since = time.monotonic()
+        self._set_step(reason)
+
+    def hand_off(self) -> "Optional[str]":
+        """The document is opening: where it should open — this window's own
+        geometry, when it is showing (None when it never was) — and this
+        window goes."""
+        geometry = None
+        win = self._win
+        if win is not None and not self.cancelled:
+            try:
+                if win.winfo_exists():
+                    geometry = str(win.wm_geometry())
+            except tk.TclError:
+                geometry = None
+        self._end()
+        return geometry
+
+    def finish(self) -> None:
+        """The load is over, and has nothing to say."""
+        self._end()
+
+    def fail(self, message: str) -> None:
+        """Nothing could be opened.  A window showing says so, and why, until
+        the reader closes it; one that never showed stays unshown, the status
+        line of the window the load was asked for from having said it."""
+        if self.done:
+            return
+        if self._win is None:
+            self._end()
+            return
+        self.done = self.failed = True
+        self._cancel_timers()
+        self._unregister()
+        if self._now and (not self._steps or self._steps[-1] != self._now):
+            self._steps.append(self._now)
+        self._now = message or f"{self.label} could not be found."
+        self._bytes = None
+        self._refresh()
+        try:
+            self._vars["elapsed"].set(f"Stopped after {self._spent()}.")
+        except (KeyError, tk.TclError):
+            pass
+
+    # --- the window -----------------------------------------------------------
+
+    def _geometry(self) -> str:
+        """Where the document will open (see _FloatingPdfWindow._place_beside),
+        stepped down and across from any other load's window already there."""
+        # Beside the window it was asked for from — the main window included,
+        # as a viewer with no other anchor stands beside the application's
+        # root — or, that window gone, beside the root.
+        anchor = self._root
+        try:
+            parent = self._parent
+            if parent is not None and parent.winfo_exists():
+                anchor = parent.winfo_toplevel()
+        except (AttributeError, tk.TclError):
+            anchor = self._root
+        spec = _beside_geometry(
+            self._root, anchor, _FloatingPdfWindow._W, _FloatingPdfWindow._H,
+            _FloatingPdfWindow._MIN_W, _FloatingPdfWindow._MIN_H)
+        showing = sum(1 for w in getattr(self._app, "_load_watches", ())
+                      if w is not self and w._win is not None and not w.done)
+        match = _WM_GEOMETRY_RE.match(spec)
+        if showing and match is not None:
+            step = self._CASCADE * min(showing, 6)
+            x = int(match.group(3).lstrip("+")) + step
+            y = int(match.group(4).lstrip("+")) + step
+            spec = f"{match.group(1)}x{match.group(2)}+{x}+{y}"
+        return spec
+
+    def _show(self) -> None:
+        """The load has taken a while: give it a window, where the document
+        will open — without taking the reader's focus from the window they
+        are working in."""
+        self._timer = None
+        if self.done or self._win is not None:
+            return
+        try:
+            had_focus = self._root.focus_get()
+        except (KeyError, tk.TclError):
+            had_focus = None
+        try:
+            win = _ui_toplevel(self._root)
+            _ensure_modern_ttk_styles(win)
+            win.title(f"Opening {self.label}")
+            win.geometry(self._geometry())
+            win.minsize(_FloatingPdfWindow._MIN_W, _FloatingPdfWindow._MIN_H)
+            self._win = win
+            self._build(win)
+        except Exception as exc:      # no display, a theme that will not load
+            print(f"[load] the status window could not open: {exc}")
+            self._destroy_window()
+            return
+        try:
+            win.protocol("WM_DELETE_WINDOW", self._stop_clicked)
+            win.bind("<Escape>", lambda _e: self._stop_clicked())
+        except tk.TclError:
+            pass
+        self._refresh()
+        self._tick()
+        if had_focus is not None:
+            try:
+                self._root.after(60, lambda: self._give_back_focus(had_focus))
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _give_back_focus(widget) -> None:
+        try:
+            if widget.winfo_exists():
+                widget.focus_force()
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _build(self, win) -> None:
+        """What the window holds: the document's name, a progress bar, the
+        step under way and those already taken, and one button."""
+        for key in ("heading", "now", "bytes", "tried_head", "tried",
+                    "footer", "elapsed"):
+            self._vars[key] = tk.StringVar(master=win, value="")
+        card = _ui_frame(win)
+        card.pack(fill="both", expand=True, padx=28, pady=(28, 16))
+
+        def label(key, *, size=12, weight="normal", muted=True, pady=(0, 0)):
+            lbl = _ui_label(card, size=size, weight=weight, muted=muted,
+                            anchor="w", textvariable=self._vars[key])
+            try:
+                lbl.configure(wraplength=self._WRAP, justify="left")
+            except (tk.TclError, ValueError):
+                pass
+            lbl.pack(fill="x", pady=pady)
+            return lbl
+
+        label("heading")
+        title = _ui_label(card, text=self.label, size=15, weight="bold",
+                          anchor="w")
+        try:
+            title.configure(wraplength=self._WRAP, justify="left")
+        except (tk.TclError, ValueError):
+            pass
+        title.pack(fill="x", pady=(2, 16))
+        self._bar = ttk.Progressbar(card, mode="indeterminate")
+        self._bar.pack(fill="x", pady=(0, 10))
+        self._bar.start(12)
+        label("now", size=13, muted=False)
+        label("bytes", pady=(2, 0))
+        label("tried_head", pady=(16, 2))
+        label("tried")
+        label("footer", pady=(16, 0))
+        label("elapsed", pady=(4, 0))
+        row = _ui_frame(win)
+        row.pack(fill="x", side="bottom", padx=28, pady=(0, 20))
+        self._button = _ui_button(row, "Stop waiting",
+                                  command=self._stop_clicked, width=130)
+        self._button.pack(side="right")
+
+    def _refresh(self) -> None:
+        """Bring the window up to what is known."""
+        if self._win is None:
+            return
+        v = self._vars
+        try:
+            if self.failed:
+                v["heading"].set("Couldn't open")
+                v["footer"].set("")
+            elif self.phase == "text":
+                v["heading"].set("Opening the text of")
+                v["footer"].set("It will open here when it arrives.")
+            else:
+                v["heading"].set("Opening")
+                v["footer"].set("It will open in this window as soon as it "
+                                "arrives. Other links can be followed "
+                                "meanwhile.")
+            v["now"].set(self._now or "Getting started…")
+            v["bytes"].set(self._bytes_text())
+            tried = self._steps[-self._SHOWN_STEPS:]
+            v["tried_head"].set("Tried so far" if tried else "")
+            v["tried"].set("\n".join(f"•  {s}" for s in tried))
+            self._sync_bar()
+            if self._button is not None:
+                self._button.configure(
+                    text="Stop waiting" if self.phase == "scan"
+                    and not self.done else "Close")
+        except tk.TclError:
+            pass
+
+    def _bytes_text(self) -> str:
+        if not self._bytes:
+            return ""
+        done, total = self._bytes
+        if total > 0:
+            pct = min(100, int(done * 100 / total))
+            return f"{_size_label(done)} of {_size_label(total)} ({pct}%)"
+        return f"{_size_label(done)} so far"
+
+    def _sync_bar(self) -> None:
+        """Measured while a file of known size comes in; a busy bar while
+        things are being looked for; none once there is nothing to wait
+        for."""
+        bar = self._bar
+        if bar is None:
+            return
+        if self.failed:
+            bar.stop()
+            bar.pack_forget()
+            return
+        done, total = self._bytes or (0, 0)
+        if total > 0:
+            if str(bar.cget("mode")) != "determinate":
+                bar.stop()
+                bar.configure(mode="determinate", maximum=100)
+            bar.configure(value=min(100, done * 100 / total))
+        elif str(bar.cget("mode")) != "indeterminate":
+            bar.configure(mode="indeterminate", value=0)
+            bar.start(12)
+
+    def _tick(self) -> None:
+        """Once a second: how long it has been — and, a while into waiting
+        for text, that it may not come."""
+        self._tick_after = None
+        if self._win is None or self.done:
+            return
+        try:
+            self._vars["elapsed"].set(f"Working on it for {self._spent()}.")
+        except tk.TclError:
+            return
+        if (self.phase == "text" and self._text_since
+                and time.monotonic() - self._text_since > self.TEXT_PATIENCE_S
+                and not self._now.startswith("Still waiting")):
+            self._set_step("Still waiting — the text may not be available "
+                           "anywhere.")
+        try:
+            # On the root, like every timer here: Tkinter keeps an after()
+            # callback's name on the widget that set it, and one cancelled
+            # through another widget is left there, to fail that widget's
+            # destroy() — and the app's, quitting with the window up.
+            self._tick_after = self._root.after(1000, self._tick)
+        except tk.TclError:
+            pass
+
+    def _spent(self) -> str:
+        """How long the load has taken: "12 s", "1 min 5 s"."""
+        mins, secs = divmod(int(time.monotonic() - self._started), 60)
+        return f"{mins} min {secs} s" if mins else f"{secs} s"
+
+    def _set_step(self, text: str) -> None:
+        if self.done or not text or text == self._now:
+            return
+        if self._now and (not self._steps or self._steps[-1] != self._now):
+            self._steps.append(self._now)
+        self._now = text
+        self._bytes = None
+        self._refresh()
+
+    def _set_bytes(self, done: int, total: int) -> None:
+        if self.done:
+            return
+        self._bytes = (done, total)
+        if self._win is not None:
+            try:
+                self._vars["bytes"].set(self._bytes_text())
+                self._sync_bar()
+            except tk.TclError:
+                pass
+
+    def _stop_clicked(self) -> None:
+        """"Stop waiting" — the document is given up, and anything arriving
+        for it let go — or, once there is nothing left to wait for (a
+        failure, or a text that opens in a window of its own either way),
+        "Close"."""
+        if self.phase == "scan" and not self.done:
+            self.cancelled = True
+        self._end()
+
+    # --- bookkeeping ----------------------------------------------------------
+
+    def _end(self) -> None:
+        self.done = True
+        self._cancel_timers()
+        self._destroy_window()
+        self._unregister()
+
+    def _cancel_timers(self) -> None:
+        for name in ("_timer", "_tick_after"):
+            after_id = getattr(self, name)
+            setattr(self, name, None)
+            if after_id is None:
+                continue
+            try:
+                self._root.after_cancel(after_id)
+            except (tk.TclError, ValueError):
+                pass
+
+    def _destroy_window(self) -> None:
+        win, self._win = self._win, None
+        self._bar = self._button = None
+        if win is not None:
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+    def _unregister(self) -> None:
+        ended = getattr(self._app, "_load_watch_ended", None)
+        if ended is not None:
+            ended(self)
+
+
 class _FloatingPdfWindow:
     """A small, Preview-style window showing nothing but the PDF.
 
@@ -21393,9 +22383,10 @@ class _FloatingPdfWindow:
     behind a full window of chrome, the page gets a window of its own — one
     quiet strip along the top carrying the zoom controls and the document's
     name, and the page under it on a small margin.  Nothing else: no button
-    bar, no side panels, no status line.  Save and Print stay reachable from
-    the strip's context menu and the usual accelerators, and Ctrl/Cmd-F
-    searches the page whenever the PDF has a text layer.
+    bar, no status line — and the case's details only when asked for, in a
+    column the window grows to hold (the "s" key).  Save and Print stay
+    reachable from the strip's context menu and the usual accelerators, and
+    Ctrl/Cmd-F searches the page whenever the PDF has a text layer.
 
     Always a real top-level window, never a page in the shared tabbed case
     window — floating clear of the reader is the whole point of the mode.
@@ -21415,7 +22406,8 @@ class _FloatingPdfWindow:
                  on_cite=None, on_cite_browser=None,
                  on_build_text=None, bookmarks=None,
                  anchor: "Optional[tk.Misc]" = None,
-                 on_citation_edited=None) -> None:
+                 on_citation_edited=None, geometry: str = "",
+                 page_meta: "Optional[list]" = None) -> None:
         self._app = app
         # Whoever names this window, told when the reader edits the case's
         # citation beside the pages (see citation_edited).
@@ -21450,13 +22442,16 @@ class _FloatingPdfWindow:
         # soon as pages are in hand.  P is on the strip throughout, greyed
         # until there is something for it to show.
         self._scan_search: "Optional[bool]" = True if data is not None else None
-        # The case-details panel, in a window of its own beside this one (the
-        # "s" key).  Kept once built and hidden rather than destroyed, so
-        # opening it again costs neither a rebuild nor a second lookup, and
-        # the geometry this window last had, so following it about does not
-        # re-place the panel on every unrelated <Configure>.
-        self._details_win: "Optional[tk.Toplevel]" = None
-        self._details_geom: tuple = ()
+        # The case-details panel (the "s" key), in a column along this
+        # window's right-hand side.  Kept once built and unpacked rather than
+        # destroyed, so opening it again costs neither a rebuild nor a second
+        # lookup.  What the window grew by to hold it — the width, and how far
+        # it stepped left to keep the panel in view — is given back when it
+        # goes; the width asked for is what _when_resized waits to land.
+        self._details_side: "Optional[tk.Misc]" = None
+        self._details_open = False
+        self._details_grew: "Optional[tuple]" = None
+        self._details_resize_target: "Optional[int]" = None
 
         # ``parent`` owns this window's lifetime — Tk destroys a toplevel with
         # its master, so a viewer meant to outlive the reader that opened it is
@@ -21465,7 +22460,15 @@ class _FloatingPdfWindow:
         self._win = _ui_toplevel(parent)
         _ensure_modern_ttk_styles(self._win)
         self._win.title(title or "PDF")
-        self._place_beside(anchor if anchor is not None else parent)
+        if geometry:
+            # Where a slow document's status window stood (see _LoadWatch):
+            # the document opens in its place.
+            try:
+                self._win.geometry(geometry)
+            except tk.TclError:
+                self._place_beside(anchor if anchor is not None else parent)
+        else:
+            self._place_beside(anchor if anchor is not None else parent)
         self._win.minsize(self._MIN_W, self._MIN_H)
 
         self._zoom_var = tk.StringVar(master=self._win, value="100%")
@@ -21473,8 +22476,11 @@ class _FloatingPdfWindow:
         # first use and refilled on every one after.
         self._strip_menus: dict = {}
         self._build_bar()
+        # Packed from the left, so the case's details can stand to its right
+        # in a column of their own, and its width can be held while the
+        # window grows to make room for them (see _open_details).
         self._body = ttk.Frame(self._win)
-        self._body.pack(side="top", fill="both", expand=True)
+        self._body.pack(side="left", fill="both", expand=True)
         # A window of its own, so the other windows' Window menus list it.
         _list_in_window_menu(app, self._win)
 
@@ -21503,11 +22509,9 @@ class _FloatingPdfWindow:
         _bind_find_keys(self._win, self._find_open,
                         lambda: self._find_step(+1),
                         lambda: self._find_step(-1))
-        # Bare "s" opens the case's details beside the window — over the pages
+        # Bare "s" opens the case's details beside the pages — over the pages
         # as much as over the text, since it is the same case either way.
         self._win.bind("<KeyPress-s>", self._details_shortcut)
-        # The panel stands against this window, so it goes where this one goes.
-        self._win.bind("<Configure>", self._on_geometry, add="+")
         self._win.bind("<Destroy>", self._on_destroy, add="+")
         if data is None:
             # A window with no scan to show — a case the reporter interface
@@ -21516,7 +22520,7 @@ class _FloatingPdfWindow:
             self._sync_bar()
             return
         try:
-            self.set_pdf(data, url, title, margin=margin)
+            self.set_pdf(data, url, title, margin=margin, page_meta=page_meta)
         except Exception:
             self.close()
             raise
@@ -21530,26 +22534,11 @@ class _FloatingPdfWindow:
         covering the text is the point of the mode.  The left of the desktop is
         where it goes: to the reader's left when there is room there, to its
         right when there is not, and against the left edge when neither side of
-        the reader can hold it."""
-        left, top, work_w, work_h = _work_area(self._win)
-        w = max(self._MIN_W, min(self._W, max(self._MIN_W, work_w - 32)))
-        h = max(self._MIN_H, min(self._H, max(self._MIN_H, work_h - 72)))
-        x = left + 16
-        y = top + 24
+        the reader can hold it (see _beside_geometry, which a slow document's
+        status window uses too, so that the document opens where it stood)."""
         try:
-            if anchor is not None and anchor.winfo_exists():
-                anchor.update_idletasks()
-                ax, aw = anchor.winfo_rootx(), anchor.winfo_width()
-                if ax - left >= w + 24:
-                    x = ax - w - 12           # room to the reader's left
-                elif left + work_w - (ax + aw) >= w + 24:
-                    x = ax + aw + 12          # …or to its right
-                y = max(top + 16,
-                        min(anchor.winfo_rooty(), top + work_h - h - 24))
-        except tk.TclError:
-            pass
-        try:
-            self._win.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
+            self._win.geometry(_beside_geometry(
+                self._win, anchor, self._W, self._H, self._MIN_W, self._MIN_H))
         except tk.TclError:
             pass
 
@@ -21847,10 +22836,13 @@ class _FloatingPdfWindow:
             pass
 
     def set_pdf(self, data: bytes, url: str, title: str = "",
-                *, margin: Optional[int] = None) -> None:
+                *, margin: Optional[int] = None,
+                page_meta: "Optional[list]" = None) -> None:
         """Show *data* here, replacing whatever was on screen — a second click
         on the PDF button (or another reporter's scan) reuses this window
-        instead of stacking another one on top of it."""
+        instead of stacking another one on top of it.  ``page_meta`` is the
+        pages' measurements taken off the Tk thread (see _measure_pdf_pages),
+        when the caller has them."""
         old, self._pane = self._pane, None
         if old is not None:
             old.destroy()
@@ -21878,7 +22870,7 @@ class _FloatingPdfWindow:
         width = max((avail or self._W) - 30, self._MIN_W - 40)
         pane = _PdfPane(self._body, data, width=width, margin=margin,
                         link_style="recolor", uniform_crop=True, autofit=True,
-                        on_zoom=self._show_zoom)
+                        on_zoom=self._show_zoom, meta=page_meta)
         pane.pack(fill="both", expand=True)
         pane.take_focus()   # the page is all there is here: the keys are its own
         self._pane = pane
@@ -22025,7 +23017,8 @@ class _FloatingPdfWindow:
     def attach_scan(self, data: bytes, url: str, title: str = "",
                     *, margin: Optional[int] = None,
                     on_save=None, on_print=None,
-                    on_cite=None, on_cite_browser=None) -> bool:
+                    on_cite=None, on_cite_browser=None,
+                    page_meta: "Optional[list]" = None) -> bool:
         """Take pages that arrived after this window opened.
 
         A case the reporter interface could find no scan of from its citation
@@ -22061,7 +23054,8 @@ class _FloatingPdfWindow:
             # stays there until the reader presses P.
             self._pane = _PdfPane(self._body, data, width=width, margin=margin,
                                   link_style="recolor", uniform_crop=True,
-                                  autofit=True, on_zoom=self._show_zoom)
+                                  autofit=True, on_zoom=self._show_zoom,
+                                  meta=page_meta)
         except Exception as exc:
             print(f"[pdf-window] the scan that arrived could not be shown: {exc}")
             self._bytes = None
@@ -22169,15 +23163,19 @@ class _FloatingPdfWindow:
             self.scroll_to_page(page, y_pt)
 
     # ------------------------------------------------------------------
-    # The case's details, in a panel standing beside the window
+    # The case's details, in a column along the window's right-hand side
     # ------------------------------------------------------------------
 
-    _DETAILS_GAP = 10   # px between this window and the panel beside it
+    _DETAILS_RULE_W = 1   # the hairline between the pages and the panel
+    # How far left of the desktop's left-hand edge a window's inside may start
+    # and still count as on that desktop — the frame of a window pushed
+    # against the edge, as the case window allows for it.
+    _DETAILS_SLACK = 16
 
     def _details_shortcut(self, event=None):
         """The bare "s" key, over the pages as much as over the text: show
-        this case's details beside the window, or put them away again.  Left
-        to the keyboard while a field that takes typing has it."""
+        this case's details beside them, or put them away again.  Left to the
+        keyboard while a field that takes typing has it."""
         try:
             focused = self._win.focus_get()
         except (KeyError, tk.TclError):
@@ -22188,12 +23186,8 @@ class _FloatingPdfWindow:
         return "break"
 
     def details_showing(self) -> bool:
-        """Whether the details panel is on screen beside this window."""
-        win = self._details_win
-        try:
-            return win is not None and bool(win.winfo_ismapped())
-        except tk.TclError:
-            return False
+        """Whether the details panel is open in this window."""
+        return self._details_open and self._details_side is not None
 
     def toggle_details(self) -> None:
         """The panel's switch — the "s" key, the strip's panel icon, and Case
@@ -22244,9 +23238,21 @@ class _FloatingPdfWindow:
         fetched.  A case whose text has not arrived says so on the strip and
         leaves the key to be pressed again; a document with no text side at
         all (the Statutes at Large, an English report) has no case details to
-        show and stays as it is."""
-        win = self._details_win
-        if win is None:
+        show and stays as it is.
+
+        The panel opens inside this window, in a column along its right-hand
+        side, and the window grows by that column's width to hold it: the
+        pages — or the text — keep exactly the room they had, so nothing on
+        them is re-fitted, re-wrapped or re-rendered.  Their width is held
+        while the window grows and the column is packed into the room it
+        made, since Tk lays the two changes out in separate passes and the
+        window manager answers a resize in its own time.  Only a window with
+        no room to grow — maximized, or as wide as the desktop already —
+        gives the panel its width out of the pages instead."""
+        if self.details_showing():
+            return
+        side = self._details_side
+        if side is None:
             if not self.has_text_side():
                 return
             reader = self._build_reader()
@@ -22254,57 +23260,93 @@ class _FloatingPdfWindow:
                 self._flash("Case details not ready")
                 return
             try:
-                win = self._details_window(reader)
+                side = self._details_column(reader)
             except Exception as exc:
                 print(f"[pdf-window] the details panel could not open: {exc}")
                 return
-            self._details_win = win
+            self._details_side = side
+        self._details_open = True
+        self._mark_details_btn(True)
         try:
             self._win.update_idletasks()
         except tk.TclError:
             pass
-        self._details_geom = ()
-        self._place_details()
-        try:
-            win.deiconify()
-            win.lift()
-        except tk.TclError:
-            self._details_win = None
+        width = self._details_width() + self._DETAILS_RULE_W
+        grow = self._details_growth(width)
+        if grow is not None and self._pin_body_width():
+            spec, shift = grow
+            try:
+                self._win.geometry(spec)
+            except tk.TclError:
+                self._unpin_body_width()
+                grow = None
+        else:
+            grow = None
+        if grow is None:
+            # Nowhere to grow (or pages not laid out yet, with no width to
+            # keep): the panel takes its width from the pages.
+            self._pack_details(True)
             return
-        self._mark_details_btn(True)
+        self._details_grew = (width, shift, spec)
+        self._details_resize_target = int(spec.split("x", 1)[0])
+
+        def made_room() -> None:
+            if self._details_open:     # not put away again meanwhile
+                self._pack_details(True)
+            self._unpin_body_width()
+
+        self._when_resized(made_room)
 
     def _hide_details(self) -> None:
-        """Put the panel away — withdrawn, not destroyed, so bringing it back
-        costs neither a rebuild nor a second lookup."""
-        win = self._details_win
-        if win is not None:
-            try:
-                win.withdraw()
-            except tk.TclError:
-                self._details_win = None
+        """Put the panel away — unpacked, not destroyed, so bringing it back
+        costs neither a rebuild nor a second lookup — and give back what the
+        window grew by to hold it: the column's width, and the step left it
+        took to keep the panel in view, unless it has been moved since.  The
+        pages' width is held across it, as it was on the way in."""
+        was_open = self._details_open
+        self._details_open = False
         self._mark_details_btn(False)
-        return None
-
-    def _details_window(self, reader) -> tk.Toplevel:
-        """A window holding this case's details panel, built by the opinion
-        that owns them.  Mastered on this window, so it is closed with the
-        case it belongs to; it opens on the case's own details and, for a
-        Supreme Court case, offers the docket behind them (see
-        ``_ScholarTextWindow._details_panel``)."""
-        win = _ui_toplevel(self._win)
-        _ensure_modern_ttk_styles(win)
-        win.title("Case Details")
+        if not was_open:
+            return None
+        grew, self._details_grew = self._details_grew, None
         try:
-            if self._win.winfo_viewable():
-                win.transient(self._win)   # a panel of this window's, not a peer
+            self._win.update_idletasks()
         except tk.TclError:
             pass
-        body = ttk.Frame(win)
-        body.pack(fill="both", expand=True)
+        spec = self._details_shrink(grew) if grew is not None else None
+        held = spec is not None and self._pin_body_width()
+        # Unpacked before the window shrinks: the other way round the pages
+        # would be squeezed into what is left beside the panel.
+        self._pack_details(False)
+        if spec is not None:
+            try:
+                self._win.geometry(spec)
+            except tk.TclError:
+                spec = None
+        if spec is None:
+            if held:
+                self._unpin_body_width()
+            return None
+        self._details_resize_target = int(spec.split("x", 1)[0])
+        self._when_resized(self._unpin_body_width)
+        return None
+
+    def _details_column(self, reader):
+        """The column holding this case's details panel, along the window's
+        right-hand side behind a hairline, built by the opinion that owns
+        them: it opens on the case's own details and, for a Supreme Court
+        case, offers the docket behind them (see
+        ``_ScholarTextWindow._details_panel``).  Built once, and not packed
+        here — _open_details says when it stands in the window."""
+        side = ttk.Frame(self._win)
+        rule = tk.Frame(side, width=self._DETAILS_RULE_W, bg=_UI["border"])
+        rule.pack(side="left", fill="y")
+        host = ttk.Frame(side)
+        host.pack(side="left", fill="both", expand=True)
         # A chromeless reader builds no panel of its own — it has neither the
         # checkbox nor the key for one — so this is the panel, and it is built
         # here, in this window.
-        reader._details_host = body
+        reader._details_host = host
         reader._details_views = _ScholarTextWindow._SCAN_DETAILS_VIEWS
         reader._details_panel().pack(fill="both", expand=True)
         reader._details_on = True
@@ -22313,63 +23355,161 @@ class _FloatingPdfWindow:
         except (AttributeError, tk.TclError):
             pass
         reader._refresh_details_view()
-        for seq in ("<KeyPress-s>", "<Escape>") + _accel_sequences("w"):
-            try:
-                win.bind(seq, lambda _e: self._hide_details() or "break")
-            except tk.TclError:
-                pass    # modifier not supported on this platform
-        win.protocol("WM_DELETE_WINDOW", self._hide_details)
-        return win
+        # Esc with the panel in hand puts it away, as it did the window the
+        # panel used to stand in; "s" and the close keys are the window's.
+        _bind_recursive(side, "<Escape>",
+                        lambda _e: self._hide_details() or "break")
+        return side
+
+    def _pack_details(self, on: bool) -> None:
+        """Stand the details column against the window's right-hand edge,
+        beside the pages, or take it out again.  While it is in, the window
+        will not be made narrower than the pages' least width beside it."""
+        side = self._details_side
+        if side is None:
+            return
+        try:
+            if on:
+                side.pack(side="right", fill="y", before=self._body)
+                self._win.minsize(self._MIN_W + self._details_width()
+                                  + self._DETAILS_RULE_W, self._MIN_H)
+            else:
+                side.pack_forget()
+                self._win.minsize(self._MIN_W, self._MIN_H)
+        except tk.TclError:
+            pass
 
     def _details_width(self) -> int:
         """The panel's own width — the column it is given in a case window."""
         width = getattr(self._reader, "_details_panel_w", 0)
         return int(width) if width else _ScholarTextWindow._DETAILS_PANEL_W
 
-    def _place_details(self) -> None:
-        """Stand the panel against this window's right-hand edge and match its
-        height.  Beside the window, never inside it: nothing here is resized,
-        re-laid out or re-rendered by opening it.  A maximized window has
-        nothing to its right, so there the panel goes against the right of the
-        desktop, over the edge of the pages rather than moving them."""
-        win = self._details_win
-        if win is None:
-            return
+    def _pin_body_width(self) -> bool:
+        """Hold the pages at the width they have now, so the two-step layout
+        of opening or closing the panel cannot re-fit them in between.  False
+        where they are not laid out yet, with nothing to hold."""
+        body = self._body
         try:
-            x0, y0 = self._win.winfo_rootx(), self._win.winfo_rooty()
-            w, h = self._win.winfo_width(), self._win.winfo_height()
+            width = body.winfo_width()
+            if width <= 1:
+                return False
+            body.configure(width=width)
+            body.pack_propagate(False)
+            body.pack_configure(expand=False)
         except tk.TclError:
-            return
-        left, top, work_w, work_h = _work_area(self._win)
-        pw = self._details_width()
-        h = max(self._MIN_H, min(h, work_h))
-        x = x0 + w + self._DETAILS_GAP
-        if x + pw > left + work_w:      # maximized, or no room to the right
-            x = max(left, left + work_w - pw)
-        y = max(top, min(y0, top + work_h - h))
+            return False
+        return True
+
+    def _unpin_body_width(self) -> None:
+        """Let the pages follow the window's width again.  Their share is what
+        they were held at — the window changed by exactly the panel's column
+        — so this changes nothing on screen."""
+        body = self._body
         try:
-            win.geometry(f"{pw}x{int(h)}+{int(x)}+{int(y)}")
+            body.pack_propagate(True)
+            body.pack_configure(expand=True)
+            body.configure(width=0)    # back to taking what pack gives it
         except tk.TclError:
             pass
 
-    def _on_geometry(self, event) -> None:
-        """This window moved or was resized: bring the panel along with it.
-        Only this window's own <Configure> counts — the event fires for every
-        child — and only one that changed something, so nothing is re-placed
-        on an event that says the window is where it already was."""
-        if getattr(event, "widget", None) is not self._win:
-            return
-        if not self.details_showing():
-            return
+    def _details_growth(self, width: int) -> "Optional[tuple[str, int]]":
+        """The geometry giving this window *width* more on its right, and how
+        far it stepped left for it — or None where there is no room to grow:
+        a maximized window, or one the desktop could not hold with the panel
+        beside it.
+
+        The window grows to the right.  Where that would run past the
+        desktop's right-hand edge — the panel opening out of sight — the
+        window steps left, just far enough to keep it in view; the pages move
+        with it, whole and unchanged.  A window on a screen _work_area does
+        not describe (a second monitor it cannot see) simply grows.  The
+        window manager's own geometry string is kept to, as the case window
+        keeps to it: one rebuilt from winfo_x/y drifts by the title bar."""
+        win = self._win
+        if _window_zoomed(win):
+            return None
         try:
-            geom = (self._win.winfo_rootx(), self._win.winfo_rooty(),
-                    self._win.winfo_width(), self._win.winfo_height())
+            spec = str(win.wm_geometry())
+            current = win.winfo_width()
+            rootx = win.winfo_rootx()
+        except (AttributeError, tk.TclError):
+            return None
+        match = _WM_GEOMETRY_RE.match(spec)
+        if not match or current <= 1:
+            return None
+        new_width = current + width
+        x, y = match.group(3), match.group(4)
+        shift = 0
+        left, _top, work_w, _work_h = _work_area(win)
+        if left - self._DETAILS_SLACK <= rootx < left + work_w:
+            if new_width > work_w:
+                return None
+            shift = max(0, rootx + new_width - (left + work_w))
+            if shift and x.startswith("+"):
+                x = f"+{int(x[1:]) - shift}"
+            else:
+                shift = 0
+        return f"{new_width}x{match.group(2)}{x}{y}", shift
+
+    def _details_shrink(self, grew: tuple) -> "Optional[str]":
+        """The geometry giving back what _details_growth gave: the column's
+        width and, where the window stepped left for it and is still where it
+        was put, the step.  None for a window maximized since, which has
+        nothing to give back until it is restored."""
+        width, shift, put = grew
+        win = self._win
+        if _window_zoomed(win):
+            return None
+        try:
+            spec = str(win.wm_geometry())
+            current = win.winfo_width()
+        except (AttributeError, tk.TclError):
+            return None
+        match = _WM_GEOMETRY_RE.match(spec)
+        if not match or current <= 1:
+            return None
+        x, y = match.group(3), match.group(4)
+        placed = _WM_GEOMETRY_RE.match(put)
+        if (shift and placed is not None and x.startswith("+")
+                and (x, y) == (placed.group(3), placed.group(4))):
+            x = f"+{int(x[1:]) + shift}"
+        return f"{max(self._MIN_W, current - width)}x{match.group(2)}{x}{y}"
+
+    def _when_resized(self, done, tries: int = 20, step_ms: int = 15) -> None:
+        """Run *done* once the window has taken the width last asked for — or
+        after a moment, should the window manager decline to give it.
+
+        A new window size is recorded before its children are laid out again,
+        and the re-layout is only queued; packing the panel in between would
+        have it share out the *old* width.  So the pending layout is flushed
+        first — safe here, because the pages' width is held across it."""
+        target = self._details_resize_target
+
+        def finish() -> None:
+            try:
+                self._win.update_idletasks()
+            except tk.TclError:
+                pass
+            done()
+
+        def check(n: int = 0) -> None:
+            try:
+                landed = (target is None
+                          or abs(self._win.winfo_width() - target) <= 2)
+            except tk.TclError:
+                return
+            if landed or n >= tries:
+                finish()
+                return
+            try:
+                self._win.after(step_ms, check, n + 1)
+            except tk.TclError:
+                pass
+
+        try:
+            self._win.after(1, check)
         except tk.TclError:
-            return
-        if geom == self._details_geom:
-            return
-        self._details_geom = geom
-        self._place_details()
+            finish()
 
     def _sync_bar(self) -> None:
         """Point the strip at whichever surface is showing: T becomes P, Fit
@@ -22583,7 +23723,8 @@ class _FloatingPdfWindow:
         self._closing = True
         self._pane = None
         self._text_host = self._reader = None
-        self._details_win = None    # a child of this window; already gone
+        self._details_side = None   # a child of this window; already gone
+        self._details_open = False
         self._flash_after = None
         if self._on_close is not None:
             try:
@@ -24006,8 +25147,9 @@ class _ScholarTextWindow:
 
         # Supreme Court cases: open the Oyez case-details panel from the start
         # (the checkbox above defaults on and the window is sized to fit it).
-        # Not in the floating viewer, which is narrow by design and cannot grow
-        # a column for it — "s" still opens it there if the reader wants it.
+        # Not in the floating viewer, which opens on the page alone — "s"
+        # opens the panel there, the window growing to hold it (see
+        # _FloatingPdfWindow._open_details).
         if self._is_scotus and not self._chromeless:
             self._toggle_details()
 
@@ -25141,11 +26283,14 @@ class _ScholarTextWindow:
         # The span outranks the bare "Id." match at the same start.
         for s, e, spec in fed_cas.iter_cites(text):
             matches.append((s, e, "fedcas", spec))
-        # Legislative history — the Record, a report, the Globe … — ahead of
-        # the case cites, which would read "116 Cong. Rec. 36481" as a
-        # reporter's (a tie goes to the match listed first).
-        matches = [(s, e, "leghist", spec) for s, e, spec
-                   in legislative_history.iter_cites(text)] + matches
+        # Legislative history — the Record, a report, the Globe … — and the
+        # SEC's Decisions and Reports ahead of the case cites, which would
+        # read "116 Cong. Rec. 36481" and "8 S.E.C. 893" as a reporter's (a
+        # tie goes to the match listed first).
+        matches = ([(s, e, "leghist", spec) for s, e, spec
+                    in legislative_history.iter_cites(text)]
+                   + [(s, e, "sec", spec) for s, e, spec
+                      in sec_decisions.iter_cites(text)] + matches)
         matches.sort(key=lambda t: (t[0], -t[1]))
         pos = 0
         for start, end, kind, m in matches:
@@ -25207,10 +26352,18 @@ class _ScholarTextWindow:
                     # session last cited.
                     action = ("leghist",
                               legislative_history.with_page(la[1], pin))
+                elif la[0] == "sec":
+                    # Another page of the SEC decision last cited, if it
+                    # can run to it.
+                    action = (("sec", sec_decisions.with_page(la[1], pin))
+                              if sec_decisions.pin_in_range(la[1], pin)
+                              else None)
                 else:
                     action = la  # statute/regulation/rule → reopen (no pin page)
             elif kind == "leghist":
                 action = ("leghist", m)  # m is legislative_history's spec
+            elif kind == "sec":
+                action = ("sec", m)  # m is sec_decisions' spec
             elif kind == "statestat":
                 # In-app for priority states (once a parser exists), else a
                 # browser link-out.  `m` here is a state_statutes.Cite record.
@@ -29036,11 +30189,7 @@ class _ScholarTextWindow:
         def run() -> None:
             title = "Recent Supreme Court Decisions"
             try:
-                import scotus_recent
-                decisions = scotus_recent.fetch_recent_decisions()
-                merits = ([] if decisions
-                          else scotus_recent.recent_merits_opinions(10))
-                orders = scotus_recent.recent_order_opinions(5)
+                decisions, merits, orders = _fetch_recent_scotus()
                 lines = self._details_lines_recent(decisions, merits, orders)
             except Exception as exc:
                 print(f"[details] recent decisions: {exc}")
@@ -29600,6 +30749,9 @@ class _ScholarTextWindow:
             _open_leghist(self._win, value, self._status_var.set,
                           app=self._app)
             return
+        if kind == "sec":
+            _open_sec(self._win, value, self._status_var.set, app=self._app)
+            return
         if kind == "engrep":
             _open_eng_rep(self._win, value, self._status_var.set,
                           app=self._app)
@@ -29673,6 +30825,10 @@ class _ScholarTextWindow:
                     return
             except Exception as exc:
                 print(f"[reporter] following {cite!r} to its scan failed: {exc}")
+        # A case whose scan could not be found: its load waits on the text
+        # this finds (see _LoadWatch.to_text), and hears how the lookup ends.
+        if self._following_as_text and cite:
+            self._claim_text_load(cite)
         # CourtListener opinion URL: fetch structured text from CL directly
         if kind == "url" and "courtlistener.com/opinion/" in url_val:
             self._follow_cl_link(url_val)
@@ -29735,6 +30891,29 @@ class _ScholarTextWindow:
                        absent)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _claim_text_load(self, cite: str) -> None:
+        """Take up the load waiting on the text of *cite* — its scan could not
+        be found — so that the lookup starting now can tell it how it ends
+        (_end_text_load)."""
+        claim = getattr(self._app, "claim_text_load", None)
+        if claim is None:
+            return
+        watch = claim(self._live_parent(), cite)
+        if watch is not None:
+            loads = getattr(self, "_text_loads", None)
+            if loads is None:
+                loads = self._text_loads = {}
+            loads[cite] = watch
+
+    def _end_text_load(self, cite: str, failure: str = "") -> None:
+        """The text lookup for *cite* is over: it opened, or — *failure*
+        says why — it found nothing.  Told to the load waiting on it, if one
+        is (see _claim_text_load)."""
+        loads = getattr(self, "_text_loads", None)
+        watch = loads.pop(cite, None) if loads and cite else None
+        if watch is not None:
+            self._app.end_text_load(watch, failure)
 
     def _follow_how_cited(self, tag: str, url: str, pin: str,
                           name: str) -> None:
@@ -29833,13 +31012,15 @@ class _ScholarTextWindow:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_cl_link_ready(self, parts, blocks, plain, item, retry=None) -> None:
+    def _on_cl_link_ready(self, parts, blocks, plain, item, retry=None,
+                          cite: str = "") -> None:
         self._status_var.set("Cited case loaded from CourtListener.")
         win = _ScholarTextWindow(
             self._win, self._app, "", "",
             item=item, cl_text=plain,
             cl_parts=parts, cl_blocks=blocks,
         )
+        self._end_text_load(cite)
         if retry:
             # A Google Scholar link failed; keep retrying it and light up the
             # new window's "Scholar" button if it comes through.
@@ -29862,6 +31043,7 @@ class _ScholarTextWindow:
             primary_source_url=source.source_url,
             primary_source_kind=source.kind,
         )
+        self._end_text_load(cite)
         if pin:
             win.jump_to_cite_page(cite, pin)
         if retry:
@@ -29869,8 +31051,9 @@ class _ScholarTextWindow:
             # new window's "Scholar" button if it comes through.
             win._retry_scholar_link(*retry)
 
-    def _on_cl_link_error(self, msg: str) -> None:
+    def _on_cl_link_error(self, msg: str, cite: str = "") -> None:
         self._status_var.set(f"CourtListener: {msg}")
+        self._end_text_load(cite, msg)
 
     def _try_case_law_link_pdf(self, cite: str, pin: str = "",
                                name: str = "") -> bool:
@@ -29933,7 +31116,7 @@ class _ScholarTextWindow:
                     if ask_again:
                         self._post(self._retry_scholar_only, *ask_again)
                     else:
-                        self._post(self._on_cl_link_error, not_found)
+                        self._post(self._on_cl_link_error, not_found, cite)
                     return
                 # CourtListener by the cite as printed and — for an old
                 # nominative SCOTUS cite — by its modern "U.S." form; then the
@@ -29967,13 +31150,14 @@ class _ScholarTextWindow:
                     if ask_again:
                         self._post(self._retry_scholar_only, *ask_again)
                     else:
-                        self._post(self._on_cl_link_error, not_found)
+                        self._post(self._on_cl_link_error, not_found, cite)
                     return
                 parts, blocks, plain, cluster = _assemble_case_parts(
                     client, target,
                 )
                 self._post(
                     self._on_cl_link_ready, parts, blocks, plain, target, retry,
+                    cite,
                 )
             except Exception as exc:
                 if self._try_case_law_link_pdf(cite, pin, name):
@@ -29981,7 +31165,7 @@ class _ScholarTextWindow:
                 if ask_again:
                     self._post(self._retry_scholar_only, *ask_again)
                 else:
-                    self._post(self._on_cl_link_error, str(exc))
+                    self._post(self._on_cl_link_error, str(exc), cite)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -29989,6 +31173,7 @@ class _ScholarTextWindow:
                              expected_name: str = "") -> None:
         """Open a cited case's static.case.law PDF (the fallback when neither
         Google Scholar nor CourtListener has the opinion)."""
+        self._end_text_load(cite)
         self._status_var.set(f"Opening {cite} (case.law PDF)…")
         _open_case_law_pdf(
             self._win, url, cite + (f" at {_pin_display(pin)}" if pin else ""),
@@ -30005,6 +31190,7 @@ class _ScholarTextWindow:
         url, html = result
         self._status_var.set("Cited case loaded.")
         win = _ScholarTextWindow(self._win, self._app, url, html, item=None)
+        self._end_text_load(cite)
         if pin:  # cite or Scholar-URL pincite — jump once the window lays out
             win.jump_to_cite_page(cite, pin)
 
@@ -30033,10 +31219,10 @@ class _ScholarTextWindow:
             # Scholar, and open it if it comes through.
             self._retry_scholar_only(cite, pin, url_val, name)
         else:
-            self._status_var.set(
-                "Google Scholar has no copy of the cited case." if absent
-                else "Google Scholar: cited case not found (or blocked)."
-            )
+            message = ("Google Scholar has no copy of the cited case." if absent
+                       else "Google Scholar: cited case not found (or blocked).")
+            self._status_var.set(message)
+            self._end_text_load(cite, message)
 
     def _pin_page_positions(self, cite: str) -> "dict[int, str]":
         """The page → mark track a pin cite written in *cite*'s reporter should
@@ -30441,8 +31627,13 @@ class _ScholarTextWindow:
         fetcher = self._app._get_scholar()
         if fetcher is None:
             self._status_var.set("Google Scholar: cited case not found.")
+            self._end_text_load(cite, "Google Scholar: cited case not found.")
             return
         self._status_var.set("Google Scholar busy — retrying this link…")
+
+        def gave_up(message: str) -> None:
+            self._status_var.set(message)
+            self._end_text_load(cite, message)
 
         def run() -> None:
             for _ in range(attempts):
@@ -30460,12 +31651,12 @@ class _ScholarTextWindow:
                     return
                 if fetcher.last_fetch_absent():
                     self._post(
-                        self._status_var.set,
+                        gave_up,
                         "Google Scholar has no copy of the cited case.",
                     )
                     return
             self._post(
-                self._status_var.set,
+                gave_up,
                 "Google Scholar still unavailable for this link.",
             )
 
@@ -31342,6 +32533,13 @@ class _ScholarTextWindow:
                     fetched = _fetch_pdf_bytes(url, client=client, timeout=30)
                     if fetched is not None:
                         data, final_url = fetched
+                        if self._standalone_embed:
+                            # The pages go into the window the reader is
+                            # reading: measured here, not on the Tk thread
+                            # (see _measure_pdf_pages), and kept with the
+                            # very bytes they measure.
+                            self._pdf_prefetch_meta = (
+                                data, _measure_pdf_pages(data))
                         self._pdf_prefetch = (data, final_url)
                         self._pdf_url = final_url
                 except ImportError:
@@ -31382,6 +32580,8 @@ class _ScholarTextWindow:
             return
         data, url = self._pdf_prefetch
         margin = _PdfPane._MARGIN * 3 if _is_us_reports_pdf(url) else None
+        measured = getattr(self, "_pdf_prefetch_meta", None)
+        page_meta = measured[1] if measured and measured[0] is data else None
         try:
             # The handlers go across with the pages: this window was built
             # around a case with no scan, so it has none of its own.
@@ -31389,7 +32589,8 @@ class _ScholarTextWindow:
                 data, url, self._scan_window_title(url), margin=margin,
                 on_save=self._download_pdf, on_print=self._print_pdf,
                 on_cite=self._open_pdf_cite,
-                on_cite_browser=self._open_pdf_cite_browser)
+                on_cite_browser=self._open_pdf_cite_browser,
+                page_meta=page_meta)
         except Exception as exc:
             print(f"[reporter] handing the scan to the window failed: {exc}")
             return
@@ -31834,7 +33035,8 @@ _CFR_SECREF_RE = re.compile(
     r"((?:\((?:\d{1,3}|[ivxIVX]{2,4}|[a-zA-Z]{1,3})\))*)"
 )
 
-_SPOTLIGHT_CASE_ACTIONS = frozenset(("cite", "engrep", "recap", "fedcas"))
+_SPOTLIGHT_CASE_ACTIONS = frozenset(("cite", "engrep", "recap", "fedcas",
+                                     "sec"))
 
 
 def _spotlight_case_action(
@@ -32236,6 +33438,13 @@ class _PdfWindow:
                 self._win.withdraw()
             except (AttributeError, tk.TclError):
                 self._reporter = False
+        # Hidden while the pages are on their way, this window says nothing
+        # of a slow fetch — so the load is watched, and one slow to come gets
+        # a window of its own saying what it is doing, where the pages will
+        # open (see _LoadWatch).
+        self._watch = (app.watch_load(parent, title)
+                       if self._reporter and hasattr(app, "watch_load")
+                       else None)
         self._history_menubar = (
             _install_history_menubar(self._app, self._win)
             if self._is_case else
@@ -32628,7 +33837,7 @@ class _PdfWindow:
             self._win.destroy()
             return
 
-        def run() -> None:
+        def fetch() -> None:
             try:
                 # Reopened from a bookmark: use the saved local copy, no refetch.
                 if self._local_pdf:
@@ -32637,7 +33846,8 @@ class _PdfWindow:
                     except OSError:
                         saved = b""
                     if saved.startswith(b"%PDF"):
-                        self._post(self._show, saved)
+                        self._post(self._show, saved,
+                                   _measure_pdf_pages(saved))
                         return
                 client = (
                     getattr(self._app, "_client", None)
@@ -32650,9 +33860,14 @@ class _PdfWindow:
                                      "isn't a PDF")
                 data, final_url = fetched
                 self._url = final_url
-                self._post(self._show, data)
+                # Measured here, off the Tk thread (see _measure_pdf_pages).
+                self._post(self._show, data, _measure_pdf_pages(data))
             except Exception as exc:
                 self._post(self._error, str(exc))
+
+        def run() -> None:
+            with _watching(self._watch):
+                fetch()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -32687,6 +33902,7 @@ class _PdfWindow:
         """Show this window after all.  The reporter interface keeps it hidden
         while the scan is on its way, but a CloudFlare hand-off panel or a
         fetch error has to be seen."""
+        self._end_watch()
         if not self._reporter or self._float is not None:
             return
         try:
@@ -32694,7 +33910,14 @@ class _PdfWindow:
         except (AttributeError, tk.TclError):
             pass
 
-    def _hand_to_viewer(self, data: bytes) -> bool:
+    def _end_watch(self) -> None:
+        """The load is over one way or another, and this window (or the
+        viewer it hands to) says so itself: its status window goes."""
+        watch, self._watch = getattr(self, "_watch", None), None
+        if watch is not None:
+            watch.finish()
+
+    def _hand_to_viewer(self, data: bytes, meta=None) -> bool:
         """Put the pages in the floating viewer and step aside.
 
         A source printed only as pages — Statutes at Large, the English
@@ -32711,6 +33934,8 @@ class _PdfWindow:
         except (AttributeError, tk.TclError):
             anchor = None
         wants_text = self._can_discover_text and not self._text_lookup_empty
+        watch, self._watch = getattr(self, "_watch", None), None
+        geometry = (watch.hand_off() if watch is not None else None) or ""
         try:
             viewer = _FloatingPdfWindow(
                 app.root if app is not None else self._win,
@@ -32725,6 +33950,7 @@ class _PdfWindow:
                 # strip's own menu carries it instead.
                 bookmarks=self,
                 on_close=lambda _w: self._viewer_closed(),
+                geometry=geometry, page_meta=meta,
             )
         except Exception as exc:
             print(f"[reporter] the scan viewer could not open: {exc}")
@@ -32814,14 +34040,24 @@ class _PdfWindow:
             initial_pdf_analysis=self._initial_pdf_analysis(),
         )
 
-    def _show(self, data: bytes) -> None:
-        if self._reporter and self._hand_to_viewer(data):
+    def _show(self, data: bytes, meta=None) -> None:
+        watch = getattr(self, "_watch", None)
+        if watch is not None and watch.cancelled:
+            # The reader stopped waiting for it.
+            self._watch = None
+            try:
+                self._win.destroy()
+            except tk.TclError:
+                pass
             return
+        if self._reporter and self._hand_to_viewer(data, meta):
+            return
+        self._end_watch()
         try:
             pane = _PdfPane(
                 self._body, data, width=760,
                 link_style="recolor" if self._is_case else "tint",
-                uniform_crop=self._is_case,
+                uniform_crop=self._is_case, meta=meta,
             )
         except Exception as exc:  # pragma: no cover - render/lib failure
             self._error(str(exc))
@@ -32890,7 +34126,7 @@ class _PdfWindow:
         threading.Thread(target=extract_text, daemon=True).start()
 
     def _error(self, msg: str) -> None:
-        self._reveal()
+        self._reveal()      # ends the load's status window too
         self._status_var.set(f"PDF: {msg}")
         if messagebox.askyesno(
             "PDF", f"{msg}\n\nOpen the PDF in your web browser instead?",
@@ -33482,18 +34718,21 @@ class _LegHistPdfWindow(_PdfWindow):
 
         def run() -> None:
             try:
-                pages = leghist_fetch.fetch(spec)
+                with _watching(self._watch):
+                    pages = leghist_fetch.fetch(spec)
+                    # Measured here, off the Tk thread.
+                    meta = _measure_pdf_pages(pages.data)
             except leghist_fetch.Unavailable as exc:
                 self._post(self._unavailable, str(exc), exc.browser_url)
                 return
             except Exception as exc:  # the network, a malformed file
                 self._post(self._error, str(exc))
                 return
-            self._post(self._arrived, pages)
+            self._post(self._arrived, pages, meta)
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _arrived(self, pages) -> None:
+    def _arrived(self, pages, meta=None) -> None:
         self._url = pages.source_url or self._url
         self._title = pages.title or self._title
         self._open_index = pages.index
@@ -33502,10 +34741,10 @@ class _LegHistPdfWindow(_PdfWindow):
             self._win.title(self._title)
         except tk.TclError:
             pass
-        self._show(pages.data)
+        self._show(pages.data, meta)
 
-    def _show(self, data: bytes) -> None:  # overrides _PdfWindow._show
-        super()._show(data)
+    def _show(self, data: bytes, meta=None) -> None:  # overrides _PdfWindow._show
+        super()._show(data, meta)
         target = self._float if self._float is not None else self._pane
         if target is not None and self._open_index:
             index = self._open_index
@@ -33550,6 +34789,34 @@ def _open_leghist(parent: tk.Misc, spec: str,
     except tk.TclError:
         pass
     _LegHistPdfWindow(parent, spec, status, app=app)
+
+
+# ---------------------------------------------------------------------------
+# The SEC's Decisions and Reports — the cited page of HathiTrust's scan
+# ---------------------------------------------------------------------------
+
+def _open_sec(parent: tk.Misc, spec: str,
+              status=lambda _s: None, *, app=None) -> None:
+    """Open a citation to the SEC's Decisions and Reports (a ``("sec",
+    spec)`` action) at the cited page of HathiTrust's scan, in the web
+    browser.  HathiTrust's CloudFlare check admits people, not scripts, so
+    the pages can't be fetched into a viewer of the app's own; the browser
+    passes the check, and HathiTrust's viewer turns the pages.
+
+    Kept in History like a document opened here, one entry a decision:
+    reopening it goes back to the page last opened."""
+    label = sec_decisions.spec_label(spec) or "the SEC decision"
+    webbrowser.open(sec_decisions.page_url(spec))
+    try:
+        status(f"Opened {label} at HathiTrust, in your web browser.")
+    except tk.TclError:
+        pass
+    if app is not None and hasattr(app, "record_case_view"):
+        root = getattr(app, "root", parent)
+        app.record_case_view(
+            f"sec:{sec_decisions.base_spec(spec)}", label,
+            lambda: _open_sec(root, spec, app=app),
+            {"type": "sec", "spec": spec})
 
 
 # ---------------------------------------------------------------------------
@@ -33638,8 +34905,11 @@ class _EngRepPdfWindow(_PdfWindow):
 
         def run() -> None:
             try:
-                data = eng_rep_pdf.fetch_pdf(case.year, case.num, case.web_url)
-                self._post(self._show, data)
+                with _watching(self._watch):
+                    data = eng_rep_pdf.fetch_pdf(case.year, case.num,
+                                                 case.web_url)
+                    meta = _measure_pdf_pages(data)
+                self._post(self._show, data, meta)
             except eng_rep_pdf.CloudflareChallenge as exc:
                 self._post(self._need_clearance, exc.web_url)
             except eng_rep_pdf.FetchUnavailable:
@@ -33652,9 +34922,10 @@ class _EngRepPdfWindow(_PdfWindow):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _show(self, data: bytes) -> None:  # overrides _PdfWindow._show
-        super()._show(data)
-        if self._pin:
+    def _show(self, data: bytes, meta=None) -> None:  # overrides _PdfWindow._show
+        super()._show(data, meta)
+        # Not for pages the reader stopped waiting for: none went on screen.
+        if self._pin and (self._float is not None or self._pane is not None):
             self._open_at_pin(data)
 
     def _open_at_pin(self, data: bytes) -> None:
@@ -33819,6 +35090,7 @@ class _EngRepPdfWindow(_PdfWindow):
     def _error(self, msg: str) -> None:  # overrides _PdfWindow._error
         """Origin error fallback — open the CommonLII *case page* (not the
         hotlink-blocked .pdf), so the scan loads when clicked from there."""
+        self._end_watch()
         self._status_var.set(f"English Reports: {msg}")
         if messagebox.askyesno(
             "English Reports",
@@ -34472,8 +35744,8 @@ def _open_eng_rep_case(parent: tk.Misc, case: "eng_rep.ERCase",
 
 #: Categories used to colour-code highlights by what the citation points at.
 def _brief_action_category(kind: str) -> str:
-    if kind in ("cite", "url", "engrep", "recap", "fedcas", "scotus"):
-        return "case"  # English Reports, RECAP and Federal Cases too
+    if kind in ("cite", "url", "engrep", "recap", "fedcas", "scotus", "sec"):
+        return "case"  # English Reports, RECAP, Federal Cases, SEC decisions
     if kind == "const":
         return "const"
     return "statute"
@@ -34491,6 +35763,8 @@ def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
         url = leghist_fetch.browser_url(value)
         if not url:
             return
+    elif kind == "sec":
+        url = sec_decisions.page_url(value)
     elif kind == "scotus":
         url = _scotus_docket_page_url(value)
         if not url:
@@ -34838,6 +36112,9 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
                                             "leghist"):
         _open_statute_action(parent, action, status, app=app)
         return
+    if kind == "sec":
+        _open_sec(parent, value, status, app=app)
+        return
     if kind == "engrep":
         _open_eng_rep(parent, value, status, app=app)
         return
@@ -34876,10 +36153,19 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
 
     cite, _, pin = value.partition("@")
     name = _citation_link_name(snippet, cite)
+    # A case whose scan could not be found: its load waits on the text this
+    # finds (see _LoadWatch.to_text), and hears how the lookup ends.
+    watch = None
+    claim = getattr(app, "claim_text_load", None)
+    if claim is not None and getattr(app, "_following_as_text", False):
+        watch = claim(parent, cite.strip())
     fetcher = app._get_scholar() if _SCHOLAR_AVAILABLE else None
     client = app._get_client() if app._token_var.get().strip() else None
     if fetcher is None and client is None:
         status("Neither Google Scholar nor CourtListener is available.")
+        if watch is not None:
+            app.end_text_load(
+                watch, "Neither Google Scholar nor CourtListener is available.")
         return
 
     def safe_status(s: str) -> None:
@@ -34890,15 +36176,21 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
 
     safe_status(f"Opening {cite}…")
 
+    def ended(ok: bool) -> None:
+        safe_status(f"Opened {cite}." if ok else f"Not found: {cite}")
+        if watch is not None:
+            app.end_text_load(watch, "" if ok else
+                              "Its text could not be found either.")
+
     def run() -> None:
         ok = app._try_open_citation(name, cite, pin, fetcher, client,
                                     prefetch_pdf=prefetch_pdf,
                                     view_parent=parent)
         try:
-            parent.after(0, lambda: safe_status(
-                f"Opened {cite}." if ok else f"Not found: {cite}"))
-        except tk.TclError:
-            pass
+            parent.after(0, lambda: ended(ok))
+        except (tk.TclError, RuntimeError):
+            if watch is not None:
+                app._post_root(lambda: ended(ok))
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -35305,6 +36597,8 @@ class _BriefCompileResolver:
             return _stat_cite_from_url(value)
         if kind == "leghist":
             return legislative_history.spec_label(value, with_pin=False)
+        if kind == "sec":
+            return sec_decisions.spec_label(value, with_pin=False)
         mod = _STATUTE_SOURCES.get(kind)
         if mod is not None:
             try:
@@ -36361,6 +37655,9 @@ class _StatuteWindow:
             _open_leghist(self._win, value, self._status_var.set,
                           app=self._app)
             return
+        if kind == "sec":
+            _open_sec(self._win, value, self._status_var.set, app=self._app)
+            return
         _fetch_statute_window(
             self._win, kind, value, self._status_var.set, app=self._app
         )
@@ -37206,6 +38503,7 @@ def main() -> None:
     # would answer the hotkey too, and the two spotlights fall out of step.
     instance = app._claim_instance()
     eng_rep.warm()  # load the English Reports index in the background
+    sec_decisions.warm()  # and the SEC Decisions and Reports' page index
 
     # Run in the background by default: rather than greeting the user with the
     # full search window, GetCases starts hidden and waits.  Ctrl+Space opens

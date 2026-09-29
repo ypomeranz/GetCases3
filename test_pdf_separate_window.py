@@ -434,8 +434,11 @@ class DocumentWindowRegistrationTests(unittest.TestCase):
                       _source_of("_FloatingPdfWindow", "__init__"))
 
     def test_the_details_panel_beside_it_is_not_a_window_of_its_own(self):
-        self.assertNotIn("_list_in_window_menu",
-                         _source_of("_FloatingPdfWindow", "_details_window"))
+        # A column inside the viewer, not a window to be listed or placed.
+        column = _source_of("_FloatingPdfWindow", "_details_column")
+        self.assertNotIn("_list_in_window_menu", column)
+        self.assertNotIn("_ui_toplevel", column)
+        self.assertIn("ttk.Frame(self._win)", column)
 
     def test_the_search_window_carries_the_window_menu_too(self):
         body = _source_of("CourtListenerGUI", "_build_ui")

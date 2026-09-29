@@ -67,6 +67,9 @@ CACHE_DIR = Path.home() / ".config" / "courtlistener" / "usrep_cache"
 # serves those as per-opinion PDFs.
 _SC_BASE = "https://www.supremecourt.gov/opinions/"
 _SC_DOWNLOAD_MIN = 584
+#: The first volume fetched from supremecourt.gov rather than GovInfo or the
+#: Library of Congress — for a caller that wants to say it is about to be.
+SC_DOWNLOAD_MIN = _SC_DOWNLOAD_MIN
 _PP_SUFFIXES = ("_final", "_web", "")
 _MAX_PP_PARTS = 4  # currently 2 halves; tolerate more
 
@@ -94,10 +97,36 @@ _lock = threading.Lock()
 # path -> (mtime, size, [(pdf_index, printed_page), …] for arabic labels)
 _label_cache: dict[Path, tuple[float, int, list[tuple[int, int]]]] = {}
 
+# One lock per volume, so two volumes download side by side while two
+# requests for the same volume fetch it once; ``_dl_lock`` guards the table.
 _dl_lock = threading.Lock()
+_dl_locks: dict[int, threading.Lock] = {}
 # Volumes that supremecourt.gov didn't have this session — don't re-probe on
 # every citation into them.
 _dl_missing: set[int] = set()
+
+#: Told what a download is doing, when set: ``on_step(text)`` as one starts
+#: and ``on_bytes(done, total)`` as it comes in (``total`` 0 where the server
+#: does not say).  The GUI points these at its status reporting, which knows
+#: from the calling thread which load, if any, is being watched.
+on_step = None
+on_bytes = None
+
+
+def _volume_lock(vol: int) -> threading.Lock:
+    with _dl_lock:
+        lock = _dl_locks.get(vol)
+        if lock is None:
+            lock = _dl_locks[vol] = threading.Lock()
+        return lock
+
+
+def _tell(hook, *args) -> None:
+    if hook is not None:
+        try:
+            hook(*args)
+        except Exception:
+            pass
 
 _session: Optional[requests.Session] = None
 
@@ -149,6 +178,7 @@ def has_volume(vol: int) -> bool:
 def _download(url: str, dest: Path) -> bool:
     """Stream *url* into *dest* (atomically, via a temp file).  False on any
     HTTP error or when the body isn't a PDF; True once *dest* is in place."""
+    _tell(on_step, f"Downloading {dest.name} from supremecourt.gov…")
     try:
         resp = _get_session().get(url, stream=True, timeout=_DOWNLOAD_TIMEOUT)
     except Exception as exc:
@@ -157,9 +187,14 @@ def _download(url: str, dest: Path) -> bool:
     with resp:
         if resp.status_code != 200:
             return False
+        try:
+            total = int(resp.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            total = 0
         tmp = dest.with_suffix(f".{os.getpid()}.part")
         try:
             first = b""
+            done = 0
             with open(tmp, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1 << 16):
                     if not first:
@@ -168,6 +203,8 @@ def _download(url: str, dest: Path) -> bool:
                             print(f"[usrep] not a PDF: {url}")
                             return False
                     f.write(chunk)
+                    done += len(chunk)
+                    _tell(on_bytes, done, total)
             if not first:
                 return False
             tmp.replace(dest)
@@ -196,7 +233,7 @@ def ensure_volume(vol: int) -> list[Path]:
     files = volume_files(vol)
     if files or vol < _SC_DOWNLOAD_MIN or vol in _dl_missing:
         return files
-    with _dl_lock:
+    with _volume_lock(vol):
         files = volume_files(vol)  # another thread may have fetched it
         if files or vol in _dl_missing:
             return files

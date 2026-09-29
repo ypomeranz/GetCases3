@@ -265,8 +265,10 @@ class WhereItIsAskedTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 HOST_NS = _load(
-    "CourtListenerGUI", ["new_case_view_host", "_reporter_text_host"],
-    {"_FloatingPdfWindow": lambda *a, **kw: _StubViewer(*a, **kw)},
+    "CourtListenerGUI", ["new_case_view_host", "_reporter_text_host",
+                         "_take_text_watch"],
+    {"_FloatingPdfWindow": lambda *a, **kw: _StubViewer(*a, **kw),
+     "_toplevel_path": _load_functions(["_toplevel_path"])["_toplevel_path"]},
 )
 
 
@@ -288,7 +290,9 @@ class _HostApp:
         self.root = _Widget()
         self._cited_pdf_windows: set = set()
         self.secondary: list = []
-        for name in ("new_case_view_host", "_reporter_text_host"):
+        self._load_watches: list = []
+        for name in ("new_case_view_host", "_reporter_text_host",
+                     "_take_text_watch"):
             setattr(self, name, HOST_NS[name].__get__(self))
 
     def new_secondary_view_host(self, parent):
@@ -706,7 +710,8 @@ class ScanTitleTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 PDFWIN_NAMES = ["_hand_to_viewer", "_viewer_closed", "_dialog_parent",
-                "_reveal", "_say", "_show", "_reporter_analysis"]
+                "_reveal", "_say", "_show", "_reporter_analysis",
+                "_end_watch"]
 
 
 class _HandoffViewer:
@@ -912,6 +917,104 @@ class ScanWindowChromeTests(unittest.TestCase):
         self.assertFalse(win._win.shown)
 
 
+class _FakeWatch:
+    """A slow document's status window (``_LoadWatch``), as far as the window
+    that finally shows the document asks it anything."""
+
+    def __init__(self, anchor_path="", phase="text", cancelled=False,
+                 geometry="700x800+40+50"):
+        self.anchor_path = anchor_path
+        self.phase = phase
+        self.cancelled = cancelled
+        self.geometry = geometry
+        self.done = False
+        self.handed = self.finished = 0
+
+    def hand_off(self):
+        self.handed += 1
+        self.done = True
+        return self.geometry
+
+    def finish(self):
+        self.finished += 1
+        self.done = True
+
+
+TOPLEVEL_PATH = _load_functions(["_toplevel_path"])["_toplevel_path"]
+
+
+class SlowDocumentHandOffTests(unittest.TestCase):
+    """A document slow to come has had a status window standing where it will
+    open: it opens in that window's place, and the window goes."""
+
+    def setUp(self):
+        _StubViewer.made.clear()
+        _HandoffViewer.made.clear()
+
+    def test_a_scan_opens_where_its_status_window_stood(self):
+        win = _ScanWindow()
+        watch = win._watch = _FakeWatch(phase="scan")
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made[0].kw["geometry"], watch.geometry)
+        self.assertEqual(watch.handed, 1)
+        self.assertIsNone(win._watch)
+
+    def test_with_its_pages_measured_before_it_came(self):
+        win = _ScanWindow()
+        win._show(b"%PDF-1.4", [(612, 792, (0, 0, 1, 1))])
+        self.assertEqual(_HandoffViewer.made[0].kw["page_meta"],
+                         [(612, 792, (0, 0, 1, 1))])
+
+    def test_a_scan_the_reader_stopped_waiting_for_is_let_go(self):
+        win = _ScanWindow()
+        win._watch = _FakeWatch(phase="scan", cancelled=True)
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made, [])
+        self.assertTrue(win._win.destroyed)
+
+    def test_a_panel_this_window_shows_itself_ends_the_wait(self):
+        # The CloudFlare hand-off, an error: this window says it from here.
+        win = _ScanWindow()
+        watch = win._watch = _FakeWatch(phase="scan")
+        win._reveal()
+        self.assertEqual(watch.finished, 1)
+        self.assertIsNone(win._watch)
+
+    def test_text_found_for_a_case_with_no_scan_opens_where_it_waited(self):
+        app = _HostApp()
+        parent = _Widget()
+        watch = _FakeWatch(TOPLEVEL_PATH(parent))
+        app._load_watches.append(watch)
+        app.new_case_view_host(parent)
+        self.assertEqual(_StubViewer.made[0].kw["geometry"], watch.geometry)
+        self.assertEqual(watch.handed, 1)
+
+    def test_but_not_a_load_from_another_window(self):
+        app = _HostApp()
+        watch = _FakeWatch(TOPLEVEL_PATH(_Widget()))
+        app._load_watches.append(watch)
+        app.new_case_view_host(_Widget())
+        self.assertEqual(_StubViewer.made[0].kw["geometry"], "")
+        self.assertEqual(watch.handed, 0)
+
+    def test_nor_one_still_looking_for_its_scan(self):
+        app = _HostApp()
+        parent = _Widget()
+        watch = _FakeWatch(TOPLEVEL_PATH(parent), phase="scan")
+        app._load_watches.append(watch)
+        app.new_case_view_host(parent)
+        self.assertEqual(watch.handed, 0)
+
+    def test_the_oldest_waiting_there_is_the_one_answered(self):
+        app = _HostApp()
+        parent = _Widget()
+        first = _FakeWatch(TOPLEVEL_PATH(parent), geometry="1x1+1+1")
+        second = _FakeWatch(TOPLEVEL_PATH(parent), geometry="2x2+2+2")
+        app._load_watches.extend([first, second])
+        app.new_case_view_host(parent)
+        self.assertEqual((first.handed, second.handed), (1, 0))
+
+
 class WindowIndependenceTests(unittest.TestCase):
     """No window in Reporter View closes another.  Tk destroys a top-level
     with its master, so every one of them hangs on the application root."""
@@ -1034,7 +1137,8 @@ class _StripViewer:
         self._on_build_text = None
         self._pane = None
         self._bytes = b""
-        self._details_win = None
+        self._details_side = None
+        self._details_open = False
         self.details_toggled = 0
         self.closed = 0
         self._bar_menu = _StripMenu()
@@ -1190,14 +1294,16 @@ class ScanWindowSourceTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# The case's details, in a panel beside the window ("s")
+# The case's details, in a column along the window's right-hand side ("s")
 # ---------------------------------------------------------------------------
 
 DETAILS_NAMES = ["_details_shortcut", "details_showing", "toggle_details",
-                 "_open_details", "_hide_details", "_details_window",
-                 "_details_width", "_place_details", "_on_geometry",
-                 "_build_reader", "adopt_reader", "has_scan", "has_text_side",
-                 "showing_text", "_details_label", "_mark_details_btn"]
+                 "_open_details", "_hide_details", "_details_column",
+                 "_pack_details", "_details_width", "_pin_body_width",
+                 "_unpin_body_width", "_details_growth", "_details_shrink",
+                 "_when_resized", "_build_reader", "adopt_reader", "has_scan",
+                 "has_text_side", "showing_text", "_details_label",
+                 "_mark_details_btn"]
 
 
 class _Packable:
@@ -1213,57 +1319,130 @@ class _Packable:
         self.destroyed = True
 
 
-class _DetailsPanelWindow:
-    """The Toplevel the panel is built into."""
+class _PanelWindow:
+    """This window's geometry, as opening the panel reads and writes it —
+    the window manager's own string, the width it has taken, and where on the
+    desktop it stands.  Every change goes into one log, beside the column's
+    packing and the pages' hold, so a test can read the order they came in."""
 
-    made: list = []
-
-    def __init__(self, parent=None):
-        self.parent = parent
-        self.titles: list = []
-        self.geometries: list = []
+    def __init__(self, x=100, y=80, w=720, h=880):
+        self.x, self.y, self.width, self.height = x, y, w, h
+        self.zoomed = False
+        self.applied: list = []
+        self.minsizes: list = []
+        self.events: list = []
         self.bindings: dict = {}
-        self.protocols: dict = {}
-        self.mapped = False
-        self.destroyed = False
-        self.lifted = 0
-        _DetailsPanelWindow.made.append(self)
+        self.focused = None
+        self.pages = None           # the frame the pages sit in
+        self.deferred = None        # a list, to hold after() callbacks back
 
-    def title(self, value=None):
-        if value is None:
-            return self.titles[-1] if self.titles else ""
-        self.titles.append(value)
-        return None
+    def wm_geometry(self):
+        return f"{self.width}x{self.height}+{self.x}+{self.y}"
 
-    def transient(self, _master=None):
-        self.transient_to = _master
+    def geometry(self, spec):
+        self.applied.append(spec)
+        self.events.append(("geometry", spec))
+        m = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", spec)
+        self.width, self.height, self.x, self.y = map(int, m.groups())
+
+    def winfo_width(self):
+        return self.width
+
+    def winfo_rootx(self):
+        return self.x
+
+    def state(self):
+        return "zoomed" if self.zoomed else "normal"
+
+    def attributes(self, name):
+        raise _Tk.TclError(name)    # as Windows answers "-zoomed"
+
+    def minsize(self, w, h):
+        self.minsizes.append((w, h))
+
+    def update_idletasks(self):
+        pass
+
+    def after(self, _ms, fn, *args):
+        """The window manager answers at once here, so the wait resolves on
+        the spot — unless a test holds the answer back."""
+        if self.deferred is not None:
+            self.deferred.append((fn, args))
+        else:
+            fn(*args)
+        return "timer"
+
+    def answer(self):
+        while self.deferred:
+            fn, args = self.deferred.pop(0)
+            fn(*args)
+
+    def focus_get(self):
+        return self.focused
 
     def bind(self, sequence, callback, add=None):
         self.bindings[sequence] = callback
 
-    def protocol(self, name, func):
-        self.protocols[name] = func
 
-    def geometry(self, spec=None):
-        if spec is None:
-            return self.geometries[-1] if self.geometries else ""
-        self.geometries.append(spec)
-        return None
+class _Pages:
+    """The frame the pages sit in, whose width the panel's coming and going
+    holds."""
 
-    def deiconify(self):
-        self.mapped = True
+    def __init__(self, window, width=None):
+        self.window = window
+        self.width = window.width if width is None else width
+        self.requested = None
+        self.given: list = []       # every width it was told to keep
+        self.propagate = True
+        self.expand = True
 
-    def withdraw(self):
-        self.mapped = False
+    def winfo_width(self):
+        return self.width
 
-    def lift(self):
-        self.lifted += 1
+    def configure(self, **kw):
+        if "width" in kw:
+            self.requested = kw["width"]
+            self.given.append(kw["width"])
 
-    def winfo_ismapped(self):
-        return self.mapped
+    def pack_propagate(self, flag):
+        self.propagate = flag
 
-    def winfo_viewable(self):
-        return True
+    def pack_configure(self, **kw):
+        if "expand" in kw:
+            self.expand = kw["expand"]
+            self.window.events.append(("free",) if self.expand else ("held",))
+
+    def held(self):
+        return not self.expand and not self.propagate
+
+
+class _Frame:
+    """A frame of the window's: the details column, its hairline and the
+    panel's host."""
+
+    made: list = []
+
+    def __init__(self, master=None, **kw):
+        self.master = master
+        self.kw = kw
+        self.packed = False
+        self.pack_kw = None
+        self.bindings: dict = {}
+        _Frame.made.append(self)
+
+    def pack(self, **kw):
+        self.packed, self.pack_kw = True, kw
+        if isinstance(self.master, _PanelWindow):     # the column itself
+            self.master.events.append(("pack", self.master.pages.held()))
+
+    def pack_forget(self):
+        self.packed = False
+        if isinstance(self.master, _PanelWindow):
+            self.master.events.append(("unpack", self.master.pages.held()))
+
+
+def _no_window_of_its_own(*_a, **_kw):
+    raise AssertionError("the panel is not a window of its own any more")
 
 
 class _DetailsReader:
@@ -1298,39 +1477,6 @@ class _PanelIcon:
         self.image = kw.get("image", self.image)
 
 
-class _GeomWindow(_Widget):
-    """A window that knows where it is and how big it is."""
-
-    def __init__(self, x=100, y=80, w=720, h=880):
-        super().__init__()
-        self.place = (x, y, w, h)
-        self.bindings: dict = {}
-
-    def winfo_rootx(self):
-        return self.place[0]
-
-    def winfo_rooty(self):
-        return self.place[1]
-
-    def winfo_width(self):
-        return self.place[2]
-
-    def winfo_height(self):
-        return self.place[3]
-
-    def winfo_viewable(self):
-        return True
-
-    def update_idletasks(self):
-        pass
-
-    def focus_get(self):
-        return getattr(self, "focused", None)
-
-    def bind(self, sequence, callback, add=None):
-        self.bindings[sequence] = callback
-
-
 class _TypingWidget:
     def __init__(self, cls="TEntry", state="normal"):
         self.cls, self.state = cls, state
@@ -1342,48 +1488,63 @@ class _TypingWidget:
         return self.state
 
 
+def _module_regex(name: str):
+    """A module-level compiled pattern, evaluated from the source."""
+    for node in TREE.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return eval(ast.get_source_segment(SRC, node.value),  # noqa: S307
+                        {"re": re})
+    raise AssertionError(f"module-level pattern not found: {name}")
+
+
 #: A desktop 1600x1000 wide, so the placement arithmetic is checkable.
 DETAILS_WORK_AREA = (0, 0, 1600, 1000)
 
 DETAILS_NS = _load(
     "_FloatingPdfWindow", DETAILS_NAMES,
-    {"_ui_toplevel": _DetailsPanelWindow,
-     "_ensure_modern_ttk_styles": lambda _w: None,
+    {"tk": type("tk", (), {"TclError": Exception, "Frame": _Frame}),
+     "ttk": type("ttk", (), {"Frame": _Frame}),
+     "_ui_toplevel": _no_window_of_its_own,
+     "_UI": {"border": "#e2e4e9"},
+     "_bind_recursive": lambda widget, seq, fn: widget.bindings.__setitem__(
+         seq, fn),
      "_work_area": lambda _w: DETAILS_WORK_AREA,
+     "_window_zoomed": _load_functions(["_window_zoomed"])["_window_zoomed"],
+     "_WM_GEOMETRY_RE": _module_regex("_WM_GEOMETRY_RE"),
      "_widget_accepts_typing": _load_functions(
          ["_widget_accepts_typing"])["_widget_accepts_typing"],
      "_EmbeddedCaseHost": lambda body, window: _Packable(body),
-     "ttk": type("ttk", (), {"Frame": _Packable}),
      "_ScholarTextWindow": type(
          "_ScholarTextWindow", (),
          {"_DETAILS_PANEL_W": 300,
           "_SCAN_DETAILS_VIEWS": _class_value(
               "_ScholarTextWindow", "_SCAN_DETAILS_VIEWS")}),
-     # The real one, so the panel's close keys are the platform's own.
-     "_accel_sequences": _load_functions(
-         ["_accel_sequences"])["_accel_sequences"],
      },
 )
 
-#: What ``_accel_sequences`` yields here — Ctrl alone off macOS, since
-#: ``<Command-…>`` is Mod1 and Tk's Windows port sets Mod1 from Num Lock.
-ACCEL = _load_functions(["_accel_sequences"])["_accel_sequences"]
+#: The column the window grows by: the panel and the hairline before it.
+COLUMN_W = 300 + _class_value("_FloatingPdfWindow", "_DETAILS_RULE_W")
 
 
 class _DetailsViewer:
     _MIN_H = 280
-    _MIN_W = 380
-    _DETAILS_GAP = _class_value("_FloatingPdfWindow", "_DETAILS_GAP")
+    _MIN_W = _class_value("_FloatingPdfWindow", "_MIN_W")
+    _DETAILS_RULE_W = _class_value("_FloatingPdfWindow", "_DETAILS_RULE_W")
+    _DETAILS_SLACK = _class_value("_FloatingPdfWindow", "_DETAILS_SLACK")
 
     def __init__(self, scan=True, reader="build", x=100, y=80, w=720, h=880):
         self._pane = object() if scan else None
         self._bytes = b"%PDF" if scan else None
-        self._win = _GeomWindow(x, y, w, h)
-        self._body = object()
+        self._win = _PanelWindow(x, y, w, h)
+        self._body = _Pages(self._win)
+        self._win.pages = self._body
         self._mode = "pdf" if scan else "text"
         self._text_host = None
-        self._details_win = None
-        self._details_geom = ()
+        self._details_side = None
+        self._details_open = False
+        self._details_grew = None
+        self._details_resize_target = None
         self._details_btn = _PanelIcon()
         self._strip_icons = {"panel": "panel",
                              "panel_showing": "panel_showing"}
@@ -1408,31 +1569,47 @@ class _DetailsViewer:
         self._win.focused = focused
         return self._details_shortcut(None)
 
-
-class _ConfigureEvent:
-    def __init__(self, widget):
-        self.widget = widget
+    def columns(self):
+        """The details columns built into this window."""
+        return [f for f in _Frame.made if f.master is self._win]
 
 
 class DetailsPanelTests(unittest.TestCase):
-    """"s" stands the case's details beside the window — over the pages as
-    much as over the text — without touching the window itself."""
+    """"s" opens the case's details in a column along the window's right-hand
+    side — over the pages as much as over the text — and the window grows to
+    hold it, so the pages keep the room they had."""
 
     def setUp(self):
-        _DetailsPanelWindow.made.clear()
+        _Frame.made.clear()
 
     def test_s_opens_the_panel(self):
         viewer = _DetailsViewer()
         self.assertEqual(viewer.press_s(), "break")
         self.assertTrue(viewer.details_showing())
-        self.assertEqual(len(_DetailsPanelWindow.made), 1)
+        self.assertEqual(len(viewer.columns()), 1)
+
+    def test_in_this_window_not_in_one_of_its_own(self):
+        # _ui_toplevel would fail the test: the column's master is the window.
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        (column,) = viewer.columns()
+        self.assertTrue(column.packed)
+
+    def test_to_the_right_of_the_pages(self):
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        (column,) = viewer.columns()
+        self.assertEqual(column.pack_kw,
+                         {"side": "right", "fill": "y", "before": viewer._body})
 
     def test_it_is_the_opinion_s_own_panel_holding_the_case_s_details(self):
         viewer = _DetailsViewer()
         viewer.press_s()
         reader = viewer.reader
+        (column,) = viewer.columns()
         self.assertEqual(reader.built, 1)
         self.assertIs(reader.panel.master, reader._details_host)
+        self.assertIs(reader._details_host.master, column)
         self.assertTrue(reader.panel.packed)
         self.assertTrue(reader._details_on)
         self.assertEqual(reader.refreshed, 1)
@@ -1453,49 +1630,143 @@ class DetailsPanelTests(unittest.TestCase):
         viewer.press_s()
         self.assertEqual(viewer.reader._details_views[0], "Case details")
 
-    def test_it_stands_to_the_right_of_the_window_at_its_height(self):
+    def test_the_window_grows_by_the_column_s_width(self):
         viewer = _DetailsViewer(x=100, y=80, w=720, h=880)
         viewer.press_s()
-        self.assertEqual(_DetailsPanelWindow.made[0].geometry(),
-                         f"300x880+{100 + 720 + viewer._DETAILS_GAP}+80")
+        # To the right: where it stands, and its height, are left alone.
+        self.assertEqual(viewer._win.applied, [f"{720 + COLUMN_W}x880+100+80"])
 
-    def test_a_maximized_window_puts_it_against_the_right_of_the_desktop(self):
-        # Nothing to the window's right to stand in: it goes over the edge of
-        # the pages rather than moving them.
-        viewer = _DetailsViewer(x=0, y=0, w=1600, h=1000)
+    def test_the_pages_are_held_at_their_width_while_it_grows(self):
+        # Tk lays out the resize and the packing in separate passes, and the
+        # window manager answers in its own time: held across both, the pages
+        # are never given the column's width, or the window's, in between.
+        viewer = _DetailsViewer()
+        viewer._body.width = 720
         viewer.press_s()
-        self.assertEqual(_DetailsPanelWindow.made[0].geometry(),
-                         "300x1000+1300+0")
+        # Held at the width they had, then given back to the packer (0).
+        self.assertEqual(viewer._body.given, [720, 0])
+        self.assertEqual(viewer._win.events, [
+            ("held",), ("geometry", f"{720 + COLUMN_W}x880+100+80"),
+            ("pack", True), ("free",)])
+
+    def test_closing_gives_the_width_back(self):
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        viewer._win.events.clear()
+        viewer.press_s()
+        self.assertFalse(viewer.details_showing())
+        self.assertEqual((viewer._win.width, viewer._win.x), (720, 100))
+        # Unpacked while the pages are held, before the window shrinks: the
+        # other way round they would be squeezed beside the column.
+        self.assertEqual(viewer._win.events, [
+            ("held",), ("unpack", True), ("geometry", "720x880+100+80"),
+            ("free",)])
+
+    def test_near_the_desktop_s_right_edge_the_window_steps_left(self):
+        # 800 + 720 + the column is past the 1600 desktop: the panel would
+        # open out of sight, so the window moves left just far enough.
+        viewer = _DetailsViewer(x=800, w=720)
+        viewer.press_s()
+        new_w = 720 + COLUMN_W
+        self.assertEqual(viewer._win.applied, [f"{new_w}x880+{1600 - new_w}+80"])
+        # …and back again when it goes.
+        viewer.press_s()
+        self.assertEqual(viewer._win.applied[-1], "720x880+800+80")
+
+    def test_as_does_one_already_hanging_off_that_edge(self):
+        viewer = _DetailsViewer(x=1200, w=720)
+        viewer.press_s()
+        new_w = 720 + COLUMN_W
+        self.assertEqual(viewer._win.applied, [f"{new_w}x880+{1600 - new_w}+80"])
+
+    def test_a_window_moved_since_is_not_moved_back(self):
+        viewer = _DetailsViewer(x=800, w=720)
+        viewer.press_s()
+        viewer._win.x = 300                      # the reader moved it
+        viewer.press_s()
+        self.assertEqual(viewer._win.applied[-1], "720x880+300+80")
+
+    def test_a_maximized_window_gives_the_panel_the_pages_room(self):
+        viewer = _DetailsViewer(x=0, y=0, w=1600, h=1000)
+        viewer._win.zoomed = True
+        viewer.press_s()
+        self.assertEqual(viewer._win.applied, [])
+        self.assertEqual(viewer._win.events, [("pack", False)])
+        viewer.press_s()
+        self.assertEqual(viewer._win.applied, [])
+        self.assertEqual(viewer._win.events, [("pack", False), ("unpack", False)])
+
+    def test_as_does_one_the_desktop_could_not_hold_grown(self):
+        viewer = _DetailsViewer(x=100, w=1400)
+        viewer.press_s()
+        self.assertEqual(viewer._win.applied, [])
+        self.assertTrue(viewer.columns()[0].packed)
+
+    def test_a_window_on_a_screen_the_desktop_does_not_cover_just_grows(self):
+        # A second monitor _work_area cannot see: no room to measure, so no
+        # step left that would throw the window back onto the first.
+        viewer = _DetailsViewer(x=1700, w=720)
+        viewer.press_s()
+        self.assertEqual(viewer._win.applied, [f"{720 + COLUMN_W}x880+1700+80"])
+
+    def test_a_window_maximized_since_keeps_its_size_as_the_panel_goes(self):
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        viewer._win.zoomed = True
+        viewer.press_s()
+        self.assertEqual(len(viewer._win.applied), 1)     # the growth only
+        self.assertFalse(viewer.columns()[0].packed)
+
+    def test_pages_not_laid_out_yet_are_not_held(self):
+        viewer = _DetailsViewer()
+        viewer._body.width = 1
+        viewer.press_s()
+        self.assertEqual(viewer._win.applied, [])
+        self.assertEqual(viewer._win.events, [("pack", False)])
+
+    def test_put_away_before_the_window_has_grown_it_stays_away(self):
+        viewer = _DetailsViewer()
+        viewer._win.deferred = []                # the resize not yet granted
+        viewer.press_s()
+        viewer.press_s()
+        viewer._win.answer()
+        self.assertFalse(viewer.columns()[0].packed)
+        self.assertFalse(viewer._body.held())
+
+    def test_the_window_keeps_room_for_pages_and_panel(self):
+        viewer = _DetailsViewer()
+        viewer.press_s()
+        self.assertEqual(viewer._win.minsizes[-1],
+                         (viewer._MIN_W + COLUMN_W, viewer._MIN_H))
+        viewer.press_s()
+        self.assertEqual(viewer._win.minsizes[-1],
+                         (viewer._MIN_W, viewer._MIN_H))
 
     def test_pressing_it_again_puts_the_panel_away_but_keeps_it(self):
         viewer = _DetailsViewer()
         viewer.press_s()
         viewer.press_s()
         self.assertFalse(viewer.details_showing())
-        panel_win = _DetailsPanelWindow.made[0]
-        self.assertFalse(panel_win.destroyed)
+        (column,) = viewer.columns()
+        self.assertFalse(column.packed)
         viewer.press_s()
         self.assertTrue(viewer.details_showing())
-        self.assertEqual(len(_DetailsPanelWindow.made), 1)
+        self.assertTrue(column.packed)
+        self.assertEqual(len(viewer.columns()), 1)
         self.assertEqual(viewer.reader.built, 1)   # neither rebuilt nor refetched
 
-    def test_the_panel_s_own_keys_and_close_box_put_it_away(self):
+    def test_esc_in_the_panel_puts_it_away(self):
         viewer = _DetailsViewer()
         viewer.press_s()
-        panel_win = _DetailsPanelWindow.made[0]
-        for seq in ("<KeyPress-s>", "<Escape>") + ACCEL("w"):
-            with self.subTest(seq=seq):
-                panel_win.mapped = True
-                self.assertEqual(panel_win.bindings[seq](None), "break")
-                self.assertFalse(viewer.details_showing())
-        panel_win.mapped = True
-        panel_win.protocols["WM_DELETE_WINDOW"]()
+        (column,) = viewer.columns()
+        self.assertEqual(column.bindings["<Escape>"](None), "break")
         self.assertFalse(viewer.details_showing())
+        self.assertFalse(column.packed)
 
     def test_the_key_is_left_alone_while_a_field_is_being_typed_in(self):
         viewer = _DetailsViewer()
         self.assertIsNone(viewer.press_s(_TypingWidget("TEntry")))
-        self.assertEqual(_DetailsPanelWindow.made, [])
+        self.assertEqual(viewer.columns(), [])
         # A disabled box takes no typing, so the key is free to fire.
         self.assertEqual(
             viewer.press_s(_TypingWidget("Text", state="disabled")), "break")
@@ -1521,45 +1792,35 @@ class DetailsPanelTests(unittest.TestCase):
         viewer._on_build_text = lambda host: None
         viewer.press_s()
         self.assertEqual(viewer.flashed, ["Case details not ready"])
-        self.assertEqual(_DetailsPanelWindow.made, [])
+        self.assertEqual(viewer.columns(), [])
+        self.assertEqual(viewer._win.applied, [])
 
     def test_a_document_with_no_case_behind_it_has_no_details(self):
         # The Statutes at Large, an English report: pages and nothing else.
         viewer = _DetailsViewer(reader=None)
         viewer.press_s()
-        self.assertEqual(_DetailsPanelWindow.made, [])
+        self.assertEqual(viewer.columns(), [])
         self.assertEqual(viewer.flashed, [])
+        self.assertEqual(viewer._win.applied, [])
 
-    def test_the_panel_follows_the_window_about(self):
-        viewer = _DetailsViewer(x=100, y=80)
-        viewer.press_s()
-        viewer._win.place = (300, 120, 720, 880)
-        viewer._on_geometry(_ConfigureEvent(viewer._win))
-        self.assertEqual(_DetailsPanelWindow.made[0].geometry(),
-                         f"300x880+{300 + 720 + viewer._DETAILS_GAP}+120")
 
-    def test_but_not_for_an_event_that_moved_nothing(self):
-        viewer = _DetailsViewer()
-        viewer.press_s()
-        panel_win = _DetailsPanelWindow.made[0]
-        viewer._on_geometry(_ConfigureEvent(viewer._win))
-        placed = len(panel_win.geometries)
-        viewer._on_geometry(_ConfigureEvent(viewer._win))
-        self.assertEqual(len(panel_win.geometries), placed)
+class DetailsGeometryTests(unittest.TestCase):
+    """The arithmetic of growing and giving back, on its own."""
 
-    def test_nor_for_a_child_widget_s_own_configure(self):
-        viewer = _DetailsViewer()
-        viewer.press_s()
-        panel_win = _DetailsPanelWindow.made[0]
-        placed = len(panel_win.geometries)
-        viewer._win.place = (300, 120, 720, 880)
-        viewer._on_geometry(_ConfigureEvent(object()))
-        self.assertEqual(len(panel_win.geometries), placed)
+    def test_a_negative_position_is_read(self):
+        viewer = _DetailsViewer(x=-8, w=720)
+        spec, shift = viewer._details_growth(COLUMN_W)
+        self.assertEqual((spec, shift), (f"{720 + COLUMN_W}x880+-8+80", 0))
 
-    def test_a_window_with_the_panel_closed_ignores_being_moved(self):
-        viewer = _DetailsViewer()
-        viewer._on_geometry(_ConfigureEvent(viewer._win))   # nothing to place
-        self.assertEqual(_DetailsPanelWindow.made, [])
+    def test_the_step_left_is_never_past_the_desktop_s_left_edge(self):
+        # Whatever needs a bigger step than that cannot fit, and so is None.
+        viewer = _DetailsViewer(x=10, w=1600 - COLUMN_W + 5)
+        self.assertIsNone(viewer._details_growth(COLUMN_W))
+
+    def test_giving_back_never_goes_below_the_least_width(self):
+        viewer = _DetailsViewer(w=500)
+        spec = viewer._details_shrink((COLUMN_W, 0, "801x880+100+80"))
+        self.assertEqual(spec, f"{viewer._MIN_W}x880+100+80")
 
 
 class DetailsIconTests(unittest.TestCase):
@@ -1567,7 +1828,7 @@ class DetailsIconTests(unittest.TestCase):
     way it is set."""
 
     def setUp(self):
-        _DetailsPanelWindow.made.clear()
+        _Frame.made.clear()
 
     def test_a_click_opens_the_panel_and_another_puts_it_away(self):
         # The icon's command is toggle_details, the switch "s" throws.
@@ -1576,7 +1837,7 @@ class DetailsIconTests(unittest.TestCase):
         self.assertTrue(viewer.details_showing())
         viewer.toggle_details()
         self.assertFalse(viewer.details_showing())
-        self.assertEqual(len(_DetailsPanelWindow.made), 1)
+        self.assertEqual(len(viewer.columns()), 1)
 
     def test_its_column_is_filled_in_while_the_panel_is_up(self):
         viewer = _DetailsViewer()
@@ -1593,16 +1854,11 @@ class DetailsIconTests(unittest.TestCase):
         viewer.press_s()
         self.assertEqual(viewer._details_btn.image, "panel")
 
-    def test_and_the_panel_s_own_keys_and_close_box(self):
+    def test_and_esc_in_the_panel(self):
         viewer = _DetailsViewer()
-        for seq in ("<KeyPress-s>", "<Escape>") + ACCEL("w"):
-            with self.subTest(seq=seq):
-                viewer.toggle_details()
-                self.assertEqual(viewer._details_btn.image, "panel_showing")
-                _DetailsPanelWindow.made[0].bindings[seq](None)
-                self.assertEqual(viewer._details_btn.image, "panel")
         viewer.toggle_details()
-        _DetailsPanelWindow.made[0].protocols["WM_DELETE_WINDOW"]()
+        self.assertEqual(viewer._details_btn.image, "panel_showing")
+        viewer.columns()[0].bindings["<Escape>"](None)
         self.assertEqual(viewer._details_btn.image, "panel")
 
     def test_a_case_whose_text_has_not_arrived_leaves_it_empty(self):
@@ -1625,8 +1881,8 @@ class DetailsMenuTests(unittest.TestCase):
         viewer._on_build_text = object()
         viewer._sync_bar_menu()
         self.assertIn("Case Details\ts", viewer._bar_menu.labels())
-        viewer._details_win = type(
-            "W", (), {"winfo_ismapped": lambda _s: True})()
+        viewer._details_side = object()
+        viewer._details_open = True
         viewer._sync_bar_menu()
         self.assertIn("Hide Case Details\ts", viewer._bar_menu.labels())
 

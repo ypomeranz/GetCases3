@@ -67,6 +67,21 @@ class Unavailable(Exception):
 _SESSION = None
 _SESSION_LOCK = threading.Lock()
 
+#: Told what a fetch is doing, when set: ``on_step(text)`` as it tries each
+#: source and ``on_bytes(done, total)`` as a file comes in (``total`` 0 where
+#: the server does not say).  The GUI points these at its status reporting,
+#: which knows from the calling thread which load, if any, is being watched.
+on_step = None
+on_bytes = None
+
+
+def _tell(hook, *args) -> None:
+    if hook is not None:
+        try:
+            hook(*args)
+        except Exception:
+            pass
+
 
 def _session():
     global _SESSION
@@ -112,15 +127,22 @@ def _get_pdf(url: str, *, max_bytes: int = 150_000_000) -> tuple[bytes, str]:
     if cached is not None:
         meta = _cached_meta("whole:" + url)
         return cached, meta.get("final", url)
+    host = urllib.parse.urlparse(url).hostname or "the source"
+    _tell(on_step, f"Downloading from {host.removeprefix('www.')}…")
     r = _session().get(url, timeout=TIMEOUT, stream=True)
     try:
         if r.status_code != 200:
             raise Unavailable(f"HTTP {r.status_code}")
         final = r.url
+        try:
+            size = int(r.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            size = 0
         chunks, total = [], 0
         for chunk in r.iter_content(1 << 16):
             chunks.append(chunk)
             total += len(chunk)
+            _tell(on_bytes, total, size)
             if total > max_bytes:
                 raise Unavailable("the file is too large to fetch whole")
         data = b"".join(chunks)
@@ -157,6 +179,7 @@ def _cut(url: str, first: int, last: int, *, whole_ok: bool = True) -> tuple[byt
     cached = _cached(key)
     if cached is not None:
         return cached, int(_cached_meta(key).get("total") or 0)
+    _tell(on_step, "Cutting the cited pages out of the scan…")
     try:
         pdf = pdf_range.open_url(url, session=_session(), timeout=TIMEOUT)
         total = pdf.page_count()
@@ -266,6 +289,7 @@ def _find_printed_page(data: bytes, page: int, guess: int, total: int) -> Option
 # ---------------------------------------------------------------------------
 
 def _cr(s: dict) -> Pages:
+    _tell(on_step, "Finding the page in GovInfo's Congressional Record…")
     vol = int(s.get("vol") or 0)
     page = str(s.get("page") or "")
     m = re.fullmatch(r"([SHEDA]?)(\d+)", page)
@@ -385,6 +409,7 @@ def _debates(s: dict) -> Pages:
     # (from the printing headed "History of Congress") comes some pages on
     # — so more pages after it are cut, and the reader is told.
     two_printings = s.get("src") == "annals" and int(s.get("vol") or 0) in (1, 2)
+    _tell(on_step, "Finding the page in the Library of Congress's scans…")
     pages, at = lh.debates_pages(s, BEFORE, 14 if two_printings else AFTER)
     if not pages:
         raise Unavailable(
@@ -489,6 +514,7 @@ def _paper(s: dict) -> Pages:
     congs = [int(s["cong"])] if s.get("cong") else [
         int(c) for c in str(s.get("congs") or "").split(",") if c.strip()]
     tried = []
+    _tell(on_step, "Asking GovInfo for it…")
     for cong in congs:
         spec = dict(s, cong=cong)
         spec.pop("congs", None)
@@ -499,6 +525,7 @@ def _paper(s: dict) -> Pages:
             except Exception:
                 continue
             return _at_pin(data, spec, "GovInfo", final.split("#")[0])
+    _tell(on_step, "Searching the Internet Archive…")
     for cong in congs:
         spec = dict(s, cong=cong)
         spec.pop("congs", None)
@@ -506,6 +533,7 @@ def _paper(s: dict) -> Pages:
         if found is not None:
             return found
     label = lh.spec_label(dict(s, cong=congs[0] if congs else 0), with_pin=False)
+    _tell(on_step, "Searching HathiTrust's catalogue…")
     hathi = _hathitrust(dict(s, cong=congs[0] if congs else 0))
     if hathi:
         raise Unavailable(
@@ -637,43 +665,70 @@ def _ia_leaf(ident: str, files: list, pin: str) -> Optional[int]:
     return None
 
 
+def _chamber_word(s: dict) -> str:
+    """The word a report's or document's title page prints for the chamber
+    that issued it — "Senate", or "House" (of Representatives) — or "" where
+    the spec doesn't say."""
+    return {"s": "Senate", "h": "House"}.get(s.get("ch", ""), "")
+
+
+def _hathitrust_records(lookfor: str) -> list[str]:
+    """The catalogue record numbers a HathiTrust search for *lookfor*
+    finds, in its order."""
+    try:
+        r = _session().get("https://catalog.hathitrust.org/Search/Home", params={
+            "lookfor": lookfor, "type": "all", "pagesize": 20},
+            timeout=TIMEOUT)
+        return list(dict.fromkeys(re.findall(r"/Record/(\d+)\?", r.text)))
+    except Exception:
+        return []
+
+
 def _hathitrust(s: dict) -> str:
     """The HathiTrust volume holding the report, for the browser — found in
     its catalogue by the series statement libraries give reports ("Report /
-    94th Congress, 2d session, House of Representatives ; no. 94-1476")."""
+    94th Congress, 2d session, House of Representatives ; no. 94-1476").
+
+    The chamber is searched for with the number: a House and a Senate report
+    of one Congress often share a number, and the other chamber's can fill
+    the first results.  A catalogue that doesn't spell the chamber out is
+    searched again for the number alone."""
     cong, num = s.get("cong"), s.get("num")
     if not cong or not num:
         return ""
-    try:
-        r = _session().get("https://catalog.hathitrust.org/Search/Home", params={
-            "lookfor": f'"no. {cong}-{num}"', "type": "all", "pagesize": 20},
-            timeout=TIMEOUT)
-        records = list(dict.fromkeys(re.findall(r"/Record/(\d+)\?", r.text)))
-    except Exception:
-        return ""
-    for rec in records[:6]:
-        try:
-            d = _session().get(
-                f"https://catalog.hathitrust.org/api/volumes/full/recordnumber/{rec}.json",
-                timeout=TIMEOUT).json()
-        except Exception:
-            continue
-        for rv in (d.get("records") or {}).values():
-            marc = rv.get("marc-xml", "")
-            series = " ".join(re.findall(r'<datafield tag="(?:490|830|086|245)"[^>]*>(.*?)</datafield>', marc, re.S))
-            series = re.sub(r"<[^>]+>", " ", series)
-            if not _names_report(series, s):
+    number = f'"no. {cong}-{num}"'
+    chamber = _chamber_word(s)
+    checked: set[str] = set()
+    for lookfor in ([f"{number} {chamber}"] if chamber else []) + [number]:
+        for rec in _hathitrust_records(lookfor)[:6]:
+            if rec in checked:
                 continue
-            for item in d.get("items") or []:
-                if "Full view" in (item.get("usRightsString") or "") and item.get("htid"):
-                    return f"https://babel.hathitrust.org/cgi/pt?id={item['htid']}"
+            checked.add(rec)
+            try:
+                d = _session().get(
+                    f"https://catalog.hathitrust.org/api/volumes/full/recordnumber/{rec}.json",
+                    timeout=TIMEOUT).json()
+            except Exception:
+                continue
+            for rv in (d.get("records") or {}).values():
+                marc = rv.get("marc-xml", "")
+                series = " ".join(re.findall(r'<datafield tag="(?:490|830|086|245)"[^>]*>(.*?)</datafield>', marc, re.S))
+                series = re.sub(r"<[^>]+>", " ", series)
+                if not _names_report(series, s):
+                    continue
+                for item in d.get("items") or []:
+                    if "Full view" in (item.get("usRightsString") or "") and item.get("htid"):
+                        return f"https://babel.hathitrust.org/cgi/pt?id={item['htid']}"
     return ""
 
 
 def _hathitrust_search_url(s: dict) -> str:
     """A full-text search of HathiTrust's public-domain volumes for the
     report as its title page prints it: "Report No. 91-1234" from the 91st
-    Congress (1969) on, "Report No. 245" with its "80th Congress" before."""
+    Congress (1969) on, "Report No. 245" with its "80th Congress" before —
+    and the chamber the title page names, "Senate" or "House" (of
+    Representatives), so the other chamber's report of that number isn't
+    found with it."""
     cong, num = int(s.get("cong") or 0), s.get("num")
     word = "Report" if s.get("src") == "rpt" else "Document"
     if cong >= 91:
@@ -683,6 +738,9 @@ def _hathitrust_search_url(s: dict) -> str:
         query, mode = f'"{word} No. {num}" "{cong}{th} Congress"', "all"
     else:
         query, mode = f'"{word} No. {num}"', "all"
+    chamber = _chamber_word(s)
+    if chamber:
+        query += " " + chamber
     return ("https://babel.hathitrust.org/cgi/ls?lmt=ft&anyall1=" + mode
             + "&q1=" + urllib.parse.quote(query))
 
