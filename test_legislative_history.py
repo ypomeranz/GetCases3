@@ -11,6 +11,7 @@ import io
 import json
 import pathlib
 import unittest
+import urllib.parse
 from unittest.mock import Mock, patch
 
 import citations
@@ -376,6 +377,61 @@ class FetchTests(unittest.TestCase):
                 leghist_fetch.fetch(spec)
         self.assertEqual(urls, ["https://www.govinfo.gov/link/crpt/39/hrpt/12?link-type=pdf",
                                 "https://www.govinfo.gov/link/crpt/40/hrpt/12?link-type=pdf"])
+
+    def test_the_hathitrust_search_names_the_chamber(self):
+        def query(**s):
+            url = leghist_fetch._hathitrust_search_url(s)
+            return urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["q1"][0]
+
+        self.assertEqual(query(src="rpt", ch="s", cong=95, num=797),
+                         '"Report No. 95-797" Senate')
+        self.assertEqual(query(src="rpt", ch="h", cong=80, num=245),
+                         '"Report No. 245" "80th Congress" House')
+        self.assertEqual(query(src="doc", ch="s", cong=91, num=35),
+                         '"Document No. 91-35" Senate')
+        # A spec that doesn't say which chamber gets no guess at one.
+        self.assertEqual(query(src="rpt", cong=95, num=797), '"Report No. 95-797"')
+
+    def test_a_report_nobody_has_leaves_a_search_naming_its_chamber(self):
+        spec = lh.make_spec(src="rpt", ch="s", cong=95, num=797, pin="5")
+        with patch.object(leghist_fetch, "_get_pdf", side_effect=leghist_fetch.Unavailable("HTTP 400")), \
+                patch.object(leghist_fetch, "_internet_archive", return_value=None), \
+                patch.object(leghist_fetch, "_hathitrust", return_value=""):
+            with self.assertRaises(leghist_fetch.Unavailable) as ctx:
+                leghist_fetch.fetch(spec)
+        q1 = urllib.parse.parse_qs(urllib.parse.urlsplit(ctx.exception.browser_url).query)["q1"][0]
+        self.assertEqual(q1, '"Report No. 95-797" Senate')
+
+    def test_the_hathitrust_catalogue_is_asked_for_the_chamber_first(self):
+        asked = []
+
+        def records(lookfor):
+            asked.append(lookfor)
+            return []
+
+        with patch.object(leghist_fetch, "_hathitrust_records", side_effect=records):
+            self.assertEqual(leghist_fetch._hathitrust(
+                {"src": "rpt", "ch": "h", "cong": 94, "num": 1476}), "")
+        # Then the number alone, for a record that doesn't spell the chamber out.
+        self.assertEqual(asked, ['"no. 94-1476" House', '"no. 94-1476"'])
+
+    def test_a_catalogue_record_is_read_once(self):
+        # Found by both searches, a record already read isn't fetched again.
+        fetched = []
+
+        class Answer:
+            def __init__(self, url):
+                fetched.append(url)
+
+            def json(self):
+                return {"records": {}, "items": []}
+
+        session = Mock()
+        session.get.side_effect = lambda url, **_kw: Answer(url)
+        with patch.object(leghist_fetch, "_hathitrust_records", return_value=["1", "2"]), \
+                patch.object(leghist_fetch, "_session", return_value=session):
+            leghist_fetch._hathitrust({"src": "rpt", "ch": "s", "cong": 95, "num": 797})
+        self.assertEqual(len(fetched), 2)
 
     def test_a_catalogue_entry_names_this_report(self):
         s = {"src": "rpt", "ch": "h", "cong": 94, "num": 1476}

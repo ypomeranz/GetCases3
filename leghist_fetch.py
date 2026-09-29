@@ -637,43 +637,70 @@ def _ia_leaf(ident: str, files: list, pin: str) -> Optional[int]:
     return None
 
 
+def _chamber_word(s: dict) -> str:
+    """The word a report's or document's title page prints for the chamber
+    that issued it — "Senate", or "House" (of Representatives) — or "" where
+    the spec doesn't say."""
+    return {"s": "Senate", "h": "House"}.get(s.get("ch", ""), "")
+
+
+def _hathitrust_records(lookfor: str) -> list[str]:
+    """The catalogue record numbers a HathiTrust search for *lookfor*
+    finds, in its order."""
+    try:
+        r = _session().get("https://catalog.hathitrust.org/Search/Home", params={
+            "lookfor": lookfor, "type": "all", "pagesize": 20},
+            timeout=TIMEOUT)
+        return list(dict.fromkeys(re.findall(r"/Record/(\d+)\?", r.text)))
+    except Exception:
+        return []
+
+
 def _hathitrust(s: dict) -> str:
     """The HathiTrust volume holding the report, for the browser — found in
     its catalogue by the series statement libraries give reports ("Report /
-    94th Congress, 2d session, House of Representatives ; no. 94-1476")."""
+    94th Congress, 2d session, House of Representatives ; no. 94-1476").
+
+    The chamber is searched for with the number: a House and a Senate report
+    of one Congress often share a number, and the other chamber's can fill
+    the first results.  A catalogue that doesn't spell the chamber out is
+    searched again for the number alone."""
     cong, num = s.get("cong"), s.get("num")
     if not cong or not num:
         return ""
-    try:
-        r = _session().get("https://catalog.hathitrust.org/Search/Home", params={
-            "lookfor": f'"no. {cong}-{num}"', "type": "all", "pagesize": 20},
-            timeout=TIMEOUT)
-        records = list(dict.fromkeys(re.findall(r"/Record/(\d+)\?", r.text)))
-    except Exception:
-        return ""
-    for rec in records[:6]:
-        try:
-            d = _session().get(
-                f"https://catalog.hathitrust.org/api/volumes/full/recordnumber/{rec}.json",
-                timeout=TIMEOUT).json()
-        except Exception:
-            continue
-        for rv in (d.get("records") or {}).values():
-            marc = rv.get("marc-xml", "")
-            series = " ".join(re.findall(r'<datafield tag="(?:490|830|086|245)"[^>]*>(.*?)</datafield>', marc, re.S))
-            series = re.sub(r"<[^>]+>", " ", series)
-            if not _names_report(series, s):
+    number = f'"no. {cong}-{num}"'
+    chamber = _chamber_word(s)
+    checked: set[str] = set()
+    for lookfor in ([f"{number} {chamber}"] if chamber else []) + [number]:
+        for rec in _hathitrust_records(lookfor)[:6]:
+            if rec in checked:
                 continue
-            for item in d.get("items") or []:
-                if "Full view" in (item.get("usRightsString") or "") and item.get("htid"):
-                    return f"https://babel.hathitrust.org/cgi/pt?id={item['htid']}"
+            checked.add(rec)
+            try:
+                d = _session().get(
+                    f"https://catalog.hathitrust.org/api/volumes/full/recordnumber/{rec}.json",
+                    timeout=TIMEOUT).json()
+            except Exception:
+                continue
+            for rv in (d.get("records") or {}).values():
+                marc = rv.get("marc-xml", "")
+                series = " ".join(re.findall(r'<datafield tag="(?:490|830|086|245)"[^>]*>(.*?)</datafield>', marc, re.S))
+                series = re.sub(r"<[^>]+>", " ", series)
+                if not _names_report(series, s):
+                    continue
+                for item in d.get("items") or []:
+                    if "Full view" in (item.get("usRightsString") or "") and item.get("htid"):
+                        return f"https://babel.hathitrust.org/cgi/pt?id={item['htid']}"
     return ""
 
 
 def _hathitrust_search_url(s: dict) -> str:
     """A full-text search of HathiTrust's public-domain volumes for the
     report as its title page prints it: "Report No. 91-1234" from the 91st
-    Congress (1969) on, "Report No. 245" with its "80th Congress" before."""
+    Congress (1969) on, "Report No. 245" with its "80th Congress" before —
+    and the chamber the title page names, "Senate" or "House" (of
+    Representatives), so the other chamber's report of that number isn't
+    found with it."""
     cong, num = int(s.get("cong") or 0), s.get("num")
     word = "Report" if s.get("src") == "rpt" else "Document"
     if cong >= 91:
@@ -683,6 +710,9 @@ def _hathitrust_search_url(s: dict) -> str:
         query, mode = f'"{word} No. {num}" "{cong}{th} Congress"', "all"
     else:
         query, mode = f'"{word} No. {num}"', "all"
+    chamber = _chamber_word(s)
+    if chamber:
+        query += " " + chamber
     return ("https://babel.hathitrust.org/cgi/ls?lmt=ft&anyall1=" + mode
             + "&q1=" + urllib.parse.quote(query))
 
