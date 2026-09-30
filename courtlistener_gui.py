@@ -30091,6 +30091,14 @@ class _ScholarTextWindow:
         oyez_cites = [c for c in ([cite] + list(self._header_cites)) if c]
         name = self._bb.get("name", "")
         year = self._bb.get("year", "")
+        # The docket numbers the opinion gives ("No. 08-1448"): Oyez has no
+        # page, and for the newest cases no citation, to find a case by.
+        dockets: list[str] = []
+        if is_scotus:
+            dockets = (sorted(_scotus_docket_tokens(_item_docket_text(
+                self._item or {})))
+                or _docket_numbers_in(" ".join(
+                    b.text() for b in (self._blocks or [])[:16])))
         # Resolve the CourtListener client on the main thread (it reads tk vars),
         # but only when a token is set — the case-details panel opens
         # automatically for SCOTUS cases, and _get_client() pops a "Missing
@@ -30109,7 +30117,8 @@ class _ScholarTextWindow:
             # anything else.  Any failure falls through to the paths below.
             if is_scotus:
                 try:
-                    case = oyez.lookup(cites=oyez_cites, name=name, year=year)
+                    case = oyez.lookup(cites=oyez_cites, name=name, year=year,
+                                       dockets=dockets)
                     if case is not None and case.is_substantive:
                         lines = self._details_lines_oyez(case)
                         if lines:

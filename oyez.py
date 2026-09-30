@@ -16,10 +16,17 @@ to two stable public services, both used here:
         body {"query": {...}}
 
     Each hit's ``_source`` carries ``field_court_term``,
-    ``field_docket_number``, ``field_citation:field_{volume,page,year}`` and a
-    ``url`` pointing at the full record below.  We can therefore match a case
-    *exactly* by its U.S. Reports citation (volume + page), or fall back to a
-    name search.
+    ``field_docket_number`` (and ``field_additional_docket_numbers`` for
+    cases decided together), ``field_citation:field_{volume,page,year}`` and
+    a ``url`` pointing at the full record below.  A case is matched by its
+    U.S. Reports volume and page -- but Oyez records the page only for the
+    older volumes (from about 2009 most cases have the volume alone, and the
+    newest no citation at all) -- else by the docket number the opinion
+    gives, else by name among the cases of its volume or its term.  A name
+    must name both parties (a Bluebook abbreviation, "Ent. Merchs. Ass'n",
+    counts as the words it cuts short), and where two cases fit it equally
+    well neither is taken: "Brown" and the year alone once picked McDaniel v.
+    Brown for Brown v. Entertainment Merchants Association.
 
   * Case     -- the full JSON record:
 
@@ -295,38 +302,141 @@ def _html_to_text(value: str) -> str:
 
 # "410 U.S. 113", "384 U. S. 436", "143 S. Ct. 1322" -> (vol, reporter, page)
 _CITE_RE = re.compile(r"(\d+)\s+([A-Za-z.][A-Za-z. ]*?[A-Za-z.])\s+(\d+)")
+# "602 U.S. ___": a volume whose pages are not out yet
+_BLANK_PAGE_RE = re.compile(r"(\d+)\s+U\.\s?S\.\s+_{2,}")
 
 
 def _parse_us_citation(cite: str) -> Optional[tuple[str, str]]:
-    """Return (volume, page) when *cite* is a U.S. Reports citation, else None.
-    Only the official reporter (``U.S.``) keys the Oyez citation index; parallel
+    """Return (volume, page) when *cite* is a U.S. Reports citation, else None;
+    the page is "" for a volume not yet paginated ("602 U.S. ___").  Only the
+    official reporter (``U.S.``) keys the Oyez citation index; parallel
     reporters (S. Ct., L. Ed.) are skipped so name search handles those."""
     if not cite:
         return None
     m = _CITE_RE.search(cite)
-    if not m:
+    if m:
+        vol, reporter, page = m.group(1), m.group(2), m.group(3)
+        if re.sub(r"[ .]", "", reporter).upper() == "US":
+            return vol, page
         return None
-    vol, reporter, page = m.group(1), m.group(2), m.group(3)
-    norm = re.sub(r"[ .]", "", reporter).upper()
-    if norm == "US":
-        return vol, page
-    return None
+    m = _BLANK_PAGE_RE.search(cite)
+    return (m.group(1), "") if m else None
 
 
 _PARTY_STOP = {
     "the", "of", "v", "vs", "and", "a", "an", "et", "al", "in", "re",
-    "ex", "rel", "on", "behalf",
+    "ex", "rel", "on", "behalf", "for", "to", "at", "by",
+}
+
+#: Words so common in parties' names that sharing one says nothing about
+#: whether two names are one case's: the United States alone is a party to
+#: hundreds.  (Their Bluebook abbreviations -- "Ass'n", "Dep't", "Educ." --
+#: count as these words too; see _word_matches.)
+_COMMON_WORDS = {
+    "united", "states", "state", "people", "commonwealth", "city",
+    "county", "town", "township", "village", "board", "commission",
+    "commissioner", "department", "secretary", "director", "attorney",
+    "general", "governor", "warden", "school", "district", "education",
+    "university", "college", "company", "corporation", "incorporated",
+    "inc", "co", "ltd", "llc", "association", "national", "american",
+    "federal", "government", "authority", "agency", "council",
+    "committee", "trustees", "president", "fellows", "bank", "insurance",
+    "international", "public", "service", "services",
 }
 
 
-def _name_tokens(name: str) -> set[str]:
-    """Lower-cased alphabetic tokens of a case name, minus connective words and
-    one-letter fragments, for fuzzy comparison."""
-    raw = re.sub(r"[^a-z ]", " ", (name or "").lower())
-    return {
-        t for t in raw.split()
-        if len(t) > 1 and t not in _PARTY_STOP
-    }
+def _name_words(name: str) -> list[str]:
+    """The words of a case name, lower-cased and in order, minus connective
+    words.  An apostrophe closes up, so a Bluebook contraction stays one word
+    ("Ass'n" -> "assn"), and a run of initials is one word ("J.G.G." ->
+    "jgg"); any other single letter is dropped."""
+    raw = re.sub(r"['’]", "", (name or "").lower())
+    words: list[str] = []
+    initials = ""
+    for t in re.sub(r"[^a-z]", " ", raw).split():
+        if len(t) == 1 and t != "v":
+            initials += t
+            continue
+        if len(initials) > 1:
+            words.append(initials)
+        initials = ""
+        words.append(t)
+    if len(initials) > 1:
+        words.append(initials)
+    return [w for w in words if w not in _PARTY_STOP]
+
+
+def _sides(name: str) -> list[list[str]]:
+    """The words of each party of a case name ("v." between them)."""
+    parts = re.split(r"\s+vs?\.?\s+", name or "", maxsplit=1,
+                     flags=re.IGNORECASE)
+    return [_name_words(p) for p in parts]
+
+
+def _word_matches(a: str, b: str) -> bool:
+    """Whether two words of case names are one word, the one perhaps cut
+    short as the Bluebook cuts it: "ent" for "entertainment", "merchs" for
+    "merchants", "assn" for "association".  The shorter begins as the longer
+    does and runs through it in order -- and, of two letters, is its first
+    and last ("bd" for "board", but not "co" for "commission")."""
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    if len(short) < 2 or short[0] != long_[0]:
+        return False
+    if len(short) == 2:
+        return short[1] == long_[-1]
+    rest = iter(long_)
+    return all(ch in rest for ch in short)
+
+
+def _initials(words: list[str]) -> str:
+    return "".join(w[0] for w in words)
+
+
+def _word_in(word: str, words: list[str]) -> bool:
+    """Whether *word* is one of *words*, or the initials of a run of them
+    ("epa": "environmental protection agency")."""
+    return (any(_word_matches(word, w) for w in words)
+            or (len(word) >= 3 and word in _initials(words)))
+
+
+def _is_common(word: str) -> bool:
+    return any(_word_matches(word, c) for c in _COMMON_WORDS)
+
+
+def _party_in(party: list[str], words: list[str]) -> bool:
+    """Whether the party whose name has the words *party* is named by
+    *words*: a telling word of its name is among them -- or they are the
+    initials of its name ("fcc") -- or, for a party named in common words
+    alone ("United States"), every one of those is there."""
+    telling = [w for w in party if not _is_common(w)]
+    if not telling:
+        return all(_word_in(w, words) for w in party)
+    return (any(_word_in(w, words) for w in telling)
+            or any(len(w) >= 3 and w in _initials(party) for w in words))
+
+
+#: The least share of a case name's words an Oyez title must have.
+_NAME_FLOOR = 0.5
+
+
+def _name_fit(name: str, title: str) -> Optional[float]:
+    """How well the Oyez *title* fits the case *name*: the share of the
+    name's words the title has -- or None when it names another case, one
+    party of the name missing from it, or too few of the name's words there.
+    The parties are compared in order where both name two."""
+    ours, theirs = _sides(name), _sides(title)
+    title_words = [w for side in theirs for w in side]
+    words = [w for side in ours for w in side]
+    if not words or not title_words:
+        return None
+    paired = len(ours) == 2 and len(theirs) == 2
+    for i, party in enumerate(ours):
+        if party and not _party_in(party, theirs[i] if paired else title_words):
+            return None
+    share = sum(_word_in(w, title_words) for w in words) / len(words)
+    return share if share >= _NAME_FLOOR else None
 
 
 # ---------------------------------------------------------------------------
@@ -354,82 +464,128 @@ def _es_search(body: dict) -> list[dict]:
     return [h.get("_source") or {} for h in hits]
 
 
-def _hit_citation(src: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    return (
-        src.get("field_citation:field_volume"),
-        src.get("field_citation:field_page"),
-        src.get("field_citation:field_year"),
-    )
+def _hit_citation(src: dict) -> tuple[str, str, str]:
+    """A hit's U.S. Reports (volume, page, year), "" where Oyez has none."""
+    return tuple(str(src.get(f"field_citation:field_{part}") or "")
+                 for part in ("volume", "page", "year"))
 
 
-def _find_by_citation(vol: str, page: str) -> Optional[dict]:
-    """Exact match on U.S. Reports volume + page.  The pair is unique to one
-    case, so we trust a hit only when both fields equal the query."""
-    body = {
-        "size": 5,
-        "query": {
-            "bool": {
-                "must": [
-                    {"match": {"field_citation:field_volume": vol}},
-                    {"match": {"field_citation:field_page": page}},
-                ]
-            }
-        },
-    }
+def _hit_year(src: dict) -> Optional[int]:
+    """The year a hit was decided, or failing that the year of its term."""
+    return (_year_int(src.get("field_citation:field_year"))
+            or _year_int(src.get("field_court_term")))
+
+
+def _cited_elsewhere(src: dict, vol: str, page: str) -> bool:
+    """Whether Oyez files *src* at another place in the U.S. Reports than
+    *vol* U.S. *page* -- so it is another case."""
+    hv, hp, _ = _hit_citation(src)
+    return bool(vol and hv and (hv != vol or (page and hp and hp != page)))
+
+
+def _norm_docket(value) -> str:
+    return re.sub(r"[‐-―−]", "-", str(value or "")).strip().upper()
+
+
+def _volume_cases(vol: str) -> list[dict]:
+    """Every case Oyez files under volume *vol* of the U.S. Reports: a few
+    dozen at most, the argued cases."""
+    body = {"size": 500,
+            "query": {"term": {"field_citation:field_volume": str(vol)}}}
+    return [src for src in _es_search(body)
+            if _hit_citation(src)[0] == str(vol)]
+
+
+def _at_page(cases: list[dict], page: str, name: str) -> Optional[dict]:
+    """The case of one volume's *cases* at *page*: unique to it, where Oyez
+    records the page at all."""
+    here = [src for src in cases if page and _hit_citation(src)[1] == page]
+    if len(here) > 1 and name:
+        here.sort(key=lambda src: -(_name_fit(name, src.get("title") or "")
+                                    or 0.0))
+    return here[0] if here else None
+
+
+def _find_by_docket(dockets, vol: str, page: str,
+                    year: str) -> Optional[dict]:
+    """The case filed under one of *dockets* ("08-1448") -- its own number,
+    or one of the others of cases decided with it -- unless its citation or
+    year says it is another case."""
+    wanted = sorted({d for d in map(_norm_docket, dockets or ()) if d})
+    if not wanted:
+        return None
+    body = {"size": 10, "query": {"bool": {
+        "should": [{"terms": {"field_docket_number": wanted}},
+                   {"terms": {"field_additional_docket_numbers": wanted}}],
+        "minimum_should_match": 1}}}
+    yr = _year_int(year)
     for src in _es_search(body):
-        hv, hp, _ = _hit_citation(src)
-        if str(hv) == str(vol) and str(hp) == str(page):
+        own = {_norm_docket(src.get("field_docket_number"))} | {
+            _norm_docket(d)
+            for d in src.get("field_additional_docket_numbers") or ()}
+        hyr = _hit_year(src)
+        if (own & set(wanted) and not _cited_elsewhere(src, vol, page)
+                and not (yr and hyr and abs(hyr - yr) > 1)):
             return src
     return None
 
 
-def _find_by_name(name: str, year: str) -> Optional[dict]:
-    """Relevance search on the case name, validated against the year and a
-    minimum name overlap so a wrong top hit is rejected (caller falls back)."""
-    if not name:
+def _best_by_name(cases: list[dict], name: str, year: str) -> Optional[dict]:
+    """The one case of *cases* the case name *name* picks out (see
+    _name_fit), decided within a year of *year* where both are known -- in
+    that very year, of two that fit alike (Brown v. Board of Education in
+    1954, not its sequel of 1955).  None when none fits, or two fit equally
+    well: better no details than another case's."""
+    yr = _year_int(year)
+    scored: dict[str, tuple[tuple[float, bool], dict]] = {}
+    for src in cases:
+        hyr = _hit_year(src)
+        if yr and hyr and abs(hyr - yr) > 1:
+            continue
+        fit = _name_fit(name, src.get("title") or "")
+        if fit is not None:
+            scored[src.get("url") or src.get("title") or ""] = (
+                (fit, bool(yr and hyr == yr)), src)
+    ranked = sorted(scored.values(), key=lambda pair: pair[0], reverse=True)
+    if not ranked or (len(ranked) > 1 and ranked[1][0] == ranked[0][0]):
         return None
-    body = {
-        "size": 10,
-        "query": {
-            "multi_match": {
-                "query": name,
-                "type": "cross_fields",
-                "fields": [
-                    "title^3",
-                    "field_first_party^2",
-                    "field_second_party^2",
-                ],
-            }
-        },
-    }
-    want = _name_tokens(name)
-    if not want:
+    return ranked[0][1]
+
+
+def _find_by_name(name: str, year: str, vol: str = "",
+                  page: str = "") -> Optional[dict]:
+    """The case the name picks out among those of the term it was decided in
+    (or the term before: a term runs October to June), else among the
+    index's best matches for the name -- of those decided within a year of
+    it, where the year is known: Oyez gives the older cases a span of terms
+    ("1940-1955").  A case Oyez files at another place in the U.S. Reports
+    than *vol* U.S. *page* is never taken."""
+    if not _name_words(name):
         return None
     yr = _year_int(year)
-    best: Optional[dict] = None
-    best_score = 0.0
-    for src in _es_search(body):
-        title = src.get("title") or ""
-        have = _name_tokens(title)
-        if not have:
-            continue
-        overlap = len(want & have) / len(want)
-        # year agreement (citation year, then term) is a strong tie-breaker
-        _, _, hy = _hit_citation(src)
-        hyr = _year_int(hy) or _year_int(src.get("field_court_term"))
-        year_ok = yr is not None and hyr is not None and abs(hyr - yr) <= 1
-        score = overlap + (0.5 if year_ok else 0.0)
-        if score > best_score:
-            best, best_score = src, score
-    # require a solid name overlap; if a year is known, require it to agree
-    if best is None or best_score < 0.6:
-        return None
-    if yr is not None:
-        _, _, hy = _hit_citation(best)
-        hyr = _year_int(hy) or _year_int(best.get("field_court_term"))
-        if hyr is not None and abs(hyr - yr) > 2:
-            return None
-    return best
+    queries = []
+    by_name: dict = {"multi_match": {
+        "query": name,
+        "type": "cross_fields",
+        "fields": ["title^3", "field_first_party^2", "field_second_party^2"],
+    }}
+    if yr:
+        queries.append({"size": 500, "query": {"terms": {
+            "field_court_term": [str(yr - 1), str(yr)]}}})
+        # Oyez's Elasticsearch is too old for a "filter" clause; a second
+        # "must" does the same.
+        by_name = {"bool": {"must": [by_name, {"terms": {
+            "field_citation:field_year": [str(yr - 1), str(yr),
+                                          str(yr + 1)]}}]}}
+    queries.append({"size": 25, "query": by_name})
+    for body in queries:
+        hit = _best_by_name(
+            [src for src in _es_search(body)
+             if not _cited_elsewhere(src, vol, page)],
+            name, year)
+        if hit is not None:
+            return hit
+    return None
 
 
 def _year_int(value) -> Optional[int]:
@@ -579,36 +735,42 @@ _CACHE: dict[str, Optional[OyezCase]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _cache_key(cites, name: str, year: str) -> str:
+def _cache_key(cites, name: str, year: str, dockets=()) -> str:
     cites_part = "|".join(cites) if cites else ""
-    return f"{cites_part}#{(name or '').lower().strip()}#{year or ''}"
+    return (f"{cites_part}#{(name or '').lower().strip()}#{year or ''}"
+            f"#{','.join(dockets)}")
 
 
 def lookup(
     cites=None,
     name: str = "",
     year: str = "",
+    dockets=None,
 ) -> Optional[OyezCase]:
     """Find a Supreme Court case on Oyez and return an :class:`OyezCase`.
 
     *cites* is a citation string or an iterable of them (the caller may pass
     every parallel reporter from the opinion header); the first that parses as
-    a ``U.S.`` citation drives an exact lookup.  When no U.S. citation matches,
-    a name + year search is tried.  Returns ``None`` if nothing matches
-    confidently or the network is unavailable.  Results (including misses) are
-    cached for the process lifetime.
+    a ``U.S.`` citation drives the lookup.  *dockets* are the docket numbers
+    the opinion gives ("08-1448"): the newest cases have no citation in Oyez.
+    Without either, a name + year search is tried.  Returns ``None`` if
+    nothing matches confidently or the network is unavailable.  Results
+    (including misses) are cached for the process lifetime.
     """
     if isinstance(cites, str):
         cites = [cites]
     cites = [c for c in (cites or []) if c]
+    if isinstance(dockets, str):
+        dockets = [dockets]
+    dockets = [d for d in (dockets or []) if d]
 
-    key = _cache_key(cites, name, year)
+    key = _cache_key(cites, name, year, dockets)
     with _CACHE_LOCK:
         if key in _CACHE:
             return _CACHE[key]
 
     try:
-        result = _lookup_uncached(cites, name, year)
+        result = _lookup_uncached(cites, name, year, dockets)
     except Exception as exc:
         # Transient failure (network/HTTP/JSON) -- return None but do NOT cache,
         # so a later attempt can succeed once connectivity is back.
@@ -620,20 +782,24 @@ def lookup(
     return result
 
 
-def _lookup_uncached(cites: list[str], name: str, year: str) -> Optional[OyezCase]:
-    hit: Optional[dict] = None
-
-    # 1) Exact match by U.S. Reports citation (most reliable).
-    for cite in cites:
-        parsed = _parse_us_citation(cite)
-        if parsed:
-            hit = _find_by_citation(*parsed)
-            if hit:
-                break
-
-    # 2) Fall back to a validated name + year search.
-    if hit is None:
-        hit = _find_by_name(name, year)
+def _lookup_uncached(cites: list[str], name: str, year: str,
+                     dockets=()) -> Optional[OyezCase]:
+    vol, page = next((p for p in map(_parse_us_citation, cites) if p),
+                     ("", ""))
+    volume = _volume_cases(vol) if vol else []
+    hit = (
+        # 1) The U.S. Reports volume and page: one case's, where Oyez records
+        #    the page.  It has none for most cases decided since 2009.
+        _at_page(volume, page, name)
+        # 2) The docket number the opinion gives: the newest cases have no
+        #    citation in Oyez at all.
+        or _find_by_docket(dockets, vol, page, year)
+        # 3) The name, among the cases of the volume Oyez has no page for.
+        or _best_by_name([src for src in volume if not _hit_citation(src)[1]],
+                         name, year)
+        # 4) The name, among the cases of the term.
+        or _find_by_name(name, year, vol, page)
+    )
 
     if hit is None:
         return None  # genuine no-match -- safe to cache
