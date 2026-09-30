@@ -3,3 +3,6 @@
 
 # Shipped gzipped data indexes (e.g. eng_rep_index.tsv.gz) are binary.
 *.gz binary
+
+# The browser extension's vendored pdf.js is kept byte-for-byte as published.
+browser_extension/vendor/** -text

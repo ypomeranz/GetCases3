@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF · GetCases</title>
+  <link rel="icon" href="../icons/icon32.png">
+  <link rel="stylesheet" href="../vendor/pdfjs/pdf_viewer.css">
+  <link rel="stylesheet" href="viewer.css">
+  <script src="../src/patterns.js"></script>
+  <script src="../src/citations.js"></script>
+  <script type="module" src="viewer.js"></script>
+</head>
+<body>
+  <div id="toolbar" role="toolbar" aria-label="PDF">
+    <div class="group grow">
+      <img src="../icons/icon16.png" alt="" width="16" height="16">
+      <span id="title" class="title">Loading…</span>
+    </div>
+    <div class="group">
+      <button id="prev" type="button" title="Previous page" aria-label="Previous page">‹</button>
+      <input id="pageNumber" type="number" min="1" value="1" aria-label="Page">
+      <span id="numPages" class="muted">of –</span>
+      <button id="next" type="button" title="Next page" aria-label="Next page">›</button>
+    </div>
+    <div class="group">
+      <button id="zoomOut" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+      <select id="scale" aria-label="Zoom">
+        <option value="auto" selected>Automatic</option>
+        <option value="page-fit">Page fit</option>
+        <option value="page-width">Page width</option>
+        <option value="0.75">75%</option>
+        <option value="1">100%</option>
+        <option value="1.25">125%</option>
+        <option value="1.5">150%</option>
+        <option value="2">200%</option>
+        <option value="3">300%</option>
+        <option id="customScale" value="custom" hidden></option>
+      </select>
+      <button id="zoomIn" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+    </div>
+    <div class="group">
+      <input id="find" type="search" placeholder="Find" aria-label="Find in document" size="14">
+      <span id="findResult" class="muted"></span>
+    </div>
+    <div class="group">
+      <button id="toggleLinks" type="button" aria-pressed="true" title="Show or hide the citation links">
+        <span class="dot"></span><span id="citeStatus">Citations…</span>
+      </button>
+      <button id="download" type="button" title="Save the PDF" aria-label="Save the PDF">Save</button>
+      <button id="native" type="button" title="Open in Chrome's own PDF viewer, to print, fill in or annotate it">Chrome viewer</button>
+    </div>
+  </div>
+  <div id="viewerContainer" tabindex="0">
+    <div id="viewer" class="pdfViewer"></div>
+  </div>
+  <div id="message" role="alert" hidden></div>
+  <div id="toast" role="status"></div>
+</body>
+</html>

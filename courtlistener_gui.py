@@ -1230,6 +1230,7 @@ import us_code
 import pdfium_lock
 import us_reports_pdf
 import brief_reader
+import browser_links
 import oyez
 import slip_opinion
 import opinion_location
@@ -8559,6 +8560,15 @@ class CourtListenerGUI:
             label="Spotlight Shortcut…",
             command=self._show_spotlight_shortcut_dialog,
         )
+        # Whether a citation clicked in Chrome, through the GetCases browser
+        # extension, opens here (see browser_bridge).
+        self._browser_link_var = tk.BooleanVar(
+            value=_load_config().get("browser_extension") is not False)
+        settings_menu.add_checkbutton(
+            label="Open Citations Clicked in Chrome Here",
+            variable=self._browser_link_var,
+            command=self._toggle_browser_bridge,
+        )
         settings_menu.add_separator()
         settings_menu.add_command(
             label="Check for Updates…", command=self._check_for_updates,
@@ -9065,6 +9075,9 @@ class CourtListenerGUI:
                 listener.stop()
             except Exception:
                 pass
+        # The browser extension's clicks are the newer one's too: it takes
+        # the port as soon as this one lets it go.
+        self._stop_browser_bridge()
         self._close_quick_popup()
         if self._anything_on_screen():
             print("\nA newer GetCases has started and taken over the "
@@ -9090,6 +9103,166 @@ class CourtListenerGUI:
             except tk.TclError:
                 continue
         return False
+
+    # ------------------------------------------------------------------
+    # Citations clicked in Chrome, through the browser extension (see
+    # browser_bridge and browser_extension/)
+    # ------------------------------------------------------------------
+
+    _browser_bridge = None
+    _browser_requests = None
+    #: Until when (time.monotonic()) the next window to open is brought to
+    #: the front — see _on_window_mapped.
+    _browser_raise_until = 0.0
+    #: How long a click in Chrome may take to open its window and still
+    #: have it come to the front: past the seven seconds after which a slow
+    #: document's status window appears in its place.
+    _BROWSER_RAISE_SECONDS = 30.0
+    #: The kinds of link /open may name — what _follow_brief_action opens.
+    _BROWSER_KINDS = frozenset((
+        "cite", "usc", "cfr", "rule", "const", "statestat", "browse",
+        "statpdf", "frpdf", "leghist", "sec", "engrep", "recap", "fedcas",
+        "scotus"))
+
+    def _start_browser_bridge(self):
+        """Open the port the browser extension knocks on, so that a citation
+        clicked in Chrome opens here.  Returns the bridge, for :func:`main`
+        to close on the way out, or None when the reader has turned it off
+        (Settings ▸ Open Citations Clicked in Chrome Here)."""
+        if self._browser_bridge is not None:
+            return self._browser_bridge
+        if getattr(self, "_hotkey_yielded", False):
+            return None             # a newer GetCases has the port
+        cfg = _load_config()
+        if cfg.get("browser_extension") is False:
+            return None
+        import browser_bridge
+        try:
+            port = int(cfg.get("browser_bridge_port")
+                       or browser_bridge.DEFAULT_PORT)
+        except (TypeError, ValueError):
+            port = browser_bridge.DEFAULT_PORT
+        if self._browser_requests is None:
+            self._browser_requests = queue.SimpleQueue()
+            try:
+                self.root.bind_class("Toplevel", "<Map>",
+                                     self._on_window_mapped, add="+")
+            except tk.TclError:
+                pass
+            try:
+                self.root.after(100, self._drain_browser_requests)
+            except tk.TclError:
+                pass
+        bridge = browser_bridge.BrowserBridge(self._browser_requests.put,
+                                              port=port)
+        self._browser_bridge = bridge
+        bridge.start()
+        return bridge
+
+    def _stop_browser_bridge(self) -> None:
+        """Give the extension's port up.  Off the Tk thread: the server can
+        take half a second to notice."""
+        bridge, self._browser_bridge = self._browser_bridge, None
+        if bridge is not None:
+            threading.Thread(target=bridge.close, daemon=True).start()
+
+    def _toggle_browser_bridge(self) -> None:
+        """Settings ▸ Open Citations Clicked in Chrome Here."""
+        on = bool(self._browser_link_var.get())
+        cfg = _load_config()
+        cfg["browser_extension"] = on
+        _save_config(cfg)
+        if on:
+            self._start_browser_bridge()
+        else:
+            self._stop_browser_bridge()
+
+    def _drain_browser_requests(self) -> None:
+        """The Tk thread's half of a click in Chrome: open what has come in
+        since the last look.  (The bridge's threads only queue them — see
+        _on_global_hotkey for why nothing but the Tk thread touches Tk.)"""
+        while True:
+            try:
+                request = self._browser_requests.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._open_from_browser(request)
+            except Exception as exc:
+                print(f"[browser] opening a citation from Chrome failed: "
+                      f"{exc}")
+        try:
+            self.root.after(100, self._drain_browser_requests)
+        except tk.TclError:
+            pass                    # shutting down
+
+    def _open_from_browser(self, request: dict) -> None:
+        """Open a citation clicked in Chrome.  A link comes as its action —
+        the app's own (see browser_bridge.detect), or the same kind of action
+        the extension builds when it reads a page without the app — and opens
+        as a link in a brief does.  Text alone (the reader's right-click on a
+        selection) opens as if typed into Spotlight: a citation at once, and
+        anything else, a case name say, as Spotlight's list of cases."""
+        kind = request.get("kind") or ""
+        value = request.get("value") or ""
+        text = " ".join((request.get("text") or "").split())
+        if kind and value:
+            if kind not in self._BROWSER_KINDS:
+                return
+            if (kind in ("browse", "statpdf", "frpdf")
+                    and not value.startswith(("https://", "http://"))):
+                return              # only ever a web page
+            self._browser_raise_until = (time.monotonic()
+                                         + self._BROWSER_RAISE_SECONDS)
+            _follow_brief_action(self, self.root, (kind, value),
+                                 self._status_var.set, snippet=text)
+            return
+        if not text:
+            return
+        self._browser_raise_until = (time.monotonic()
+                                     + self._BROWSER_RAISE_SECONDS)
+        if not self._open_lookup_query(text):
+            self._spotlight_search(text)
+
+    def _spotlight_search(self, query: str) -> None:
+        """Open Spotlight with *query* typed in, and run it."""
+        if self._quick_popup is not None:
+            self._close_quick_popup()
+        self._spotlight_toggle_at = 0.0     # not a second press of the key
+        self._toggle_quick_search_popup(query=query)
+
+    def _on_window_mapped(self, event) -> None:
+        """Bring the first window a click in Chrome opens to the front.  The
+        app is in the background when the click comes, and a window it opens
+        then appears behind the browser (on Windows and macOS the system
+        keeps it there) unless the app puts it in front."""
+        win = event.widget
+        if (not self._browser_raise_until
+                or not isinstance(win, tk.Toplevel)):
+            return
+        if time.monotonic() > self._browser_raise_until:
+            self._browser_raise_until = 0.0
+            return
+        self._browser_raise_until = 0.0
+        if win is self._quick_popup:
+            return                  # Spotlight takes the front by itself
+        try:
+            win.after(0, lambda: self._bring_to_front(win))
+        except tk.TclError:
+            pass
+
+    def _bring_to_front(self, win: tk.Misc) -> None:
+        try:
+            if not win.winfo_exists():
+                return
+            win.lift()
+            if sys.platform == "win32":
+                self._win_force_foreground(win)
+            elif sys.platform == "darwin":
+                _mac_activate_app()
+            win.focus_force()
+        except tk.TclError:
+            pass
 
     def _spot_knockout_corners(self, popup: tk.Toplevel) -> None:
         """On Windows, punch the popup's square window corners out to
@@ -9150,7 +9323,9 @@ class CourtListenerGUI:
             pass
 
     def _toggle_quick_search_popup(
-            self, pressed_at: "Optional[float]" = None) -> None:
+            self, pressed_at: "Optional[float]" = None,
+            query: str = "") -> None:
+        # *query*: opening, type it in and run it (see _spotlight_search).
         # One press = one toggle: a duplicate hotkey delivery (macOS event
         # taps can fire twice for one chord) would close the popup and
         # immediately reopen it, so a burst within the debounce window is
@@ -9249,137 +9424,10 @@ class CourtListenerGUI:
                 return
             self._spotlight_empty_returns = 0
 
-            # 1. Federal Register: "88 Fed. Reg. 382" or "88 FR 382".
-            fr_action = federal_register.parse_query(query)
-            if fr_action:
-                self._close_quick_popup()
-                _open_statute_action(
-                    self.root, fr_action, self._status_var.set, app=self
-                )
+            # 1-2. A citation, of any kind Spotlight reads, opens at once.
+            if self._open_lookup_query(query,
+                                       before_open=self._close_quick_popup):
                 return
-
-            # 1b. Legislative history: "116 Cong. Rec. 36481", "S. Rep. No.
-            # 95-797", "Cong. Globe, 39th Cong., 1st Sess. 2765".
-            leg_action = legislative_history.parse_query(query)
-            if leg_action:
-                self._close_quick_popup()
-                _open_leghist(self.root, leg_action[1], self._status_var.set,
-                              app=self)
-                return
-
-            # 1c. The SEC's Decisions and Reports: "8 S.E.C. 893, 915" —
-            # at HathiTrust, not the case search, which would read "S.E.C."
-            # as a court's reporter and find nothing.
-            sec_action = sec_decisions.parse_query(query)
-            if sec_action:
-                self._close_quick_popup()
-                _open_sec(self.root, sec_action[1], self._status_var.set,
-                          app=self)
-                return
-
-            # 1a. Statute / regulation / federal rule: "42 USC 1983(b)",
-            # "29 CFR 1614.105", "Fed. R. Civ. P. 56", "Cal. Penal Code 187".
-            # The section sign is optional — it can't be typed on a keyboard.
-            statute = _parse_statute_query(query)
-            if statute:
-                self._close_quick_popup()
-                _open_statute_action(
-                    self.root, statute, self._status_var.set, app=self,
-                    on_missing=self._notify_lookup_miss,
-                )
-                return
-
-            # 1b. English Reports citation ("156 Eng. Rep. 145", "95 E.R. 807"):
-            # handle it as an E.R. cite end-to-end.  _open_eng_rep opens the
-            # CommonLII scan when the cite is in our index, and otherwise falls
-            # back to a CommonLII search (in the browser) with a status note.
-            # Either way it must NOT fall through to the Google Scholar /
-            # CourtListener case search below: that treats "Eng. Rep." as a U.S.
-            # reporter and spends many seconds on a doomed lookup that, after the
-            # popup has already closed, looks like the app has hung.
-            er_m = eng_rep.ER_CITE_RE.search(query)
-            if er_m:
-                self._close_quick_popup()
-                _open_eng_rep(self.root, eng_rep.cite_spec(er_m),
-                              self._status_var.set, app=self)
-                return
-            # ... or its original nominate-report form ("9 Exch. 341",
-            # "Cro. Jac. 489").  Resolution-gated in eng_rep, so a U.S. cite
-            # sharing an abbreviation falls through to the case search below.
-            nom = eng_rep.iter_nominate_cites(query)
-            if nom:
-                self._close_quick_popup()
-                _open_eng_rep(self.root, nom[0][2], self._status_var.set,
-                              app=self)
-                return
-
-            # The opinion/brief readers recognize several case-citation forms
-            # that the permissive hand-typed parser below cannot normalize on
-            # its own: early federal reporters ("1 Sumner, 73", "35 Fed.
-            # Rep. 665"), Federal Cases case numbers, federal slip opinions,
-            # and similar special forms.  Reuse that shared detector so the
-            # same citation opens directly from Spotlight too.
-            detected = _spotlight_case_action(query)
-            if detected and detected[2][0] != "cite":
-                self._close_quick_popup()
-                _follow_brief_action(
-                    self, self.root, detected[2], self._status_var.set,
-                )
-                return
-
-            # 2. Case citation: "365 U.S. 167" or "Monroe v. Pape, 365 U.S. 167, 171"
-            parsed = _parse_citation_line(query)
-            if detected:
-                start, _end, (_kind, target) = detected
-                cite, _, pin = target.partition("@")
-                # Preserve the broader parser's case-name fallback when it
-                # found one; otherwise take the caption preceding the shared
-                # detector's citation span.
-                name = parsed[0] if parsed else query[:start]
-                name = name.strip().rstrip(",;–—- ").strip()
-                parsed = name, cite, pin
-            if parsed:
-                name, cite, pin = parsed
-                # "(2025)" after the cite: with the name, what picks the case
-                # when more than one begins on the cited page.
-                year = _citation_line_year(query)
-                fetcher = (
-                    self._get_scholar() if _SCHOLAR_AVAILABLE else None
-                )
-                client = (
-                    self._get_client()
-                    if self._token_var.get().strip() else None
-                )
-                if fetcher is not None or client is not None:
-                    self._close_quick_popup()
-
-                    def run() -> None:
-                        # The popup is already gone; a citation that
-                        # resolves nowhere would otherwise end in silence,
-                        # which reads as the app having hung.
-                        if not self._try_open_citation(
-                            name, cite, pin, fetcher, client, year=year,
-                        ):
-                            label = f"{name}, {cite}" if name else cite
-                            self._post_root(self._notify_lookup_miss,
-                                            f"No case found for {label}.")
-
-                    def as_text() -> None:
-                        threading.Thread(target=run, daemon=True).start()
-
-                    # The case's own pages first, as a search result opens:
-                    # the scan is up the moment it is found, and the text
-                    # comes in behind it — Google Scholar's, or failing that
-                    # static.case.law's or CourtListener's — for T to show.
-                    # With no scan anywhere, the text opens instead.  The
-                    # Federal Appendix keeps its own scan route, as a search
-                    # result's does.
-                    action = ("cite", f"{cite}@{pin}" if pin else cite)
-                    if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
-                            self.root, action, query, self._status_var.set,
-                            fallback=as_text, name=name):
-                        as_text()
-                    return
 
             # 3. Fallback: show spotlight dropdown with search results
             # (keep the popup alive — it expands into the dropdown)
@@ -9432,6 +9480,155 @@ class CourtListenerGUI:
                 pass
 
         popup.after(10, _grab_focus)
+        if query:
+            entry_var.set(query)
+            popup.after(30, _submit)
+
+    def _open_lookup_query(self, query: str,
+                           before_open=lambda: None) -> bool:
+        """Open *query* straight away when it is a citation Spotlight reads —
+        a statute, rule or regulation, the Federal Register, legislative
+        history, the SEC's or the English Reports, or a case — and say
+        whether it was.  *before_open* runs just before it opens (Spotlight
+        takes its popup down there).  False leaves a case name, or anything
+        else, to the caller to search for.
+
+        Spotlight and the browser extension (see :meth:`_open_from_browser`)
+        both come this way, so a citation clicked in Chrome opens exactly as
+        one typed into Spotlight does."""
+        # 1. Federal Register: "88 Fed. Reg. 382" or "88 FR 382".
+        fr_action = federal_register.parse_query(query)
+        if fr_action:
+            before_open()
+            _open_statute_action(
+                self.root, fr_action, self._status_var.set, app=self
+            )
+            return True
+
+        # 1b. Legislative history: "116 Cong. Rec. 36481", "S. Rep. No.
+        # 95-797", "Cong. Globe, 39th Cong., 1st Sess. 2765".
+        leg_action = legislative_history.parse_query(query)
+        if leg_action:
+            before_open()
+            _open_leghist(self.root, leg_action[1], self._status_var.set,
+                          app=self)
+            return True
+
+        # 1c. The SEC's Decisions and Reports: "8 S.E.C. 893, 915" —
+        # at HathiTrust, not the case search, which would read "S.E.C."
+        # as a court's reporter and find nothing.
+        sec_action = sec_decisions.parse_query(query)
+        if sec_action:
+            before_open()
+            _open_sec(self.root, sec_action[1], self._status_var.set,
+                      app=self)
+            return True
+
+        # 1a. Statute / regulation / federal rule: "42 USC 1983(b)",
+        # "29 CFR 1614.105", "Fed. R. Civ. P. 56", "Cal. Penal Code 187".
+        # The section sign is optional — it can't be typed on a keyboard.
+        statute = _parse_statute_query(query)
+        if statute:
+            before_open()
+            _open_statute_action(
+                self.root, statute, self._status_var.set, app=self,
+                on_missing=self._notify_lookup_miss,
+            )
+            return True
+
+        # 1b. English Reports citation ("156 Eng. Rep. 145", "95 E.R. 807"):
+        # handle it as an E.R. cite end-to-end.  _open_eng_rep opens the
+        # CommonLII scan when the cite is in our index, and otherwise falls
+        # back to a CommonLII search (in the browser) with a status note.
+        # Either way it must NOT fall through to the Google Scholar /
+        # CourtListener case search below: that treats "Eng. Rep." as a U.S.
+        # reporter and spends many seconds on a doomed lookup that, after the
+        # popup has already closed, looks like the app has hung.
+        er_m = eng_rep.ER_CITE_RE.search(query)
+        if er_m:
+            before_open()
+            _open_eng_rep(self.root, eng_rep.cite_spec(er_m),
+                          self._status_var.set, app=self)
+            return True
+        # ... or its original nominate-report form ("9 Exch. 341",
+        # "Cro. Jac. 489").  Resolution-gated in eng_rep, so a U.S. cite
+        # sharing an abbreviation falls through to the case search below.
+        nom = eng_rep.iter_nominate_cites(query)
+        if nom:
+            before_open()
+            _open_eng_rep(self.root, nom[0][2], self._status_var.set,
+                          app=self)
+            return True
+
+        # The opinion/brief readers recognize several case-citation forms
+        # that the permissive hand-typed parser below cannot normalize on
+        # its own: early federal reporters ("1 Sumner, 73", "35 Fed.
+        # Rep. 665"), Federal Cases case numbers, federal slip opinions,
+        # and similar special forms.  Reuse that shared detector so the
+        # same citation opens directly from Spotlight too.
+        detected = _spotlight_case_action(query)
+        if detected and detected[2][0] != "cite":
+            before_open()
+            _follow_brief_action(
+                self, self.root, detected[2], self._status_var.set,
+            )
+            return True
+
+        # 2. Case citation: "365 U.S. 167" or "Monroe v. Pape, 365 U.S. 167, 171"
+        parsed = _parse_citation_line(query)
+        if detected:
+            start, _end, (_kind, target) = detected
+            cite, _, pin = target.partition("@")
+            # Preserve the broader parser's case-name fallback when it
+            # found one; otherwise take the caption preceding the shared
+            # detector's citation span.
+            name = parsed[0] if parsed else query[:start]
+            name = name.strip().rstrip(",;–—- ").strip()
+            parsed = name, cite, pin
+        if parsed:
+            name, cite, pin = parsed
+            # "(2025)" after the cite: with the name, what picks the case
+            # when more than one begins on the cited page.
+            year = _citation_line_year(query)
+            fetcher = (
+                self._get_scholar() if _SCHOLAR_AVAILABLE else None
+            )
+            client = (
+                self._get_client()
+                if self._token_var.get().strip() else None
+            )
+            if fetcher is not None or client is not None:
+                before_open()
+
+                def run() -> None:
+                    # The popup is already gone; a citation that
+                    # resolves nowhere would otherwise end in silence,
+                    # which reads as the app having hung.
+                    if not self._try_open_citation(
+                        name, cite, pin, fetcher, client, year=year,
+                    ):
+                        label = f"{name}, {cite}" if name else cite
+                        self._post_root(self._notify_lookup_miss,
+                                        f"No case found for {label}.")
+
+                def as_text() -> None:
+                    threading.Thread(target=run, daemon=True).start()
+
+                # The case's own pages first, as a search result opens:
+                # the scan is up the moment it is found, and the text
+                # comes in behind it — Google Scholar's, or failing that
+                # static.case.law's or CourtListener's — for T to show.
+                # With no scan anywhere, the text opens instead.  The
+                # Federal Appendix keeps its own scan route, as a search
+                # result's does.
+                action = ("cite", f"{cite}@{pin}" if pin else cite)
+                if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
+                        self.root, action, query, self._status_var.set,
+                        fallback=as_text, name=name):
+                    as_text()
+                return True
+
+        return False
 
     def _open_main_from_spotlight(
         self, popup: tk.Toplevel, query: str = "",
@@ -36023,73 +36220,13 @@ def _brief_action_category(kind: str) -> str:
 
 def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
     """Open a brief citation in the user's web browser — a guaranteed-reliable
-    fallback (right-click) that never touches the in-app window machinery:
-    cases go to Google Scholar, link-out actions to their URL, and anything
-    else to a web search of the citation text."""
-    kind, value = action
-    if kind in ("browse", "statpdf", "frpdf"):
-        url = value
-    elif kind == "leghist":
-        url = leghist_fetch.browser_url(value)
-        if not url:
-            return
-    elif kind == "sec":
-        url = sec_decisions.page_url(value)
-    elif kind == "scotus":
-        url = _scotus_docket_page_url(value)
-        if not url:
-            return
-    elif kind == "recap":
-        # The RECAP search on CourtListener, pre-filtered to the docket (or,
-        # for a citation printing none, the case name), court and opinion
-        # date the citation names.
-        try:
-            spec = json.loads(value)
-        except Exception:
-            spec = {}
-        params = {"type": "rd", "q": "",
-                  "entry_date_filed_after": spec.get("date", ""),
-                  "entry_date_filed_before": spec.get("date", "")}
-        if spec.get("docket"):
-            params["docket_number"] = spec["docket"]
-        elif spec.get("name"):
-            params["case_name"] = spec["name"]
-        if spec.get("court"):
-            params["court"] = spec["court"]
-        url = ("https://www.courtlistener.com/?"
-               + urllib.parse.urlencode(params))
-    elif kind == "cite":
-        cite = value.split("@")[0]
-        url = ("https://scholar.google.com/scholar?q="
-               + urllib.parse.quote(f'"{cite}"'))
-    elif kind == "fedcas":
-        # Federal Cases number → the CourtListener search the in-app lookup
-        # would run, pre-filtered to the era: by printed case name when the
-        # citation gives one, else by the "Case No. N" phrase.
-        try:
-            spec = json.loads(value)
-        except Exception:
-            spec = {}
-        name = spec.get("name") or ""
-        q = (f'caseName:"{name}"' if name
-             else f'"Case No. {fed_cas.pretty_number(spec.get("no") or "")}"')
-        url = ("https://www.courtlistener.com/?"
-               + urllib.parse.urlencode(
-                   {"q": q, "type": "o", "filed_before": "1882-12-31"}))
-    elif kind == "engrep":
-        # English Reports → the CommonLII case page (first case at that page),
-        # not the .pdf directly: the origin hotlink-blocks the scan unless you
-        # reach it from a link on the site.  Falls back to a CommonLII search
-        # when the citation isn't in our index.
-        cases = eng_rep.resolve(value)
-        vp = eng_rep.parse_spec(value)
-        url = (cases[0].web_url if cases
-               else (eng_rep.search_url(*vp) if vp else ""))
-        if not url:
-            return
-    else:
-        q = (text or value).strip()
-        url = "https://www.google.com/search?q=" + urllib.parse.quote(q)
+    fallback (right-click) that never touches the in-app window machinery.
+    Which page opens is :func:`browser_links.browser_url`'s choice, shared
+    with the browser extension: cases go to Google Scholar, statutes and
+    rules to their official pages, link-out actions to their URL."""
+    url = browser_links.browser_url(action, text)
+    if not url:
+        return
     try:
         webbrowser.open(url)
     except Exception:
@@ -36285,12 +36422,7 @@ def _open_fedcas_citation(app: "CourtListenerGUI", parent: tk.Misc,
 def _scotus_docket_page_url(spec_json: str) -> str:
     """The supremecourt.gov docket page for a Supreme Court decision cited by
     docket number (a ``("scotus", spec)`` action), or ""."""
-    try:
-        docket = json.loads(spec_json).get("docket") or ""
-        import scotus_docket
-        return scotus_docket.official_docket_url(docket)
-    except Exception:
-        return ""
+    return browser_links.scotus_docket_url(spec_json)
 
 
 def _open_scotus_citation(app: "CourtListenerGUI", parent: tk.Misc,
@@ -38772,6 +38904,8 @@ def main() -> None:
     # A GetCases already running — in the background, from another checkout —
     # would answer the hotkey too, and the two spotlights fall out of step.
     instance = app._claim_instance()
+    # The browser extension's citations open here while it runs.
+    bridge = app._start_browser_bridge()
     eng_rep.warm()  # load the English Reports index in the background
     sec_decisions.warm()  # and the SEC Decisions and Reports' page index
 
@@ -38812,6 +38946,8 @@ def main() -> None:
     finally:
         if instance is not None:
             instance.close()
+        if bridge is not None:
+            bridge.close()
 
 
 if __name__ == "__main__":

@@ -147,7 +147,9 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
   the cited page, **in your web browser**. HathiTrust lets people, not apps,
   turn its pages, so the first time it may ask you to pass a quick check there.
   The decision is listed in History, to open again.
-- **Right-click** a citation on a scan to open it in your web browser instead.
+- **Right-click** a citation on a scan to open it in your web browser instead:
+  a case on Google Scholar, a statute, regulation or rule on its official page
+  (uscode.house.gov, eCFR, Cornell LII, the Library of Congress).
 
 You can keep clicking while something loads. Each link loads on its own, so a
 slow one does not hold up the others. When a document takes more than about
@@ -218,9 +220,10 @@ Its menus:
   local database (`data/opinions.jsonl` in the app folder), which makes it
   faster to reopen and available offline. **Find Opinion in Database…** searches
   it; **Merge In Database File…** adds someone else's.
-- **Settings:** the API token, the Spotlight shortcut, and **Check for
-  Updates…**, which downloads the latest version, keeps your saved opinions and
-  restarts.
+- **Settings:** the API token, the Spotlight shortcut, **Open Citations Clicked
+  in Chrome Here** (see [The Chrome extension](#the-chrome-extension)), and
+  **Check for Updates…**, which downloads the latest version, keeps your saved
+  opinions and restarts.
 
 ---
 
@@ -302,6 +305,36 @@ A small card shows exactly what was copied, italics and all, so you can check it
 before you paste. You can turn the card off in the same menu. If the citation
 GetCases builds is wrong, fix it once with **Edit citation…**. Your version is
 saved and reused, with pinpoint pages still added automatically.
+
+---
+
+## The Chrome extension
+
+The **GetCases Citation Links** extension (in the `browser_extension` folder)
+links the case, statute, regulation and rule citations on the web pages and in
+the PDFs you read in Chrome (or Edge, Brave and other Chromium browsers):
+
+- **With GetCases running**, clicking a citation opens it here, as a citation in
+  one of GetCases's own windows opens. GetCases also reads the page's citations
+  for the extension, so everything it can open is linked, short forms and case
+  names included. Links a page already has to a case or statute (on Justia,
+  CourtListener, Cornell, uscode.house.gov…) open in GetCases too.
+- **Without GetCases**, the extension reads the common citations itself, with
+  GetCases's own patterns, and a click opens the web page GetCases would: the
+  same page as right-clicking the citation in the app.
+- **PDFs** open in the extension's viewer with their citations linked;
+  **Chrome viewer** on its toolbar switches back to Chrome's own.
+- Select any text and right-click **Look up "…" in GetCases** to open it, or to
+  search for it in Spotlight.
+
+To install it: open `chrome://extensions`, turn on **Developer mode**, click
+**Load unpacked** and choose the `browser_extension` folder. Its
+[README](browser_extension/README.md) has the details: settings, privacy, and
+what to do when a click opens the web although GetCases is running.
+
+GetCases listens for the extension on this computer only (port 21983) and
+answers nothing else. **Settings → Open Citations Clicked in Chrome Here**
+turns that off.
 
 ---
 
@@ -409,7 +442,10 @@ automatic matching that can go wrong. In particular:
   the app folder, and downloaded Supreme Court volumes are kept in its
   `US Reports` folder.
 - **Updating:** **Settings → Check for Updates…** installs the latest version
-  and keeps your saved opinions.
+  and keeps your saved opinions. It updates the Chrome extension's folder too;
+  click its reload arrow in `chrome://extensions` afterwards.
+- **The Chrome extension** sends a page's text only to GetCases, on your own
+  computer, and only while GetCases is running.
 
 ---
 
@@ -425,6 +461,7 @@ automatic matching that can go wrong. In particular:
 | English Reports ask you to "pass the check in Firefox" | Open any English Reports case in Firefox, let the check finish, then try again |
 | PDF export says LaTeX was not found | Install a [LaTeX distribution](#a-latex-distribution), or save the `.tex` source instead |
 | A document seems stuck | Its status window shows what is being tried; **Stop waiting** abandons it |
+| Citations clicked in Chrome open on the web although GetCases is running | Check **Settings → Open Citations Clicked in Chrome Here** is ticked, and see the [extension's README](browser_extension/README.md#troubleshooting) |
 
 ---
 

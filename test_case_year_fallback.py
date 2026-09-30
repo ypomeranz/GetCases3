@@ -226,7 +226,10 @@ def gui_source(name):
 
 class SpotlightCitationTests(unittest.TestCase):
     def test_a_typed_citation_opens_its_pages_with_the_text_behind(self):
-        src = gui_source("_toggle_quick_search_popup")
+        # Spotlight reads a typed citation through _open_lookup_query.
+        self.assertIn("self._open_lookup_query(query",
+                      gui_source("_toggle_quick_search_popup"))
+        src = gui_source("_open_lookup_query")
         self.assertIn("self.open_cited_case_pdf(", src)
         self.assertIn("fallback=as_text", src)
 

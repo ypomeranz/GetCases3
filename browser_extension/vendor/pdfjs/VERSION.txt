@@ -1,0 +1,6 @@
+pdf.js 6.3.289 (pdfjs-dist on npm), Apache-2.0.  The "legacy" build, which carries
+its own polyfills, so it runs in Chrome versions a year or two old:
+legacy/build/pdf.min.mjs, legacy/build/pdf.worker.min.mjs,
+legacy/web/pdf_viewer.mjs (source-map comment removed), legacy/web/pdf_viewer.css,
+legacy/web/images/, and cmaps/, standard_fonts/, iccs/ and the wasm decoders
+(openjpeg, jbig2, qcms).

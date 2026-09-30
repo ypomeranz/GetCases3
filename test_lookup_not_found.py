@@ -190,7 +190,11 @@ class WhereItIsAskedTests(unittest.TestCase):
         return ast.get_source_segment(SRC, node)
 
     def test_spotlight(self):
-        src = self._source("_toggle_quick_search_popup")
+        # Spotlight reads a citation through _open_lookup_query, which the
+        # browser extension's clicks share.
+        self.assertIn("self._open_lookup_query(query",
+                      self._source("_toggle_quick_search_popup"))
+        src = self._source("_open_lookup_query")
         self.assertIn("on_missing=self._notify_lookup_miss", src)
         self.assertIn('f"No case found for {label}."', src)
 
