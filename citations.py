@@ -1280,6 +1280,13 @@ _REPORTER_FAMILIES = (
     # files each under a folder of its own.
     _ReporterFamily("Paige Ch.", ("Paige", "Pai. Ch."), ("Paige Ch.",),
                     "paige-ch"),
+    # Sandford's Chancery Reports (1843–1847), which old opinions cite as
+    # "Sandf. Ch." or, shorter still, "Sandf.".
+    _ReporterFamily(
+        "Sand. Ch.",
+        ("Sandf. Ch.", "Sandf.", "Sandf. Chan.", "Sand. Chan.",
+         "Sand. Chy.", "Sandf. Chy."),
+        ("Sand. Ch.", "Sandf. Ch."), "sand-ch"),
     _ReporterFamily("Denio", (), ("Denio",), "denio"),
     _ReporterFamily("Keyes", (), ("Keyes",), "keyes"),
     _ReporterFamily("Cai.", ("Caines", "Cai. R."), ("Cai.",), "cai"),

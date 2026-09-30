@@ -446,12 +446,34 @@ class ClearanceCandidateTests(unittest.TestCase):
 
 
 class _Reply:
-    """What a fake CommonLII answers a request with."""
+    """What a fake CommonLII answers a request with: ``(status, body,
+    cf-mitigated header)``."""
 
-    PDF = (200, b"%PDF-1.3 scan")
+    PDF = (200, b"%PDF-1.3 scan", "")
     CHALLENGE = (403, b"<html><title>Just a moment...</title>"
-                      b"<script src='/cdn-cgi/challenge-platform/'></script>")
-    NOT_FOUND = (404, b"<html>Not Found</html>")
+                      b"<script src='/cdn-cgi/challenge-platform/'></script>",
+                 "challenge")
+    # A CloudFlare rule blocking the request outright.  CloudFlare's script
+    # is in this page too, as in every page it serves.
+    BLOCKED = (403, b"<html><title>Access denied</title>Sorry, you have been "
+                    b"blocked.<script src='/cdn-cgi/challenge-platform/scripts/"
+                    b"jsd/main.js'></script></html>", "")
+    NOT_FOUND = (404, b"<html>Not Found</html>", "")
+
+
+class ChallengeTests(unittest.TestCase):
+    """What counts as CloudFlare's check, for a clearance to pass."""
+
+    def test_cloudflare_says_so_in_a_header(self):
+        self.assertTrue(eng_rep_pdf._is_challenge(403, b"<html></html>",
+                                                  "challenge"))
+
+    def test_or_the_check_page_shows_it(self):
+        status, body, _header = _Reply.CHALLENGE
+        self.assertTrue(eng_rep_pdf._is_challenge(status, body))
+
+    def test_a_page_carrying_cloudflares_script_is_not_one(self):
+        self.assertFalse(eng_rep_pdf._is_challenge(*_Reply.BLOCKED))
 
 
 class FetchTests(unittest.TestCase):
@@ -530,11 +552,14 @@ class FetchTests(unittest.TestCase):
                          self._candidate("b", "july", "154")])
         self.assertEqual(cm.exception.web_url, self.WEB)
         self.assertEqual(len(self.requests), 2)   # both were tried
+        # The freshest clearance, as sent: the panel says why it was refused.
+        self.assertIn("Firefox/156.0", cm.exception.refused_ua)
 
     def test_no_clearance_anywhere_asks_without_a_request(self):
-        with self.assertRaises(eng_rep_pdf.CloudflareChallenge):
+        with self.assertRaises(eng_rep_pdf.CloudflareChallenge) as cm:
             self._fetch([])
         self.assertEqual(self.requests, [])
+        self.assertEqual(cm.exception.refused_ua, "")
 
     def test_an_origin_error_is_reported_not_retried_with_another_cookie(self):
         # CloudFlare was passed; the origin said 404.  Another profile's
@@ -544,6 +569,16 @@ class FetchTests(unittest.TestCase):
             self._fetch([self._candidate("store", "today", "156"),
                          self._candidate("regular", "aug", "154")])
         self.assertEqual(cm.exception.status, 404)
+        self.assertEqual(len(self.requests), 1)
+
+    def test_a_block_is_a_refusal_not_a_check(self):
+        # No check passed in Firefox lifts a block, and another profile's
+        # cookie would meet the same rule.
+        self.replies = {"today": _Reply.BLOCKED, "aug": _Reply.PDF}
+        with self.assertRaises(eng_rep_pdf.OriginError) as cm:
+            self._fetch([self._candidate("store", "today", "156"),
+                         self._candidate("regular", "aug", "154")])
+        self.assertEqual(cm.exception.status, 403)
         self.assertEqual(len(self.requests), 1)
 
     def test_a_network_failure_is_an_origin_error(self):

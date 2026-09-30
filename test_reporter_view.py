@@ -119,10 +119,20 @@ def _module_value(name: str):
 
 
 class _Widget:
+    # Tk names a window by a path it never gives out again (".!toplevel2").
+    # A stub's default name is its address, which Python hands the next stub
+    # once this one is collected, and two windows would share one name.
+    _made = 0
+
     def __init__(self, top=None):
+        _Widget._made += 1
+        self._path = f".!toplevel{_Widget._made}"
         self._top = top
         self.destroyed = False
         self.shown = False
+
+    def __str__(self):
+        return self._path
 
     def winfo_exists(self):
         return not self.destroyed
@@ -135,6 +145,15 @@ class _Widget:
 
     def deiconify(self):
         self.shown = True
+
+    def withdraw(self):
+        self.shown = False
+
+    def winfo_viewable(self):
+        return self.shown
+
+    def wm_geometry(self):
+        return "820x900+40+60"
 
     def after(self, _ms, fn=None, *args):
         if fn is not None:
@@ -814,6 +833,20 @@ class ScanHandoffTests(unittest.TestCase):
         win._show(b"%PDF-1.4")
         self.assertFalse(win._win.shown)
 
+    def test_a_window_that_asked_for_a_cloudflare_check_gives_the_pages_its_place(self):
+        # It showed the hand-off panel; the check has since been passed.
+        win = _ScanWindow()
+        win._reveal()
+        self.assertTrue(win._win.shown)
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made[0].kw["geometry"], "820x900+40+60")
+        self.assertFalse(win._win.shown)
+
+    def test_one_never_shown_leaves_the_viewer_where_it_would_go(self):
+        win = _ScanWindow()
+        win._show(b"%PDF-1.4")
+        self.assertEqual(_HandoffViewer.made[0].kw["geometry"], "")
+
     def test_statutes_at_large_gets_no_switch_to_offer(self):
         win = _ScanWindow()
         win._show(b"%PDF-1.4")
@@ -1131,6 +1164,7 @@ class _StripViewer:
         self._reader = reader
         self._mode = mode
         self._recent_menu = recent
+        self._text_host = None     # nothing built into the text side
         # What has_text_side/details_showing read: a viewer with an opinion
         # behind it offers the case's details on the menu; one showing only
         # pages has none to offer.

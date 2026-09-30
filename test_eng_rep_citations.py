@@ -23,9 +23,22 @@ import eng_rep_pdf
 
 os.environ.setdefault("GETCASES_SKIP_DEPENDENCY_PROMPT", "1")
 try:  # the app itself needs tkinter, which a headless run may not have
+    import tkinter as tk
+    from tkinter import ttk
     import courtlistener_gui as gui
 except Exception:  # pragma: no cover - depends on the machine
     gui = None
+
+
+def _display_available() -> bool:
+    if gui is None:
+        return False
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        return False
+    root.destroy()
+    return True
 
 
 def specs(text):
@@ -255,6 +268,28 @@ class ViewerTests(unittest.TestCase):
         win._turn_to_pin(None)
         self.assertIn("isn't marked", win._say.call_args.args[0])
 
+    def test_a_refused_clearance_reaches_the_panel(self):
+        win = object.__new__(gui._EngRepPdfWindow)
+        win._case = mock.Mock(year=1854, num=296, web_url="https://c/296.html")
+        win._status_var, win._watch = mock.Mock(), None
+        win._post = lambda fn, *args: fn(*args)
+        win._need_clearance = mock.Mock()
+        ua = eng_rep_pdf._user_agent_for("157")
+
+        class Inline:
+            def __init__(self, target=None, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with mock.patch.object(gui.threading, "Thread", Inline), \
+                mock.patch.object(eng_rep_pdf, "fetch_pdf", side_effect=
+                                  eng_rep_pdf.CloudflareChallenge(
+                                      "https://c/296.html", ua)):
+            win._fetch()
+        win._need_clearance.assert_called_once_with("https://c/296.html", ua)
+
     def test_passing_the_check_in_firefox_loads_the_scan(self):
         win = object.__new__(gui._EngRepPdfWindow)
         win._win = mock.Mock()
@@ -298,6 +333,80 @@ class ViewerTests(unittest.TestCase):
                                   side_effect=[("old",), ("new",)]):
             win._watch_for_clearance(retry)
         retry.assert_not_called()
+
+
+def _buttons(widget) -> dict:
+    found = {}
+    for child in widget.winfo_children():
+        if isinstance(child, ttk.Button):
+            found[str(child.cget("text"))] = child
+        found.update(_buttons(child))
+    return found
+
+
+def _labels(widget) -> list:
+    out = []
+    for child in widget.winfo_children():
+        if isinstance(child, ttk.Label):
+            out.append(str(child.cget("text")))
+        out.extend(_labels(child))
+    return out
+
+
+@unittest.skipUnless(_display_available(), "needs a display for Tk")
+class PanelTests(unittest.TestCase):
+    """The CloudFlare panel itself, drawn by Tk: the reader's choice."""
+
+    WEB = "https://www.commonlii.org/uk/cases/EngR/1854/296.html"
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.addCleanup(self.root.destroy)
+        win = object.__new__(gui._EngRepPdfWindow)
+        win._case = mock.Mock(web_url=self.WEB)
+        win._body = ttk.Frame(self.root)
+        win._win, win._status_var = mock.Mock(), mock.Mock()
+        win._reveal = mock.Mock()
+        win._watch_for_clearance = mock.Mock()
+        win._fetch = mock.Mock()
+        self.win = win
+
+    def test_it_offers_firefox_retry_and_the_browser(self):
+        self.win._need_clearance(self.WEB)
+        self.win._status_var.set.assert_called_with(
+            "CommonLII needs a CloudFlare check.")
+        self.assertTrue(_labels(self.win._body)[0].startswith(
+            "CommonLII is behind a CloudFlare check.\n\nTo view this scan in the app"))
+        buttons = _buttons(self.win._body)
+        self.assertEqual(sorted(buttons),
+                         ["Open in Firefox", "Open in browser instead", "Retry"])
+        self.win._watch_for_clearance.assert_called_once()
+
+        with mock.patch.object(eng_rep_pdf, "open_in_firefox",
+                               return_value=True) as firefox:
+            buttons["Open in Firefox"].invoke()
+        firefox.assert_called_once_with(self.WEB)
+        self.win._status_var.set.assert_called_with(
+            "Pass the check in Firefox — the scan loads here then.")
+
+        with mock.patch.object(eng_rep_pdf, "open_in_browser") as browser:
+            buttons["Open in browser instead"].invoke()
+        browser.assert_called_once_with(self.WEB)
+        self.win._win.destroy.assert_called_once_with()
+
+    def test_retry_fetches_again(self):
+        self.win._need_clearance(self.WEB)
+        _buttons(self.win._body)["Retry"].invoke()
+        self.win._fetch.assert_called_once_with()
+
+    def test_a_clearance_refused_asks_for_the_check_again(self):
+        # Whatever Firefox's version: the scans load from Firefox 156 though
+        # curl_cffi imitates 147 (Sept 2026), so a gap explains no refusal.
+        self.win._need_clearance(self.WEB, eng_rep_pdf._user_agent_for("157"))
+        text = _labels(self.win._body)[0]
+        self.assertIn("pass the check again in Firefox", text)
+        self.assertNotIn("curl_cffi", text)
 
 
 if __name__ == "__main__":

@@ -306,6 +306,18 @@ def _header_court(blocks):
     return court() if callable(court) else court
 
 
+#: The scans kept beside bookmarks: url -> bytes, as the app's cache would
+#: hold them.
+BOOKMARKED_SCANS: dict = {}
+
+#: What bookmarks a cited scan's window — the real class, over that cache.
+CITED_SCAN_BOOKMARK = _load_dataclass("_CitedScanBookmark", {
+    "tk": _Tk, "re": re,
+    "_bookmark_pdf_save": lambda url, data: BOOKMARKED_SCANS.__setitem__(
+        url, data) or True,
+    "_bookmark_pdf_delete": lambda url: BOOKMARKED_SCANS.pop(url, None),
+})
+
 APP_NS = _load(
     "CourtListenerGUI",
     ["open_cited_case_pdf", "_cited_case_pdf_item", "_show_cited_case_pdf",
@@ -313,8 +325,11 @@ APP_NS = _load(
      "_request_cited_pdf_analysis", "_cited_filename_item",
      "_jump_to_pin", "_scan_cite_for", "_retitle_cited_pdf",
      "_embed_cited_case_text", "_cited_citation_override",
-     "_describe_warmed_case", "_save_cited_pdf", "_print_cited_pdf"],
-    {"_citation_link_name": lambda snippet, cite="": snippet.strip(),
+     "_describe_warmed_case", "_save_cited_pdf", "_print_cited_pdf",
+     "_reopen_cited_scan"],
+    {"_CitedScanBookmark": CITED_SCAN_BOOKMARK,
+     "_bookmark_pdf_read": lambda url: BOOKMARKED_SCANS.get(url),
+     "_citation_link_name": lambda snippet, cite="": snippet.strip(),
      # The court a fetched page's header names, keyed like CAPTIONS.
      "_scholar_header_court": lambda blocks: _header_court(blocks),
      # The citations the reader has saved: none, unless a test saves one.
@@ -436,6 +451,9 @@ class _FakeViewer:
     def set_title(self, title):
         self.title = title
 
+    def current_title(self):
+        return self.title
+
     def apply_analysis(self, result):
         self.analyses.append(result)
 
@@ -474,8 +492,28 @@ class _App:
                      "_warm_case_text", "_request_cited_pdf_analysis",
                      "_cited_filename_item", "_save_cited_pdf",
                      "_print_cited_pdf", "_jump_to_pin", "_scan_cite_for",
-                     "_retitle_cited_pdf", "_embed_cited_case_text"):
+                     "_retitle_cited_pdf", "_embed_cited_case_text",
+                     "_reopen_cited_scan"):
             setattr(self, name, APP_NS[name].__get__(self))
+        self.bookmarks: dict = {}        # key -> descriptor
+        self.touched: list = []          # keys marked accessed-now
+        self.root_status: list = []
+
+    # --- the bookmarks list ---
+    def is_bookmarked(self, key):
+        return key in self.bookmarks
+
+    def add_bookmark(self, desc):
+        self.bookmarks[desc["key"]] = desc
+
+    def remove_bookmark(self, key):
+        return self.bookmarks.pop(key, None)
+
+    def touch_bookmark(self, key):
+        self.touched.append(key)
+
+    def _safe_root_status(self, text):
+        self.root_status.append(text)
 
     # --- collaborators ---
     def watch_load(self, parent, label, cite=""):
@@ -832,6 +870,79 @@ class _OrdersApp(_App):
 
     def _spotlight_notify(self, message, duration_ms=4000):
         self.toasts.append(message)
+
+
+class CitedScanBookmarkTests(unittest.TestCase):
+    """A case's scan, opened from a citation, bookmarked while its pages are
+    what is on screen — and reopened from the bookmark."""
+
+    URL = "https://loc.test/usrep410113.pdf"
+
+    def setUp(self):
+        RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
+        TEXT_OPENS.clear(); _FakeViewer.opened.clear(); _Thread.started.clear()
+        BOOKMARKED_SCANS.clear()
+        RESOLVED["410 U.S. 113"] = self.URL
+        FETCHED[self.URL] = (b"%PDF-1", self.URL)
+        CL_ITEMS["410 U.S. 113"] = {"caseName": "Roe v. Wade",
+                                    "cluster_id": 108713,
+                                    "citation": ["410 U.S. 113"]}
+        self.app = _App()
+        self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", "410 U.S. 113"), "Roe v. Wade",
+            lambda _s: None)
+        self.viewer = _FakeViewer.opened[0]
+        self.owner = self.viewer.kw["bookmarks"]
+
+    def test_the_window_can_bookmark_the_scan_it_shows(self):
+        desc = self.owner._bookmark_descriptor()
+        self.assertEqual(desc["key"], f"pdf:{self.URL}")
+        self.assertEqual(desc["noun"], "case")
+        payload = desc["payload"]
+        self.assertEqual(payload["type"], "cited")
+        self.assertEqual(payload["url"], self.URL)
+        self.assertEqual(payload["cite"], "410 U.S. 113")
+        self.assertEqual(payload["name"], "Roe v. Wade")
+        self.assertEqual(payload["cl_item"]["cluster_id"], 108713)
+
+    def test_it_is_named_as_the_window_is_now(self):
+        self.viewer.set_title("Roe v. Wade, 410 U.S. 113 (1973)")
+        self.assertEqual(self.owner._bookmark_descriptor()["label"],
+                         "Roe v. Wade, 410 U.S. 113 (1973)")
+
+    def test_bookmarking_keeps_the_scan_and_unbookmarking_lets_it_go(self):
+        self.owner._toggle_bookmark()
+        self.assertIn(f"pdf:{self.URL}", self.app.bookmarks)
+        self.assertEqual(BOOKMARKED_SCANS[self.URL], b"%PDF-1")
+        self.owner._toggle_bookmark()
+        self.assertEqual(self.app.bookmarks, {})
+        self.assertNotIn(self.URL, BOOKMARKED_SCANS)
+
+    def test_the_bookmark_reopens_the_saved_scan_in_the_same_window(self):
+        self.owner._toggle_bookmark()
+        payload = self.app.bookmarks[f"pdf:{self.URL}"]["payload"]
+        FETCHED.clear()          # offline: only the saved copy is to hand
+        _FakeViewer.opened.clear()
+        self.app._reopen_cited_scan(payload, "Roe v. Wade")
+        self.assertEqual(len(_FakeViewer.opened), 1)
+        reopened = _FakeViewer.opened[0]
+        self.assertEqual(reopened.data, b"%PDF-1")
+        self.assertEqual(reopened.url, self.URL)
+        self.assertIn("bookmarks", reopened.kw)
+        self.assertEqual(self.app.touched, [f"pdf:{self.URL}"])
+
+    def test_without_the_saved_copy_the_scan_is_fetched_again(self):
+        payload = self.owner._bookmark_descriptor()["payload"]
+        _FakeViewer.opened.clear()
+        self.app._reopen_cited_scan(payload, "Roe v. Wade")
+        self.assertEqual([v.data for v in _FakeViewer.opened], [b"%PDF-1"])
+
+    def test_and_failing_that_the_citation_is_looked_up_again(self):
+        payload = self.owner._bookmark_descriptor()["payload"]
+        payload["url"] = "https://gone.test/scan.pdf"
+        _FakeViewer.opened.clear()
+        self.app._reopen_cited_scan(payload, "Roe v. Wade")
+        self.assertEqual([v.url for v in _FakeViewer.opened], [self.URL])
 
 
 class OrdersPageTests(unittest.TestCase):

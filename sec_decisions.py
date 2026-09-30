@@ -20,9 +20,11 @@ Rows, tab-separated:
     v  vol  first year  last year          (the years the volume covers)
     d  vol  page a decision begins on  its year (0: the pages don't say)
 
-HathiTrust lets people, not scripts, turn its pages (a CloudFlare check
-stands in front of them), so a citation opens HathiTrust's own viewer, in
-the web browser, at the cited page.
+HathiTrust lets people, not programs, turn its pages: its terms allow
+reading in a web browser and forbid automated downloading, and its page
+service turns programs away rather than asking them to pass a check.  So a
+citation opens HathiTrust's own viewer, in the web browser, at the cited
+page.
 
 A citation is linked only in a volume the series has (1-58) and on a page
 the volume prints.  Each becomes a *spec* — ``{"vol": 8, "page": 893,

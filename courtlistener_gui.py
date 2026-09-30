@@ -489,9 +489,11 @@ def _drop_menu_children(menu) -> None:
 def _forget_bookmark_copy(entry: dict) -> None:
     """Delete the local copy a bookmark reopened from, once it is no longer
     bookmarked anywhere: the scan saved beside it (a case's PDF, a slip
-    opinion) — the only copy kept outside the bookmark itself."""
+    opinion, a Statutes at Large page) — the only copy kept outside the
+    bookmark itself."""
     payload = entry.get("payload") if isinstance(entry, dict) else None
-    if isinstance(payload, dict) and payload.get("type") in ("pdf", "slip"):
+    if isinstance(payload, dict) and payload.get("type") in (
+            "pdf", "slip", "cited"):
         _bookmark_pdf_delete(str(payload.get("url") or ""))
 
 
@@ -1458,6 +1460,69 @@ def _bookmark_pdf_delete(url: str) -> None:
         _bookmark_pdf_path(url).unlink()
     except OSError:
         pass
+
+
+class _CitedScanBookmark:
+    """What bookmarks a case's scan in the window a citation opened it in
+    (see CourtListenerGUI._show_cited_case_pdf) while the pages are showing —
+    the text side has the opinion's own bookmark.  The scan is saved beside
+    the bookmark, so it reopens offline, in the same kind of window, with
+    its text looked for behind it again."""
+
+    def __init__(self, app, named: dict) -> None:
+        self._app = app
+        self._named = named
+
+    def _label(self) -> str:
+        """What the window is called now — the case in Bluebook form, once
+        its text has said what that is."""
+        named = self._named
+        window = named.get("window")
+        try:
+            title = window.current_title() if window is not None else ""
+        except (AttributeError, tk.TclError):
+            title = ""
+        name, cite = str(named.get("name") or ""), str(named.get("cite") or "")
+        fallback = f"{name} — {cite}" if name and cite else (cite or name)
+        return re.sub(r"\s+", " ", title or fallback).strip()
+
+    def _bookmark_descriptor(self) -> Optional[dict]:
+        named = self._named
+        url = str(named.get("url") or "")
+        if self._app is None or not url:
+            return None
+        label = self._label() or url
+        start = named.get("start_page")
+        cl_item = named.get("cl_item")
+        return {
+            "key": f"pdf:{url}",
+            "label": label,
+            "noun": "case",
+            "payload": {
+                "type": "cited", "url": url, "title": label,
+                "cite": str(named.get("cite") or ""),
+                "name": str(named.get("name") or ""),
+                "cl_item": dict(cl_item) if isinstance(cl_item, dict) else {},
+                "decided": str(named.get("decided") or ""),
+                "writing": str(named.get("writing") or "merits"),
+                "start_page": start if isinstance(start, int) else None,
+            },
+        }
+
+    def _toggle_bookmark(self) -> None:
+        app = self._app
+        if app is None or not hasattr(app, "is_bookmarked"):
+            return
+        desc = self._bookmark_descriptor()
+        if not desc:
+            return
+        url = desc["payload"]["url"]
+        if app.is_bookmarked(desc["key"]):
+            app.remove_bookmark(desc["key"])
+            _bookmark_pdf_delete(url)   # drop the saved local copy
+        else:
+            _bookmark_pdf_save(url, self._named.get("data"))  # a local copy
+            app.add_bookmark(desc)
 
 
 # --- opinion-block (de)serialization for offline case copies ---------------
@@ -8003,9 +8068,15 @@ class CourtListenerGUI:
         if kind == "pdf":
             url = str(payload.get("url") or "")
             title = str(payload.get("title") or label or url)
+            is_case = payload.get("is_case", True) is not False
             return lambda: _PdfWindow(
                 self.root, url, title, self._status_var.set, app=self,
-                is_case=True, local_pdf=str(_bookmark_pdf_path(url)))
+                is_case=is_case, local_pdf=str(_bookmark_pdf_path(url)))
+        if kind == "cited":
+            if not str(payload.get("url") or ""):
+                return None
+            saved = dict(payload)
+            return lambda: self._reopen_cited_scan(saved, label)
         if kind == "statute":
             doc = payload.get("doc")
             if not isinstance(doc, dict):
@@ -8040,6 +8111,70 @@ class CourtListenerGUI:
             return lambda: _SlipOpinionWindow(
                 self.root, url, title, app=self, description=desc)
         return None
+
+    def _reopen_cited_scan(self, payload: dict, label: str = "") -> None:
+        """Reopen a case's scan bookmarked in the window a citation opened it
+        in (see _CitedScanBookmark): from the copy saved with the bookmark, in
+        the same kind of window, its text looked for behind it again.  Where
+        that copy has gone the scan is fetched again from where it came, and
+        failing that the case is looked up afresh by its citation."""
+        url = str(payload.get("url") or "")
+        cite = str(payload.get("cite") or "")
+        name = str(payload.get("name") or "")
+        cl_item = payload.get("cl_item")
+        cl_item = dict(cl_item) if isinstance(cl_item, dict) and cl_item else None
+        start = payload.get("start_page")
+        start = start if isinstance(start, int) and start >= 0 else None
+        decided = str(payload.get("decided") or "")
+        writing = str(payload.get("writing") or "merits")
+        label = label or str(payload.get("title") or "") or cite or name
+        status = self._safe_root_status
+        self.touch_bookmark(f"pdf:{url}")
+        watch = self.watch_load(self.root, label, cite=cite)
+
+        def look_up() -> None:
+            watch.finish()
+            if cite:
+                self.open_cited_case_pdf(self.root, ("cite", cite), name,
+                                         status, name=name)
+            else:
+                status(f"Could not reopen {label}.")
+
+        def find() -> None:
+            data = _bookmark_pdf_read(url)
+            if data is None:
+                try:
+                    fetched = _fetch_pdf_bytes(url, timeout=30)
+                except Exception as exc:
+                    print(f"[bookmark] fetching {url} again failed: {exc}")
+                    fetched = None
+                data = fetched[0] if fetched else None
+            if watch.cancelled:
+                return
+            if data is None:
+                self._post_root(look_up)
+                return
+            # Measured here, off the Tk thread (see _measure_pdf_pages).
+            meta = _measure_pdf_pages(data)
+            if watch.cancelled:
+                return
+            self._post_root(lambda: self._show_cited_case_pdf(
+                self.root, data, url, cite, "", name, ("cite", cite), name,
+                status, cl_item=cl_item, decided=decided, writing=writing,
+                start_page=start, watch=watch, page_meta=meta))
+
+        def run() -> None:
+            with _watching(watch):
+                try:
+                    find()
+                except Exception as exc:     # never leave a window waiting
+                    print(f"[bookmark] reopening {label!r} failed: {exc}")
+                    problem = str(exc) or type(exc).__name__
+                    self._post_root(lambda: (
+                        status(f"Could not reopen {label}: {problem}"),
+                        watch.fail(f"Something went wrong: {problem}")))
+
+        threading.Thread(target=run, daemon=True).start()
 
     def populate_bookmarks_menu(self, menu: tk.Menu, view=None,
                                 owner=None) -> None:
@@ -10924,7 +11059,9 @@ class CourtListenerGUI:
                  # A page of orders opened for none of them in particular:
                  # it is the page, called by its citation alone, and has no
                  # text to show — any would be one order's, and name it.
-                 "orders_page": bool((cl_item or {}).get("_orders_page"))}
+                 "orders_page": bool((cl_item or {}).get("_orders_page")),
+                 # How its text is found, kept for a bookmark to reopen by.
+                 "decided": decided, "writing": writing}
 
         def described(record: dict) -> None:
             """The text has loaded: name the window properly."""
@@ -11009,6 +11146,7 @@ class CourtListenerGUI:
                     lambda body: self._embed_cited_case_text(body, named)),
                 on_close=self._cited_pdf_window_closed,
                 on_citation_edited=lambda: self._retitle_cited_pdf(named),
+                bookmarks=_CitedScanBookmark(self, named),
                 geometry=geometry, page_meta=page_meta,
             )
         except Exception as exc:
@@ -21995,7 +22133,7 @@ class _LoadWatch:
     _load_bytes); everything else belongs to the Tk thread.
     """
 
-    SLOW_MS = 3000          # how long a load may take before its window shows
+    SLOW_MS = 7500          # how long a load may take before its window shows
     TEXT_PATIENCE_S = 90    # how long the text is waited for before saying so
     _SHOWN_STEPS = 6        # how many of the steps already taken are listed
     _BYTES_EVERY = 0.2      # seconds between updates of the byte count
@@ -22732,11 +22870,27 @@ class _FloatingPdfWindow:
 
     def _bookmark_owner(self):
         """Whatever can bookmark what this window is showing: the opinion when
-        the text is up, the document behind the pages when it is not."""
-        if self.showing_text() and hasattr(
-                self._reader, "_bookmark_descriptor"):
-            return self._reader
-        return self._bookmarks
+        the text is up, the document behind the pages when it is not.  With
+        no one named for the pages, it is what the window was built around:
+        the opinion a text-only window later found a scan for, or a document
+        built into its text side that is not an opinion (a slip opinion)."""
+        reader = (self._reader
+                  if hasattr(self._reader, "_bookmark_descriptor") else None)
+        if self.showing_text() and reader is not None:
+            return reader
+        if self._bookmarks is not None:
+            return self._bookmarks
+        if reader is not None:
+            return reader
+        app, host = self._app, self._text_host
+        if host is not None and hasattr(app, "_viewer_for_host"):
+            try:
+                owner = app._viewer_for_host(host)
+            except Exception:
+                owner = None
+            if hasattr(owner, "_bookmark_descriptor"):
+                return owner
+        return None
 
     def _sync_bar_menu(self) -> None:
         """Rebuild the strip menu below Save and Print.
@@ -22834,6 +22988,13 @@ class _FloatingPdfWindow:
             self._win.title(title)
         except tk.TclError:
             pass
+
+    def current_title(self) -> str:
+        """What the window is called now."""
+        try:
+            return str(self._win.title())
+        except tk.TclError:
+            return ""
 
     def set_pdf(self, data: bytes, url: str, title: str = "",
                 *, margin: Optional[int] = None,
@@ -32740,6 +32901,9 @@ class _ScholarTextWindow:
                     on_cite_browser=self._open_pdf_cite_browser,
                     on_build_text=self._embed_text_reader,
                     on_citation_edited=self._retitle_pdf_float,
+                    # The pages are this case's: bookmarked from them, it is
+                    # this case that is bookmarked.
+                    bookmarks=self,
                 )
                 self._pdf_float_win = win
                 holder = getattr(self._app, "_cited_pdf_windows", None)
@@ -33445,6 +33609,9 @@ class _PdfWindow:
         self._watch = (app.watch_load(parent, title)
                        if self._reporter and hasattr(app, "watch_load")
                        else None)
+        # What the menu bar's Bookmarks cascade bookmarks, should this window
+        # show the pages itself (see CourtListenerGUI._viewer_for_host).
+        self._win._secondary_owner = self
         self._history_menubar = (
             _install_history_menubar(self._app, self._win)
             if self._is_case else
@@ -33541,13 +33708,18 @@ class _PdfWindow:
                 payload)
 
     def _bookmark_descriptor(self) -> Optional[dict]:
-        if not self._is_case or self._app is None:
+        if self._app is None:
             return None
+        payload = {"type": "pdf", "url": self._url, "title": self._title}
+        if not self._is_case:
+            # A Statutes at Large or Federal Register page: reopened as one,
+            # with no case text to look for behind it.
+            payload["is_case"] = False
         return {
             "key": f"pdf:{self._url}",
             "label": self._title,
-            "noun": "case",
-            "payload": {"type": "pdf", "url": self._url, "title": self._title},
+            "noun": "case" if self._is_case else "source",
+            "payload": payload,
         }
 
     def _toggle_bookmark(self) -> None:
@@ -33936,6 +34108,15 @@ class _PdfWindow:
         wants_text = self._can_discover_text and not self._text_lookup_empty
         watch, self._watch = getattr(self, "_watch", None), None
         geometry = (watch.hand_off() if watch is not None else None) or ""
+        # This window on screen — it showed a CloudFlare panel, and the check
+        # has since been passed — is where the reader is looking: the pages
+        # open in its place, and it steps aside again.
+        try:
+            shown = bool(self._win.winfo_viewable())
+            if shown and not geometry:
+                geometry = str(self._win.wm_geometry())
+        except (AttributeError, tk.TclError):
+            shown = False
         try:
             viewer = _FloatingPdfWindow(
                 app.root if app is not None else self._win,
@@ -33959,6 +34140,11 @@ class _PdfWindow:
         self._float = viewer
         if app is not None and hasattr(app, "_cited_pdf_windows"):
             app._cited_pdf_windows.add(viewer)
+        if shown:
+            try:
+                self._win.withdraw()
+            except (AttributeError, tk.TclError):
+                pass
         viewer.surface()
         self._reporter_analysis(viewer, data)
         return True
@@ -34799,9 +34985,10 @@ def _open_sec(parent: tk.Misc, spec: str,
               status=lambda _s: None, *, app=None) -> None:
     """Open a citation to the SEC's Decisions and Reports (a ``("sec",
     spec)`` action) at the cited page of HathiTrust's scan, in the web
-    browser.  HathiTrust's CloudFlare check admits people, not scripts, so
-    the pages can't be fetched into a viewer of the app's own; the browser
-    passes the check, and HathiTrust's viewer turns the pages.
+    browser.  HathiTrust's terms allow reading its scans in a web browser
+    and forbid automated downloading, and its page service turns programs
+    away, so the pages can't be fetched into a viewer of the app's own;
+    HathiTrust's viewer, in the browser, turns them.
 
     Kept in History like a document opened here, one entry a decision:
     reopening it goes back to the page last opened."""
@@ -34820,15 +35007,180 @@ def _open_sec(parent: tk.Misc, spec: str,
 
 
 # ---------------------------------------------------------------------------
+# Pages behind a CloudFlare check: fetched with Firefox's clearance, or not
+# ---------------------------------------------------------------------------
+
+class _CloudflarePdfWindow(_PdfWindow):
+    """A viewer for pages kept behind a CloudFlare check that admits people,
+    not scripts — the English Reports on CommonLII.  The pages are fetched
+    with the clearance the reader obtained by passing the check in Firefox
+    (see eng_rep_pdf).  With none CloudFlare accepts, the window asks: open
+    the page in Firefox and pass the check there — the pages then load here
+    by themselves — or open it in the browser instead.  A subclass names its
+    site, says where its page is, and words the panels."""
+
+    #: The site, as the reader knows it: "CommonLII".
+    _SITE_NAME = ""
+
+    def _site_url(self) -> str:
+        """The page to open outside the app — in Firefox, to pass the
+        check, or in the browser instead."""
+        return self._url
+
+    def _clearance_mark(self) -> tuple:
+        """What changes when the reader passes the site's check in Firefox
+        (see eng_rep_pdf.clearance_mark)."""
+        return eng_rep_pdf.clearance_mark()
+
+    def _handoff_text(self) -> str:
+        """The CloudFlare panel's explanation."""
+        return ""
+
+    def _handoff_waiting_text(self) -> str:
+        """The status once Firefox is open on the check."""
+        return "Pass the check in Firefox — the scan loads here then."
+
+    def _link_out_text(self, has_ff: bool) -> str:
+        """The explanation when the pages can't be fetched here at all."""
+        return ""
+
+    def _clear_body(self) -> None:
+        for child in self._body.winfo_children():
+            child.destroy()
+
+    def _need_clearance(self, web_url: str, refused_ua: str = "") -> None:
+        """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
+        and try again by itself the moment Firefox holds a new clearance.
+        *refused_ua*: see eng_rep_pdf.CloudflareChallenge."""
+        self._reveal()
+        self._clear_body()
+        self._status_var.set(f"{self._SITE_NAME} needs a CloudFlare check.")
+        frame = ttk.Frame(self._body)
+        frame.pack(fill="both", expand=True, padx=24, pady=24)
+        text = self._handoff_text()
+        if refused_ua:
+            # CloudFlare stops honouring a clearance long before its cookie
+            # says it expires.
+            text += ("\n\nFirefox holds a clearance from an earlier check, but "
+                     "CloudFlare no longer accepts it from the app: pass the "
+                     "check again in Firefox.")
+        ttk.Label(
+            frame, wraplength=560, justify="left", text=text,
+        ).pack(anchor="w", pady=(0, 16))
+        row = ttk.Frame(frame)
+        row.pack(anchor="w")
+
+        def open_ff() -> None:
+            if eng_rep_pdf.open_in_firefox(web_url):
+                self._status_var.set(self._handoff_waiting_text())
+            else:
+                eng_rep_pdf.open_in_browser(web_url)
+
+        def retry() -> None:
+            self._clearance_watch = None
+            self._clear_body()
+            self._fetch()
+
+        self._watch_for_clearance(retry)
+
+        ttk.Button(row, text="Open in Firefox", command=open_ff).pack(side="left")
+        ttk.Button(row, text="Retry", command=retry).pack(side="left", padx=8)
+        ttk.Button(row, text="Open in browser instead",
+                   command=lambda: (eng_rep_pdf.open_in_browser(self._site_url()),
+                                    self._win.destroy())).pack(side="left")
+
+    #: How long the hand-off panel waits for a new clearance before leaving it
+    #: to the Retry button, and how often it looks.
+    _CLEARANCE_WAIT = 600.0
+    _CLEARANCE_POLL = 3.0
+
+    def _watch_for_clearance(self, retry) -> None:
+        """Call *retry* once Firefox holds a clearance for the site it did
+        not hold when the panel went up — the reader has passed the check —
+        for as long as the panel is showing (up to ten minutes).  Only the
+        clearance the reader obtains is used; nothing here answers the
+        check."""
+        token = object()
+        self._clearance_watch = token
+
+        def watching() -> bool:
+            return getattr(self, "_clearance_watch", None) is token
+
+        def stop(event) -> None:
+            if event.widget is self._win:
+                self._clearance_watch = None
+
+        try:
+            self._win.bind("<Destroy>", stop, add="+")
+        except tk.TclError:
+            return
+
+        def load() -> None:
+            if watching():
+                self._say("CloudFlare check passed — loading the scan…")
+                retry()
+
+        def run() -> None:
+            try:
+                mark = self._clearance_mark()
+            except Exception as exc:
+                print(f"[cloudflare] can't watch Firefox's cookies: {exc}")
+                return
+            deadline = time.monotonic() + self._CLEARANCE_WAIT
+            while watching() and time.monotonic() < deadline:
+                time.sleep(self._CLEARANCE_POLL)
+                try:
+                    changed = self._clearance_mark() != mark
+                except Exception:
+                    return
+                if changed:
+                    self._post(load)
+                    return
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _link_out(self) -> None:
+        """In-app fetch isn't possible here (Firefox or a dependency
+        missing).  Offer the page on the site instead — in Firefox, when
+        it's installed, or the browser."""
+        self._reveal()
+        self._clear_body()
+        web_url = self._site_url()
+        has_ff = eng_rep_pdf.firefox_available()
+        frame = ttk.Frame(self._body)
+        frame.pack(fill="both", expand=True, padx=24, pady=24)
+        ttk.Label(frame, wraplength=560, justify="left",
+                  text=self._link_out_text(has_ff)).pack(
+            anchor="w", pady=(0, 16))
+        row = ttk.Frame(frame)
+        row.pack(anchor="w")
+        if has_ff:
+            ttk.Button(
+                row, text="Open in Firefox",
+                command=lambda: (eng_rep_pdf.open_in_firefox(web_url),
+                                 self._status_var.set("Opened in Firefox.")),
+            ).pack(side="left")
+        ttk.Button(
+            row, text="Open in browser",
+            command=lambda: (eng_rep_pdf.open_in_browser(web_url),
+                             self._status_var.set("Opened in your browser.")),
+        ).pack(side="left", padx=8)
+        self._status_var.set(
+            f"In-app viewing unavailable — open on {self._SITE_NAME}.")
+
+
+# ---------------------------------------------------------------------------
 # English Reports — open the CommonLII scan (cached; CloudFlare hand-off)
 # ---------------------------------------------------------------------------
 
-class _EngRepPdfWindow(_PdfWindow):
+class _EngRepPdfWindow(_CloudflarePdfWindow):
     """The in-app viewer for an English Reports scan from CommonLII.  Reuses the
     Statutes-at-Large PDF pane (centered, zoomable, Download/Print) but fetches
     through :mod:`eng_rep_pdf` — disk cache first, then a ``curl_cffi`` fetch
     using Firefox's CloudFlare clearance.  When there is no clearance yet it
     shows a hand-off panel that opens the case in Firefox and offers Retry."""
+
+    _SITE_NAME = "CommonLII"
 
     def __init__(self, parent: tk.Misc, case: "eng_rep.ERCase",
                  status=lambda _s: None, *, app=None, pin: str = "",
@@ -34911,7 +35263,7 @@ class _EngRepPdfWindow(_PdfWindow):
                     meta = _measure_pdf_pages(data)
                 self._post(self._show, data, meta)
             except eng_rep_pdf.CloudflareChallenge as exc:
-                self._post(self._need_clearance, exc.web_url)
+                self._post(self._need_clearance, exc.web_url, exc.refused_ua)
             except eng_rep_pdf.FetchUnavailable:
                 self._post(self._link_out)
             except eng_rep_pdf.OriginError as exc:
@@ -34957,111 +35309,20 @@ class _EngRepPdfWindow(_PdfWindow):
             return
         self._say(f"Opened at page {pin}.")
 
-    def _clear_body(self) -> None:
-        for child in self._body.winfo_children():
-            child.destroy()
+    def _site_url(self) -> str:  # overrides _CloudflarePdfWindow
+        # The *case page*, not the hotlink-blocked .pdf: the scan loads when
+        # it is clicked from there.
+        return self._case.web_url
 
-    def _need_clearance(self, web_url: str) -> None:
-        """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
-        and try again by itself the moment Firefox holds a new clearance."""
-        self._reveal()
-        self._clear_body()
-        self._status_var.set("CommonLII needs a CloudFlare check.")
-        frame = ttk.Frame(self._body)
-        frame.pack(fill="both", expand=True, padx=24, pady=24)
-        ttk.Label(
-            frame, wraplength=560, justify="left",
-            text=("CommonLII is behind a CloudFlare check.\n\n"
-                  "To view this scan in the app, click “Open in Firefox” and "
-                  "pass the “Just a moment…” check there — the scan loads here "
-                  "as soon as you have (or click “Retry”).  Once cleared, this "
-                  "and other English Reports cases load straight in the app "
-                  "(and are cached so you won't be asked again)."),
-        ).pack(anchor="w", pady=(0, 16))
-        row = ttk.Frame(frame)
-        row.pack(anchor="w")
+    def _handoff_text(self) -> str:  # overrides _CloudflarePdfWindow
+        return ("CommonLII is behind a CloudFlare check.\n\n"
+                "To view this scan in the app, click “Open in Firefox” and "
+                "pass the “Just a moment…” check there — the scan loads here "
+                "as soon as you have (or click “Retry”).  Once cleared, this "
+                "and other English Reports cases load straight in the app "
+                "(and are cached so you won't be asked again).")
 
-        def open_ff() -> None:
-            if eng_rep_pdf.open_in_firefox(web_url):
-                self._status_var.set(
-                    "Pass the check in Firefox — the scan loads here then.")
-            else:
-                eng_rep_pdf.open_in_browser(web_url)
-
-        def retry() -> None:
-            self._clearance_watch = None
-            self._clear_body()
-            self._fetch()
-
-        self._watch_for_clearance(retry)
-
-        ttk.Button(row, text="Open in Firefox", command=open_ff).pack(side="left")
-        ttk.Button(row, text="Retry", command=retry).pack(side="left", padx=8)
-        ttk.Button(row, text="Open in browser instead",
-                   command=lambda: (eng_rep_pdf.open_in_browser(self._case.web_url),
-                                    self._win.destroy())).pack(side="left")
-
-    #: How long the hand-off panel waits for a new clearance before leaving it
-    #: to the Retry button, and how often it looks.
-    _CLEARANCE_WAIT = 600.0
-    _CLEARANCE_POLL = 3.0
-
-    def _watch_for_clearance(self, retry) -> None:
-        """Call *retry* once Firefox holds a CommonLII clearance it did not
-        hold when the panel went up — the reader has passed the check — for
-        as long as the panel is showing (up to ten minutes).  Only the
-        clearance the reader obtains is used; nothing here answers the
-        check."""
-        token = object()
-        self._clearance_watch = token
-
-        def watching() -> bool:
-            return getattr(self, "_clearance_watch", None) is token
-
-        def stop(event) -> None:
-            if event.widget is self._win:
-                self._clearance_watch = None
-
-        try:
-            self._win.bind("<Destroy>", stop, add="+")
-        except tk.TclError:
-            return
-
-        def load() -> None:
-            if watching():
-                self._say("CloudFlare check passed — loading the scan…")
-                retry()
-
-        def run() -> None:
-            try:
-                mark = eng_rep_pdf.clearance_mark()
-            except Exception as exc:
-                print(f"[eng_rep_pdf] can't watch Firefox's cookies: {exc}")
-                return
-            deadline = time.monotonic() + self._CLEARANCE_WAIT
-            while watching() and time.monotonic() < deadline:
-                time.sleep(self._CLEARANCE_POLL)
-                try:
-                    changed = eng_rep_pdf.clearance_mark() != mark
-                except Exception:
-                    return
-                if changed:
-                    self._post(load)
-                    return
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _link_out(self) -> None:
-        """In-app fetch isn't possible here (Firefox or a dependency missing).
-        Offer the same hand-off as the CloudFlare panel: open the case page on
-        CommonLII — the *main site*, so the scan's hotlink check passes when you
-        click through to it — preferring Firefox when it's installed."""
-        self._reveal()
-        self._clear_body()
-        web_url = self._case.web_url
-        has_ff = eng_rep_pdf.firefox_available()
-        frame = ttk.Frame(self._body)
-        frame.pack(fill="both", expand=True, padx=24, pady=24)
+    def _link_out_text(self, has_ff: bool) -> str:  # overrides _CloudflarePdfWindow
         msg = ("This English Reports scan can't be fetched inside the app "
                "here.\n\nOpen the case on CommonLII and click through to the "
                "scan there: the site only serves the PDF when you arrive from "
@@ -35070,22 +35331,7 @@ class _EngRepPdfWindow(_PdfWindow):
         if not has_ff:
             msg += ("\n\nFor in-app viewing (cached, no repeat checks), install "
                     "Firefox and run:\n\n    pip install curl_cffi browser_cookie3")
-        ttk.Label(frame, wraplength=560, justify="left", text=msg).pack(
-            anchor="w", pady=(0, 16))
-        row = ttk.Frame(frame)
-        row.pack(anchor="w")
-        if has_ff:
-            ttk.Button(
-                row, text="Open in Firefox",
-                command=lambda: (eng_rep_pdf.open_in_firefox(web_url),
-                                 self._status_var.set("Opened in Firefox.")),
-            ).pack(side="left")
-        ttk.Button(
-            row, text="Open in browser",
-            command=lambda: (eng_rep_pdf.open_in_browser(web_url),
-                             self._status_var.set("Opened in your browser.")),
-        ).pack(side="left", padx=8)
-        self._status_var.set("In-app viewing unavailable — open on CommonLII.")
+        return msg
 
     def _error(self, msg: str) -> None:  # overrides _PdfWindow._error
         """Origin error fallback — open the CommonLII *case page* (not the
@@ -35178,10 +35424,14 @@ class _SlipTextWindow:
 
     def __init__(
         self, parent: tk.Misc, title: str, text: str, *, app=None,
+        bookmarks=None,
     ) -> None:
         self._app = app
         self._title = title
         self._source_text = text
+        # The slip opinion this is the text of: bookmarking the text
+        # bookmarks it.
+        self._bookmarks = bookmarks
         win = _secondary_view_host(parent, app)
         _ensure_modern_ttk_styles(win)
         win.title(f"{title} — Text")
@@ -35216,11 +35466,20 @@ class _SlipTextWindow:
                 _SlipTextWindow(
                     app.root if parent is None else parent,
                     source._title, source._source_text, app=app,
+                    bookmarks=source._bookmarks,
                 )
             app.register_secondary_window(
                 self, win, f"slip-text:{id(self)}", f"{title} — Text",
                 reopen,
             )
+
+    def _bookmark_descriptor(self) -> Optional[dict]:
+        owner = self._bookmarks
+        return owner._bookmark_descriptor() if owner is not None else None
+
+    def _toggle_bookmark(self) -> None:
+        if self._bookmarks is not None:
+            self._bookmarks._toggle_bookmark()
 
     def _select_all(self, _e=None) -> str:
         self._text.tag_add("sel", "1.0", "end-1c")
@@ -35601,7 +35860,8 @@ class _SlipOpinionWindow:
     def _show_text(self) -> None:
         if self._clean_text is not None:
             _SlipTextWindow(
-                self._win, self._title, self._clean_text, app=self._app
+                self._win, self._title, self._clean_text, app=self._app,
+                bookmarks=self,
             )
             return
         if not self._pages:
@@ -35628,7 +35888,8 @@ class _SlipOpinionWindow:
         self._status_var.set("Text ready.")
         if self._clean_text is not None:
             _SlipTextWindow(
-                self._win, self._title, self._clean_text, app=self._app
+                self._win, self._title, self._clean_text, app=self._app,
+                bookmarks=self,
             )
 
 
