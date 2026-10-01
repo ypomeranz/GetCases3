@@ -382,6 +382,12 @@
       claim(m.index, m.index + m[0].length, "cite", `${m[1]} ${canonicalReporter(m[2])} ${m[3]}`);
     }
 
+    // The Code and the C.F.R.: "42 U.S.C. Section 1983" has a reporter's
+    // shape too ("U.S.C. Section", page 1983), and must not read as a case.
+    for (const name of ["usc", "cfr"]) {
+      for (const m of matchAll(name, text)) claimed.push([m.index, m.index + m[0].length]);
+    }
+
     // Cases: the named reporters, the early Supreme Court's, then any other
     // reporter the app would accept (citations._iter_case_cites).
     const cases = [];

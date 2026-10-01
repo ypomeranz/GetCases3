@@ -178,7 +178,9 @@
     // Right to left, so that splitting a text node leaves the offsets of
     // the pieces before it where they were.
     for (let k = pieces.length - 1; k >= 0; k--) wrap(pieces[k]);
-    if (observer) observer.takeRecords();
+    // Our own changes are recorded with any the page made meanwhile: keep
+    // the page's (see queue()).
+    if (observer) queue(observer.takeRecords());
     return pieces.length;
   }
 
@@ -188,9 +190,13 @@
         node.data.slice(s, e) !== seg.data.slice(s, e)) {
       return;                       // the page changed it meanwhile
     }
+    // The text split off has been read with the rest.
     let target = node;
-    if (e < target.data.length) target.splitText(e);
-    if (s > 0) target = target.splitText(s);
+    if (e < target.data.length) scanned.add(target.splitText(e));
+    if (s > 0) {
+      target = target.splitText(s);
+      scanned.add(target);
+    }
     const a = document.createElement("a");
     a.className = `${LINK} getcases-${action.category || "case"}`;
     if (action.url) a.href = action.url;
@@ -225,13 +231,16 @@
     for (const a of document.querySelectorAll("a.getcases-known")) a.classList.remove("getcases-known");
     links.clear();
     scanned = new WeakSet();
+    if (observer) observer.takeRecords();       // our changes, not the page's
   }
 
   async function scanPage() {
     if (!document.body) return;
+    // Watch first: what the page adds while it is being read (the app can
+    // take a second or two) is read after it.
+    observe();
     mode = (await refreshStatus(true)) ? "app" : "web";
     await scan(document.body);
-    observe();
   }
 
   async function rescan() {
@@ -245,20 +254,24 @@
 
   function observe() {
     if (observer || !document.body) return;
-    observer = new MutationObserver((records) => {
-      for (const r of records) {
-        for (const n of r.addedNodes) {
-          if (n.nodeType === Node.ELEMENT_NODE) {
-            if (!n.classList.contains(LINK)) pending.add(n);
-          } else if (n.nodeType === Node.TEXT_NODE && n.parentElement &&
-                     !n.parentElement.closest("a." + LINK)) {
-            pending.add(n.parentElement);
-          }
+    observer = new MutationObserver(queue);
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  /** Note what the page added, to read shortly: never our own links, nor
+   *  text already read. */
+  function queue(records) {
+    for (const r of records) {
+      for (const n of r.addedNodes) {
+        if (n.nodeType === Node.ELEMENT_NODE) {
+          if (!n.classList.contains(LINK)) pending.add(n);
+        } else if (n.nodeType === Node.TEXT_NODE && !scanned.has(n) && n.parentElement &&
+                   !n.parentElement.closest("a." + LINK)) {
+          pending.add(n.parentElement);
         }
       }
-      if (pending.size && !timer) timer = setTimeout(flush, 600);
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+    }
+    if (pending.size && !timer) timer = setTimeout(flush, 600);
   }
 
   async function flush() {

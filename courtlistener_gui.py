@@ -9214,7 +9214,18 @@ class CourtListenerGUI:
                 return              # only ever a web page
             self._browser_raise_until = (time.monotonic()
                                          + self._BROWSER_RAISE_SECONDS)
-            _follow_brief_action(self, self.root, (kind, value),
+            action = (kind, value)
+            if kind in _STATUTE_SOURCES:
+                # The main window is usually hidden, so a section that
+                # can't be opened says so where the reader is looking; and
+                # one whose source the app couldn't reach opens on the web.
+                _open_statute_action(
+                    self.root, action, self._status_var.set, app=self,
+                    on_missing=self._notify_lookup_miss,
+                    on_unreachable=lambda message: self._open_on_web(
+                        action, text, message))
+                return
+            _follow_brief_action(self, self.root, action,
                                  self._status_var.set, snippet=text)
             return
         if not text:
@@ -9223,6 +9234,29 @@ class CourtListenerGUI:
                                      + self._BROWSER_RAISE_SECONDS)
         if not self._open_lookup_query(text):
             self._spotlight_search(text)
+
+    def _open_on_web(self, action: tuple, text: str, message: str) -> None:
+        """Open *action*'s web page (see browser_links) after the app could
+        not fetch it for itself, saying so.  *message* — the error itself —
+        goes to the terminal: the reader needs only the gist."""
+        print(f"[browser] {message}")
+        url = browser_links.browser_url(action, text)
+        if not url:
+            self._notify_lookup_miss(message)
+            return
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        kind, value = action
+        try:
+            label = _STATUTE_SOURCES[kind].spec_label(value)
+        except Exception:
+            label = text or value
+        host = _SOURCE_HOST.get(kind, "its source")
+        self._notify_lookup_miss(f"GetCases couldn't reach {host} for "
+                                 f"{label}, so it is open in your browser "
+                                 "instead.")
 
     def _spotlight_search(self, query: str) -> None:
         """Open Spotlight with *query* typed in, and run it."""
@@ -33552,14 +33586,17 @@ _SOURCE_HOST: dict[str, str] = {
 
 def _fetch_statute_window(parent: tk.Misc, kind: str, spec: str,
                           status=lambda _s: None, *, app=None,
-                          on_missing=None) -> None:
+                          on_missing=None, on_unreachable=None) -> None:
     """Fetch a statute, regulation or federal rule section in a background
     thread and open a _StatuteWindow over `parent` when it arrives.
 
     ``on_missing`` receives a message for the reader when the section can't
     be opened — "No such provision found: 42 U.S.C. § 99999." when the
     source has no such section, or what went wrong when the source itself
-    failed — so a citation typed in by hand never ends in silence."""
+    failed — so a citation typed in by hand never ends in silence.
+    ``on_unreachable``, when given, takes the second kind of message
+    instead: the section may well exist, and its official page may open
+    where the app's own request could not."""
     mod = _STATUTE_SOURCES[kind]
     host = _SOURCE_HOST.get(kind, "the source")
     title, section, subs = spec.split(":", 2)
@@ -33589,7 +33626,9 @@ def _fetch_statute_window(parent: tk.Misc, kind: str, spec: str,
                        if isinstance(exc, LookupError)
                        else f"Couldn't open {label}: {exc}")
             post(safe_status, message)
-            if on_missing is not None:
+            if on_unreachable is not None and not isinstance(exc, LookupError):
+                post(on_unreachable, message)
+            elif on_missing is not None:
                 post(on_missing, message)
             return
 
@@ -33607,11 +33646,11 @@ def _fetch_statute_window(parent: tk.Misc, kind: str, spec: str,
 
 def _open_statute_action(parent: tk.Misc, action: tuple[str, str],
                          status=lambda _s: None, *, app=None,
-                         on_missing=None) -> None:
+                         on_missing=None, on_unreachable=None) -> None:
     """Carry out a parsed statute-lookup action: open the in-app viewer, or —
     for a state we only link out to (N.Y., Tex., other states) — open the
-    official source in the browser.  ``on_missing``: see
-    :func:`_fetch_statute_window`."""
+    official source in the browser.  ``on_missing``, ``on_unreachable``:
+    see :func:`_fetch_statute_window`."""
     kind, value = action
     if kind == "browse":
         webbrowser.open(value)
@@ -33623,8 +33662,10 @@ def _open_statute_action(parent: tk.Misc, action: tuple[str, str],
     if kind == "leghist":
         _open_leghist(parent, value, status, app=app)
         return
+    extra = ({} if on_unreachable is None
+             else {"on_unreachable": on_unreachable})
     _fetch_statute_window(parent, kind, value, status, app=app,
-                          on_missing=on_missing)
+                          on_missing=on_missing, **extra)
 
 
 def _stat_cite_from_url(url: str) -> str:

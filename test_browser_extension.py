@@ -521,6 +521,66 @@ class FallbackReaderTests(unittest.TestCase):
         ])
 
 
+def us_code_missing():
+    import us_code
+    return us_code.SectionNotFound("uscode.house.gov: no such section")
+
+
+# ---------------------------------------------------------------------------
+# The U.S. Code, however a page writes it
+# ---------------------------------------------------------------------------
+
+#: How web pages write a U.S. Code citation, and the action each must open.
+US_CODE_FORMS = [
+    ("42 U.S.C. § 1983", "42:1983:"),
+    ("42 U.S.C. §1983(a)", "42:1983:a"),
+    ("42 U.S.C. § 1983", "42:1983:"),
+    ("42 U.S.C.A. § 1983", "42:1983:"),
+    ("42 U.S.C.S. § 1983", "42:1983:"),
+    ("42 USC § 1983", "42:1983:"),
+    ("5 USC 552(b)(6)", "5:552:b,6"),
+    ("42 U.S. Code § 1983", "42:1983:"),
+    ("42 U.S.C. 1983", "42:1983:"),
+    ("42 U.S.C. sec. 1983", "42:1983:"),
+    ("42 U.S.C. Section 1983", "42:1983:"),
+    ("42 U.S.C. Sec. 1985(3)", "42:1985:3"),
+    ("42 U. S. C. § 1983", "42:1983:"),
+    ("26 U.S.C. § 5000A", "26:5000A:"),
+]
+
+
+class UsCodeFormsTests(unittest.TestCase):
+    """Every way a page writes the Code opens the section — never a case
+    lookup ("42 U.S.C. Section 1983" has a reporter's shape) and never
+    nothing ("42 USC § 1983", "42 U.S. Code § 1983")."""
+
+    def test_the_app_reads_them(self):
+        for written, spec in US_CODE_FORMS:
+            text = f"See {written}."
+            with self.subTest(written=written):
+                self.assertEqual(
+                    [(text[s:e], a) for s, e, a in citations.detect_links(text)],
+                    [(text[4:-1], ("usc", spec))])
+
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_the_extension_reads_them_too(self):
+        got = run_node(
+            "process.stdout.write(JSON.stringify(input.map(t => {\n"
+            "  const t2 = 'See ' + t + '.';\n"
+            "  return GetCasesCitations.detect(t2).map(l => [t2.slice(l.start, l.end), l.kind, l.value]);\n"
+            "})));", [w for w, _s in US_CODE_FORMS])
+        for (written, spec), links in zip(US_CODE_FORMS, got):
+            with self.subTest(written=written):
+                self.assertEqual(links, [[written, "usc", spec]])
+
+    def test_not_the_university_or_the_immigration_service(self):
+        for text in ("USC 24, UCLA 21", "the 12 USCIS 400 forms",
+                     "Doe v. USC, 123 F.3d 456 (9th Cir. 1997)"):
+            with self.subTest(text=text):
+                self.assertFalse(any(a[0] == "usc" for _s, _e, a
+                                     in citations.detect_links(text)))
+
+
 # ---------------------------------------------------------------------------
 # The app's side
 # ---------------------------------------------------------------------------
@@ -593,6 +653,60 @@ class AppOpensWhatTheBrowserSendsTests(unittest.TestCase):
                 patch.object(self.gui, "_parse_citation_line",
                              return_value=None):
             self.assertFalse(win._open_lookup_query("Roe v. Wade"))
+
+    def test_a_statute_says_why_it_cannot_open_and_falls_back_to_the_web(self):
+        # The main window is usually hidden: a statute GetCases can't open
+        # used to fail without a word, so the click seemed to do nothing.
+        win = self.app()
+        with patch.object(self.gui, "_open_statute_action") as opened, \
+                patch.object(self.gui, "_follow_brief_action") as follow:
+            win._open_from_browser({"kind": "usc", "value": "42:1983:",
+                                    "text": "42 U.S.C. § 1983"})
+        follow.assert_not_called()
+        args, kwargs = opened.call_args
+        self.assertEqual(args[1], ("usc", "42:1983:"))
+        self.assertEqual(kwargs["on_missing"], win._notify_lookup_miss)
+        # uscode.house.gov didn't answer the app: its page opens instead.
+        with patch.object(self.gui.webbrowser, "open") as browse, \
+                patch.object(self.gui.CourtListenerGUI, "_notify_lookup_miss",
+                             autospec=True) as told:
+            kwargs["on_unreachable"]("Couldn't open 42 U.S.C. § 1983: "
+                                     "uscode.house.gov: timed out")
+        browse.assert_called_once_with(
+            browser_links.browser_url(("usc", "42:1983:")))
+        self.assertEqual(told.call_args.args[1],
+                         "GetCases couldn't reach uscode.house.gov for 42 "
+                         "U.S.C. § 1983, so it is open in your browser "
+                         "instead.")
+
+    def test_a_missing_section_is_told_and_a_dead_source_reported(self):
+        # _fetch_statute_window: "no such section" goes to on_missing; the
+        # source failing goes to on_unreachable when there is one.
+        calls = []
+
+        class Parent:
+            def after(self, _ms, fn, *args):
+                fn(*args)
+
+        class Sync:
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        for exc, want in ((us_code_missing(), "missing"),
+                          (RuntimeError("uscode.house.gov: timed out"),
+                           "unreachable")):
+            calls.clear()
+            with patch.object(self.gui.us_code, "load_section",
+                              side_effect=exc), \
+                    patch.object(self.gui.threading, "Thread", Sync):
+                self.gui._fetch_statute_window(
+                    Parent(), "usc", "42:99999:",
+                    on_missing=lambda m: calls.append(("missing", m)),
+                    on_unreachable=lambda m: calls.append(("unreachable", m)))
+            self.assertEqual([k for k, _m in calls], [want])
 
     def test_requests_queued_off_the_tk_thread_open_on_it(self):
         import queue

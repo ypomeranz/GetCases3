@@ -101,6 +101,7 @@ from this computer.
 | Problem | What to do |
 | --- | --- |
 | Clicks open the web, though GetCases is running | Check the extension's popup says GetCases is running. If not: is **Settings → Open Citations Clicked in Chrome Here** ticked in GetCases, and do the ports match? A second copy of GetCases takes the connection over from the first. |
+| A statute opens in the browser although GetCases is running | GetCases couldn't reach its source (uscode.house.gov, eCFR, Cornell) and says so in a message; the web page opened instead. Try again later, or check your connection. |
 | A GetCases window opened behind Chrome | Click its icon in the taskbar or Dock; GetCases brings the first window of each click forward, but some systems refuse. |
 | Links look wrong on some site | Untick **…on this site** in the popup. |
 | A PDF says it can't be opened | Use **Open it in Chrome's viewer instead**. For PDFs on your computer, allow file access (step 4 above). |

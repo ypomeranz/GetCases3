@@ -30,8 +30,15 @@ from dataclasses import dataclass, field
 # "15 U.S.C.A. § 78j(b)", "42 U.S.C. § 2000e-2(a)", "5 U.S.C. 552".
 # A parenthesized subdivision is 1-4 alphanumerics but never 4 digits, so a
 # trailing year parenthetical "(1982)" is not swallowed.
+#
+# Off the printed page the Code is written other ways too, and web pages use
+# them all: without the periods ("42 USC § 1983", "5 USC 552", the way
+# "29 CFR 1614.105" goes for the C.F.R.), Lexis's annotated "U.S.C.S.", and
+# "42 U.S. Code § 1983" (Cornell's and Wikipedia's style).  The unpunctuated
+# form is matched in capitals only, so prose about the university is not.
 USC_CITE_RE = re.compile(
-    r"\b(\d{1,2})\s+U\.\s?S\.\s?C\.?\s?(?:A\.)?\s*"
+    r"\b(\d{1,2})\s+"
+    r"(?:U\.\s?S\.\s?C\.?\s?(?:[AS]\.)?|USC[AS]?\b\.?|U\.\s?S\.\s?Code\b)\s*"
     r"(?:§§?|[Ss]ec(?:tions?|s)?\.?)?\s*"
     r"(\d+[a-zA-Z0-9]*(?:[-–—]\d+[a-zA-Z0-9]*)?)"
     r"((?:\s?\((?:\d{1,3}|[ivxIVX]{2,4}|[a-zA-Z]{1,3})\))*)"
@@ -1153,13 +1160,19 @@ if __name__ == "__main__":
         ("see 5 U.S.C. 552", "5:552:"),
         ("15 U.S.C. §§ 78a–78pp", "15:78a-78pp:"),
         ("42 U.S.C. § 1983 (1982)", "42:1983:"),
+        ("42 USC § 1983", "42:1983:"),
+        ("see 5 USC 552(b)(6)", "5:552:b,6"),
+        ("42 U.S.C.S. § 1983", "42:1983:"),
+        ("42 U.S. Code § 1983", "42:1983:"),
+        ("42 U.S.C. Section 1985(3)", "42:1985:3"),
     ]
     for text, want in cases:
         m = USC_CITE_RE.search(text)
         got = cite_spec(m) if m else None
         check(got == want, f"{text!r} -> {got!r}")
     for text in ("501 U.S. 32", "1988 U.S.C.C.A.N. 5982",
-                 "U.S. Const. art. I", "120 U.S. 678"):
+                 "U.S. Const. art. I", "120 U.S. 678", "the 12 USCIS 400",
+                 "12 usc 400"):
         check(USC_CITE_RE.search(text) is None, f"no match in {text!r}")
     check(spec_label("42:1983:") == "42 U.S.C. § 1983", "label plain")
     check(spec_label("18:922:g,1") == "18 U.S.C. § 922(g)(1)", "label subsec")
