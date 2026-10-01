@@ -1590,7 +1590,8 @@ class StoredUsCiteTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 NAME_NS = _load("_ScholarTextWindow", ["_filename_item", "_scan_window_title",
-                                       "_pdf_filename_item"],
+                                       "_pdf_filename_item",
+                                       "_with_citation_facts"],
                 {"_scan_citation_item": SCAN_CITATION_ITEM,
                  "_bluebook_display_name": lambda item: (
                      f"{item.get('caseName')} | "
@@ -1602,7 +1603,7 @@ class _NamedReader:
         self._item = item
         self._bb = {"name": caption, "cite": "137 S. Ct. 911"}
         for name in ("_filename_item", "_scan_window_title",
-                     "_pdf_filename_item"):
+                     "_pdf_filename_item", "_with_citation_facts"):
             setattr(self, name, NAME_NS[name].__get__(self))
 
     def _shown_us_reports_cite(self):

@@ -1,0 +1,1 @@
+python -m PyInstaller --noconfirm --onefile --noconsole --name GetCases --add-data "data/opinions.jsonl;data" --add-data "person_names.tsv.gz;." --add-data "eng_rep_index.tsv.gz;." --add-data "eng_rep_nominate.tsv.gz;." --add-data "sec_index.tsv.gz;." --add-data "crecb_index.tsv.gz;." --add-data "debates_index.tsv.gz;." courtlistener_gui.py

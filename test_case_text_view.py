@@ -754,16 +754,17 @@ class ReporterSidePanelTests(unittest.TestCase):
     def test_the_case_window_offers_every_view(self):
         self.assertEqual(
             _class_value("_ScholarTextWindow", "_DETAILS_VIEWS"),
-            ("Case details", "Docket", "Recent SCOTUS",
+            ("Case details", "Citing cases", "Docket", "Recent SCOTUS",
              "Related cases", "Outline"))
 
     def test_the_panel_beside_a_scan_offers_the_case_docket_and_recent(self):
-        # The docket is what a reader looking at the pages asks for next, and
-        # the Court's recent opinions are a glance at what is new; related
-        # cases and the outline want the room a window has.
+        # The cases citing it and the docket are what a reader looking at the
+        # pages asks for next, and the Court's recent opinions are a glance
+        # at what is new; related cases and the outline want the room a
+        # window has.
         self.assertEqual(
             _class_value("_ScholarTextWindow", "_SCAN_DETAILS_VIEWS"),
-            ("Case details", "Docket", "Recent SCOTUS"))
+            ("Case details", "Citing cases", "Docket", "Recent SCOTUS"))
 
     def test_the_case_s_own_details_lead_either_way(self):
         # current(0) is what the panel opens on, so Oyez is the default.

@@ -45,6 +45,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
@@ -54,8 +55,12 @@ import requests
 from pdfium_lock import PDFIUM_LOCK
 
 # The volume PDFs live next to the app; downloads land here too, so a volume
-# is fetched from supremecourt.gov at most once.
-US_REPORTS_DIR = Path(__file__).resolve().parent / "US Reports"
+# is fetched from supremecourt.gov at most once.  In a packaged build that is
+# beside the .exe: a one-file build's own folder is deleted at every exit.
+US_REPORTS_DIR = (
+    Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent
+) / "US Reports"
 
 # Extracted per-opinion PDFs land here, next to the app's other caches.
 CACHE_DIR = Path.home() / ".config" / "courtlistener" / "usrep_cache"

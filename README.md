@@ -77,10 +77,20 @@ Started from a terminal, GetCases runs **in the background with no window**:
 - Type **`s`** + Enter in the terminal to open the main search window.
 - Type **`q`** + Enter in the terminal to quit.
 
-Started without a terminal, the main search window opens.
+On Windows, GetCases also shows the **⚖ scales** (Spotlight's icon) in the
+notification area at the right of the taskbar while it runs:
+
+- **Click** the scales to open Spotlight.
+- **Right-click** them for **Open Main Window** and **Quit GetCases**.
+
+So on Windows it starts in the background even without a terminal — run with
+`pythonw`, or packaged as an `.exe` with no console — and nothing appears
+until you open Spotlight. Elsewhere, started without a terminal, the main
+search window opens.
 
 Closing the main window does **not** quit GetCases; it keeps running in the
-background. To quit, type `q` + Enter in the terminal (or close the terminal).
+background. To quit, right-click the scales and choose **Quit GetCases**, or
+type `q` + Enter in the terminal (or close the terminal).
 Starting GetCases a second time hands Ctrl+Space to the new copy, and the old
 one closes (once any windows it has open are closed).
 
@@ -169,6 +179,20 @@ maximized window takes the room from the page instead.
 
 **Show** at the top of the panel switches to:
 
+- **Citing cases:** the cases that cite this one, ten at a time, each with its
+  citation, court and date and the passage where it cites the case, the case's
+  name and citation in bold. Click a case's name to open it.
+  - They come from **Google Scholar's "Cited by" list** when Scholar has one
+    for the case, even if it has only the citation and not the opinion. Scholar's
+    green bars show how much each case discusses this one.
+  - **Sort** orders them by relevance or by date (newest first), **Years**
+    narrows them to a span of years (press Enter), **Courts** to the courts you
+    pick, and **Clear** undoes the narrowing. **Next 10** and **Previous 10**
+    page through them.
+  - When Scholar has no list for the case, or is not answering, they come from
+    **CourtListener's** citation graph instead, newest first, with the same
+    controls. The panel says which you are looking at, and offers to try
+    Scholar again.
 - **Recent SCOTUS:** the Supreme Court's latest opinions and opinions relating
   to orders.
 - **Docket** (Supreme Court cases only): the cert-stage and merits-stage
@@ -370,6 +394,22 @@ at the foot of the page that cites them and a running head showing the
 reporter pages on each sheet. The syllabus or headnotes and each separate
 opinion begin on a page of their own. GetCases finds an installed LaTeX by itself.
 
+### A single GetCases.exe (Windows)
+
+With [PyInstaller](https://pyinstaller.org/) (`pip install pyinstaller`), this
+command, run in the GetCases folder, builds `dist\GetCases.exe`: one file, no
+console window, carrying the saved opinions and every index GetCases reads.
+
+```bash
+python -m PyInstaller --noconfirm --onefile --noconsole --name GetCases --add-data "data/opinions.jsonl;data" --add-data "person_names.tsv.gz;." --add-data "eng_rep_index.tsv.gz;." --add-data "eng_rep_nominate.tsv.gz;." --add-data "sec_index.tsv.gz;." --add-data "crecb_index.tsv.gz;." --add-data "debates_index.tsv.gz;." courtlistener_gui.py
+```
+
+The .exe runs in the background, with the scales in the taskbar. The first
+time it starts it creates a `data` folder beside itself, holding a copy of the
+opinions it carries, and from then on saves opinions there. Keep the folder
+with the .exe if you move it. A rebuilt .exe goes on using a `data` folder it
+finds rather than its own copy. To update a packaged GetCases, build it again.
+
 ---
 
 ## Where the material comes from
@@ -455,6 +495,7 @@ automatic matching that can go wrong. In particular:
 | --- | --- |
 | No Tk / `No module named tkinter` | Install Python's Tk (see [Install Python](#1-install-python)) |
 | Ctrl+Space does nothing | Install `pynput`; on macOS, allow the terminal (or Python) under **System Settings → Privacy & Security → Accessibility** and **Input Monitoring** |
+| The scales aren't in the taskbar (Windows) | Windows 11 tucks new icons behind the **^** arrow. Drag the scales out onto the taskbar, or turn on Python (or your GetCases `.exe`) under **Settings → Personalization → Taskbar → Other system tray icons** |
 | Scans open in the browser instead of the app | Install `pypdfium2` and `Pillow` |
 | "CourtListener" results missing | Add your API token under **Settings → API Token…** |
 | Google Scholar returns nothing, or says it is blocked | Wait a few minutes, or set up [Firefox and selenium](#firefox) |

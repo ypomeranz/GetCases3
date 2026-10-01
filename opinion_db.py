@@ -41,7 +41,9 @@ import html as _html
 import json
 import os
 import re
+import shutil
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
@@ -325,8 +327,30 @@ def decision_date_from_blocks(blocks: list) -> str:
     )
     if bracketed:
         return _iso_full_date(bracketed.group(1))
-    dates = list(_FULL_DATE_RE.finditer(centers))
+    # A bare date is the decision's unless its line says it is another
+    # event's: "October 22, 1975." is Brown v. United States, 524 F.2d 693,
+    # decided; "As Amended January 9, 1976." beneath it is not — the year a
+    # citation gives is the decision's (rule 10.5).
+    dates = [m for m in _FULL_DATE_RE.finditer(centers)
+             if not _NOT_DECISION_RE.search(_date_lead_in(centers, m.start()))]
     return _iso_full_date(dates[-1].group(0)) if dates else ""
+
+
+#: What a date in an opinion's front matter is when it is not the decision's:
+#: the argument or submission before it, an amendment, correction or
+#: rehearing after it, the Supreme Court's later word on it.
+_NOT_DECISION_RE = re.compile(
+    r"\b(?:argued|reargued|submitted|heard|amended|modified|corrected|"
+    r"rehearing|reh'g|certiorari|cert\.|withdrawn|superseded|vacated)",
+    re.IGNORECASE,
+)
+
+
+def _date_lead_in(text: str, at: int) -> str:
+    """The words before the date at *at* in the front matter, back to the
+    start of its line or sentence: "As Amended " before "January 9,
+    1976"."""
+    return re.split(r"\s{2,}|[.;:]\s", text[:at])[-1]
 
 
 def _header_dockets(blocks: list) -> list[str]:
@@ -599,7 +623,28 @@ def _default_dir() -> Path:
     env = os.environ.get("GETCASES_DB_DIR")
     if env:
         return Path(env)
+    if getattr(sys, "frozen", False):
+        return _packaged_dir()
     return Path(__file__).resolve().parent / "data"
+
+
+def _packaged_dir() -> Path:
+    """A packaged GetCases (PyInstaller): ``data`` beside the .exe.
+
+    A one-file build runs from a folder it unpacks afresh at every start and
+    deletes at exit, so the database cannot live beside this module there:
+    every opinion saved would be gone at the next start.  The database the
+    build carries fills the folder the first time."""
+    target = Path(sys.executable).resolve().parent / "data"
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / "data" / "opinions.jsonl"
+    if not (target / "opinions.jsonl").exists() and bundled.is_file():
+        target.mkdir(parents=True, exist_ok=True)
+        # Copied under another name and swapped in, so a start cut short
+        # never leaves half a database to be taken for the whole.
+        scratch = target / "opinions.jsonl.unpacking"
+        shutil.copyfile(bundled, scratch)
+        os.replace(scratch, target / "opinions.jsonl")
+    return target
 
 
 def data_dir() -> Path:

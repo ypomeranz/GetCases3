@@ -351,6 +351,7 @@ VIEWER_NAMES = [
     "_scroll_key", "_page_key", "_find_open", "_find_step", "_drop_reader",
     "_show_zoom",
     "_save_label", "_print_label", "_save", "_print", "_on_destroy", "alive",
+    "citation_edited",
 ]
 
 VIEWER_NS = _load(
@@ -387,6 +388,7 @@ class _Viewer:
             setattr(self, "saved_pane", pane))
         self._on_print = self.printed.append
         self._on_close = self.closed_with.append
+        self._on_citation_edited = None
         if build_text == "reader":
             def build(host):
                 reader = _FakeReader(host)
