@@ -766,6 +766,14 @@ class _EmbeddedCaseHost(ttk.Frame):
         if callable(notify):
             notify()
 
+    def citation_changed(self) -> None:
+        """The reader built in here has worked out more of its citation — the
+        court, or the year — since it was built.  A window that names itself
+        after the scan beside it restates its name from it; one that takes
+        the reader's own title (``retitles``) has had it already."""
+        if not self._retitles:
+            self.citation_edited()
+
     def title(self, value=None):
         if value is None:
             return self._case_title
@@ -11412,7 +11420,8 @@ class CourtListenerGUI:
         def described(record: dict) -> None:
             """The text has loaded: name the window properly."""
             named["record"] = record
-            self._post_root(lambda: self._retitle_cited_pdf(named))
+            self._post_root(lambda: (self._retitle_cited_pdf(named),
+                                     self._learn_cited_court(named)))
 
         def page_ready(page_url: str, html: str) -> None:
             """Keep the opinion page itself: the viewer's T button renders it
@@ -11429,7 +11438,8 @@ class CourtListenerGUI:
             clicked citation cannot supply on its own."""
             named["text_source"] = source
             named["record"] = _cl_text_record(source)
-            self._post_root(lambda: self._retitle_cited_pdf(named))
+            self._post_root(lambda: (self._retitle_cited_pdf(named),
+                                     self._learn_cited_court(named)))
 
         def onward() -> tk.Misc:
             """Where a citation followed *out of this window* starts from —
@@ -11587,6 +11597,51 @@ class CourtListenerGUI:
                  or _bluebook_display_name(item))
         if title:
             window.set_title(title)
+
+    def _learn_cited_court(self, named: dict) -> None:
+        """Ask CourtListener which court decided a cited case whose record
+        names none — a court its opinion's header does not name in a form
+        the header reader knows — and name the window with it, as the
+        opinion beside the scan does for its own citation (see
+        _ScholarTextWindow._enrich_citation).  Asked once, in the
+        background, and only where the citation needs a court: never for
+        the Supreme Court's reporters, nor without an API token."""
+        record = named.get("record") or {}
+        cite = str(named.get("cite") or "").split("@", 1)[0].strip()
+        if (record.get("court") or named.get("court_asked") or not cite
+                or named.get("orders_page")):
+            return
+        m = _CITE_PARSE_RE.match(cite)
+        if m and m.group(2).strip() in _SCOTUS_REPORTERS:
+            return
+        if not self._token_var.get().strip():
+            return
+        client = self._get_client()
+        if client is None:
+            return
+        named["court_asked"] = True
+        cl_item = dict(named.get("cl_item") or {})
+        name = str(record.get("name") or named.get("name") or "")
+
+        def run() -> None:
+            try:
+                court_id, _year = _ScholarTextWindow._cl_court_and_year(
+                    client, cite, cl_item, name=name)
+            except Exception as exc:
+                print(f"[cite-pdf] asking CourtListener for the court "
+                      f"failed: {exc}")
+                return
+            if court_id:
+                self._post_root(take, court_id.strip().lower())
+
+        def take(court_id: str) -> None:
+            current = named.get("record") or {}
+            if current.get("court"):
+                return              # the record learned it meanwhile
+            named["record"] = {**current, "court": court_id}
+            self._retitle_cited_pdf(named)
+
+        threading.Thread(target=run, daemon=True).start()
 
     @staticmethod
     def _cited_citation_override(named: dict, item: dict) -> str:
@@ -11918,6 +11973,14 @@ class CourtListenerGUI:
             "court_id": court,
             "court": court,
         }
+        # Once the opinion is open beside the scan, its citation — the one
+        # Copy with citation gives — says what the record could not: a court
+        # looked up since, the year it settled on.
+        window = named.get("window")
+        reader = getattr(window, "_reader", None) if window is not None else None
+        facts = getattr(reader, "_with_citation_facts", None)
+        if callable(facts):
+            item = facts(item)
         # Filed under the pages it actually prints, whichever reporter that
         # is: the U.S. cite among those known for a U.S. Reports scan, and for
         # any other the reporter its own file names.
@@ -16314,6 +16377,25 @@ def _classify_state_court(text: str, courts: list[tuple[str, str, str]]) -> str:
     return high
 
 
+#: Federal courts outside the circuits, the districts and the states, as a
+#: Scholar header names them, by CourtListener id — courts whose citations
+#: still name them: "Brown v. United States, 524 F.2d 693 (Ct. Cl. 1975)".
+#: A header line must open with the name; one that only mentions the court
+#: ("On appeal from the United States Court of Claims") is about another.
+_SCHOLAR_FEDERAL_COURTS = (
+    ("united states court of federal claims", "uscfc"),
+    ("united states court of claims", "cc"),
+    ("court of claims of the united states", "cc"),
+    ("united states court of international trade", "cit"),
+    ("united states customs court", "cusc"),
+    ("united states court of customs and patent appeals", "ccpa"),
+    ("united states tax court", "tax"),
+    ("tax court of the united states", "tax"),
+    ("united states court of appeals for veterans claims", "cavet"),
+    ("united states court of appeals for the armed forces", "caaf"),
+)
+
+
 def _scholar_court_id(blocks) -> str:
     """CourtListener court ID inferred from the Scholar header's court line
     (used when a case was opened from Scholar with no CourtListener record)."""
@@ -16325,6 +16407,9 @@ def _scholar_court_id(blocks) -> str:
             continue
         if "supreme court" in t and "united states" in t:
             return "scotus"
+        for court_name, court_id in _SCHOLAR_FEDERAL_COURTS:
+            if t.startswith(court_name):
+                return court_id
         m = re.search(
             r"court of appeals,? (?:for the )?(\w+(?: of columbia)?) circuit", t
         )
@@ -23365,8 +23450,10 @@ class _FloatingPdfWindow:
     # ------------------------------------------------------------------
 
     def citation_edited(self) -> None:
-        """The case's citation was edited in the text side: the window is
-        named anew — by the edit, or, with the edit undone, as before."""
+        """The case's citation was edited in the text side, or the opinion
+        there has worked more of it out (the court, the year): the window is
+        named anew — by the edit, or, with none, by the citation as it now
+        stands."""
         if self._on_citation_edited is not None:
             try:
                 self._on_citation_edited()
@@ -23657,6 +23744,10 @@ class _FloatingPdfWindow:
             host.destroy()
             return None
         self._text_host, self._reader = host, reader
+        # The opinion reads its own citation off the page as it is built — a
+        # court, a year the record behind the title lacked: the title follows
+        # it, as it follows what the opinion looks up later.
+        self.citation_edited()
         return reader
 
     def _show_text(self) -> None:
@@ -28614,6 +28705,10 @@ class _ScholarTextWindow:
         return {
             "name": name, "cite": cite, "display_cite": display_cite,
             "court": court_abbr, "year": year,
+            # The court "court" was abbreviated from, for a title cited to
+            # another reporter, whose parenthetical may need less of it
+            # (see _with_citation_facts); "" where there was no id.
+            "court_id": "" if is_scotus else court_id,
             "docket_cite": docket_cite, "docket_paren": docket_paren,
             "omit_parenthetical": omit_parenthetical, "pin_kind": pin_kind,
             "_caption_case_unresolved": unresolved_caption_case,
@@ -28975,8 +29070,13 @@ class _ScholarTextWindow:
             if (new_court != bb.get("court", "")
                     or new_year != bb.get("year", "")
                     or new_name != bb.get("name", "")):
+                # The court's id goes with its abbreviation, where one was
+                # learned: a title cited to another reporter re-derives the
+                # court from it (see _with_citation_facts).
+                learned = (court_id,) if need_court and court_id else ()
                 self._post(
-                    self._apply_enriched_citation, new_court, new_year, new_name
+                    self._apply_enriched_citation, new_court, new_year,
+                    new_name, *learned,
                 )
 
         threading.Thread(target=run, daemon=True).start()
@@ -29011,11 +29111,13 @@ class _ScholarTextWindow:
         return court_id, year
 
     def _apply_enriched_citation(
-        self, court: str, year: str, name: str = ""
+        self, court: str, year: str, name: str = "", court_id: str = ""
     ) -> None:
         old_history_key = self._history_key()
         self._bb["court"] = court
         self._bb["year"] = year
+        if court_id:
+            self._bb["court_id"] = court_id.strip().lower()
         # A user edit always wins, including over a metadata request that began
         # before the edit dialog was saved.
         if name and not getattr(self, "_base_citation_override", ""):
@@ -29031,6 +29133,17 @@ class _ScholarTextWindow:
                     app.retitle_case_view(old_history_key, title)
         except tk.TclError:
             pass
+        self._citation_changed()
+
+    def _citation_changed(self) -> None:
+        """Say the citation has changed to the windows that name themselves
+        after this case's scan — this window's own scan viewer, and the
+        viewer this opinion is built into — so their titles agree with the
+        citation Copy with citation gives (see _with_citation_facts)."""
+        self._retitle_pdf_float()
+        host = self._win
+        if isinstance(host, _EmbeddedCaseHost):
+            host.citation_changed()
 
     def _citation_name(self) -> str:
         """The party-name prefix of the Bluebook citation — the portion set
@@ -29545,20 +29658,43 @@ class _ScholarTextWindow:
         """
         bb = self._bb
         if self._item:
-            name = bb.get("name") or ""
-            if not name:
-                return self._item
             item = dict(self._item)
-            item["caseName"] = name
-            item.pop("case_name", None)
-            return item
+            name = bb.get("name") or ""
+            if name:
+                item["caseName"] = name
+                item.pop("case_name", None)
+            return self._with_citation_facts(item)
         return {
             "caseName": bb["name"],
             "citation": [bb["cite"]] if bb["cite"] else [],
             "dateFiled": f"{bb['year']}-01-01" if bb["year"] else "",
-            "court_id": "scotus" if not bb["court"] else "",
+            "court_id": (bb.get("court_id")
+                         or ("scotus" if not bb["court"] else "")),
             "court": bb["court"],
         }
+
+    def _with_citation_facts(self, item: dict) -> dict:
+        """*item* with the court and year this case's citation gives — the
+        ones Copy with citation uses, read off the opinion or looked up since
+        (see _enrich_citation) — where they say more than the item does: a
+        court it names none of, a year other than its own (a search result
+        can carry a rehearing's date, or an amendment's, as the decision's).
+        A window or file named from the item then agrees with the citation
+        copied from it.  The court goes by the id it was abbreviated from,
+        where there is one, so a title cited to another reporter takes only
+        what that reporter does not already say (rule 10.4)."""
+        bb = self._bb
+        out = dict(item)
+        year = str(bb.get("year") or "")
+        date = str(out.get("dateFiled") or out.get("date_filed") or "")
+        if year and date[:4] != year:
+            out["dateFiled"] = f"{year}-01-01"
+            out.pop("date_filed", None)
+        court = str(bb.get("court") or "")
+        if court and not (out.get("court_id") or out.get("court")):
+            out["court_id"] = str(bb.get("court_id") or "") or court
+            out["court"] = court
+        return out
 
     def _pdf_filename_item(self) -> dict:
         """:meth:`_filename_item` for the PDF on screen, which is filed under

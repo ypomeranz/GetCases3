@@ -327,8 +327,30 @@ def decision_date_from_blocks(blocks: list) -> str:
     )
     if bracketed:
         return _iso_full_date(bracketed.group(1))
-    dates = list(_FULL_DATE_RE.finditer(centers))
+    # A bare date is the decision's unless its line says it is another
+    # event's: "October 22, 1975." is Brown v. United States, 524 F.2d 693,
+    # decided; "As Amended January 9, 1976." beneath it is not — the year a
+    # citation gives is the decision's (rule 10.5).
+    dates = [m for m in _FULL_DATE_RE.finditer(centers)
+             if not _NOT_DECISION_RE.search(_date_lead_in(centers, m.start()))]
     return _iso_full_date(dates[-1].group(0)) if dates else ""
+
+
+#: What a date in an opinion's front matter is when it is not the decision's:
+#: the argument or submission before it, an amendment, correction or
+#: rehearing after it, the Supreme Court's later word on it.
+_NOT_DECISION_RE = re.compile(
+    r"\b(?:argued|reargued|submitted|heard|amended|modified|corrected|"
+    r"rehearing|reh'g|certiorari|cert\.|withdrawn|superseded|vacated)",
+    re.IGNORECASE,
+)
+
+
+def _date_lead_in(text: str, at: int) -> str:
+    """The words before the date at *at* in the front matter, back to the
+    start of its line or sentence: "As Amended " before "January 9,
+    1976"."""
+    return re.split(r"\s{2,}|[.;:]\s", text[:at])[-1]
 
 
 def _header_dockets(blocks: list) -> list[str]:

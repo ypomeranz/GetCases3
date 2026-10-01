@@ -1337,7 +1337,7 @@ DETAILS_NAMES = ["_details_shortcut", "details_showing", "toggle_details",
                  "_unpin_body_width", "_details_growth", "_details_shrink",
                  "_when_resized", "_build_reader", "adopt_reader", "has_scan",
                  "has_text_side", "showing_text", "_details_label",
-                 "_mark_details_btn"]
+                 "_mark_details_btn", "citation_edited"]
 
 
 class _Packable:
@@ -1590,6 +1590,7 @@ class _DetailsViewer:
         self._on_build_text = None if reader is None else (
             lambda host: (self.adopt_reader(self.reader), self.reader)[1])
         self._reader = self.reader if reader == "ready" else None
+        self._on_citation_edited = None
         for name in DETAILS_NAMES:
             setattr(self, name, DETAILS_NS[name].__get__(self))
 
