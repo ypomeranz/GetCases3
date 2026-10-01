@@ -385,7 +385,7 @@ opinion begin on a page of their own. GetCases finds an installed LaTeX by itsel
 | [SCOTUSblog](https://www.scotusblog.com/) | Supreme Court docket briefs |
 | [Office of the Law Revision Counsel](https://uscode.house.gov/) | The U.S. Code |
 | [eCFR](https://www.ecfr.gov/) | The Code of Federal Regulations |
-| [Cornell LII](https://www.law.cornell.edu/) | The Federal Rules (Civil, Criminal, Evidence, Appellate, Bankruptcy) |
+| [Cornell LII](https://www.law.cornell.edu/) | The Federal Rules (Civil, Criminal, Evidence, Appellate, Bankruptcy); the U.S. Code while uscode.house.gov is down |
 | State legislatures | California and Florida statutes in the app; other states' statute citations open on the state's official site |
 | [Congress.gov](https://www.congress.gov/), the [Internet Archive](https://archive.org/), [HathiTrust](https://www.hathitrust.org/) | The Annals of Congress, Register of Debates and Congressional Globe; older reports and documents |
 | [HathiTrust](https://www.hathitrust.org/) | The SEC's Decisions and Reports (1934 to 2006), opened at the cited page; the page index was built from the [HathiTrust Research Center](https://analytics.hathitrust.org/)'s Extracted Features |

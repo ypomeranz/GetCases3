@@ -1615,6 +1615,9 @@ class _SavedStatuteDoc:
         ]
         self.site_formatting = bool(data.get("site_formatting", False))
         self.url = str(data.get("url", ""))
+        # the address its bookmark is filed under, when not its url (see
+        # _StatuteWindow._bookmark_descriptor)
+        self.key_url = str(data.get("key_url", "") or "")
         self.title = str(data.get("title", ""))
         self.set_key = data.get("set_key")
         self.container = None
@@ -37498,6 +37501,7 @@ class _StatuteWindow:
                     getattr(doc, "site_formatting", False),
                 ),
                 "url": doc.url,
+                "key_url": getattr(doc, "key_url", ""),
                 "kind": doc.kind,
                 "title": getattr(doc, "title", ""),
                 "set_key": getattr(doc, "set_key", None),
@@ -37510,8 +37514,10 @@ class _StatuteWindow:
             }
         except Exception:
             return None
+        # A U.S. Code section is filed under its OLRC address even when its
+        # text came from Cornell's copy, so it is one bookmark either way.
         return {
-            "key": f"statute:{doc.url}",
+            "key": f"statute:{getattr(doc, 'key_url', '') or doc.url}",
             "label": doc.label,
             "noun": self._bookmark_noun(),
             "payload": {"type": "statute", "doc": local},
@@ -37533,7 +37539,9 @@ class _StatuteWindow:
         app = self._app
         if app is not None and hasattr(app, "touch_bookmark"):
             try:
-                app.touch_bookmark(f"statute:{self._doc.url}")
+                doc = self._doc
+                app.touch_bookmark(
+                    f"statute:{getattr(doc, 'key_url', '') or doc.url}")
             except Exception:
                 pass
 
@@ -37953,7 +37961,8 @@ class _StatuteWindow:
             txt.insert("end", "More follows — open this part of the Code "
                               "in your browser for the rest.\n", ("credit",))
         if not unit.entries:
-            txt.insert("end", "uscode.house.gov lists no contents for this "
+            host = getattr(unit, "host", "uscode.house.gov")
+            txt.insert("end", f"{host} lists no contents for this "
                               "part of the Code.\n", ("credit",))
         txt.config(state="disabled")
         self._finder.refresh()

@@ -307,9 +307,15 @@ class LoadUnitTests(unittest.TestCase):
         self.addCleanup(us_code._unit_cache.clear)
 
     def fetch_from(self, pages):
+        # The OLRC's page for an id it does not have: its viewer's template,
+        # and nothing in it.
+        missing = ('<html><head><link type="text/css" rel="stylesheet" '
+                   'href="/javax.faces.resource/viewLayout.css.xhtml?ln=css"'
+                   " /></head><body>no such page</body></html>")
+
         def fetch(url, cap=0):
             granule = url.split("USC-prelim-")[1].split("&")[0]
-            return pages.get(granule, "<html>no such page</html>")
+            return pages.get(granule, missing)
         return patch("us_code._fetch_unit_top", side_effect=fetch)
 
     def test_a_unit_without_a_table_is_listed_in_its_parent(self):

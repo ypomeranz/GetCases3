@@ -49,8 +49,11 @@ class UsCodeTests(unittest.TestCase):
             self._load(lambda url, **kw: _Response(404))
 
     def test_a_page_with_no_section_on_it(self):
+        # the OLRC's viewer (its template), with no section in it
+        page = ('<html><head><link rel="stylesheet" href="/javax.faces.'
+                'resource/usc.css.xhtml?ln=css" /></head><body></body></html>')
         with self.assertRaises(us_code.SectionNotFound):
-            self._load(lambda url, **kw: _Response(200, "<html></html>"))
+            self._load(lambda url, **kw: _Response(200, page))
 
     def test_a_site_that_fails_is_not_a_missing_section(self):
         def down(url, **kw):
