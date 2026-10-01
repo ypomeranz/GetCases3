@@ -15589,10 +15589,10 @@ class _CourtPickerDialog:
     Checkbox-tree dialog for choosing which courts to search.
 
     The tree mirrors ``court_catalog.CATALOG``: Federal (Supreme Court,
-    Courts of Appeals, District Courts, Specialized) and State (each state
-    with its appellate courts).  Clicking a group toggles everything under
-    it; groups show ☑ / ☐ / ◪ for all / none / some selected.  An empty
-    selection means "all courts" (no filter).
+    Courts of Appeals, District Courts — grouped by state — and Specialized)
+    and State (each state with its appellate courts).  Clicking a group
+    toggles everything under it; groups show ☑ / ☐ / ◪ for all / none /
+    some selected.  An empty selection means "all courts" (no filter).
     """
 
     _GLYPH_ALL, _GLYPH_NONE, _GLYPH_SOME = "☑", "☐", "◪"

@@ -617,47 +617,6 @@ for _state, _courts in STATE_COURTS:
     for _cid, _abbr, _label in _courts:
         COURT_BLUEBOOK[_cid] = _abbr
 
-# --- Picker tree --------------------------------------------------------------
-# Group: (label, [children]); leaf: (court_id, label).
-
-CATALOG: list[tuple] = [
-    ("Federal", [
-        ("scotus", "Supreme Court of the United States"),
-        ("Courts of Appeals", [
-            (cid, f"{label} ({CIRCUIT_COURTS[cid]})") for cid, label in _CIRCUIT_LABELS
-        ]),
-        ("District Courts", [
-            (cid, abbr) for cid, abbr in sorted(
-                DISTRICT_COURTS.items(), key=lambda kv: kv[1]
-            )
-        ]),
-        ("Specialized", [
-            (cid, label) for cid, label in _SPECIAL_LABELS
-        ]),
-    ]),
-    ("State", [
-        (state, [(cid, f"{label} ({abbr})") for cid, abbr, label in courts])
-        for state, courts in STATE_COURTS
-    ]),
-]
-
-
-def all_court_ids() -> set[str]:
-    """Every court ID present in the picker catalog."""
-    ids: set[str] = set()
-
-    def walk(nodes) -> None:
-        for node in nodes:
-            label_or_id, payload = node
-            if isinstance(payload, list):
-                walk(payload)
-            else:
-                ids.add(label_or_id)
-
-    walk(CATALOG)
-    return ids
-
-
 # --- Bluebook abbreviation from a court's full name ---------------------------
 # CourtListener knows thousands of courts; COURT_BLUEBOOK maps only the ids
 # the picker offers (plus EXTRA_BLUEBOOK).  For everything else the GUI falls
@@ -887,6 +846,79 @@ def _state_of_bluebook_abbr(abbr: str) -> str:
         if a == sabbr or a.startswith(sabbr + " "):
             return _STATE_BY_BLUEBOOK[sabbr]
     return ""
+
+
+# --- Picker tree --------------------------------------------------------------
+# Group: (label, [children]); leaf: (court_id, label).
+
+#: The states as the picker's State branch names them, by their Bluebook
+#: abbreviation — so a state's district courts are filed under the same name.
+_STATE_NAME_BY_ABBR: dict[str, str] = {
+    STATE_BLUEBOOK[name.lower()]: name
+    for name, _courts in STATE_COURTS if name.lower() in STATE_BLUEBOOK
+}
+
+# The district a district court's abbreviation opens with: "M.D." in "M.D.
+# Ala.", "S.D." in "S.D.N.Y.", the bare "D." in "D. Alaska" and "D.D.C.".
+_DISTRICT_PREFIX_RE = re.compile(r"^(?:[NSEWMC]\.)?D\.\s*")
+
+
+def _district_state(abbr: str) -> str:
+    """The state or territory a federal district court sits in, from its
+    Bluebook abbreviation — "M.D. Ala." → "Alabama", "S.D.N.Y." → "New
+    York", "D.D.C." → "District of Columbia", "D.N. Mar. I." → "Northern
+    Mariana Islands" — or "" when the abbreviation names none."""
+    place = _DISTRICT_PREFIX_RE.sub("", (abbr or "").strip(), count=1)
+    if place in _STATE_NAME_BY_ABBR:
+        return _STATE_NAME_BY_ABBR[place]
+    name = _STATE_BY_BLUEBOOK.get(place, "")
+    return " ".join(word if word in ("of", "the") else word[:1].upper()
+                    + word[1:] for word in name.split())
+
+
+def _district_courts_by_state() -> list[tuple]:
+    """The district courts, a group to each state or territory in
+    alphabetical order, its districts in order within it."""
+    by_state: dict[str, list[tuple[str, str]]] = {}
+    for cid, abbr in sorted(DISTRICT_COURTS.items(), key=lambda kv: kv[1]):
+        by_state.setdefault(_district_state(abbr) or "Other", []).append(
+            (cid, abbr))
+    return sorted(by_state.items(),
+                  key=lambda group: (group[0] == "Other", group[0]))
+
+
+CATALOG: list[tuple] = [
+    ("Federal", [
+        ("scotus", "Supreme Court of the United States"),
+        ("Courts of Appeals", [
+            (cid, f"{label} ({CIRCUIT_COURTS[cid]})") for cid, label in _CIRCUIT_LABELS
+        ]),
+        ("District Courts", _district_courts_by_state()),
+        ("Specialized", [
+            (cid, label) for cid, label in _SPECIAL_LABELS
+        ]),
+    ]),
+    ("State", [
+        (state, [(cid, f"{label} ({abbr})") for cid, abbr, label in courts])
+        for state, courts in STATE_COURTS
+    ]),
+]
+
+
+def all_court_ids() -> set[str]:
+    """Every court ID present in the picker catalog."""
+    ids: set[str] = set()
+
+    def walk(nodes) -> None:
+        for node in nodes:
+            label_or_id, payload = node
+            if isinstance(payload, list):
+                walk(payload)
+            else:
+                ids.add(label_or_id)
+
+    walk(CATALOG)
+    return ids
 
 
 #: Court id -> the state whose judiciary it belongs to.  Built from the
