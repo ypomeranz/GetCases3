@@ -481,6 +481,8 @@ class DetectLinksTests(unittest.TestCase):
 
 
 SRC = pathlib.Path(courtlistener_gui.__file__).read_text(encoding="utf-8")
+LINKS_SRC = (pathlib.Path(courtlistener_gui.__file__).with_name("browser_links.py")
+             .read_text(encoding="utf-8"))
 
 
 class GuiWiringTests(unittest.TestCase):
@@ -488,7 +490,10 @@ class GuiWiringTests(unittest.TestCase):
         # The text window, briefs and scans (via the statute dispatcher), the
         # statute viewer's cross-references, the browser fallback, Spotlight.
         self.assertGreaterEqual(SRC.count("_open_leghist("), 5)
-        self.assertIn('elif kind == "leghist":\n        url = leghist_fetch.browser_url(value)', SRC)
+        # The browser fallback is browser_links', shared with the extension.
+        self.assertIn("url = browser_links.browser_url(action, text)", SRC)
+        self.assertIn('if kind == "leghist":\n        return leghist_fetch.browser_url(value)',
+                      LINKS_SRC)
         self.assertIn("legislative_history.parse_query(query)", SRC)
 
     def test_history_and_bookmarks_reopen_it(self):

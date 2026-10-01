@@ -2759,9 +2759,15 @@ def detect_links(
             continue
         efed_spans.append((m.start(), m.end()))
         matches.append((m.start(), m.end(), "cite", early_fed_cite_text(m)))
+    # The Code and the C.F.R. as well: with its section written out, "42
+    # U.S.C. Section 1983" has a reporter's shape too ("U.S.C. Section",
+    # page 1983), and a Scholar lookup by it finds nothing.
+    code_spans = [(m.start(), m.end()) for rx in (us_code.USC_CITE_RE,
+                                                  ecfr.CFR_CITE_RE)
+                  for m in rx.finditer(text)]
     claimed_spans = (
         engrep_spans + recap_spans + fedcas_spans + efed_spans
-        + stat_spans + fr_spans + leghist_spans + sec_spans
+        + stat_spans + fr_spans + leghist_spans + sec_spans + code_spans
     )
     for m in case_cites:
         if any(m.start() < e and s < m.end() for s, e in claimed_spans):

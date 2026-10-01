@@ -1,0 +1,41 @@
+/* Citations GetCases linked: the page's own type, with a dotted underline in
+   the colour the app tints them by (cases blue, statutes green, the
+   Constitution amber).  Doubled class and !important because pages style
+   their <a> elements freely. */
+a.getcases-cite.getcases-cite {
+  color: inherit !important;
+  font: inherit !important;
+  display: inline !important;
+  background: none !important;
+  border: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-decoration-line: underline !important;
+  text-decoration-style: dotted !important;
+  text-decoration-thickness: 1.5px !important;
+  text-underline-offset: 2px !important;
+  text-decoration-color: #2563eb !important;
+  cursor: pointer !important;
+  border-radius: 2px !important;
+}
+a.getcases-cite.getcases-statute {
+  text-decoration-color: #15803d !important;
+}
+a.getcases-cite.getcases-const {
+  text-decoration-color: #b45309 !important;
+}
+a.getcases-cite.getcases-cite:hover {
+  text-decoration-style: solid !important;
+  background: rgba(37, 99, 235, 0.12) !important;
+}
+a.getcases-cite.getcases-statute:hover {
+  background: rgba(21, 128, 61, 0.12) !important;
+}
+a.getcases-cite.getcases-const:hover {
+  background: rgba(180, 83, 9, 0.12) !important;
+}
+@media print {
+  a.getcases-cite.getcases-cite {
+    text-decoration: none !important;
+  }
+}

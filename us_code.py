@@ -13,6 +13,9 @@ carries a CSS class encoding its role and indentation depth
 (``statutory-body``, ``statutory-body-1em``, …, ``subsection-head``).
 ``parse_section()`` walks those markers; the GUI renders the resulting
 (kind, indent, text) stream with bolding and indentation.
+
+When the OLRC's site is down, a section is read from Cornell's Legal
+Information Institute instead (see "Cornell's copy" below).
 """
 
 from __future__ import annotations
@@ -20,7 +23,10 @@ from __future__ import annotations
 import html as _html
 import re
 import threading
+import time
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
+from urllib.parse import unquote
 
 # ---------------------------------------------------------------------------
 # Citation recognition
@@ -30,8 +36,15 @@ from dataclasses import dataclass, field
 # "15 U.S.C.A. § 78j(b)", "42 U.S.C. § 2000e-2(a)", "5 U.S.C. 552".
 # A parenthesized subdivision is 1-4 alphanumerics but never 4 digits, so a
 # trailing year parenthetical "(1982)" is not swallowed.
+#
+# Off the printed page the Code is written other ways too, and web pages use
+# them all: without the periods ("42 USC § 1983", "5 USC 552", the way
+# "29 CFR 1614.105" goes for the C.F.R.), Lexis's annotated "U.S.C.S.", and
+# "42 U.S. Code § 1983" (Cornell's and Wikipedia's style).  The unpunctuated
+# form is matched in capitals only, so prose about the university is not.
 USC_CITE_RE = re.compile(
-    r"\b(\d{1,2})\s+U\.\s?S\.\s?C\.?\s?(?:A\.)?\s*"
+    r"\b(\d{1,2})\s+"
+    r"(?:U\.\s?S\.\s?C\.?\s?(?:[AS]\.)?|USC[AS]?\b\.?|U\.\s?S\.\s?Code\b)\s*"
     r"(?:§§?|[Ss]ec(?:tions?|s)?\.?)?\s*"
     r"(\d+[a-zA-Z0-9]*(?:[-–—]\d+[a-zA-Z0-9]*)?)"
     r"((?:\s?\((?:\d{1,3}|[ivxIVX]{2,4}|[a-zA-Z]{1,3})\))*)"
@@ -179,15 +192,28 @@ class UscSection:
     # bar names them: ("title42", "TITLE 42"), ("title42-chapter21",
     # "CHAPTER 21") … — see load_unit
     crumbs: list[tuple[str, str]] = field(default_factory=list)
+    # where the text was read: "olrc", or "lii" for Cornell's copy, read
+    # while the OLRC's site was down
+    source: str = "olrc"
+    # Cornell's page names the sections before and after it outright
+    adjacent: tuple = (None, None)
 
     @property
     def kind(self) -> str:
         return "usc"
 
+    @property
+    def key_url(self) -> str:
+        """The section's address at the OLRC, wherever its text was read:
+        what a bookmark of it is filed under."""
+        return section_url(self.title, self.section)
+
     def neighbors(self) -> tuple[tuple[str, str] | None,
                                  tuple[str, str] | None]:
         """Adjacent sections, from the container's table of sections
         (fetched lazily and cached).  Failures yield (None, None)."""
+        if self.source == "lii":
+            return self.adjacent
         if not self.container:
             print(f"[usc-nav] no container breadcrumb found for "
                   f"§ {self.section}")
@@ -236,10 +262,15 @@ class UscSection:
 
     @property
     def source_name(self) -> str:
+        if self.source == "lii":
+            return "U.S. Code (Cornell LII)"
         return "U.S. Code (OLRC)"
 
     @property
     def source_note(self) -> str:
+        if self.source == "lii":
+            return ("Cornell LII's copy of the OLRC text "
+                    "(uscode.house.gov was not answering)")
         return "OLRC preliminary edition (current law)"
 
     def bluebook_cite(self, subs: tuple = ()) -> str:
@@ -259,24 +290,80 @@ class SectionNotFound(RuntimeError, LookupError):
     two apart without knowing which source it asked."""
 
 
+def _candidates(section: str) -> list[str]:
+    """The section asked for, then — for a range or hyphenated section the
+    site does not know ("78a-78pp") — the part before the dash."""
+    return [section] + ([section.split("-", 1)[0]] if "-" in section else [])
+
+
+class _OlrcUnavailable(RuntimeError):
+    """The OLRC did not answer with a page of its own."""
+
+
+def _olrc_page(page: str) -> bool:
+    """Whether a page is the OLRC's own, as against the house.gov "Under
+    Maintenance" notice or an error page put up in front of the site.  Every
+    page the OLRC's viewer serves, one saying it has no such section
+    included, loads its stylesheets from /javax.faces.resource/."""
+    return any(mark in page
+               for mark in ("javax.faces", "field-start:", 'class="navigator"'))
+
+
+# After the OLRC fails and Cornell answers, Cornell is asked first for this
+# long: a site that is down tends to stay down a while, and one that hangs
+# would cost every section its full timeout before Cornell was tried.
+_OLRC_REST = 600.0
+_olrc_rest_until = 0.0
+
+
 def load_section(title: str, section: str) -> UscSection:
     """Fetch and parse a section, with an in-memory cache.  For a range or
     hyphenated section that the OLRC does not know ("78a-78pp"), falls back
-    to the part before the dash.  Raises RuntimeError with a readable
-    message on failure."""
+    to the part before the dash.  While the OLRC's site is down, reads
+    Cornell's copy instead.  Raises SectionNotFound when the Code has no
+    such section, RuntimeError with a readable message when neither site
+    answers."""
+    global _olrc_rest_until
     title, section = str(title).strip(), str(section).strip()
     key = (title, section)
     with _cache_lock:
         if key in _cache:
             return _cache[key]
 
+    resting = time.monotonic() < _olrc_rest_until
+    if resting:
+        down = "was not answering a few minutes ago"
+    else:
+        try:
+            doc = _olrc_section(title, section)
+        except _OlrcUnavailable as exc:
+            down = str(exc)
+        else:
+            down = ""
+    if down:
+        try:
+            doc = _lii_section(title, section)
+        except SectionNotFound:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"uscode.house.gov {down}; law.cornell.edu: "
+                               f"{exc}") from exc
+        if not resting:
+            _olrc_rest_until = time.monotonic() + _OLRC_REST
+            print(f"[usc] uscode.house.gov {down}; reading Cornell's copy "
+                  f"for the next {int(_OLRC_REST // 60)} minutes")
+    with _cache_lock:
+        _cache[key] = doc
+    return doc
+
+
+def _olrc_section(title: str, section: str) -> UscSection:
+    """A section from the OLRC.  Raises SectionNotFound when the OLRC says
+    there is no such section, _OlrcUnavailable when it does not answer."""
     import requests
 
-    candidates = [section]
-    if "-" in section:
-        candidates.append(section.split("-", 1)[0])
     last_err = "section not found"
-    for cand in candidates:
+    for cand in _candidates(section):
         url = section_url(title, cand)
         try:
             resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
@@ -285,7 +372,7 @@ def load_section(title: str, section: str) -> UscSection:
                 continue
             resp.raise_for_status()
         except Exception as exc:
-            raise RuntimeError(f"uscode.house.gov: {exc}") from exc
+            raise _OlrcUnavailable(f"failed: {exc}") from exc
         # Decode explicitly: a missing charset in the Content-Type would
         # otherwise turn "§" into "Â§" via requests' Latin-1 fallback
         page = resp.content.decode("utf-8", "replace")
@@ -294,9 +381,10 @@ def load_section(title: str, section: str) -> UscSection:
             doc = UscSection(title=title, section=cand, url=url, paras=paras)
             doc.container = _find_container(page)
             doc.crumbs = page_crumbs(page)[0]
-            with _cache_lock:
-                _cache[key] = doc
             return doc
+        if not _olrc_page(page):
+            raise _OlrcUnavailable("answered with a page that is not the "
+                                   "Code's (down for maintenance?)")
         last_err = f"no text found for {title} U.S.C. § {cand}"
     raise SectionNotFound(f"uscode.house.gov: {last_err}")
 
@@ -463,6 +551,8 @@ class UscUnit:
     entries: list[UnitEntry] = field(default_factory=list)
     # the contents were read from the unit's own text and stopped short
     partial: bool = False
+    # the site the contents were read from
+    host: str = "uscode.house.gov"
 
 
 class UnitNotFound(RuntimeError, LookupError):
@@ -828,11 +918,18 @@ _unit_cache: dict[str, UscUnit] = {}
 def load_unit(granule: str) -> UscUnit:
     """A unit of the Code with its table of contents, cached.  A unit with
     no table of its own is given the part of its parent's that lists it.
-    Raises UnitNotFound when the OLRC has no page by that id."""
+    Raises UnitNotFound when the OLRC has no page by that id.  A unit above
+    a section read from Cornell has a Cornell id ("lii:28/part-VI") and is
+    read from Cornell."""
     granule = str(granule).strip()
     with _cache_lock:
         if granule in _unit_cache:
             return _unit_cache[granule]
+    if granule.startswith(_LII_PREFIX):
+        unit = _lii_unit(granule)
+        with _cache_lock:
+            _unit_cache[granule] = unit
+        return unit
     url = unit_url(granule)
     try:
         page = _fetch_unit_top(url)
@@ -840,6 +937,9 @@ def load_unit(granule: str) -> UscUnit:
         raise RuntimeError(f"uscode.house.gov: {exc}") from exc
     head = _UNIT_HEAD_RE.search(page)
     if head is None:
+        if not _olrc_page(page):
+            raise RuntimeError("uscode.house.gov is not answering (down for "
+                               "maintenance?)")
         raise UnitNotFound(f"uscode.house.gov has no page {granule}")
     crumbs, own = page_crumbs(page)
     heading = _clean(head.group(2))
@@ -874,7 +974,9 @@ def open_unit_entry(entry: UnitEntry, parent: UscUnit) -> UscUnit:
     """The unit a table entry names.  Its page id is the OLRC's usual one
     for its designation; failing that, the designation as printed
     ("subpartII"); failing that, the one the navigation bar of its first
-    section gives it."""
+    section gives it.  Cornell's tables link each unit by its own path."""
+    if entry.granule.startswith(_LII_PREFIX):
+        return load_unit(entry.granule)
     tried: list[str] = []
     for granule in (entry.granule,
                     f"{entry.granule.rsplit(entry.unit_kind, 1)[0]}"
@@ -1135,6 +1237,476 @@ def statute_paths(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Cornell's copy, for when the OLRC's site is down
+#
+# The OLRC takes its site down for maintenance now and then, and house.gov
+# then answers every request with an "Under Maintenance" page — with HTTP
+# 200, so only the page itself shows the site is down.  Cornell's Legal
+# Information Institute republishes the OLRC's releases (its "How current is
+# this?" page names the latest it has, so its copy can trail the OLRC's by
+# a release), one section per page at
+#
+#     https://www.law.cornell.edu/uscode/text/{title}/{section}
+#
+# Its markup keeps the OLRC's XML element names.  A section's items nest as
+# <div class="subsection">, "paragraph" … each with its designation
+# (<span class="num">), heading, "chapeau" (its text before its items),
+# "content", and "continuation" (its text after them).  Then comes the
+# "sourceCredit", and the notes sit on a tab of their own.  Each item is set
+# where the OLRC sets it: one level in from the text of the item it belongs
+# to.  An item with no text of its own before its first item ("(b)" over
+# "(1)") shares that item's line, "(b)(1)", and its items stay at its
+# margin, so statute_paths reads Cornell's copy as it does the OLRC's.
+#
+# A unit above a section is a Cornell page too, listing the units or
+# sections directly under it.  Its id is "lii:" and Cornell's path
+# ("lii:28/part-VI/chapter-153").
+# ---------------------------------------------------------------------------
+
+LII_BASE = "https://www.law.cornell.edu/uscode/text/"
+_LII_PREFIX = "lii:"
+# Cornell answers a script that says what it is.
+_LII_HEADERS = {
+    "User-Agent": "GetCases/1.0 (legal research app)",
+    "Accept": "text/html,application/xhtml+xml",
+}
+
+
+def lii_section_url(title: str, section: str) -> str:
+    return f"{LII_BASE}{title}/{section}"
+
+
+def _lii_section(title: str, section: str) -> UscSection:
+    """A section from Cornell's copy.  Raises SectionNotFound when Cornell
+    has no such section; any other failure propagates."""
+    import requests
+
+    last_err = "section not found"
+    for cand in _candidates(section):
+        url = lii_section_url(title, cand)
+        resp = requests.get(url, headers=_LII_HEADERS, timeout=30)
+        if resp.status_code == 404:
+            last_err = f"no such section {title} U.S.C. § {cand}"
+            continue
+        resp.raise_for_status()
+        page = resp.content.decode("utf-8", "replace")
+        paras = parse_lii_section(page)
+        if paras:
+            return UscSection(
+                title=title, section=cand, url=url, paras=paras,
+                crumbs=lii_crumbs(page)[0], source="lii",
+                adjacent=lii_adjacent(page),
+            )
+        last_err = f"no text found for {title} U.S.C. § {cand}"
+    raise SectionNotFound(f"law.cornell.edu: {last_err}")
+
+
+class _Node:
+    """An element of a page, as _Tree reads it."""
+
+    __slots__ = ("tag", "classes", "children")
+
+    def __init__(self, tag: str, attrs: list) -> None:
+        self.tag = tag
+        self.classes = (dict(attrs).get("class") or "").split()
+        self.children: list = []          # _Nodes and strings, in order
+
+    @property
+    def kind(self) -> str:
+        """The element's first class: "subsection", "num", "chapeau" …"""
+        return self.classes[0] if self.classes else ""
+
+
+_VOID_TAGS = frozenset((
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+))
+
+
+class _Tree(HTMLParser):
+    """A piece of a page as a tree of _Nodes.  An end tag closes the
+    nearest open element of its name, and whatever was left open in it."""
+
+    def __init__(self, fragment: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.root = _Node("root", [])
+        self._open = [self.root]
+        self.feed(fragment)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        node = _Node(tag, attrs)
+        self._open[-1].children.append(node)
+        if tag not in _VOID_TAGS:
+            self._open.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self._open[-1].children.append(_Node(tag, attrs))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self._open) - 1, 0, -1):
+            if self._open[i].tag == tag:
+                del self._open[i:]
+                return
+
+    def handle_data(self, data):
+        self._open[-1].children.append(data)
+
+
+def _find(node: _Node, kind: str) -> _Node | None:
+    """The first element under *node* whose first class is *kind*."""
+    for child in node.children:
+        if isinstance(child, _Node):
+            if child.kind == kind:
+                return child
+            found = _find(child, kind)
+            if found is not None:
+                return found
+    return None
+
+
+_BLOCK_TAGS = frozenset((
+    "address", "article", "blockquote", "br", "dd", "div", "dl", "dt", "h1",
+    "h2", "h3", "h4", "h5", "h6", "hr", "li", "ol", "p", "pre", "section",
+    "table", "tbody", "tfoot", "thead", "ul",
+))
+
+
+def _lii_blocks(node) -> list[str]:
+    """The paragraphs of text in an element: its runs of inline text, split
+    where a block element begins or ends.  A table row is one line, its
+    cells separated by " | "."""
+    out: list[str] = []
+    run: list[str] = []
+
+    def end_run() -> None:
+        text = re.sub(r"\s+", " ", "".join(run)).strip()
+        run.clear()
+        if text:
+            out.append(text.replace("⁄", "/"))   # the ⁄ in "1⁄12"
+
+    def visit(n) -> None:
+        if isinstance(n, str):
+            run.append(n)
+        elif n.tag in ("script", "style"):
+            return
+        elif n.tag == "tr":
+            end_run()
+            cells = [" ".join(_lii_blocks(cell)) for cell in n.children
+                     if isinstance(cell, _Node) and cell.tag in ("td", "th")]
+            row = " | ".join(cell for cell in cells if cell)
+            if row:
+                out.append(row)
+        elif n.tag in _BLOCK_TAGS:
+            end_run()
+            for child in n.children:
+                visit(child)
+            end_run()
+        else:
+            for child in n.children:
+                visit(child)
+
+    visit(node)
+    end_run()
+    return out
+
+
+_LII_LEVELS = frozenset((
+    "subsection", "paragraph", "subparagraph", "clause", "subclause", "item",
+    "subitem", "subsubitem",
+))
+
+
+class _LiiReader:
+    """Reads Cornell's markup into the (kind, indent, text) stream that
+    parse_section makes of the OLRC's page (see above)."""
+
+    def __init__(self) -> None:
+        self.paras: list[tuple[str, int, str]] = []
+        # designations of items with no text of their own yet, which open
+        # the line of the first text inside them: "(b)", "(1)"
+        self._waiting: list[str] = []
+        self._waiting_depth = 0
+
+    def add(self, kind: str, depth: int, text: str) -> None:
+        if self._waiting:
+            text = "".join(self._waiting) + " " + text
+            depth = self._waiting_depth
+            self._waiting = []
+        self.paras.append((kind, min(depth, _MAX_DEPTH), text))
+
+    def items(self, node: _Node, depth: int, body: str, head: str) -> None:
+        """The text and items inside a section or an item, its own text at
+        *depth*.  Its items sit one level in, or at its own margin when
+        nothing of its own comes before the first of them."""
+        inner = depth
+        for child in node.children:
+            if isinstance(child, _Node) and child.kind in _LII_LEVELS:
+                break
+            if isinstance(child, str):
+                if child.strip():
+                    inner = depth + 1
+                    break
+            elif child.kind != "num" and _lii_blocks(child):
+                inner = depth + 1
+                break
+        for child in node.children:
+            if isinstance(child, str):
+                text = re.sub(r"\s+", " ", child).strip()
+                if text:
+                    self.add(body, depth, text)
+            elif child.kind in ("num", "heading"):
+                continue            # the item's own, read by item()
+            elif child.kind in _LII_LEVELS:
+                self.item(child, inner, body, head)
+            elif child.kind == "sourceCredit":
+                for text in _lii_blocks(child):
+                    self.paras.append(("credit", 0, text))
+            elif child.tag == "div" and child.kind == "quotedContent":
+                self.items(child, depth, body, head)
+            else:
+                for text in _lii_blocks(child):
+                    self.add(body, depth, text)
+
+    def item(self, node: _Node, depth: int, body: str, head: str) -> None:
+        num = heading = ""
+        for child in node.children:
+            if isinstance(child, _Node) and child.kind == "num" and not num:
+                num = " ".join(_lii_blocks(child))
+            elif (isinstance(child, _Node) and child.kind == "heading"
+                    and not heading):
+                heading = " ".join(_lii_blocks(child))
+        if heading:
+            self.add(head, depth, f"{num} {heading}".strip())
+        elif num:
+            if not self._waiting:
+                self._waiting_depth = depth
+            self._waiting.append(num)
+        self.items(node, depth, body, head)
+        if self._waiting:           # nothing in it but its designation
+            self.paras.append((body, min(self._waiting_depth, _MAX_DEPTH),
+                               "".join(self._waiting)))
+            self._waiting = []
+
+    def notes(self, node: _Node) -> None:
+        """The notes tab: each note's heading, then its paragraphs, tables
+        and quoted provisions; the footnotes first, as Cornell sets them."""
+        run: list = []
+
+        def end_run() -> None:
+            if run:
+                holder = _Node("span", [])
+                holder.children = list(run)
+                run.clear()
+                for text in _lii_blocks(holder):
+                    self.add("note-body", 0, text)
+
+        for child in node.children:
+            if isinstance(child, str):
+                run.append(child)
+                continue
+            if child.tag == "notes" or child.kind in ("notes", "note"):
+                end_run()
+                self.notes(child)
+            elif child.tag == "span" and child.kind == "heading":
+                end_run()
+                text = " ".join(_lii_blocks(child))
+                if text:
+                    self.paras.append(("note-head", 0, text))
+            elif child.tag == "hr" and "footsep" in child.classes:
+                end_run()
+                self.paras.append(("note-head", 0, "Footnotes"))
+            elif child.kind in _LII_LEVELS:
+                end_run()
+                self.item(child, 0, "note-body", "note-body")
+            elif child.tag == "div" and child.kind == "quotedContent":
+                end_run()
+                self.items(child, 0, "note-body", "note-body")
+            elif child.tag in _BLOCK_TAGS:
+                end_run()
+                for text in _lii_blocks(child):
+                    self.add("note-body", 0, text)
+            else:
+                run.append(child)
+        end_run()
+
+
+_LII_TITLE_RE = re.compile(
+    r'<h1\b[^>]*\bid="page_title"[^>]*>(.*?)</h1>', re.DOTALL)
+_LII_SECHEAD_RE = re.compile(
+    r"U\.\s*S\.\s*Code\s*(§+)\s*(\S+)(?:\s+[-–—]\s+(.*))?$")
+_LII_TEXT_RE = re.compile(r"<text>(.*?)</text>", re.DOTALL)
+_LII_NOTES_RE = re.compile(r"<notes>(.*?)</notes>", re.DOTALL)
+
+
+def parse_lii_section(page: str) -> list[tuple[str, int, str]]:
+    """Parse a Cornell section page into the stream parse_section makes of
+    the OLRC's: the section heading, its text, the source credit, then the
+    notes.  Empty when the page holds no section."""
+    title = _LII_TITLE_RE.search(page)
+    if title is None:
+        return []
+    paras: list[tuple[str, int, str]] = []
+    heading = _clean(title.group(1))
+    m = _LII_SECHEAD_RE.search(heading)
+    if m:   # "42 U.S. Code § 1983 - Civil action …" as the OLRC heads it
+        sign, number, name = m.groups()
+        heading = f"{sign}{number}. {name}" if name else f"{sign}{number}"
+    paras.append(("sechead", 0, heading))
+    reader = _LiiReader()
+    text = _LII_TEXT_RE.search(page, title.end())
+    if text:
+        root = _Tree(text.group(1)).root
+        reader.items(_find(root, "section") or root, 0, "body", "head")
+    notes = _LII_NOTES_RE.search(page, title.end())
+    if notes:
+        reader.notes(_Tree(notes.group(1)).root)
+    paras.extend(reader.paras)
+    return paras
+
+
+_LII_CRUMBS_RE = re.compile(r'<ol class="breadcrumb">(.*?)</ol>', re.DOTALL)
+_LII_LI_RE = re.compile(r"<li\b[^>]*>(.*?)</li>", re.DOTALL)
+_LII_HREF_RE = re.compile(r'href="([^"]*)"')
+_LII_PATH_RE = re.compile(
+    r"^(?:https?://www\.law\.cornell\.edu)?/uscode/text/([^?#]+?)/?"
+    r"(?:[?#].*)?$")
+
+
+def _lii_path(href: str) -> str | None:
+    """Cornell's path for a link to a page of its U.S. Code — "28/part-VI"
+    for "/uscode/text/28/part-VI" — or None for any other link."""
+    m = _LII_PATH_RE.match(_html.unescape(href))
+    return unquote(m.group(1)) if m else None
+
+
+def lii_crumbs(page: str) -> tuple[list[tuple[str, str]], str]:
+    """The units above a Cornell page, outermost first, as (id, label) —
+    and the page's own label ("CHAPTER 153", "§ 2254") — from its
+    breadcrumb."""
+    m = _LII_CRUMBS_RE.search(page)
+    if m is None:
+        return [], ""
+    crumbs: list[tuple[str, str]] = []
+    own = ""
+    for item in _LII_LI_RE.findall(m.group(1)):
+        href = _LII_HREF_RE.search(item)
+        if href is None:
+            own = _clean(item)
+            continue
+        path = _lii_path(href.group(1))
+        if path:
+            crumbs.append((_LII_PREFIX + path, _clean(item)))
+    return crumbs, own
+
+
+_LII_PREVNEXT_RE = re.compile(r'<div id="prevnext">(.*?)</div>', re.DOTALL)
+_LII_PREVNEXT_LINK_RE = re.compile(
+    r'<a\b[^>]*\bhref="([^"]+)"[^>]*>\s*(prev|next)\s*</a>')
+
+
+def _lii_section_path(path: str | None) -> tuple[str, str] | None:
+    """(title, section) for the path of a section's page; None for a unit's
+    ("28/part-VI/chapter-151")."""
+    parts = (path or "").split("/")
+    if len(parts) == 2 and parts[1][:1].isdigit():
+        return parts[0], parts[1]
+    return None
+
+
+def lii_adjacent(page: str) -> tuple[tuple[str, str] | None,
+                                     tuple[str, str] | None]:
+    """The sections before and after a Cornell section page, from its
+    prev/next links."""
+    found: dict[str, tuple[str, str] | None] = {"prev": None, "next": None}
+    m = _LII_PREVNEXT_RE.search(page)
+    if m:
+        for href, which in _LII_PREVNEXT_LINK_RE.findall(m.group(1)):
+            found[which] = _lii_section_path(_lii_path(href))
+    return found["prev"], found["next"]
+
+
+_LII_TOC_ITEM_RE = re.compile(
+    r'<li class="tocitem">\s*<a\b([^>]*)>(.*?)</a>', re.DOTALL)
+_LII_TITLE_ATTR_RE = re.compile(r'\btitle="([^"]*)"')
+_LII_TOC_SECTION_RE = re.compile(r"^\[?\s*§+\s*(.+?)\.(?:\s+(.*?))?\]?$")
+_LII_TOC_UNIT_RE = re.compile(
+    r"^(title|subtitle|division|subdivision|part|subpart|chapter|"
+    r"subchapter|article)\s+(\S+?)\s*(?:—\s*(.*))?$",
+    re.IGNORECASE,
+)
+_LII_TOC_FIRST_RE = re.compile(r"\s*\(§§?\s*([^\s)]+)[^)]*\)\s*$")
+
+
+def parse_lii_unit(page: str, granule: str, url: str) -> UscUnit:
+    """A Cornell unit page: its heading, and the units or sections it
+    lists — "SUBCHAPTER I—GENERALLY (§§ 1981 – 1996b)", "§ 2254. State
+    custody; remedies in Federal courts"."""
+    path = granule[len(_LII_PREFIX):]
+    crumbs, own = lii_crumbs(page)
+    title = _LII_TITLE_RE.search(page)
+    h1 = _clean(title.group(1)) if title else ""
+    name = re.split(r"\s+[-–—]\s+", h1, maxsplit=1)
+    own = own or h1
+    heading = f"{own}—{name[1]}" if len(name) > 1 else own
+    entries: list[UnitEntry] = []
+    for attrs, inner in _LII_TOC_ITEM_RE.findall(page):
+        href = _LII_HREF_RE.search(attrs)
+        target = _lii_path(href.group(1)) if href else None
+        if not target:
+            continue
+        text = _clean(inner)
+        section = _lii_section_path(target)
+        if section:
+            m = _LII_TOC_SECTION_RE.match(text)
+            entries.append(UnitEntry(
+                "section", 0, f"§ {m.group(1)}" if m else text,
+                (m.group(2) or "").strip() if m else "",
+                section=section[1]))
+            continue
+        first = _LII_TOC_FIRST_RE.search(text)
+        unit = _LII_TOC_UNIT_RE.match(text[:first.start()] if first else text)
+        named = _LII_TITLE_ATTR_RE.search(attrs)
+        entries.append(UnitEntry(
+            "unit", 0,
+            (f"{crumb_label(unit.group(1))} {unit.group(2)}" if unit
+             else text),
+            (_html.unescape(named.group(1)).strip() if named
+             else (unit.group(3) or "") if unit else ""),
+            unit_kind=unit.group(1).lower() if unit else "",
+            designation=unit.group(2) if unit else "",
+            granule=_LII_PREFIX + target,
+            first_section=(first.group(1).replace("–", "-")
+                           if first else ""),
+        ))
+    return UscUnit(
+        title=path.split("/", 1)[0], granule=granule, url=url,
+        label=crumb_label(own), heading=heading, crumbs=crumbs,
+        entries=entries, host="law.cornell.edu",
+    )
+
+
+def _lii_unit(granule: str) -> UscUnit:
+    import requests
+
+    path = granule[len(_LII_PREFIX):].strip("/")
+    url = LII_BASE + path
+    try:
+        resp = requests.get(url, headers=_LII_HEADERS, timeout=30)
+        if resp.status_code == 404:
+            raise UnitNotFound(f"law.cornell.edu has no page {path}")
+        resp.raise_for_status()
+    except UnitNotFound:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"law.cornell.edu: {exc}") from exc
+    unit = parse_lii_unit(resp.content.decode("utf-8", "replace"),
+                          granule, url)
+    print(f"[usc-unit] {granule}: {len(unit.entries)} entries")
+    return unit
+
+
 if __name__ == "__main__":
     failed = 0
 
@@ -1153,13 +1725,19 @@ if __name__ == "__main__":
         ("see 5 U.S.C. 552", "5:552:"),
         ("15 U.S.C. §§ 78a–78pp", "15:78a-78pp:"),
         ("42 U.S.C. § 1983 (1982)", "42:1983:"),
+        ("42 USC § 1983", "42:1983:"),
+        ("see 5 USC 552(b)(6)", "5:552:b,6"),
+        ("42 U.S.C.S. § 1983", "42:1983:"),
+        ("42 U.S. Code § 1983", "42:1983:"),
+        ("42 U.S.C. Section 1985(3)", "42:1985:3"),
     ]
     for text, want in cases:
         m = USC_CITE_RE.search(text)
         got = cite_spec(m) if m else None
         check(got == want, f"{text!r} -> {got!r}")
     for text in ("501 U.S. 32", "1988 U.S.C.C.A.N. 5982",
-                 "U.S. Const. art. I", "120 U.S. 678"):
+                 "U.S. Const. art. I", "120 U.S. 678", "the 12 USCIS 400",
+                 "12 usc 400"):
         check(USC_CITE_RE.search(text) is None, f"no match in {text!r}")
     check(spec_label("42:1983:") == "42 U.S.C. § 1983", "label plain")
     check(spec_label("18:922:g,1") == "18 U.S.C. § 922(g)(1)", "label subsec")

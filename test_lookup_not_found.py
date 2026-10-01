@@ -49,8 +49,11 @@ class UsCodeTests(unittest.TestCase):
             self._load(lambda url, **kw: _Response(404))
 
     def test_a_page_with_no_section_on_it(self):
+        # the OLRC's viewer (its template), with no section in it
+        page = ('<html><head><link rel="stylesheet" href="/javax.faces.'
+                'resource/usc.css.xhtml?ln=css" /></head><body></body></html>')
         with self.assertRaises(us_code.SectionNotFound):
-            self._load(lambda url, **kw: _Response(200, "<html></html>"))
+            self._load(lambda url, **kw: _Response(200, page))
 
     def test_a_site_that_fails_is_not_a_missing_section(self):
         def down(url, **kw):
@@ -190,7 +193,11 @@ class WhereItIsAskedTests(unittest.TestCase):
         return ast.get_source_segment(SRC, node)
 
     def test_spotlight(self):
-        src = self._source("_toggle_quick_search_popup")
+        # Spotlight reads a citation through _open_lookup_query, which the
+        # browser extension's clicks share.
+        self.assertIn("self._open_lookup_query(query",
+                      self._source("_toggle_quick_search_popup"))
+        src = self._source("_open_lookup_query")
         self.assertIn("on_missing=self._notify_lookup_miss", src)
         self.assertIn('f"No case found for {label}."', src)
 

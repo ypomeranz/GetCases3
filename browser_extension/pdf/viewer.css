@@ -1,0 +1,139 @@
+:root {
+  --toolbar-h: 42px;
+  --bar-bg: #f8f9fb;
+  --bar-text: #1f2937;
+  --bar-muted: #6b7280;
+  --bar-line: #d9dde3;
+  --field-bg: #ffffff;
+  --canvas-bg: #525659;
+  --accent: #1e3a8a;
+  --case: 37, 99, 235;
+  --statute: 21, 128, 61;
+  --const: 180, 83, 9;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bar-bg: #202328;
+    --bar-text: #e5e7eb;
+    --bar-muted: #9ca3af;
+    --bar-line: #3a3f47;
+    --field-bg: #2b2f36;
+    --canvas-bg: #2b2d31;
+    --accent: #93b4ff;
+  }
+}
+[hidden] { display: none !important; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--canvas-bg);
+  font: 13px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+#toolbar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  background: var(--bar-bg);
+  color: var(--bar-text);
+  border-bottom: 1px solid var(--bar-line);
+  z-index: 10;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.group { display: flex; align-items: center; gap: 5px; flex: none; }
+.group.grow { flex: 1 1 auto; min-width: 80px; overflow: hidden; }
+.title { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.muted { color: var(--bar-muted); }
+#toolbar button, #toolbar select, #toolbar input {
+  font: inherit;
+  color: inherit;
+  background: var(--field-bg);
+  border: 1px solid var(--bar-line);
+  border-radius: 6px;
+  height: 28px;
+  padding: 0 8px;
+}
+#toolbar button { cursor: pointer; }
+#toolbar button:hover { border-color: var(--bar-muted); }
+#prev, #next, #zoomIn, #zoomOut { width: 28px; padding: 0; font-size: 16px; }
+#pageNumber { width: 56px; text-align: right; }
+#toggleLinks { display: inline-flex; align-items: center; gap: 6px; }
+#toggleLinks .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: rgb(var(--case));
+}
+#toggleLinks[aria-pressed="false"] .dot { background: var(--bar-muted); opacity: 0.5; }
+#viewerContainer {
+  position: absolute;
+  inset: var(--toolbar-h) 0 0 0;
+  overflow: auto;
+  outline: none;
+}
+#message {
+  position: fixed;
+  top: calc(var(--toolbar-h) + 24px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 560px;
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: var(--bar-bg);
+  color: var(--bar-text);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+  z-index: 20;
+}
+#message a { color: var(--accent); }
+#toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  max-width: 340px;
+  padding: 9px 13px;
+  border-radius: 8px;
+  background: #1f2937;
+  color: #fff;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.15s, transform 0.15s;
+  pointer-events: none;
+  z-index: 20;
+}
+#toast.on { opacity: 1; transform: none; }
+
+/* The citation links, laid over the page's text layer. */
+.getcases-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.links-hidden .getcases-overlay { display: none; }
+.getcases-pdf-link {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 2px;
+  background: rgba(var(--case), 0.1);
+  box-shadow: inset 0 -2px 0 rgba(var(--case), 0.7);
+}
+.getcases-pdf-link:hover { background: rgba(var(--case), 0.24); }
+.getcases-pdf-link.getcases-statute {
+  background: rgba(var(--statute), 0.1);
+  box-shadow: inset 0 -2px 0 rgba(var(--statute), 0.7);
+}
+.getcases-pdf-link.getcases-statute:hover { background: rgba(var(--statute), 0.24); }
+.getcases-pdf-link.getcases-const {
+  background: rgba(var(--const), 0.1);
+  box-shadow: inset 0 -2px 0 rgba(var(--const), 0.7);
+}
+.getcases-pdf-link.getcases-const:hover { background: rgba(var(--const), 0.24); }
+@media print {
+  #toolbar, .getcases-overlay { display: none; }
+  #viewerContainer { position: static; overflow: visible; }
+}
