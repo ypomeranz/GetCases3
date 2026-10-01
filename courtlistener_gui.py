@@ -17081,8 +17081,9 @@ def _scholar_item_from_blocks(blocks, fallback_name: str = "",
         cite = re.sub(r"\s+", " ", m.group(0)).strip()
     if not cite:
         cite = fallback_cite
-    years = re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", header)
-    year = years[-1] if years else ""
+    # The decision's year, not a later event's the header also dates.
+    from opinion_db import decision_year_from_blocks
+    year = decision_year_from_blocks(blocks)
     return {
         "caseName": name,
         "citation": [cite] if cite else [],
@@ -28565,40 +28566,18 @@ class _ScholarTextWindow:
 
         date_filed = item.get("dateFiled") or item.get("date_filed") or ""
         year = date_filed[:4] if len(date_filed) >= 4 else ""
-        # Year candidates from the header, most reliable first.  Page markers
-        # are excluded before scanning: a star page ("*2066 Syllabus" in
-        # Cedar Point) or a bare S. Ct. page number is indistinguishable from
-        # a year (S. Ct. pages run 1600–2099 through much of a term), and a
-        # body heading inside the first blocks can carry a stray date ("A.
-        # December 20, 2013 Suppression Hearing").  A year in parentheses
-        # after a citation ("323 U.S. 214 (1944)") is the decision year; a
-        # "Decided June 23, 2021." line is next; a bare year is last.
-        hdr_clean = "  ".join(
-            "".join(s.text for s in b.spans if not s.pagenum)
-            for b in self._blocks[:16] if b.kind in ("center", "heading")
-        )
-        # Lower-court headers date the decision with a bare centered
-        # "February 27, 2026." line (no "Decided" keyword).  Only *center*
-        # blocks count for that form: a body section heading can carry a
-        # full date that is not the decision's ("A. December 20, 2013
-        # Suppression Hearing").
-        hdr_center = "  ".join(
-            "".join(s.text for s in b.spans if not s.pagenum)
-            for b in self._blocks[:16] if b.kind == "center"
-        )
-        header_years = (
-            re.findall(r"\([^()]{0,40}?(1[6-9]\d{2}|20\d{2})\s*\)", hdr_clean)
-            or re.findall(
-                r"\b(?:Decided|Filed|Released|Entered)\b[^0-9]{0,40}?"
-                r"(1[6-9]\d{2}|20\d{2})", hdr_clean, re.IGNORECASE)
-            or re.findall(
-                r"\b(?:January|February|March|April|May|June|July|August|"
-                r"September|October|November|December)\s+\d{1,2},?\s+"
-                r"(1[6-9]\d{2}|20\d{2})\b", hdr_center, re.IGNORECASE)
-            or re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", hdr_clean)
-        )
-        if not year and header_years:
-            year = header_years[-1]
+        # The year the opinion's own front matter gives its decision (see
+        # opinion_db.decision_year_from_blocks): the year after its citation
+        # ("323 U.S. 214 (1944)"), else its decision date's — never a later
+        # event's the header also records ("Judgment Affirmed April 17,
+        # 1978.", "Rehearing Denied January 23, 1990."), a docket line's
+        # ("No. 20-794 (R46-44/OT 2020)"), or a star page's ("*2066
+        # Syllabus" in Cedar Point).
+        from opinion_db import decision_year_from_blocks
+        header_year = decision_year_from_blocks(self._blocks)
+        stated_year = decision_year_from_blocks(self._blocks, guess=False)
+        if not year and header_year:
+            year = header_year
 
         if not name and self._blocks:
             first = self._blocks[0].text().strip()
@@ -28616,11 +28595,14 @@ class _ScholarTextWindow:
             re.match(r"\d+\s+(U\.S\.|S\.\s?Ct\.|L\.\s?Ed\.)", cite)
         )
         self._is_scotus = is_scotus
-        # CourtListener occasionally supplies the rehearing-denial date as
-        # ``date_filed``.  The year printed in a Supreme Court opinion's own
-        # citation header is the decision year and therefore controls.
-        if is_scotus and header_years:
-            year = header_years[-1]
+        # A search result can carry a rehearing's date, or an amendment's,
+        # as the decision's — CourtListener occasionally supplies the
+        # rehearing-denial date as ``date_filed``.  The year the opinion's own
+        # front matter states, after its citation or by its decision date,
+        # therefore controls; a Supreme Court opinion's, even one the front
+        # matter only suggests.
+        if stated_year or (is_scotus and header_year):
+            year = stated_year or header_year
         if not year:
             # The earliest U.S. Reports volumes print no year in the citation
             # line (Scholar renders "2 U.S. 409 (____)"); a centered term
