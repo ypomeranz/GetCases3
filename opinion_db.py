@@ -41,7 +41,9 @@ import html as _html
 import json
 import os
 import re
+import shutil
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
@@ -599,7 +601,28 @@ def _default_dir() -> Path:
     env = os.environ.get("GETCASES_DB_DIR")
     if env:
         return Path(env)
+    if getattr(sys, "frozen", False):
+        return _packaged_dir()
     return Path(__file__).resolve().parent / "data"
+
+
+def _packaged_dir() -> Path:
+    """A packaged GetCases (PyInstaller): ``data`` beside the .exe.
+
+    A one-file build runs from a folder it unpacks afresh at every start and
+    deletes at exit, so the database cannot live beside this module there:
+    every opinion saved would be gone at the next start.  The database the
+    build carries fills the folder the first time."""
+    target = Path(sys.executable).resolve().parent / "data"
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / "data" / "opinions.jsonl"
+    if not (target / "opinions.jsonl").exists() and bundled.is_file():
+        target.mkdir(parents=True, exist_ok=True)
+        # Copied under another name and swapped in, so a start cut short
+        # never leaves half a database to be taken for the whole.
+        scratch = target / "opinions.jsonl.unpacking"
+        shutil.copyfile(bundled, scratch)
+        os.replace(scratch, target / "opinions.jsonl")
+    return target
 
 
 def data_dir() -> Path:

@@ -121,7 +121,11 @@ def _ensure_dependencies() -> None:
         root.destroy()
 
 
-if not os.environ.get("GETCASES_SKIP_DEPENDENCY_PROMPT"):
+# A packaged build (PyInstaller) carries what it was built with, and pip
+# cannot add to it: sys.executable is the .exe itself, which would only start
+# another GetCases.
+if (not os.environ.get("GETCASES_SKIP_DEPENDENCY_PROMPT")
+        and not getattr(sys, "frozen", False)):
     _ensure_dependencies()
 
 import requests as _requests
@@ -14295,6 +14299,14 @@ class CourtListenerGUI:
     def _check_for_updates(self) -> None:
         """Ask GitHub whether the main branch is newer than the installed
         version and, if so, offer to download it and restart."""
+        if getattr(sys, "frozen", False):
+            # The updater replaces the .py files beside the program; a
+            # packaged build has none to replace.
+            messagebox.showinfo(
+                "Check for Updates",
+                "This GetCases is a packaged program. To update it, build "
+                "it again from the latest version of the source.")
+            return
         self._status_var.set("Checking for updates…")
 
         def run() -> None:

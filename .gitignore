@@ -25,3 +25,7 @@ _sec_build/
 # that us_reports_pdf.py downloads from supremecourt.gov on demand (and
 # carves per-opinion PDFs out of), so never tracked.
 US Reports/
+
+# PyInstaller's working folder and the packaged GetCases.exe (see README).
+build/
+dist/

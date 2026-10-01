@@ -380,6 +380,22 @@ at the foot of the page that cites them and a running head showing the
 reporter pages on each sheet. The syllabus or headnotes and each separate
 opinion begin on a page of their own. GetCases finds an installed LaTeX by itself.
 
+### A single GetCases.exe (Windows)
+
+With [PyInstaller](https://pyinstaller.org/) (`pip install pyinstaller`), this
+command, run in the GetCases folder, builds `dist\GetCases.exe`: one file, no
+console window, carrying the saved opinions and every index GetCases reads.
+
+```bash
+python -m PyInstaller --noconfirm --onefile --noconsole --name GetCases --add-data "data/opinions.jsonl;data" --add-data "person_names.tsv.gz;." --add-data "eng_rep_index.tsv.gz;." --add-data "eng_rep_nominate.tsv.gz;." --add-data "sec_index.tsv.gz;." --add-data "crecb_index.tsv.gz;." --add-data "debates_index.tsv.gz;." courtlistener_gui.py
+```
+
+The .exe runs in the background, with the scales in the taskbar. The first
+time it starts it creates a `data` folder beside itself, holding a copy of the
+opinions it carries, and from then on saves opinions there. Keep the folder
+with the .exe if you move it. A rebuilt .exe goes on using a `data` folder it
+finds rather than its own copy. To update a packaged GetCases, build it again.
+
 ---
 
 ## Where the material comes from
