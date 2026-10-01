@@ -77,10 +77,20 @@ Started from a terminal, GetCases runs **in the background with no window**:
 - Type **`s`** + Enter in the terminal to open the main search window.
 - Type **`q`** + Enter in the terminal to quit.
 
-Started without a terminal, the main search window opens.
+On Windows, GetCases also shows the **⚖ scales** (Spotlight's icon) in the
+notification area at the right of the taskbar while it runs:
+
+- **Click** the scales to open Spotlight.
+- **Right-click** them for **Open Main Window** and **Quit GetCases**.
+
+So on Windows it starts in the background even without a terminal — run with
+`pythonw`, or packaged as an `.exe` with no console — and nothing appears
+until you open Spotlight. Elsewhere, started without a terminal, the main
+search window opens.
 
 Closing the main window does **not** quit GetCases; it keeps running in the
-background. To quit, type `q` + Enter in the terminal (or close the terminal).
+background. To quit, right-click the scales and choose **Quit GetCases**, or
+type `q` + Enter in the terminal (or close the terminal).
 Starting GetCases a second time hands Ctrl+Space to the new copy, and the old
 one closes (once any windows it has open are closed).
 
@@ -455,6 +465,7 @@ automatic matching that can go wrong. In particular:
 | --- | --- |
 | No Tk / `No module named tkinter` | Install Python's Tk (see [Install Python](#1-install-python)) |
 | Ctrl+Space does nothing | Install `pynput`; on macOS, allow the terminal (or Python) under **System Settings → Privacy & Security → Accessibility** and **Input Monitoring** |
+| The scales aren't in the taskbar (Windows) | Windows 11 tucks new icons behind the **^** arrow. Drag the scales out onto the taskbar, or turn on Python (or your GetCases `.exe`) under **Settings → Personalization → Taskbar → Other system tray icons** |
 | Scans open in the browser instead of the app | Install `pypdfium2` and `Pillow` |
 | "CourtListener" results missing | Add your API token under **Settings → API Token…** |
 | Google Scholar returns nothing, or says it is blocked | Wait a few minutes, or set up [Firefox and selenium](#firefox) |

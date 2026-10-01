@@ -8843,17 +8843,19 @@ class CourtListenerGUI:
 
     def _can_run_headless(self) -> bool:
         """True when the process can keep running without a visible window:
-        either the global hotkey is live (Ctrl+Space opens search) or there's
+        the global hotkey is live (Ctrl+Space opens search), the scales in
+        the taskbar's notification area bring it back (Windows), or there's
         a terminal to read 's'/'q' from."""
-        if _stdin_is_tty():
+        if _stdin_is_tty() or self._tray is not None:
             return True
         return _HOTKEY_AVAILABLE and self._hotkey_listener is not None
 
     def _on_close_window(self) -> None:
         """Hide the main window instead of destroying it so the process keeps
         running in the background — the global hotkey stays live and the
-        window can be reopened with 's' in the terminal.  Only quit outright
-        when there's no way to bring it back."""
+        window can be reopened from the scales in the taskbar or with 's' in
+        the terminal.  Only quit outright when there's no way to bring it
+        back."""
         if self._can_run_headless():
             self.root.withdraw()
             self._root_hidden = True
@@ -8895,6 +8897,11 @@ class CourtListenerGUI:
         tips = []
         if _HOTKEY_AVAILABLE and self._hotkey_listener is not None:
             tips.append(f"Press {hotkey} anywhere to search.")
+        if self._tray is not None:
+            tips.append(
+                "Click the scales at the right of the taskbar to search; "
+                "right-click them for the full window or to quit."
+            )
         if _stdin_is_tty():
             tips.append(
                 "Type 's' + Enter to open the full search window, "
@@ -8902,6 +8909,104 @@ class CourtListenerGUI:
             )
         if tips:
             print("\n" + intro + "\n  " + "\n  ".join(tips))
+
+    # ------------------------------------------------------------------
+    # The scales in the Windows taskbar's notification area (see tray_icon)
+    # ------------------------------------------------------------------
+
+    _tray = None
+    #: What the icon's clicks and menu ask for, (request, when), for the Tk
+    #: thread to take up — see _drain_tray_requests.
+    _tray_requests = None
+
+    def _start_tray_icon(self):
+        """Windows: put GetCases in the taskbar's notification area, so a
+        GetCases started without a terminal — a packaged .exe — can run
+        out of sight and still be reached: a click opens Spotlight, a
+        right-click offers the main window and Quit.  Returns the icon, for
+        :func:`main` to close on the way out, or None."""
+        if sys.platform != "win32" or self._tray is not None:
+            return self._tray
+        import tray_icon
+        requests = self._tray_requests = queue.SimpleQueue()
+        tray = tray_icon.TrayIcon(
+            self._tray_tooltip(),
+            on_click=lambda: requests.put(("toggle", time.monotonic())),
+            menu=self._tray_menu,
+        )
+        if not tray.start():
+            tray.close()            # in case it comes up after all
+            return None
+        self._tray = tray
+        try:
+            self.root.after(50, self._drain_tray_requests)
+        except tk.TclError:
+            pass
+        return tray
+
+    def _stop_tray_icon(self) -> None:
+        tray, self._tray = self._tray, None
+        if tray is not None:
+            tray.close()
+
+    def _tray_hotkey_label(self) -> str:
+        """The Spotlight shortcut as menus spell it, or "" with none live."""
+        if not _HOTKEY_AVAILABLE or self._hotkey_listener is None:
+            return ""
+        return _display_hotkey(getattr(
+            self, "_spotlight_hotkey", _default_spotlight_hotkey()))
+
+    def _tray_tooltip(self) -> str:
+        hotkey = self._tray_hotkey_label()
+        how = f"click or press {hotkey}" if hotkey else "click"
+        return f"GetCases \N{EM DASH} {how} to search"
+
+    def _tray_menu(self) -> list:
+        """The icon's right-click menu.  Built on the icon's thread at each
+        right-click, so it names the shortcut as it is now; every choice
+        only queues a request for the Tk thread."""
+        import tray_icon
+        hotkey = self._tray_hotkey_label()
+
+        def ask(request: str):
+            return lambda: self._tray_requests.put((request, time.monotonic()))
+
+        return [
+            tray_icon.MenuItem(
+                "Open Spotlight" + (f"\t{hotkey}" if hotkey else ""),
+                ask("spotlight"), default=True),
+            tray_icon.MenuItem("Open Main Window", ask("window")),
+            tray_icon.SEPARATOR,
+            tray_icon.MenuItem("Quit GetCases", ask("quit")),
+        ]
+
+    def _drain_tray_requests(self) -> None:
+        """The Tk thread's half of a click on the icon or a choice from its
+        menu.  (The icon's thread only queues them — see _on_global_hotkey
+        for why nothing but the Tk thread touches Tk.)  A click toggles
+        Spotlight the way the hotkey does; the menu's Open Spotlight opens
+        it, or brings forward the one already open."""
+        while True:
+            try:
+                request, at = self._tray_requests.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if request == "quit":
+                    self.root.destroy()
+                    return
+                if request == "window":
+                    self._show_main_window()
+                elif request == "spotlight" and self._quick_popup is not None:
+                    self._bring_to_front(self._quick_popup)
+                elif request in ("toggle", "spotlight"):
+                    self._toggle_quick_search_popup(pressed_at=at)
+            except Exception as exc:
+                print(f"[tray] {request} failed: {exc}")
+        try:
+            self.root.after(50, self._drain_tray_requests)
+        except tk.TclError:
+            pass                    # shutting down
 
     # ------------------------------------------------------------------
     # Global hotkey (Ctrl+Space / Cmd+Space) → quick search popup
@@ -9081,6 +9186,8 @@ class CourtListenerGUI:
         # The browser extension's clicks are the newer one's too: it takes
         # the port as soon as this one lets it go.
         self._stop_browser_bridge()
+        # And the taskbar has the newer one's scales.
+        self._stop_tray_icon()
         self._close_quick_popup()
         if self._anything_on_screen():
             print("\nA newer GetCases has started and taken over the "
@@ -12851,6 +12958,8 @@ class CourtListenerGUI:
             self._setup_global_hotkey()
             return False
         _save_spotlight_hotkey(hotkey)
+        if self._tray is not None:
+            self._tray.set_tooltip(self._tray_tooltip())
         return True
 
     def _show_spotlight_shortcut_dialog(self) -> None:
@@ -38956,19 +39065,25 @@ def main() -> None:
     instance = app._claim_instance()
     # The browser extension's citations open here while it runs.
     bridge = app._start_browser_bridge()
+    # Windows: the scales in the taskbar, to reach it when nothing is open.
+    tray = app._start_tray_icon()
     eng_rep.warm()  # load the English Reports index in the background
     sec_decisions.warm()  # and the SEC Decisions and Reports' page index
 
     # Run in the background by default: rather than greeting the user with the
     # full search window, GetCases starts hidden and waits.  Ctrl+Space opens
-    # the quick-search popup; 's' + Enter opens the full window; 'q' + Enter
-    # quits.  When there's no terminal to drive it, fall back to showing the
-    # window so the app stays discoverable.
-    if _stdin_is_tty():
+    # the quick-search popup; so does a click on the scales in the taskbar
+    # (Windows), whose right-click menu opens the full window or quits; and
+    # from a terminal, 's' + Enter opens the full window and 'q' + Enter
+    # quits.  With neither the scales nor a terminal to bring it back — a
+    # Mac or Linux start from the desktop — fall back to showing the window
+    # so the app stays discoverable.
+    if _stdin_is_tty() or tray is not None:
         root.withdraw()
         app._root_hidden = True
         app._print_background_help()
 
+    if _stdin_is_tty():
         # A background thread watches stdin so the user can open the window
         # ('s') or quit ('q') even while it is hidden.
         def _watch_stdin() -> None:
@@ -38994,6 +39109,9 @@ def main() -> None:
     try:
         root.mainloop()
     finally:
+        # Left behind, the icon would stay in the taskbar until the pointer
+        # passed over it.
+        app._stop_tray_icon()
         if instance is not None:
             instance.close()
         if bridge is not None:
