@@ -179,6 +179,20 @@ maximized window takes the room from the page instead.
 
 **Show** at the top of the panel switches to:
 
+- **Citing cases:** the cases that cite this one, ten at a time, each with its
+  citation, court and date and the passage where it cites the case, the case's
+  name and citation in bold. Click a case's name to open it.
+  - They come from **Google Scholar's "Cited by" list** when Scholar has one
+    for the case, even if it has only the citation and not the opinion. Scholar's
+    green bars show how much each case discusses this one.
+  - **Sort** orders them by relevance or by date (newest first), **Years**
+    narrows them to a span of years (press Enter), **Courts** to the courts you
+    pick, and **Clear** undoes the narrowing. **Next 10** and **Previous 10**
+    page through them.
+  - When Scholar has no list for the case, or is not answering, they come from
+    **CourtListener's** citation graph instead, newest first, with the same
+    controls. The panel says which you are looking at, and offers to try
+    Scholar again.
 - **Recent SCOTUS:** the Supreme Court's latest opinions and opinions relating
   to orders.
 - **Docket** (Supreme Court cases only): the cert-stage and merits-stage

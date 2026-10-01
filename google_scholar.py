@@ -418,6 +418,9 @@ class ScholarResult:
     source: str = ""   # the green byline, e.g. "Supreme Court, 1973"
     snippet: str = ""
     cited_by: int = 0  # Scholar's inexpensive result-page authority signal
+    # The id Scholar lists the cases citing this one under — its "Cited by"
+    # link's ``cites=`` — or "" when it shows no such link.
+    cites_id: str = ""
 
 
 # A reporter citation ("410 U.S. 113", "529 NW 2d 155", "8 F.4th 557") for
@@ -548,6 +551,191 @@ def _scholar_case_id(url: str) -> str:
     """The ``case=`` id of a Scholar opinion URL, or ""."""
     m = re.search(r"[?&]case=(\d+)", url or "")
     return m.group(1) if m else ""
+
+
+# ---------------------------------------------------------------------------
+# The cases citing a case: Scholar's "Cited by" lists
+# ---------------------------------------------------------------------------
+# Every case Scholar knows — whether it holds the opinion or only the citation
+# — has an id its "Cited by" link lists the citing cases under
+# (``/scholar?cites=<id>``).  For an opinion Scholar holds, that is the same
+# number as its ``scholar_case?case=`` id (and its "How cited" ``about=``).
+# The list comes ten to a page, each case with the passage where it cites the
+# one asked about and Scholar's mark for how much it discusses it, and takes
+# a search's options: newest first (``scisbd=2``), a span of years
+# (``as_ylo``/``as_yhi``) and the courts (``as_sdt``).
+
+#: Cases on a page of Scholar's citing list.
+CITING_PAGE_SIZE = 10
+
+_CITED_BY_RE = re.compile(r"Cited by\s+([\d,]+)", re.IGNORECASE)
+_CITES_ID_RE = re.compile(r"[?&]cites=(\d+)")
+_DEPTH_ICON_RE = re.compile(r"\blod(\d)\b")
+_RESULT_COUNT_RE = re.compile(r"([\d,.]+)\s+results?\b", re.IGNORECASE)
+
+
+def _cited_by_link(div) -> tuple[int, str]:
+    """A result's "Cited by N" link: N, and the ``cites=`` id the citing
+    cases are listed under — (0, "") when it has none."""
+    for link in div.find_all("a"):
+        m = _CITED_BY_RE.fullmatch(_WS_RE.sub(" ", link.get_text()).strip())
+        if m:
+            listed = _CITES_ID_RE.search(link.get("href") or "")
+            return (int(m.group(1).replace(",", "")),
+                    listed.group(1) if listed else "")
+    return 0, ""
+
+
+def _bare_result_title(h3) -> str:
+    """The title of a result Scholar holds no opinion for — "[CITATION]
+    Smith v. Jones" — without the bracketed label."""
+    for label in h3.find_all("span", class_=re.compile(r"^gs_ct")):
+        label.decompose()
+    title = _WS_RE.sub(" ", h3.get_text(" ")).strip()
+    return re.sub(r"^\[[A-Z]+\]\s*", "", title)
+
+
+@dataclass
+class CitingResult:
+    """A case on a page of Scholar's citing list."""
+
+    title: str
+    url: str = ""     # its scholar_case page; "" where Scholar has only its cite
+    source: str = ""  # the byline: "166 F. 4th 798 - Court of Appeals, ..."
+    # Where it cites the case, as runs of (text, highlighted): Scholar bolds
+    # the words of the cited case's name and citation.
+    passage: list = field(default_factory=list)
+    # Scholar's bars for how much the case discusses the cited one — 1 briefly,
+    # 3 at length — and their caption; 0 when it only cites it.
+    depth: int = 0
+    depth_label: str = ""
+    cited_by: int = 0
+    cites_id: str = ""
+
+
+@dataclass
+class CitingPage:
+    """A page of Scholar's citing list."""
+
+    results: list
+    start: int = 0
+    total: Optional[int] = None   # Scholar's estimate: "About 4,290 results"
+    has_next: bool = False
+
+
+def citing_url(cites_id: str, *, by_date: bool = False,
+               year_from: Optional[int] = None,
+               year_to: Optional[int] = None, courts=(),
+               start: int = 0) -> Optional[str]:
+    """The page of Scholar's list of the cases citing the case it lists under
+    *cites_id*, starting at the *start*-th: newest first when *by_date*
+    (Scholar's own order otherwise, by relevance), decided from *year_from*
+    to *year_to*, by the *courts* given (CourtListener ids).  None when no
+    court asked for is one Scholar carries."""
+    jurisdiction = scholar_jurisdiction_value(courts)
+    if jurisdiction is None:
+        return None
+    url = f"{SCHOLAR_BASE}/scholar?cites={cites_id}&as_sdt={jurisdiction}&hl=en"
+    if by_date:
+        url += "&scisbd=2"
+    if year_from:
+        url += f"&as_ylo={int(year_from)}"
+    if year_to:
+        url += f"&as_yhi={int(year_to)}"
+    if start:
+        url += f"&start={int(start)}"
+    return url
+
+
+def _passage_runs(rs) -> list[tuple[str, bool]]:
+    """A citing-list result's passage as runs of (text, highlighted), its
+    spacing tidied across the runs' edges."""
+    for age in rs.find_all("span", class_="gs_age"):
+        age.decompose()       # "16 years ago - ", on a list sorted by date
+    raw: list[tuple[str, bool]] = []
+    for node in rs.descendants:
+        if isinstance(node, Comment):
+            continue
+        if isinstance(node, NavigableString):
+            bold = any(p.name == "b" for p in node.parents
+                       if p is not rs and p is not None)
+            raw.append((_WS_RE.sub(" ", str(node)), bold))
+        elif isinstance(node, Tag) and node.name == "br":
+            raw.append((" ", False))
+    runs: list[tuple[str, bool]] = []
+    for text, bold in raw:
+        if runs and runs[-1][0].endswith(" ") and text.startswith(" "):
+            text = text[1:]
+        if not text:
+            continue
+        if runs and runs[-1][1] == bold:
+            runs[-1] = (runs[-1][0] + text, bold)
+        else:
+            runs.append((text, bold))
+    if runs:
+        runs[0] = (runs[0][0].lstrip(), runs[0][1])
+        runs[-1] = (runs[-1][0].rstrip(), runs[-1][1])
+    return [run for run in runs if run[0]]
+
+
+def parse_citing_page(html: str, start: int = 0) -> CitingPage:
+    """The cases on a page of Scholar's citing list (see :func:`citing_url`)."""
+    soup = BeautifulSoup(html, "html.parser")
+    rows = [div for div in soup.find_all("div", class_="gs_r")
+            if "gs_or" in (div.get("class") or [])]
+    if not rows:
+        # Markup changed?  Any result with a title — the row naming the
+        # cited case itself heads the page under an <h2>, not an <h3>.
+        rows = [div for div in soup.find_all("div", class_="gs_r")
+                if div.find("h3", class_="gs_rt")]
+    results: list[CitingResult] = []
+    for div in rows:
+        h3 = div.find("h3", class_="gs_rt")
+        if h3 is None:
+            continue
+        depth, depth_label = 0, ""
+        for img in h3.find_all("img"):
+            m = _DEPTH_ICON_RE.search(img.get("src") or "")
+            if m:
+                depth = int(m.group(1))
+                depth_label = (img.get("title") or img.get("alt") or "").strip()
+                break
+        a = h3.find("a", href=True)
+        if a and "scholar_case" in a["href"]:
+            url = a["href"]
+            if url.startswith("/"):
+                url = SCHOLAR_BASE + url
+            title = _WS_RE.sub(" ", a.get_text()).strip()
+        else:
+            url, title = "", _bare_result_title(h3)
+        if not title:
+            continue
+        gs_a = div.find("div", class_="gs_a")
+        rs = div.find("div", class_="gs_rs")
+        cited_by, cites_id = _cited_by_link(div)
+        results.append(CitingResult(
+            title=title, url=url,
+            source=_WS_RE.sub(" ", gs_a.get_text()).strip() if gs_a else "",
+            passage=_passage_runs(rs) if rs else [],
+            depth=depth, depth_label=depth_label,
+            cited_by=cited_by, cites_id=cites_id,
+        ))
+    total = None
+    about = soup.find(id="gs_ab_md")
+    if about is not None:
+        m = _RESULT_COUNT_RE.search(_WS_RE.sub(" ", about.get_text(" ")))
+        if m:
+            digits = re.sub(r"\D", "", m.group(1))
+            total = int(digits) if digits else None
+    nav = soup.find(id="gs_n")
+    if nav is not None:
+        has_next = nav.find("span", class_="gs_ico_nav_next") is not None
+    else:
+        # No page links at all: a list that fits on one page — unless the
+        # count says otherwise.
+        has_next = (total is not None and len(results) >= CITING_PAGE_SIZE
+                    and start + len(results) < total)
+    return CitingPage(results, start=start, total=total, has_next=has_next)
 
 
 _CASE_NAME_H3_RE = re.compile(
@@ -1852,6 +2040,10 @@ class GoogleScholarFetcher:
         # The results bearing each citation looked up (fetch_by_citation), kept
         # for the year their bylines give — see decision_year.
         self._cited_search_cache: dict[str, list[ScholarResult]] = {}
+        # Pages of citing cases already read this session, by URL (see
+        # citing_page): paging back, or a second window on the same case,
+        # costs nothing.
+        self._citing_cache: dict[str, CitingPage] = {}
 
         # The scholar_case URL found on the results page when the opinion page
         # then failed to load (search succeeded, case page didn't) — consumed
@@ -2289,6 +2481,64 @@ class GoogleScholarFetcher:
         self._search_cache[key] = results
         return results[:limit]
 
+    def citing_page(self, cites_id: str, *, by_date: bool = False,
+                    year_from: Optional[int] = None,
+                    year_to: Optional[int] = None, courts=(),
+                    start: int = 0) -> CitingPage:
+        """A page of the cases citing the case Scholar lists under
+        *cites_id* (see :func:`citing_url` for the options).
+
+        Raises when Scholar cannot be reached or answers with no results page
+        (a challenge): an empty page is Scholar's answer that nothing cites
+        the case — under those options — and is not to be confused with
+        Scholar not answering."""
+        url = citing_url(cites_id, by_date=by_date, year_from=year_from,
+                         year_to=year_to, courts=courts, start=start)
+        if url is None:
+            return CitingPage([], start=start, total=0)
+        cached = self._citing_cache.get(url)
+        if cached is not None:
+            return cached
+        print(f"[scholar] citing cases: {url}")
+        resp = self._get(url)
+        if not _RESULTS_PAGE_RE.search(resp.text):
+            raise ScholarError("Google Scholar sent no results page")
+        page = parse_citing_page(resp.text, start)
+        self._citing_cache[url] = page
+        return page
+
+    def find_citing_id(self, citation: str, case_name: str = "",
+                       year: str = "") -> str:
+        """The id Scholar lists the cases citing the case at *citation* under
+        — read off the case's own "Cited by" link among the results for the
+        citation, where Scholar shows a case it holds only the citation of as
+        well as one it holds the opinion of.  *case_name* and *year* pick the
+        case when several begin on the page (see :meth:`_pick_cited`).
+
+        "" when no result is the case, or it shows no "Cited by" link
+        (nothing Scholar holds cites it).  Raises when Scholar does not
+        answer."""
+        citation = (citation or "").strip()
+        if not citation:
+            return ""
+        case_name = self._usable_name(case_name)
+        year = str(year or "").strip()[:4]
+        # A lookup of this citation earlier this session read the results
+        # already (fetch_by_citation keeps those bearing it).
+        bearing = self._cited_search_cache.get(citation) or []
+        pick = self._pick_cited(bearing, case_name, year) if bearing else None
+        if pick is None or not pick.cites_id:
+            phrase = f'"{citation}"'
+            url = f"{SCHOLAR_BASE}/scholar?q={quote_plus(phrase)}&as_sdt=4"
+            print(f"[scholar] finding the citing list for {citation!r}: {url}")
+            resp = self._get(url)
+            if not _RESULTS_PAGE_RE.search(resp.text):
+                raise ScholarError("Google Scholar sent no results page")
+            bearing = [r for r in self._parse_results(resp.text, bare=True)
+                       if bears_citation(r, citation)]
+            pick = self._pick_cited(bearing, case_name, year)
+        return pick.cites_id if pick is not None else ""
+
     @staticmethod
     def _db_summary_byline(hit: dict) -> str:
         """Build a Scholar-style byline ("410 U.S. 113 - Supreme Court, 1973")
@@ -2391,8 +2641,12 @@ class GoogleScholarFetcher:
         return out
 
     @staticmethod
-    def _parse_results(html: str) -> list["ScholarResult"]:
-        """Extract case-law rows from a Scholar results page."""
+    def _parse_results(html: str, bare: bool = False) -> list["ScholarResult"]:
+        """Extract case-law rows from a Scholar results page.
+
+        *bare* keeps the rows Scholar shows for a case it holds only the
+        citation of — "[CITATION]", no opinion to link to, but often a
+        "Cited by" list all the same — with an empty ``url``."""
         soup = BeautifulSoup(html, "html.parser")
         out: list[ScholarResult] = []
         seen: set[str] = set()
@@ -2401,35 +2655,33 @@ class GoogleScholarFetcher:
             if not h3:
                 continue
             a = h3.find("a", href=True)
-            if not a or "scholar_case" not in a["href"]:
+            if a and "scholar_case" in a["href"]:
+                href = a["href"]
+                if href.startswith("/"):
+                    href = SCHOLAR_BASE + href
+                title = _WS_RE.sub(" ", a.get_text()).strip()
+            elif bare:
+                href = ""
+                title = _bare_result_title(h3)
+            else:
                 continue
-            href = a["href"]
-            if href.startswith("/"):
-                href = SCHOLAR_BASE + href
-            if href in seen:
-                continue
-            seen.add(href)
-            title = _WS_RE.sub(" ", a.get_text()).strip()
             gs_a = div.find("div", class_="gs_a")
             source = _WS_RE.sub(" ", gs_a.get_text()).strip() if gs_a else ""
+            cited_by, cites_id = _cited_by_link(div)
+            key = href or (f"cites:{cites_id}" if cites_id
+                           else f"{title} ; {source}")
+            if not title or key in seen:
+                continue
+            seen.add(key)
             rs = div.find("div", class_="gs_rs")
             snippet = _WS_RE.sub(" ", rs.get_text()).strip() if rs else ""
-            cited_by = 0
-            for link in div.find_all("a"):
-                m = re.fullmatch(
-                    r"Cited by\s+(\d+)",
-                    _WS_RE.sub(" ", link.get_text()).strip(),
-                    re.IGNORECASE,
-                )
-                if m:
-                    cited_by = int(m.group(1))
-                    break
             out.append(ScholarResult(
                 title=title,
                 url=href,
                 source=source,
                 snippet=snippet,
                 cited_by=cited_by,
+                cites_id=cites_id,
             ))
         if not out:
             # Markup changed?  Fall back to bare scholar_case anchors.
