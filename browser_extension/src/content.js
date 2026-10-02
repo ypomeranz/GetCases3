@@ -29,7 +29,12 @@
     "main", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody",
     "td", "tfoot", "th", "thead", "tr", "ul", "caption"]);
 
-  let settings = { enabled: true, disabledSites: [], interceptLinks: true };
+  const S = globalThis.GetCasesSettings;
+  let settings = {
+    enabled: S.DEFAULTS.enabled,
+    disabledSites: S.DEFAULTS.disabledSites,
+    interceptLinks: S.DEFAULTS.interceptLinks,
+  };
   let mode = "web";                 // how the page was read: "app" or "web"
   let appRunning = false;
   let statusAt = 0;
@@ -65,9 +70,10 @@
     return appRunning;
   }
 
+  /** Whether this site is one the reader has the extension leave alone
+   *  (by default, the research services: Westlaw, Lexis, …). */
   function siteDisabled() {
-    const host = location.hostname;
-    return (settings.disabledSites || []).some((h) => host === h || host.endsWith("." + h));
+    return S.siteExcluded(location.hostname, settings.disabledSites);
   }
 
   // -------------------------------------------------------------------------
@@ -331,7 +337,33 @@
     return ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey;
   }
 
+  /** A click asking for the link in a tab of its own, behind this one:
+   *  Ctrl/Cmd-click, or the middle button. */
+  function behindClick(ev) {
+    if (ev.shiftKey || ev.altKey) return false;
+    return ev.button === 1 || (ev.button === 0 && (ev.ctrlKey || ev.metaKey));
+  }
+
+  /** Our link to a case, for a click asking for the web page: the scan the
+   *  service worker finds first (see background.js caseUrl), not merely
+   *  the address the link carries — which, short of looking, can only be
+   *  Google Scholar for a lower court's case. */
+  function onWebClick(ev) {
+    if (ev.defaultPrevented || !behindClick(ev) || !settings.enabled) return;
+    const el = ev.target instanceof Element ? ev.target : ev.target && ev.target.parentElement;
+    const ours = el && el.closest("a." + LINK);
+    const action = ours && links.get(+ours.dataset.getcasesId);
+    if (!action || action.kind !== "cite") return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    send({
+      type: "open", from: "ours", web: true, behind: true,
+      link: { kind: action.kind, value: action.value, text: action.text, url: action.url },
+    });
+  }
+
   function onClick(ev) {
+    if (behindClick(ev)) { onWebClick(ev); return; }
     if (ev.defaultPrevented || modified(ev) || !settings.enabled) return;
     const el = ev.target instanceof Element ? ev.target : ev.target && ev.target.parentElement;
     if (!el) return;
@@ -389,6 +421,7 @@
     if (!listening) {
       listening = true;
       window.addEventListener("click", onClick, true);
+      window.addEventListener("auxclick", onWebClick, true);   // the middle button
       document.addEventListener("pointerover", onPointerOver, true);
       document.addEventListener("visibilitychange", async () => {
         if (document.visibilityState !== "visible" || !settings.enabled || siteDisabled()) return;
@@ -402,6 +435,10 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, reply) => {
     if (message && message.type === "rescan") {
+      if (!settings.enabled || siteDisabled()) {
+        reply({ links: 0 });              // a site left alone stays so
+        return false;
+      }
       rescan().then(() => reply({ links: links.size }));
       return true;
     }

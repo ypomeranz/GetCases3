@@ -114,6 +114,18 @@ def action_label(action: "tuple[str, str]", text: str = "") -> str:
         if kind == "sec":
             import sec_decisions
             return sec_decisions.spec_label(value)
+        if kind == "engrep":
+            # The case in the English Reports — what a nominate citation
+            # ("2 Russ. & M. 639") opens, which its own text does not say.
+            import eng_rep
+            cases = eng_rep.resolve(eng_rep.split_pin(value)[0])
+            if len(cases) == 1:
+                return cases[0].label
+            reprinted = {c.er_cite for c in cases}
+            if len(reprinted) == 1:
+                return reprinted.pop()
+            if cases:
+                return f"{' '.join((text or '').split())} (English Reports)"
         if kind == "leghist":
             import legislative_history
             return legislative_history.spec_label(value)

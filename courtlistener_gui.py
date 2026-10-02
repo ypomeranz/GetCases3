@@ -37059,8 +37059,9 @@ def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
     """Open a brief citation in the user's web browser — a guaranteed-reliable
     fallback (right-click) that never touches the in-app window machinery.
     Which page opens is :func:`browser_links.browser_url`'s choice, shared
-    with the browser extension: cases go to Google Scholar, statutes and
-    rules to their official pages, link-out actions to their URL."""
+    with the browser extension: a Supreme Court case to its official scan,
+    other cases to Google Scholar's case-law search, statutes and rules to
+    their official pages, link-out actions to their URL."""
     url = browser_links.browser_url(action, text)
     if not url:
         return

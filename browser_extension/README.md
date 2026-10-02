@@ -6,11 +6,15 @@ you read in Chrome. Click one and:
 - **with GetCases running**, it opens in GetCases, just as a citation in one of
   the app's own windows does (a case opens on its scanned pages, a statute in
   the statute viewer, and so on);
-- **without GetCases**, it opens the web page GetCases itself uses for that
-  citation (the same page as the app's right-click "open in your browser"):
-  Google Scholar for a case, uscode.house.gov for the U.S. Code, eCFR for the
-  C.F.R., Cornell LII for the federal rules, the Library of Congress for the
-  Constitution, GovInfo for the Statutes at Large and the Federal Register.
+- **without GetCases**, it opens the web page for that citation on the web:
+  a case on its scanned report when the citation says where that is and the
+  scan is there — the official U.S. Reports at the Library of Congress or
+  GovInfo for the Supreme Court (the early reporters too: "1 Cranch 137" is
+  5 U.S. 137), the Caselaw Access Project's scan for any other reporter —
+  and otherwise Google Scholar's search of case law; uscode.house.gov for the
+  U.S. Code, eCFR for the C.F.R., Cornell LII for the federal rules, the
+  Library of Congress for the Constitution, GovInfo for the Statutes at
+  Large and the Federal Register.
 
 It also works in Chrome, Edge, Brave and other Chromium browsers.
 
@@ -35,7 +39,9 @@ arrow on the extension's card in `chrome://extensions` to pick up any changes.
   cites.
 - **Click** a citation to open it (in GetCases if it is running, otherwise on
   the web, in a new tab). **Ctrl/Cmd-click** or **middle-click** always opens
-  the web page instead.
+  the web page instead, in a tab behind this one. A case's scan takes a
+  moment to find: the Caselaw Access Project has only some of each
+  reporter's cases, so the extension asks before opening one.
 - **Links a page already has** to a case or statute (a Justia or CourtListener
   opinion, a section on Cornell or uscode.house.gov, a link whose text is a
   citation) open in GetCases too while it is running. Without GetCases they
@@ -55,10 +61,27 @@ many citations are linked on the page, and these settings:
 | Setting | What it does |
 | --- | --- |
 | Link citations on web pages | Turns the extension's links off everywhere |
-| …on *this site* | Turns them off on the site you are on |
+| …on *this site* | Turns them off on the site you are on (adds it to the sites left alone) |
+| Sites left alone | The sites the extension stays out of — see below |
 | Open PDFs with citation links | Off: PDFs open in Chrome's viewer as usual |
 | Open pages' own links … in GetCases | Off: a page's existing links always go where they point |
 | Connection → GetCases port | Only if you changed GetCases's port (below) |
+
+### Sites left alone
+
+On the sites in this list, and their subdomains, the extension links no
+citations, leaves the pages' own links as they are, and lets their PDFs open
+in Chrome's viewer. It starts with the research services, which link their
+own citations and whose pages are applications the links would only get in
+the way of: Westlaw, Lexis and LexisNexis, Bloomberg Law, vLex and Fastcase.
+A site reached through a library's proxy (`next-westlaw-com.ezproxy.…`)
+counts as the site itself.
+
+Open **Sites left alone** in the popup to see the list: **×** takes a site off
+it, and the box below adds one — type a domain (`example.com`) or paste an
+address from the browser. **Add the research services back** restores any of
+the starting ones you have removed. The list is kept with your Chrome
+settings, so with Chrome sync on it follows you to your other computers.
 
 ## How it reads citations
 
@@ -73,16 +96,22 @@ of GetCases's own citation patterns (`src/patterns.js`), and links cases, the
 U.S. Code, the C.F.R., the federal rules, the Constitution, the Statutes at
 Large, the Federal Register, the English Reports and the SEC's reports. (For
 the last two, GetCases's own index names the exact page; without it the link
-opens a search of CommonLII, or HathiTrust's catalogue record.) If you start
-GetCases later, the page is read again GetCases's way the next time you come
-back to its tab.
+opens a search of CommonLII, or HathiTrust's catalogue record.) A citation
+to the original reports the English Reports reprint ("2 Russ. & M. 639", "6
+Mod. 16") is linked when it stands beside the reprint's own ("…, 39 Eng.
+Rep. 538"), and opens the same case; GetCases reads them wherever they
+stand. If you start GetCases later, the page is read again GetCases's way
+the next time you come back to its tab.
 
 ## Privacy
 
-The extension talks only to GetCases on your own computer
+The extension talks to GetCases on your own computer
 (`http://127.0.0.1:21983`). Page text goes to GetCases only while it is
 running, and never leaves your computer; nothing is sent anywhere else. When
-you click a citation without GetCases, the web page for it opens like any link.
+you click a citation without GetCases, the web page for it opens like any link
+— and, for a case, the extension first asks the sites its scan would be at
+(the Library of Congress, GovInfo, the Caselaw Access Project) whether they
+have that one file: a request for its address alone, without cookies.
 
 GetCases answers only the extension: its door takes requests only with the
 extension's header, refuses anything a web page sends, and is reachable only
@@ -103,7 +132,8 @@ from this computer.
 | Clicks open the web, though GetCases is running | Check the extension's popup says GetCases is running. If not: is **Settings → Open Citations Clicked in Chrome Here** ticked in GetCases, and do the ports match? A second copy of GetCases takes the connection over from the first. |
 | A statute opens in the browser although GetCases is running | GetCases couldn't reach its source (uscode.house.gov, eCFR, Cornell) and says so in a message; the web page opened instead. Try again later, or check your connection. |
 | A GetCases window opened behind Chrome | Click its icon in the taskbar or Dock; GetCases brings the first window of each click forward, but some systems refuse. |
-| Links look wrong on some site | Untick **…on this site** in the popup. |
+| Links look wrong on some site | Untick **…on this site** in the popup, or add it under **Sites left alone**. |
+| No links on Westlaw, Lexis, … | They are among the **Sites left alone**; take one off the list to link it. |
 | A PDF says it can't be opened | Use **Open it in Chrome's viewer instead**. For PDFs on your computer, allow file access (step 4 above). |
 | A PDF has no links | It may be a scan with no text layer; the button on the viewer's toolbar says "No text to read". |
 

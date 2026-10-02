@@ -6,7 +6,9 @@
 // the C.F.R., the federal rules, the Constitution, the Statutes at Large, the
 // Federal Register, the English Reports and the SEC's reports — with the
 // app's own regular expressions (patterns.js, exported from the Python), and
-// sends a click to the web page the app would open (browser_links.py).
+// sends a click to the web page the app would open (browser_links.py): a
+// case to its scanned report where the citation gives the address and the
+// scan is there (the service worker looks first), else Google Scholar.
 //
 // A classic script, so the content script, the PDF viewer and the service
 // worker can all load it: it sets globalThis.GetCasesCitations.
@@ -40,9 +42,10 @@
     }
   }
 
-  /** The pattern *name* matched exactly at *pos* in *text*, or null. */
-  function matchAt(name, text, pos) {
-    const re = rx(name, "y");
+  /** The pattern *name* matched exactly at *pos* in *text*, or null
+   *  (*flags*: "yd" for its groups' indices too). */
+  function matchAt(name, text, pos, flags = "y") {
+    const re = rx(name, flags);
     re.lastIndex = pos;
     return re.exec(text);
   }
@@ -106,6 +109,28 @@
     return !rep.includes(".") && WORD.has(looseKey(reporterWithoutSuffix(rep)));
   }
 
+  const AMERICAN = new Set(T.americanKeys);
+  const ER_REPORTER = new RegExp(`^(?:${DATA.patterns.engRepReporter.source})$`);
+
+  /** Whether *rep*, written beside an English Reports citation, is the same
+   *  case's nominate report: an abbreviation, not the reprint's own, and
+   *  no American reporter (eng_rep.parallel_cites). */
+  function parallelReporter(rep) {
+    if (!/[.&]/.test(rep) || ER_REPORTER.test(rep.trim())) return false;
+    return !(knownReporter(rep) || AMERICAN.has(looseKey(rep)) ||
+             has(T.stateNominative, nominativeKey(rep)));
+  }
+
+  let nominate = null;
+  /** Whether *rep* names a reporter of the nominate reports, as the
+   *  app's index of them writes it (eng_rep.nominate_form_re). */
+  function nominateReporter(rep) {
+    const p = DATA.patterns.engRepNominate;
+    if (!p) return false;
+    nominate = nominate || new RegExp(`^(?:${p.source})$`, p.flags);
+    return nominate.test(rep.trim());
+  }
+
   /** Whether *pos* is where a citation's volume stands (after a case name's
    *  comma, a semicolon, an opening bracket, or the start). */
   function atCitationStart(text, pos) {
@@ -132,7 +157,9 @@
   // Web pages (browser_links.py)
   // -------------------------------------------------------------------------
 
-  const SCHOLAR_SEARCH = "https://scholar.google.com/scholar?q=";
+  // Google Scholar's search of case law in every court: without as_sdt it
+  // searches articles, where a citation finds the law reviews citing it.
+  const SCHOLAR_SEARCH = "https://scholar.google.com/scholar?hl=en&as_sdt=2006&q=";
   const CONSTITUTION_URL = "https://constitution.congress.gov/constitution/";
   const ENG_REP_URL = "https://www.commonlii.org/uk/cases/EngR";
 
@@ -145,6 +172,89 @@
   }
 
   const google = (text) => "https://www.google.com/search?q=" + pyQuote(squash(text));
+
+  // A case's scan, from its citation (browser_links.case_pdf_urls).
+
+  const CITE_PARTS = /^\s*(\d+)\s+(.+?)\s+(\d+)\s*$/;
+  const has = (table, key) => Object.prototype.hasOwnProperty.call(table, key);
+  const pad = (n, width) => String(n).padStart(width, "0");
+  const nominativeKey = (rep) => (rep || "").toLowerCase().replace(/[^a-z]/g, "");
+
+  /** The Caselaw Access Project's name for reporter *rep* in its addresses. */
+  function caseLawSlug(rep) {
+    const key = looseKey(rep);
+    if (has(T.caseLawSlugs, key)) return T.caseLawSlugs[key];
+    return (rep || "")
+      .replace(/(?<![A-Za-z])([A-Za-z]\.)\s+(?=[A-Za-z]\.|\d)/g, "$1")
+      .toLowerCase().replace(/ /g, "-").replace(/[^a-z0-9-]/g, "")
+      .replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  }
+
+  /** The U.S. Reports volume of volume *vol* of *rep* ("1 Cranch" is 5
+   *  U.S.), or 0 when *rep* is no Supreme Court reporter. */
+  function usReportsVolume(vol, rep) {
+    const key = looseKey(rep);
+    if (key === "us") return vol;
+    const nom = T.nominativeUS[key];
+    return nom && vol >= 1 && vol <= nom[1] ? vol + nom[0] : 0;
+  }
+
+  /** The official scans of the opinion at *page* of volume *vol* of the
+   *  U.S. Reports, the better first: the Library of Congress's, GPO's. */
+  function usReportsPdfUrls(vol, page) {
+    const U = T.usReports;
+    const v = pad(vol, 3), vp = v + pad(page, 3);
+    const loc = vol >= 1 && vol <= U.locMax
+      ? `https://tile.loc.gov/storage-services/service/ll/usrep/usrep${v}/usrep${vp}/usrep${vp}.pdf` : "";
+    const gpo = vol >= 2
+      ? `https://www.govinfo.gov/content/pkg/USREPORTS-${vol}/pdf/USREPORTS-${vol}-${page}.pdf` : "";
+    return (vol <= U.locPreferredMax ? [loc, gpo] : [gpo, loc]).filter(Boolean);
+  }
+
+  /** The scans of the case *cite* names whose addresses its citation gives,
+   *  best first — the official U.S. Reports, else the Caselaw Access
+   *  Project's — unchecked: CAP holds only some of a reporter's cases. */
+  function casePdfUrls(cite) {
+    const m = CITE_PARTS.exec((cite || "").split("@")[0]);
+    if (!m) return [];
+    const vol = +m[1], rep = m[2], page = +m[3];
+    const us = usReportsVolume(vol, rep);
+    if (us) return usReportsPdfUrls(us, page);
+    const key = looseKey(rep);
+    if (!key || key === "wl" || key.endsWith("lexis")) return [];
+    const out = [];
+    const add = (v, r) => {
+      const slug = caseLawSlug(r);
+      const url = `https://static.case.law/${slug}/${v}/case-pdfs/${pad(page, 4)}-01.pdf`;
+      if (slug && !out.includes(url)) out.push(url);
+    };
+    // A state's reporter renumbered into its official series ("19 Pick.
+    // 234" is 36 Mass. 234), where CAP files it.
+    for (const [series, offset, volumes] of T.stateNominative[nominativeKey(rep)] || []) {
+      if (vol >= 1 && vol <= volumes) add(vol + offset, series);
+    }
+    add(vol, rep);
+    return out;
+  }
+
+  const scholarCaseUrl = (cite) => SCHOLAR_SEARCH + pyQuote(`"${(cite || "").split("@")[0]}"`);
+
+  /** Every page that may show the case *cite* names, in the order to try
+   *  them: its scans, then Google Scholar, which always answers. */
+  function caseUrls(cite) {
+    return [...casePdfUrls(cite), scholarCaseUrl(cite)];
+  }
+
+  /** The one page for the case when there is no looking first: its official
+   *  U.S. Reports scan where that is surely there, else Google Scholar. */
+  function caseUrl(cite) {
+    const m = CITE_PARTS.exec((cite || "").split("@")[0]);
+    if (m) {
+      const us = usReportsVolume(+m[1], m[2]);
+      if (us && us <= T.usReports.govinfoMax) return usReportsPdfUrls(us, +m[3])[0];
+    }
+    return scholarCaseUrl(cite);
+  }
 
   /** "title:section:sub,sub" → [title, section, [subs]]. */
   function splitSpec(value) {
@@ -186,7 +296,7 @@
         if (first === "pmbl") return `${CONSTITUTION_URL}preamble/`;
         return CONSTITUTION_URL;
       case "cite":
-        return SCHOLAR_SEARCH + pyQuote(`"${value.split("@")[0]}"`);
+        return caseUrl(value);
       case "sec":
         return T.secCatalogUrl;
       case "engrep": {
@@ -295,6 +405,11 @@
         const [cite, pin] = value.split("@");
         return pin ? `${cite}, ${pin}` : cite;
       }
+      case "engrep": {
+        // The reprint's citation, which a nominate one opens too.
+        const m = /^(\d+):(\d+)(?:@(\S+))?$/.exec(value);
+        return m ? `${m[1]} Eng. Rep. ${m[2]}` + (m[3] ? `, ${m[3]}` : "") : squash(text);
+      }
       case "usc": return `${first} U.S.C. § ${section}${tail}`;
       case "cfr": return `${first} C.F.R. § ${section}${tail}`;
       case "rule": return T.ruleSets[first] ? `${T.ruleSets[first].abbr} ${section}${tail}` : squash(text);
@@ -345,9 +460,45 @@
 
     const claim = (s, e, kind, value) => { claimed.push([s, e]); found.push([s, e, kind, value]); };
 
-    // Sources a reporter's shape would otherwise claim as a case.
+    // Sources a reporter's shape would otherwise claim as a case.  First the
+    // English Reports (eng_rep.iter_cites): the reprint's citations with
+    // their pins, its short forms in a case cited in full, and the
+    // citations written beside them — the same cases in the nominate
+    // reports the reprint collects ("2 Russ. & M. 639, 39 Eng. Rep. 538"),
+    // which open where the reprint's citation does.
+    const reprint = [];
+    const reprinted = new Map();    // volume → first pages cited in full
     for (const m of matchAll("engRep", text)) {
-      claim(m.index, m.index + m[0].length, "engrep", `${m[1]}:${m[2]}`);
+      let end = m.index + m[0].length;
+      let value = `${m[1]}:${m[2]}`;
+      const p = matchAt("engRepPin", text, end);
+      if (p) { value += "@" + p[1]; end = p.index + p[0].length; }
+      reprint.push([m.index, end, value]);
+      if (!reprinted.has(+m[1])) reprinted.set(+m[1], []);
+      reprinted.get(+m[1]).push(+m[2]);
+    }
+    for (const m of matchAll("engRepShort", text)) {
+      const vol = +m[1], page = +m[2];
+      const near = (reprinted.get(vol) || []).filter((s) => s <= page && page <= s + T.engRepShortSpan);
+      if (near.length) reprint.push([m.index, m.index + m[0].length, `${vol}:${Math.max(...near)}@${page}`]);
+    }
+    for (const [s, e, value] of reprint) claim(s, e, "engrep", value);
+    const parallel = (m, value) => {
+      const [cs, ce] = m.indices.groups.cite;
+      if (!overlaps(claimed, cs, ce)) claim(cs, ce, "engrep", value);
+    };
+    // Just before one first: a citation between two is the second's.
+    for (const [s, , value] of reprint) {
+      const before = rx("engRepBefore", "gd");
+      before.lastIndex = Math.max(0, s - T.engRepReach);
+      const m = before.exec(text.slice(0, s));
+      if (m && parallelReporter(m.groups.rep)) parallel(m, value);
+    }
+    // Just after one, only a reporter of the nominate reports: else it is
+    // as likely the next authority of a string cite.
+    for (const [, e, value] of reprint) {
+      const m = matchAt("engRepAfter", text, e, "yd");
+      if (m && nominateReporter(m.groups.rep) && parallelReporter(m.groups.rep)) parallel(m, value);
     }
     for (const m of matchAll("sec", text)) {
       if (m.groups.short) continue;       // "8 S.E.C. at 915": needs the index
@@ -545,15 +696,22 @@
     if (host === "static.case.law" && (m = /^\/([a-z0-9-]+)\/(\d+)\/(?:cases|case-pdfs)\/(\d+)-\d+\.(?:json|pdf)$/.exec(path))) {
       return caseAction(m[2], reporterFromSlug(m[1]), m[3]);
     }
-    if ((host === "tile.loc.gov" || host === "loc.gov") && (m = /usrep(\d{3})(\d{3,4})/.exec(path))) {
+    if (/^(?:tile|cdn)\.loc\.gov$|^loc\.gov$/.test(host) && (m = /usrep(\d{3})(\d{3,4})/.exec(path))) {
       return caseAction(m[1], "U.S.", m[2]);
+    }
+    if (host === "govinfo.gov" &&
+        (m = /^\/(?:link\/usreports\/(\d+)\/(\d+)|content\/pkg\/USREPORTS-(\d+)\/pdf\/USREPORTS-\d+-(\d+)\.pdf)$/.exec(path))) {
+      return caseAction(m[1] || m[3], "U.S.", m[2] || m[4]);
     }
     return null;
   }
 
   root.GetCasesCitations = {
-    detect, mightHaveCitations, actionForUrl, browserUrl, label, category,
+    detect, mightHaveCitations, actionForUrl, browserUrl, label, category, caseUrls,
     // For the tests.
-    _internal: { caseMatchText, validCaseReporter, reporterKey, canonicalReporter, constParts, pyQuote, splitSpec },
+    _internal: {
+      caseMatchText, validCaseReporter, reporterKey, canonicalReporter, constParts, pyQuote, splitSpec,
+      casePdfUrls, caseLawSlug,
+    },
   };
 })(globalThis);

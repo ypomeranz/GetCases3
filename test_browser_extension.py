@@ -37,6 +37,7 @@ from unittest.mock import Mock, patch
 import browser_bridge
 import browser_links
 import citations
+import eng_rep
 
 ROOT = Path(__file__).resolve().parent
 EXTENSION = ROOT / "browser_extension"
@@ -280,6 +281,19 @@ class BridgeDetectTests(unittest.TestCase):
                      "8 S.E.C. 893, 915 (1941)"):
             self.assertIn(want, labels)
 
+    def test_an_english_citation_names_the_case_it_opens(self):
+        # The original report's citation does not say the English Reports
+        # is where it goes: its label does.
+        text = ("Wellesley v. Duke of Beaufort [1831] 2 Russ. & M. 639, 39 "
+                "Eng. Rep. 538 (Ch).")
+        links = self.detect(text)
+        self.assertEqual(
+            [(l["kind"], text[l["start"]:l["end"]]) for l in links],
+            [("engrep", "2 Russ. & M. 639"), ("engrep", "39 Eng. Rep. 538")])
+        for link in links:
+            self.assertIn("Wellesley", link["label"])
+            self.assertTrue(link["label"].endswith("39 E.R. 538"))
+
 
 class Utf16Tests(unittest.TestCase):
     def test_round_trip(self):
@@ -303,10 +317,29 @@ class BrowserUrlTests(unittest.TestCase):
     def url(self, kind, value, text=""):
         return browser_links.browser_url((kind, value), text)
 
-    def test_cases_go_to_google_scholar(self):
-        self.assertEqual(self.url("cite", "410 U.S. 113@153"),
-                         "https://scholar.google.com/scholar?q="
-                         "%22410%20U.S.%20113%22")
+    def test_a_supreme_court_case_goes_to_its_official_scan(self):
+        self.assertEqual(
+            self.url("cite", "410 U.S. 113@153"),
+            "https://tile.loc.gov/storage-services/service/ll/usrep/"
+            "usrep410/usrep410113/usrep410113.pdf")
+        self.assertEqual(
+            self.url("cite", "550 U.S. 544"),
+            "https://www.govinfo.gov/content/pkg/USREPORTS-550/pdf/"
+            "USREPORTS-550-544.pdf")
+        # The early reporters are the U.S. Reports' first volumes.
+        self.assertEqual(self.url("cite", "1 Cranch 137"),
+                         self.url("cite", "5 U.S. 137"))
+
+    def test_other_cases_go_to_google_scholar_s_case_law(self):
+        # Without as_sdt Scholar searches articles, and finds law reviews.
+        for cite in ("574 F.3d 1098@1101", "600 U.S. 1", "2022 WL 2373418@12"):
+            with self.subTest(cite=cite):
+                url = self.url("cite", cite)
+                self.assertTrue(url.startswith(
+                    "https://scholar.google.com/scholar?hl=en&as_sdt=2006&q="),
+                    url)
+        self.assertTrue(self.url("cite", "574 F.3d 1098@1101").endswith(
+            "q=%22574%20F.3d%201098%22"))
 
     def test_statutes_go_to_their_official_pages(self):
         self.assertEqual(
@@ -356,6 +389,91 @@ class BrowserUrlTests(unittest.TestCase):
         with patch.object(courtlistener_gui.webbrowser, "open") as browse:
             courtlistener_gui._open_citation_in_browser(("usc", "42:1983:"))
         browse.assert_called_once_with(self.url("usc", "42:1983:"))
+
+
+class CaseScanTests(unittest.TestCase):
+    """Where a case's scan is, from its citation alone: the pages a click
+    tries, in order, before Google Scholar (browser_links.case_urls)."""
+
+    LOC = ("https://tile.loc.gov/storage-services/service/ll/usrep/"
+           "usrep{0:03d}/usrep{0:03d}{1:03d}/usrep{0:03d}{1:03d}.pdf")
+    GPO = ("https://www.govinfo.gov/content/pkg/USREPORTS-{0}/pdf/"
+           "USREPORTS-{0}-{1}.pdf")
+
+    def scans(self, cite):
+        urls = browser_links.case_urls(cite)
+        self.assertEqual(urls[-1], browser_links.scholar_case_url(cite))
+        return urls[:-1]
+
+    def test_the_us_reports_as_the_app_routes_them(self):
+        # The Library's scan first through 501, GPO's after, the Library's
+        # as a second through 542; volume 1 is the Library's alone.
+        self.assertEqual(self.scans("410 U.S. 113@153"),
+                         [self.LOC.format(410, 113), self.GPO.format(410, 113)])
+        self.assertEqual(self.scans("520 U.S. 1"),
+                         [self.GPO.format(520, 1), self.LOC.format(520, 1)])
+        self.assertEqual(self.scans("550 U.S. 544"), [self.GPO.format(550, 544)])
+        self.assertEqual(self.scans("1 U.S. 1"), [self.LOC.format(1, 1)])
+        # Past the volumes GovInfo is known to have, still worth asking.
+        self.assertEqual(self.scans("600 U.S. 1"), [self.GPO.format(600, 1)])
+
+    def test_the_early_reporters_by_their_us_volumes(self):
+        for cite, vol in (("1 Cranch 137", 5), ("3 Dall. 386", 3),
+                          ("4 Wheat. 316", 17), ("18 How. 272", 59),
+                          ("2 Black 635", 67), ("21 Wall. 162", 88),
+                          ("1 Otto 1", 91)):
+            with self.subTest(cite=cite):
+                page = int(cite.rsplit(" ", 1)[1])
+                self.assertEqual(self.scans(cite)[0],
+                                 self.LOC.format(vol, page))
+        # A volume past the reporter's run is no U.S. Reports volume.
+        self.assertFalse(self.scans("25 How. 1")[0].startswith(
+            "https://tile.loc.gov/"))
+
+    def test_other_reporters_at_the_caselaw_access_project(self):
+        cap = "https://static.case.law/{}/{}/case-pdfs/{:04d}-01.pdf".format
+        self.assertEqual(self.scans("201 F. 20@24"), [cap("f", 201, 20)])
+        self.assertEqual(self.scans("253 Mass. 122@129"),
+                         [cap("mass", 253, 122)])
+        self.assertEqual(self.scans("100 F. Supp. 2d 8"),
+                         [cap("f-supp-2d", 100, 8)])
+        # CAP's own name for the New York Reports' second series.
+        self.assertEqual(self.scans("10 N.Y.2d 100"), [cap("ny-2d", 10, 100)])
+        # A state's reporter renumbered into its official series is filed
+        # under the series.
+        self.assertEqual(self.scans("19 Pick. 234")[0], cap("mass", 36, 234))
+
+    def test_no_scan_for_an_online_database_number(self):
+        self.assertEqual(self.scans("2022 WL 2373418@12"), [])
+        self.assertEqual(self.scans("2019 U.S. Dist. LEXIS 1234"), [])
+
+    @unittest.skipUnless(HAVE_TK, "tkinter not installed")
+    def test_the_same_scans_the_app_opens(self):
+        import courtlistener_gui as gui
+        for rep in ("F.", "F.2d", "F. Supp. 2d", "F. App'x", "N.E.2d",
+                    "N. E.", "Cal. App. 4th", "So. 2d", "N.Y.2d", "Wash. 2d",
+                    "Johns. Ch.", "Pa.", "Okla. Crim.", "Ct. Cl."):
+            with self.subTest(rep=rep):
+                self.assertEqual(browser_links.case_law_slug(rep),
+                                 gui._slugify_reporter(rep))
+        for cite in ("1 Cranch 137", "18 How. 272", "21 Wall. 162",
+                     "1 Otto 1", "3 Dall. 386"):
+            with self.subTest(cite=cite):
+                m = re.fullmatch(r"(\d+) (.+) (\d+)", cite)
+                vol = browser_links.us_reports_volume(int(m[1]), m[2])
+                self.assertEqual(f"{vol} U.S. {m[3]}",
+                                 gui._us_reports_cite(cite))
+        for vol, page in ((5, 137), (410, 113), (542, 692), (550, 544)):
+            cite = f"{vol} U.S. {page}"
+            app = [gui._us_reports_loc_url(cite),
+                   (gui._us_reports_govinfo_url(cite) or (None, None))[1]]
+            with self.subTest(cite=cite):
+                # The same files: the Library's under its CDN's other name.
+                ours = {u.split("/usrep/")[-1] if "loc.gov" in u else u
+                        for u in browser_links.us_reports_pdf_urls(vol, page)}
+                self.assertEqual(
+                    ours, {u.split("/usrep/")[-1] if "loc.gov" in u else u
+                           for u in app if u})
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +637,61 @@ class FallbackReaderTests(unittest.TestCase):
             None,
             None,
         ])
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class FallbackCaseAndEnglishTests(unittest.TestCase):
+    """citations.js without the app: a case's scans, and the original
+    reports' citations beside the English Reports'."""
+
+    def test_the_scans_a_click_tries_are_the_apps(self):
+        cites = ["410 U.S. 113@153", "550 U.S. 544", "600 U.S. 1",
+                 "1 Cranch 137", "18 How. 272", "25 How. 1", "201 F. 20@24",
+                 "19 Pick. 234", "1 Sneed 5", "10 N.Y.2d 100",
+                 "100 F. Supp. 2d 8", "2022 WL 2373418@12", "93 S. Ct. 705"]
+        got = run_node(
+            "process.stdout.write(JSON.stringify(input.map(c => "
+            "[GetCasesCitations.caseUrls(c), "
+            "GetCasesCitations.browserUrl('cite', c)])));", cites)
+        self.assertEqual(
+            got, [[browser_links.case_urls(c),
+                   browser_links.browser_url(("cite", c))] for c in cites])
+
+    def test_the_original_reports_open_the_reprint_s_case(self):
+        # Bray, Prosecuting Contempt, nn. 16, 142, 149 and 176.
+        text = ("Wellesley v. The Duke of Beaufort [1831] 2 Russ. & M. 639, "
+                "39 Eng. Rep. 538 (Ch). Holderstaffe v. Saunders (1703) 6 "
+                "Mod. 16, 90 Eng. Rep. 974 (KB). Rex v. Almon (1765) Wilm. "
+                "243, 97 Eng. Rep. 94. Wellesley, 2 Russ. & M. at 655, 39 Eng. "
+                "Rep. at 544. Hadley v. Baxendale (1854) 156 Eng. Rep. 145, "
+                "151; 9 Ex. 341, 354; 8 S.E.C. 893.")
+        links = run_node(
+            "process.stdout.write(JSON.stringify("
+            "GetCasesCitations.detect(input)));", text)
+        found = [(text[l["start"]:l["end"]], l["kind"], l["value"])
+                 for l in links]
+        for want in [
+            ("2 Russ. & M. 639", "engrep", "39:538"),
+            ("6 Mod. 16", "engrep", "90:974"),
+            ("Wilm. 243", "engrep", "97:94"),
+            ("2 Russ. & M. at 655", "engrep", "39:538@544"),
+            ("39 Eng. Rep. at 544", "engrep", "39:538@544"),
+            ("156 Eng. Rep. 145, 151", "engrep", "156:145@151"),
+            ("9 Ex. 341, 354", "engrep", "156:145@151"),
+        ]:
+            self.assertIn(want, found)
+        # A string cite's next authority is not the English case.
+        self.assertFalse(any(kind == "engrep" and "S.E.C." in t
+                             for t, kind, _v in found))
+        label = next(l["label"] for l in links
+                     if text[l["start"]:l["end"]] == "2 Russ. & M. 639")
+        self.assertEqual(label, "39 Eng. Rep. 538")
+        # The same parallel citations the app reads.
+        app = eng_rep.parallel_cites(text, [
+            (s, e, spec) for s, e, spec in eng_rep.iter_cites(text)
+            if not spec.startswith("n:") and "Eng" in text[s:e]])
+        for s, e, spec in app:
+            self.assertIn((text[s:e], "engrep", spec), found)
 
 
 def us_code_missing():
@@ -850,11 +1023,71 @@ class ManifestTests(unittest.TestCase):
                 r"importScripts\(([^)]*)\)", worker.read_text()).group(1)):
             self.assertTrue((worker.parent / name).is_file(), name)
 
+    def test_the_settings_load_before_whatever_reads_them(self):
+        manifest = json.loads((EXTENSION / "manifest.json").read_text(
+            encoding="utf-8"))
+        (scripts,) = manifest["content_scripts"]
+        self.assertEqual(scripts["js"][0], "src/settings.js")
+        worker = (EXTENSION / "src" / "background.js").read_text(
+            encoding="utf-8")
+        self.assertIn('importScripts("settings.js"', worker)
+        popup = (EXTENSION / "popup" / "popup.html").read_text(
+            encoding="utf-8")
+        self.assertLess(popup.index('src="../src/settings.js"'),
+                        popup.index('src="popup.js"'))
+
     def test_the_default_port_is_the_apps(self):
-        worker = (EXTENSION / "src" / "background.js").read_text()
-        popup = (EXTENSION / "popup" / "popup.js").read_text()
-        for source in (worker, popup):
-            self.assertIn(f"port: {browser_bridge.DEFAULT_PORT}", source)
+        settings = (EXTENSION / "src" / "settings.js").read_text(
+            encoding="utf-8")
+        self.assertIn(f"port: {browser_bridge.DEFAULT_PORT}", settings)
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class SitesLeftAloneTests(unittest.TestCase):
+    """src/settings.js: the sites the extension leaves alone."""
+
+    def run_settings(self, script, payload):
+        done = subprocess.run(
+            [NODE, "-e",
+             "require(%r);\n"
+             "const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));\n"
+             "const S = GetCasesSettings;\n" % str(EXTENSION / "src" / "settings.js")
+             + script],
+            input=json.dumps(payload), capture_output=True, text=True,
+            timeout=60, check=False)
+        if done.returncode:
+            raise AssertionError(f"node failed: {done.stderr}")
+        return json.loads(done.stdout)
+
+    def test_the_research_services_by_default(self):
+        hosts = {
+            "1.next.westlaw.com": True, "www.westlaw.com": True,
+            "advance.lexis.com": True, "www.bloomberglaw.com": True,
+            "app.vlex.com": True, "www.fastcase.com": True,
+            # Through a library's proxy, either way it writes the address.
+            "1-next-westlaw-com.ezproxy.law.example.edu": True,
+            "advance.lexis.com.proxy.example.edu": True,
+            "plexis.com": False, "notwestlaw.com": False,
+            "law.cornell.edu": False, "www.courtlistener.com": False,
+            "scholar.google.com": False,
+        }
+        got = self.run_settings(
+            "process.stdout.write(JSON.stringify(input.map("
+            "h => S.siteExcluded(h, S.DEFAULTS.disabledSites))));",
+            list(hosts))
+        self.assertEqual(dict(zip(hosts, got)), hosts)
+
+    def test_what_the_reader_types(self):
+        typed = {
+            "  Example.COM ": "example.com",
+            "https://www.example.com:8443/path?q=1": "example.com",
+            "*.example.com": "example.com",
+            "foo": "", "not a site": "", "": "",
+        }
+        got = self.run_settings(
+            "process.stdout.write(JSON.stringify(input.map(S.normalizeSite)));",
+            list(typed))
+        self.assertEqual(dict(zip(typed, got)), typed)
 
 
 if __name__ == "__main__":

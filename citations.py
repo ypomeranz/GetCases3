@@ -1212,6 +1212,12 @@ _REPORTER_FAMILIES = (
     _ReporterFamily("L. Ed.", ("Law. Ed.",), ("L. Ed.",), "l-ed"),
     _ReporterFamily("N.Y.S.", ("N.Y. Supp.",), ("N.Y.S.", "N.Y. Supp."),
                     "nys"),
+    # Two that static.case.law names off its own rule: the New York Reports'
+    # second series is "ny-2d" (the third, "ny3d"), and the Court of Claims'
+    # reports are the federal court's, "us-ct-cl" (West Virginia's are
+    # "wv-ct-cl").
+    _ReporterFamily("N.Y.2d", ("N.Y. 2d",), ("N.Y.2d",), "ny-2d"),
+    _ReporterFamily("Ct. Cl.", (), ("Ct. Cl.",), "us-ct-cl"),
     # The first series of the Appellate Division Reports (1896–1955) is
     # "App. Div." in the Bluebook; courts and CAP write it "A.D.".
     _ReporterFamily("App. Div.", ("A.D.",), ("App. Div.", "A.D."), "ad"),

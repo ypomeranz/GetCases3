@@ -145,6 +145,125 @@ class ReportersByNameTests(unittest.TestCase):
         self.assertEqual(specs(f"B. F. Skinner {first} experiments"), [])
 
 
+class BluebookFormsTests(unittest.TestCase):
+    """The Bluebook's own abbreviations (table T2, United Kingdom), where
+    they part from CommonLII's: an article cites "Wellesley v. Duke of
+    Beaufort, 2 Russ. & M. 639", never "Russ & My"."""
+
+    def test_each_opens_the_case_cited(self):
+        for text, spec, name in (
+            ("Wellesley v. Duke of Beaufort, 2 Russ. & M. 639",
+             "n:russmy:2:639", "Wellesley"),
+            ("Hadley v. Baxendale, 9 Ex. 341", "n:exch:9:341", "Hadley"),
+            ("Tomlin v. Mayor of Fordwich, 5 Ad. & El. 147", "n:ade:5:147",
+             "Tomlin"),
+            ("Blunt v. Morris, 2 Wm. Bl. 785", "n:blackw:2:785", "Blunt"),
+            ("Hidson v. Barclay, 3 Hurl. & C. 361", "n:hc:3:361", "Hidson"),
+            ("Pitt v. Wilks, 1 Cromp. & J. 388", "n:crj:1:388", "Pitt"),
+            ("Doyle v. Dallas, 1 Mood. & R. 48", "n:mrob:1:48", "Doyle"),
+            ("King v. Glover, 2 Bos. & P.N.R. 205", "n:bospulnr:2:205",
+             "Glover"),
+            # The new series, as the Bluebook writes it and closed up.
+            ("Bilbee v. Railway Co., 18 C.B. (n.s.) 584", "n:cbns:18:584",
+             "Bilbee"),
+            ("Lockwood v. Levick, 8 C.B.N.S. 603", "n:cbns:8:603",
+             "Lockwood"),
+            # "t." for temp., in lower case.
+            ("Rex v. Angell, Cas. t. Hard. 124", "n:casth:0:124", "Angell"),
+            ("Conyers v. Abergavenny, West t. Hard. 513",
+             "n:westthard:0:513", "Conyers"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), [spec])
+                self.assertTrue(any(name in n for n in names(spec)))
+
+    def test_ex_is_never_the_law_reports_exchequer(self):
+        for text in ("Rylands v. Fletcher, L.R. 1 Ex. 265",
+                     "Rylands v. Fletcher (1866) LR 1 Ex 265",
+                     "Smith v. Jones, 2 Ex. D. 441"):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), [])
+
+    def test_a_short_form_in_a_case_cited_in_full(self):
+        text = ("Wellesley v. Duke of Beaufort, 2 Russ. & M. 639 (Ch. 1831). "
+                "The Chancellor agreed.  Wellesley, 2 Russ. & M. at 655.")
+        self.assertEqual(specs(text),
+                         ["n:russmy:2:639", "n:russmy:2:639@655"])
+        # Not a case the text never cites in full.
+        self.assertEqual(specs("Wellesley, 2 Russ. & M. at 655."), [])
+
+
+class ParallelCitationTests(unittest.TestCase):
+    """A citation written beside the reprint's is the same case's report in
+    the nominate series, and opens where the reprint's citation does — even
+    in an abbreviation the nominate index lacks."""
+
+    def test_an_abbreviation_the_index_lacks(self):
+        text = ("Wellesley v. Duke of Beaufort [1831] 2 Russ. & Mylne 639, "
+                "39 Eng. Rep. 538 (Ch).")
+        (s1, e1, spec1), (_s2, _e2, spec2) = eng_rep.iter_cites(text)
+        self.assertEqual((text[s1:e1], spec1),
+                         ("2 Russ. & Mylne 639", "39:538"))
+        self.assertEqual(spec2, "39:538")
+
+    def test_short_forms_beside_each_other(self):
+        text = ("Wellesley v. Duke of Beaufort, 2 Russ. & Mylne 639, 39 Eng. "
+                "Rep. 538. Wellesley, 2 Russ. & Mylne at 655, 39 Eng. Rep. "
+                "at 544.")
+        self.assertEqual(specs(text),
+                         ["39:538", "39:538", "39:538@544", "39:538@544"])
+
+    def test_the_index_still_says_where_it_knows(self):
+        # 6 Mod. is reprinted in 87 E.R.; the 90 E.R. cite beside it is
+        # another report of the case, and each opens its own.
+        self.assertEqual(
+            specs("Holderstaffe v. Saunders (1703) 6 Mod. 16, 90 Eng. Rep. "
+                  "974 (KB)"),
+            ["n:mod:6:16", "90:974"])
+
+    def test_the_bluebook_s_order(self):
+        # The reprint first, the original report after it.
+        self.assertEqual(
+            specs("Hadley v. Baxendale (1854) 156 Eng. Rep. 145, 151; 9 "
+                  "Exch. 341, 354."),
+            ["156:145@151", "n:exch:9:341@354"])
+
+    def test_after_one_only_a_reporter_of_the_nominate_reports(self):
+        # The next authority of a string cite is no parallel citation.
+        for text in ("Hadley v. Baxendale, 156 Eng. Rep. 145 (1854); 8 S.E.C. "
+                     "893, 915.",
+                     "156 Eng. Rep. 145; 12 Harv. L. Rev. 100."):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), ["156:145"])
+
+    def test_never_an_american_reporter_or_a_signal(self):
+        for text in ("See 10 Mass. 100, 156 Eng. Rep. 145.",
+                     "Ibid.; 3 Wheat. 200, 156 Eng. Rep. 145.",
+                     "Smith, 19 Pick. 234, 156 Eng. Rep. 145.",
+                     "Cf. 156 Eng. Rep. 145; See 4 Bl. Comm. 80."):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), ["156:145"])
+
+    def test_between_two_it_goes_with_the_second(self):
+        # (Here the nominate index would place it anyway: this is the rule
+        # as the browser extension, which has no index, applies it.)
+        text = "156 Eng. Rep. 145; 9 Exch. 341, 39 Eng. Rep. 538."
+        reprint = [(m.start(), m.end(), eng_rep.cite_spec(m))
+                   for m in eng_rep.ER_CITE_RE.finditer(text)]
+        self.assertEqual(
+            [(text[s:e], spec)
+             for s, e, spec in eng_rep.parallel_cites(text, reprint)],
+            [("9 Exch. 341", "39:538")])
+
+    def test_the_link_detector_opens_them_in_the_english_reports(self):
+        # Footnote 176 of Bray, Prosecuting Contempt.
+        text = "176 Wellesley, 2 Russ. & Mylne at 655, 39 Eng. Rep. at 544."
+        self.assertEqual(
+            [action for _s, _e, action in citations.detect_links(text)
+             if action[0] != "idcite"],
+            [("engrep", "39:538@544"), ("engrep", "39:538@544")])
+
+
 class PinPageTests(unittest.TestCase):
     """The page a citation names travels with it."""
 

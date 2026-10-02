@@ -359,10 +359,12 @@ function drawLinks(view) {
       a.style.width = `${(r.width / base.width) * 100}%`;
       a.style.height = `${(r.height / base.height) * 100}%`;
       a.addEventListener("click", (ev) => {
+        if (behindClick(ev)) { followOnWeb(ev, action, item.text); return; }
         if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
         ev.preventDefault();
         follow(action, item.text);
       });
+      a.addEventListener("auxclick", (ev) => followOnWeb(ev, action, item.text));
       overlay.appendChild(a);
     }
   }
@@ -375,6 +377,24 @@ async function follow(action, text) {
     link: { kind: action.kind, value: action.value, url: action.url, text: text.replace(/\s+/g, " ").trim() },
   });
   if (reply && reply.opened === "app") toast(`Opening ${action.label || text} in GetCases…`);
+}
+
+/** A click asking for the link in a tab behind this one: Ctrl/Cmd-click,
+ *  or the middle button. */
+function behindClick(ev) {
+  if (ev.shiftKey || ev.altKey) return false;
+  return ev.button === 1 || (ev.button === 0 && (ev.ctrlKey || ev.metaKey));
+}
+
+/** Such a click on a case: its scan, found first, rather than the address
+ *  the link carries (see src/content.js onWebClick). */
+function followOnWeb(ev, action, text) {
+  if (!behindClick(ev) || action.kind !== "cite") return;
+  ev.preventDefault();
+  send({
+    type: "open", from: "ours", web: true, behind: true,
+    link: { kind: action.kind, value: action.value, url: action.url, text: text.replace(/\s+/g, " ").trim() },
+  });
 }
 
 setUpToolbar();
