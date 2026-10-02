@@ -29,7 +29,12 @@
     "main", "nav", "ol", "p", "pre", "section", "summary", "table", "tbody",
     "td", "tfoot", "th", "thead", "tr", "ul", "caption"]);
 
-  let settings = { enabled: true, disabledSites: [], interceptLinks: true };
+  const S = globalThis.GetCasesSettings;
+  let settings = {
+    enabled: S.DEFAULTS.enabled,
+    disabledSites: S.DEFAULTS.disabledSites,
+    interceptLinks: S.DEFAULTS.interceptLinks,
+  };
   let mode = "web";                 // how the page was read: "app" or "web"
   let appRunning = false;
   let statusAt = 0;
@@ -65,9 +70,10 @@
     return appRunning;
   }
 
+  /** Whether this site is one the reader has the extension leave alone
+   *  (by default, the research services: Westlaw, Lexis, …). */
   function siteDisabled() {
-    const host = location.hostname;
-    return (settings.disabledSites || []).some((h) => host === h || host.endsWith("." + h));
+    return S.siteExcluded(location.hostname, settings.disabledSites);
   }
 
   // -------------------------------------------------------------------------
@@ -429,6 +435,10 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, reply) => {
     if (message && message.type === "rescan") {
+      if (!settings.enabled || siteDisabled()) {
+        reply({ links: 0 });              // a site left alone stays so
+        return false;
+      }
       rescan().then(() => reply({ links: links.size }));
       return true;
     }

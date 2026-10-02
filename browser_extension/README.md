@@ -61,10 +61,27 @@ many citations are linked on the page, and these settings:
 | Setting | What it does |
 | --- | --- |
 | Link citations on web pages | Turns the extension's links off everywhere |
-| …on *this site* | Turns them off on the site you are on |
+| …on *this site* | Turns them off on the site you are on (adds it to the sites left alone) |
+| Sites left alone | The sites the extension stays out of — see below |
 | Open PDFs with citation links | Off: PDFs open in Chrome's viewer as usual |
 | Open pages' own links … in GetCases | Off: a page's existing links always go where they point |
 | Connection → GetCases port | Only if you changed GetCases's port (below) |
+
+### Sites left alone
+
+On the sites in this list, and their subdomains, the extension links no
+citations, leaves the pages' own links as they are, and lets their PDFs open
+in Chrome's viewer. It starts with the research services, which link their
+own citations and whose pages are applications the links would only get in
+the way of: Westlaw, Lexis and LexisNexis, Bloomberg Law, vLex and Fastcase.
+A site reached through a library's proxy (`next-westlaw-com.ezproxy.…`)
+counts as the site itself.
+
+Open **Sites left alone** in the popup to see the list: **×** takes a site off
+it, and the box below adds one — type a domain (`example.com`) or paste an
+address from the browser. **Add the research services back** restores any of
+the starting ones you have removed. The list is kept with your Chrome
+settings, so with Chrome sync on it follows you to your other computers.
 
 ## How it reads citations
 
@@ -115,7 +132,8 @@ from this computer.
 | Clicks open the web, though GetCases is running | Check the extension's popup says GetCases is running. If not: is **Settings → Open Citations Clicked in Chrome Here** ticked in GetCases, and do the ports match? A second copy of GetCases takes the connection over from the first. |
 | A statute opens in the browser although GetCases is running | GetCases couldn't reach its source (uscode.house.gov, eCFR, Cornell) and says so in a message; the web page opened instead. Try again later, or check your connection. |
 | A GetCases window opened behind Chrome | Click its icon in the taskbar or Dock; GetCases brings the first window of each click forward, but some systems refuse. |
-| Links look wrong on some site | Untick **…on this site** in the popup. |
+| Links look wrong on some site | Untick **…on this site** in the popup, or add it under **Sites left alone**. |
+| No links on Westlaw, Lexis, … | They are among the **Sites left alone**; take one off the list to link it. |
 | A PDF says it can't be opened | Use **Open it in Chrome's viewer instead**. For PDFs on your computer, allow file access (step 4 above). |
 | A PDF has no links | It may be a scan with no text layer; the button on the viewer's toolbar says "No text to read". |
 

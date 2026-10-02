@@ -12,18 +12,31 @@
 // sites its scan would be at (the Library of Congress, GovInfo, the Caselaw
 // Access Project) are asked whether they have it.
 
-importScripts("patterns.js", "citations.js");
+importScripts("settings.js", "patterns.js", "citations.js");
 
-const DEFAULTS = {
-  enabled: true,          // link citations on web pages
-  disabledSites: [],      // …except on these hosts
-  interceptLinks: true,   // a page's own links to legal sources open in GetCases
-  pdfViewer: true,        // open PDFs in the extension's viewer
-  port: 21983,
-};
+const { DEFAULTS, RESEARCH_SITES } = GetCasesSettings;
 
 function getSettings() {
   return chrome.storage.sync.get(DEFAULTS);
+}
+
+/** The research services joined the sites left alone in version 1.2; a copy
+ *  of the extension from before then, whose reader had already turned it
+ *  off on a site of their own, gets them added once.  (One that never had
+ *  a list of its own has them by default.) */
+async function addResearchSites() {
+  const { disabledSites, sitesVersion = 0 } =
+    await chrome.storage.sync.get(["disabledSites", "sitesVersion"]);
+  if (sitesVersion >= 1) return;
+  const update = { sitesVersion: 1 };
+  if (Array.isArray(disabledSites)) {
+    update.disabledSites = [...disabledSites, ...RESEARCH_SITES.filter((s) => !disabledSites.includes(s))];
+  }
+  await chrome.storage.sync.set(update);
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname; } catch (e) { return ""; }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +244,10 @@ function setUpMenus() {
   });
 }
 
-chrome.runtime.onInstalled.addListener(setUpMenus);
+chrome.runtime.onInstalled.addListener(() => {
+  setUpMenus();
+  addResearchSites();
+});
 chrome.runtime.onStartup.addListener(setUpMenus);
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -308,8 +324,12 @@ chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0 || !isPdfResponse(details)) return;
     (async () => {
-      const { pdfViewer } = await getSettings();
+      const { pdfViewer, disabledSites } = await getSettings();
       if (!pdfViewer || (await bypassed(details.url))) return;
+      // A PDF from a site left alone, or opened from one, is left to
+      // Chrome's viewer too.
+      const excluded = (url) => GetCasesSettings.siteExcluded(hostOf(url), disabledSites);
+      if (excluded(details.url) || (details.initiator && excluded(details.initiator))) return;
       await openPdfViewer(details.url, details.tabId);
     })();
   },

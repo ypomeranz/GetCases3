@@ -1023,11 +1023,71 @@ class ManifestTests(unittest.TestCase):
                 r"importScripts\(([^)]*)\)", worker.read_text()).group(1)):
             self.assertTrue((worker.parent / name).is_file(), name)
 
+    def test_the_settings_load_before_whatever_reads_them(self):
+        manifest = json.loads((EXTENSION / "manifest.json").read_text(
+            encoding="utf-8"))
+        (scripts,) = manifest["content_scripts"]
+        self.assertEqual(scripts["js"][0], "src/settings.js")
+        worker = (EXTENSION / "src" / "background.js").read_text(
+            encoding="utf-8")
+        self.assertIn('importScripts("settings.js"', worker)
+        popup = (EXTENSION / "popup" / "popup.html").read_text(
+            encoding="utf-8")
+        self.assertLess(popup.index('src="../src/settings.js"'),
+                        popup.index('src="popup.js"'))
+
     def test_the_default_port_is_the_apps(self):
-        worker = (EXTENSION / "src" / "background.js").read_text()
-        popup = (EXTENSION / "popup" / "popup.js").read_text()
-        for source in (worker, popup):
-            self.assertIn(f"port: {browser_bridge.DEFAULT_PORT}", source)
+        settings = (EXTENSION / "src" / "settings.js").read_text(
+            encoding="utf-8")
+        self.assertIn(f"port: {browser_bridge.DEFAULT_PORT}", settings)
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class SitesLeftAloneTests(unittest.TestCase):
+    """src/settings.js: the sites the extension leaves alone."""
+
+    def run_settings(self, script, payload):
+        done = subprocess.run(
+            [NODE, "-e",
+             "require(%r);\n"
+             "const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));\n"
+             "const S = GetCasesSettings;\n" % str(EXTENSION / "src" / "settings.js")
+             + script],
+            input=json.dumps(payload), capture_output=True, text=True,
+            timeout=60, check=False)
+        if done.returncode:
+            raise AssertionError(f"node failed: {done.stderr}")
+        return json.loads(done.stdout)
+
+    def test_the_research_services_by_default(self):
+        hosts = {
+            "1.next.westlaw.com": True, "www.westlaw.com": True,
+            "advance.lexis.com": True, "www.bloomberglaw.com": True,
+            "app.vlex.com": True, "www.fastcase.com": True,
+            # Through a library's proxy, either way it writes the address.
+            "1-next-westlaw-com.ezproxy.law.example.edu": True,
+            "advance.lexis.com.proxy.example.edu": True,
+            "plexis.com": False, "notwestlaw.com": False,
+            "law.cornell.edu": False, "www.courtlistener.com": False,
+            "scholar.google.com": False,
+        }
+        got = self.run_settings(
+            "process.stdout.write(JSON.stringify(input.map("
+            "h => S.siteExcluded(h, S.DEFAULTS.disabledSites))));",
+            list(hosts))
+        self.assertEqual(dict(zip(hosts, got)), hosts)
+
+    def test_what_the_reader_types(self):
+        typed = {
+            "  Example.COM ": "example.com",
+            "https://www.example.com:8443/path?q=1": "example.com",
+            "*.example.com": "example.com",
+            "foo": "", "not a site": "", "": "",
+        }
+        got = self.run_settings(
+            "process.stdout.write(JSON.stringify(input.map(S.normalizeSite)));",
+            list(typed))
+        self.assertEqual(dict(zip(typed, got)), typed)
 
 
 if __name__ == "__main__":

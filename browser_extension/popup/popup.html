@@ -19,10 +19,23 @@
 
   <section class="options">
     <label><input type="checkbox" id="enabled"> Link citations on web pages</label>
-    <label id="siteRow" hidden><input type="checkbox" id="site"> …on <span id="host"></span></label>
+    <label id="siteRow" hidden><input type="checkbox" id="site">
+      <span>…on <span id="host"></span><span id="siteNote" class="note" hidden></span></span></label>
     <label><input type="checkbox" id="pdfViewer"> Open PDFs with citation links</label>
     <label><input type="checkbox" id="interceptLinks"> Open pages' own links to cases and statutes in GetCases while it runs</label>
   </section>
+
+  <details id="sites">
+    <summary>Sites left alone <span id="siteCount" class="note"></span></summary>
+    <p class="hint">No citation links on these sites or their subdomains, and their PDFs open in Chrome's viewer. Westlaw, Lexis and the other research services link their own citations.</p>
+    <ul id="siteList"></ul>
+    <form id="addSite" class="add-site" autocomplete="off">
+      <input id="newSite" type="text" placeholder="example.com, or paste an address" aria-label="Site to leave alone" spellcheck="false">
+      <button type="submit">Add</button>
+    </form>
+    <p id="siteError" class="hint error" role="alert" hidden></p>
+    <button id="restoreSites" type="button" class="link" hidden>Add the research services back</button>
+  </details>
 
   <details>
     <summary>Connection</summary>
@@ -34,6 +47,7 @@
 
   <p class="hint" id="help">With GetCases running, clicking a citation opens it in the app; without it, on the web page the app would open.</p>
 
+  <script src="../src/settings.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
