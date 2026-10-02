@@ -1236,6 +1236,55 @@ class AcronymCaseTests(unittest.TestCase):
         self.assertEqual(
             refine_caption_case("Nifla v. Becerra", body), "NIFLA v. Becerra")
 
+    def test_a_long_acronym_the_prose_writes_in_capitals(self):
+        # CBOCS West, Inc. v. Humphries, 553 U.S. 442 (2008): the opinion
+        # never defines "(CBOCS)", but writes it in capitals in its
+        # sentences throughout — which a five-letter word set in capitals
+        # by a heading or a running head never is.
+        body = ("442 OCTOBER TERM, 2007\nSyllabus\nCBOCS WEST, INC. v. "
+                "HUMPHRIES\nClaiming that petitioner CBOCS West, Inc., "
+                "dismissed him because he is black, respondent Humphries "
+                "filed suit charging that CBOCS’ actions violated Title "
+                "VII.\n444 CBOCS WEST, INC. v. HUMPHRIES\nThe Court of "
+                "Appeals rejected CBOCS’ argument that § 1981 did not "
+                "encompass a claim of retaliation.")
+        name = refine_caption_case(
+            normal_case_caption("CBOCS WEST, INC. v. HUMPHRIES"), body)
+        self.assertEqual(name, "CBOCS West, Inc. v. Humphries")
+        self.assertEqual(abbreviate_case_name(name),
+                         "CBOCS W., Inc. v. Humphries")
+        self.assertEqual(caption_case_reference_tokens(name, body), ())
+
+    def test_but_not_capitals_only_in_its_headings_nor_a_name(self):
+        # Capitals in the caption and running heads alone say nothing.
+        self.assertEqual(
+            refine_caption_case(
+                "Cbocs West, Inc. v. Humphries",
+                "CBOCS WEST, INC. v. HUMPHRIES\nSyllabus\n444 CBOCS WEST, "
+                "INC. v. HUMPHRIES\nThe company dismissed him."),
+            "Cbocs West, Inc. v. Humphries")
+        # A surname some opinions set in capitals as they go stays a name.
+        self.assertEqual(
+            refine_caption_case(
+                "Roberts West v. Smith",
+                "The court denied ROBERTS West's motion, and then rejected "
+                "ROBERTS' appeal."),
+            "Roberts West v. Smith")
+
+    def test_a_reference_name_lends_a_long_acronym_beside_mixed_case(self):
+        self.assertEqual(
+            apply_caption_case_reference(
+                "Cbocs W., Inc. v. Humphries",
+                "CBOCS West, Inc. v. Humphries", ("cbocs",)),
+            "CBOCS W., Inc. v. Humphries")
+        # A caption set in capitals throughout is typography.
+        self.assertEqual(
+            apply_caption_case_reference(
+                "In re National Prescription Opiate Litigation",
+                "In re NATIONAL PRESCRIPTION OPIATE LITIGATION",
+                ("prescription",)),
+            "In re National Prescription Opiate Litigation")
+
     def test_each_piece_of_a_hyphenated_word(self):
         body = ("Americo Norberto Pena-Irala was the Inspector General. "
                 "Pena-Irala had tortured Joelito. Later Pena-Irala left.")
