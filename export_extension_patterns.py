@@ -237,6 +237,19 @@ def patterns() -> "dict[str, re.Pattern]":
         "usNominativeParallel": c.US_NOMINATIVE_PARALLEL_RE,
         "earlyFedCite": c.EARLY_FED_CITE_RE,
         "wlCite": c.WL_CITE_RE,
+        # An unpublished opinion's RECAP lookup: its docket, court and date,
+        # and the case's name (citations.iter_recap_cites, _case_name_start).
+        "recapAfter": c._RECAP_AFTER_RE,
+        "recapDocket": c._RECAP_DOCKET_RE,
+        "recapPin": c._RECAP_PIN_RE,
+        "courtYearParen": c._COURT_YEAR_PAREN_RE,
+        "docketCite": c._DOCKET_CITE_RE,
+        "docketAfterName": c._DOCKET_AFTER_NAME_RE,
+        "nameNoV": c._NAME_NO_V_RE,
+        "nameToken": c._NAME_TOKEN_RE,
+        "nameAbbrev": c._NAME_ABBREV_RE,
+        "nameSignal": c._NAME_SIGNAL_RE,
+        "caption": c._CAPTION_RE,
         "runningHead": c.RUNNING_HEAD_CITE_RE,
         "journalReporter": c._JOURNAL_REPORTER_RE,
         "agOpinion": c._AG_OPINION_RE,
@@ -247,6 +260,7 @@ def patterns() -> "dict[str, re.Pattern]":
         "cfr": ecfr.CFR_CITE_RE,
         "rule": fed_rules.RULE_CITE_RE,
         "const": constitution.CONST_CITE_RE,
+        "constCitation": constitution.CITATION_MARK_RE,
         "stat": statutes_at_large.STAT_CITE_RE,
         "fedReg": federal_register.FR_CITE_RE,
         "engRep": eng_rep.ER_CITE_RE,
@@ -263,6 +277,7 @@ def patterns() -> "dict[str, re.Pattern]":
 
 def tables() -> dict:
     """The reporter and rule tables the patterns are read against."""
+    import bluebook_names
     import browser_links
     import citations as c
     import constitution
@@ -303,6 +318,19 @@ def tables() -> dict:
         "engRepReach": eng_rep.PARALLEL_REACH,
         "engRepShortSpan": eng_rep._SHORT_SPAN,
         "nonCaseReporters": sorted(c._NONCASE_REPORTERS),
+        # Federal courts (their abbreviations, as keys) → CourtListener's ids
+        # for them, and the states by the words their courts' abbreviations
+        # begin with: a state court's unpublished opinion is not linked
+        # (citations.state_court).
+        "federalCourtIds": dict(sorted(c._FED_COURT_IDS.items())),
+        "stateKeys": sorted(c._STATE_KEYS),
+        # What a case's name is read with (citations._case_name_start).
+        "nameConnectors": sorted(c._NAME_CONNECTORS),
+        "nameStoppers": sorted(c._NAME_STOPPERS),
+        "nameSpelledOut": sorted(c._SPELLED_OUT_NAME_WORDS),
+        "headingWords": sorted(c._HEADING_WORDS),
+        "nameTableAbbrevs": sorted(bluebook_names._TABLE_ABBREVIATIONS),
+        "nameWordMap": sorted(bluebook_names._WORD_MAP),
         "plainCaseReporters": sorted(c._PLAIN_CASE_REPORTERS),
         "wordReporterKeys": sorted(c._WORD_REPORTER_KEYS),
         "ruleSets": {k: {"abbr": v[0], "path": v[2]}

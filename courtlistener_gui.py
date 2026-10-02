@@ -25225,9 +25225,9 @@ class _ScholarTextWindow:
         # A (cite, pin) this window was opened to jump to but could not reach
         # yet — the inferred U.S. Reports pages arrive after the first render.
         self._pending_pin_jump: Optional[tuple[str, str]] = None
-        # Amendment numbers already linked in this render, so a repeated bare
-        # prose mention ("the First Amendment guarantees …") isn't re-linked.
-        self._const_linked: set[int] = set()
+        # Provisions of the Constitution linked already in this render (their
+        # specs): each is linked only the first time the opinion cites it.
+        self._const_linked: set[str] = set()
         self._fonts: dict[str, tkfont.Font] = {}
         self._fn_text: dict[str, str] = {}  # footnote id → body text (for hover tips)
         self._fn_tip: Optional[tk.Toplevel] = None
@@ -26817,20 +26817,15 @@ class _ScholarTextWindow:
         return ("url", value)
 
     def _const_link_action(self, spec: str, matched_text: str):
-        """Action for a U.S. Constitution citation, or None to leave it as plain
-        text.  A bare *prose* amendment reference ("the First Amendment …", no
-        section/clause and not a "U.S. Const." citation) is linked only the
-        first time that amendment appears in the opinion — repeated prose
-        mentions of the same amendment aren't re-linked.  Formal citations
-        ("U.S. Const. amend. I", or any reference carrying a § section) always
-        link."""
-        kind, num, sec = (spec.split(":") + ["", "", ""])[:3]
-        prose = "const" not in re.sub(r"\s+", " ", matched_text).lower()
-        if kind == "amend" and num.isdigit():
-            n = int(num)
-            if prose and not sec and n in self._const_linked:
-                return None  # repeated bare prose mention — leave as plain text
-            self._const_linked.add(n)
+        """Action for a reference to the Constitution, or None to leave it as
+        plain text.  Only a citation is linked ("U.S. Const. amend. I", or one
+        pinning a section, "Article I, Section 8") — never a mention in prose,
+        "the First Amendment", "Article III standing" (see
+        constitution.is_citation) — and each provision only the first time
+        the opinion cites it."""
+        if not constitution.is_citation(matched_text) or spec in self._const_linked:
+            return None
+        self._const_linked.add(spec)
         return ("const", spec)
 
     def _insert_plain_with_links(self, text: str, tags: tuple) -> None:
@@ -27038,6 +27033,10 @@ class _ScholarTextWindow:
             if action is None:
                 id_start = txt.index("end-1c")
                 txt.insert("end", text[start:end], tags)  # plain text
+                if kind == "const" and constitution.is_citation(m.group(0)):
+                    # Cited, though linked above already: still the
+                    # authority a following "Id." means, not a case before it.
+                    self._last_cite_action = ("const", constitution.cite_spec(m))
                 la = self._last_cite_action
                 if (kind == "idcite" and m.group(1) is None
                         and la and la[0] == "cite"):
@@ -35736,6 +35735,34 @@ def _open_pdf_externally(path: str) -> bool:
             return False
 
 
+def _dialog_owner(parent: tk.Misc) -> "Optional[tk.Misc]":
+    """The window a dialog opened for *parent* should stand over: the one the
+    reader is working in — where the keyboard focus is — or else *parent*'s
+    own, whichever is on screen; None when neither is.
+
+    Tk keeps a transient window in step with its master, withdrawn while the
+    master is, and the window a viewer's Print reaches back to is often
+    hidden: the main window sits in the tray while GetCases runs in the
+    background, and a reader that fetched a scan for a floating viewer hides
+    itself.  A dialog made transient to either never appears."""
+    candidates = []
+    try:
+        focus = parent.focus_get()
+    except (tk.TclError, KeyError):     # focus in a window Tk has no name for
+        focus = None
+    if focus is not None:
+        candidates.append(focus)
+    candidates.append(parent)
+    for widget in candidates:
+        try:
+            top = widget.winfo_toplevel()
+            if top.winfo_viewable():
+                return top
+        except (AttributeError, tk.TclError):
+            continue
+    return None
+
+
 class _PrintDialog:
     """Choose a printer for a document, where the OS will not choose one for us.
 
@@ -35749,15 +35776,17 @@ class _PrintDialog:
                  default: str, status=lambda _s: None) -> None:
         self._path = path
         self._status = status
-        win = _ui_toplevel(parent)
+        owner = _dialog_owner(parent)
+        win = _ui_toplevel(owner if owner is not None else parent)
         self._win = win
         win.title("Print")
         win.minsize(360, 200)
         _ensure_modern_ttk_styles(win)
-        try:
-            win.transient(parent.winfo_toplevel())
-        except (AttributeError, tk.TclError):
-            pass
+        if owner is not None:
+            try:
+                win.transient(owner)
+            except tk.TclError:
+                pass
         frame = _ui_frame(win)
         frame.pack(fill="both", expand=True, padx=16, pady=14)
         _ui_label(frame, "Print", size=14, weight="bold",
@@ -35793,6 +35822,12 @@ class _PrintDialog:
         combo.focus_set()
         win.bind("<Return>", lambda _e: self._print())
         win.bind("<Escape>", lambda _e: win.destroy())
+        # In front, where the reader will look for it.
+        try:
+            win.lift()
+            win.focus_force()
+        except tk.TclError:
+            pass
 
     def _settings(self) -> None:
         if not _open_printer_settings(self._printer_var.get()):
@@ -35860,7 +35895,7 @@ def _print_pdf_file(parent: tk.Misc, path: str,
         status("Opened the PDF — print it (Ctrl/Cmd-P) and choose your printer.")
         return
     messagebox.showerror("Print", "Could not open the PDF for printing.",
-                         parent=parent)
+                         parent=_dialog_owner(parent) or parent)
 
 
 def _open_statute_pdf(parent: tk.Misc, url: str,
@@ -38523,6 +38558,8 @@ class _StatuteWindow:
         # (position, enumerator path) per enumerated paragraph, for the
         # pin-cite jump and for citing a selection in _copy_cite
         self._anchors: list[tuple[str, tuple]] = []
+        # Provisions of the Constitution linked already: each only once.
+        self._const_linked: set[str] = set()
         # The U.S. Code keeps the OLRC page's own indentation, which follows
         # the printed Code ("(2)" flush with "(d)(1)"), so an indent is not a
         # depth there: each paragraph's subdivision is read from the page's
@@ -38818,7 +38855,11 @@ class _StatuteWindow:
         for m in fed_rules.RULE_CITE_RE.finditer(text):
             refs.append((m.start(), m.end(), "rule", fed_rules.cite_spec(m)))
         for m in constitution.CONST_CITE_RE.finditer(text):
-            refs.append((m.start(), m.end(), "const", constitution.cite_spec(m)))
+            # Its citations, not a mention of "the First Amendment"; each
+            # provision linked the first time only (see the loop below).
+            if constitution.is_citation(m.group(0)):
+                refs.append((m.start(), m.end(), "const",
+                             constitution.cite_spec(m)))
         for c in state_statutes.iter_cites(text):
             kind, value = state_statutes.action_for(c)
             refs.append((c.start, c.end, kind, value))
@@ -38853,13 +38894,21 @@ class _StatuteWindow:
         refs.sort(key=lambda r: (r[0], -r[1]))
         txt = self._text
         pos = 0
+        linked = getattr(self, "_const_linked", None)
+        if linked is None:
+            linked = self._const_linked = set()
         for start, end, kind, spec in refs:
             if start < pos:
                 continue  # overlapping match — first/longest wins
             if start > pos:
                 txt.insert("end", text[pos:start], tags)
-            ltags = tags + ("citelink", self._new_link((kind, spec)))
-            txt.insert("end", text[start:end], ltags)
+            if kind == "const" and spec in linked:
+                txt.insert("end", text[start:end], tags)
+            else:
+                if kind == "const":
+                    linked.add(spec)
+                ltags = tags + ("citelink", self._new_link((kind, spec)))
+                txt.insert("end", text[start:end], ltags)
             pos = end
         if pos < len(text):
             txt.insert("end", text[pos:], tags)

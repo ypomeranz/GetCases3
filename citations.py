@@ -2104,6 +2104,45 @@ for _map in (court_catalog.CIRCUIT_COURTS, court_catalog.DISTRICT_COURTS,
     for _cid, _abbr in _map.items():
         _FED_COURT_IDS[re.sub(r"[^a-z0-9]", "", _abbr.lower())] = _cid
 
+# A state court's unpublished opinion is not linked at all.  A federal one is
+# found in RECAP by its docket; a state court's docket is in no archive one
+# can search — RECAP is PACER's, each state keeps its own — and nothing free
+# indexes the opinion by its Westlaw or LEXIS number, so the lookup a link
+# promised failed more often than not.  A state is known by the word or two
+# its court's abbreviation ("N.J. Super. Ct. App. Div.", "Cal. Ct. App.") or
+# its LEXIS designation ("2019 Tex. App. LEXIS 555", "2020 Cal. App. Unpub.
+# LEXIS 1234") begins with — the District of Columbia's courts with them,
+# being its own and not federal.
+_STATE_KEYS = frozenset(
+    [_loose_reporter_key(abbr) for abbr in _STATE_REPORTER_NAMES.values()]
+    + [_loose_reporter_key(name) for name in _STATE_REPORTER_NAMES]
+    + ["alaska", "idaho", "iowa", "ohio", "utah", "dc"])
+
+
+def _names_a_state(abbr: str) -> bool:
+    """Whether court or reporter abbreviation *abbr* begins with a state's
+    ("N.J. Super.", "W. Va. Cir. Ct.", "New York")."""
+    words = (abbr or "").split()
+    heads = words[:1] + ([words[0] + words[1]] if len(words) > 1 else [])
+    return any(_loose_reporter_key(h) in _STATE_KEYS for h in heads)
+
+
+def state_court(court: str) -> bool:
+    """Whether *court*, as a citation's parenthetical abbreviates it, is a
+    state's — not a federal court's, which comes first: "N.D. Cal." is the
+    Northern District of California, "N.D." alone North Dakota's."""
+    if _FED_COURT_IDS.get(re.sub(r"[^a-z0-9]", "", (court or "").lower())):
+        return False
+    return _names_a_state(court)
+
+
+def state_lexis_reporter(rep: str) -> bool:
+    """Whether *rep* is a state court's LEXIS designation ("Tex. App.
+    LEXIS", "N.J. Super. Unpub. LEXIS") — never "U.S. Dist. LEXIS" and the
+    other federal ones."""
+    return (_loose_reporter_key(rep).endswith("lexis")
+            and _names_a_state(rep))
+
 
 def iter_recap_cites(
     text: str, italic=None,
@@ -2112,10 +2151,12 @@ def iter_recap_cites(
 
     ``spec`` is a JSON string with the fields a RECAP lookup needs —
     ``cite``, ``date``, ``docket`` and/or ``name``, and (when it resolved
-    to a federal court) ``court`` — or ``None`` when the citation can't be
-    a RECAP document (no docket or case name anywhere in the document, no
-    date, or a state court), in which case the caller should treat it as
-    an ordinary case citation.  A docket number is the preferred key, but
+    to a federal court) ``court``; ``""`` when the citation names a state
+    court, whose unpublished opinion has no docket to be found by and is
+    left unlinked (see state_court); or ``None`` when it can't be a RECAP
+    document otherwise (no docket or case name anywhere in the document,
+    no date), in which case the caller should treat it as an ordinary case
+    citation.  A docket number is the preferred key, but
     a citation printing none at all — "Pecos River Talc LLC v. Emory,
     2025 WL 1249947 (E.D. Va. Apr. 30, 2025)" — still resolves when the
     case name, federal court and date are all present.  The name is the
@@ -2151,6 +2192,9 @@ def iter_recap_cites(
         info = index[key]
         spec = None
         court_raw = info.get("court_raw", "")
+        if state_court(court_raw):
+            out.append((start, end, ""))
+            continue
         court_id = _FED_COURT_IDS.get(
             re.sub(r"[^a-z0-9]", "", court_raw.lower()))
         # A federal docket + date is worth a RECAP lookup, and so is a
@@ -2688,7 +2732,11 @@ def detect_links(
     recap_spans: list[tuple[int, int]] = []
     for start, end, spec in iter_recap_cites(text, italic):
         recap_spans.append((start, end))
-        if spec is not None:
+        if spec == "":
+            # A state court's: nowhere to fetch it from, so no link — but
+            # still an authority, which a following "Id." means.
+            unlinkable.append((start, _recap_end(text, end)))
+        elif spec is not None:
             matches.append((start, end, "recap", spec))
         else:
             cite = re.sub(r"\s+", " ", text[start:end]).strip()
@@ -2778,6 +2826,11 @@ def detect_links(
     for m in case_cites:
         if any(m.start() < e and s < m.end() for s, e in claimed_spans):
             continue
+        if state_lexis_reporter(m.group(2)):
+            # A state court's unpublished opinion by LEXIS number ("2019 Tex.
+            # App. LEXIS 555"): not linked, as a Westlaw one is not (above).
+            unlinkable.append((m.start(), m.end()))
+            continue
         matches.append((m.start(), m.end(), "cite", m))
     for m in us_code.USC_CITE_RE.finditer(text):
         matches.append((m.start(), m.end(), "usc", m))
@@ -2797,6 +2850,9 @@ def detect_links(
         # would outrank it (same start, longer) — the RECAP action wins; and
         # "8 S.E.C. at 915" is the SEC decision's page, not a case's.
         if any(m.start() < e and s < m.end() for s, e in recap_spans + sec_spans):
+            continue
+        if state_lexis_reporter(m.group(2)):
+            unlinkable.append((m.start(), m.end()))
             continue
         pages = index.get((
             m.group(1), reporter_key(m.group(2)),
@@ -2842,7 +2898,7 @@ def detect_links(
     # "Id." may have to look past the nearest one to find what it means.
     recent: list[tuple[tuple[str, str], int, int]] = []
     last_cite_end: int | None = None
-    const_linked: set[int] = set()  # amendments already linked (prose dedup)
+    const_linked: set[str] = set()  # provisions of the Constitution linked
     for start, end, kind, m in matches:
         if start < pos:
             continue  # overlapping match — first/longest wins
@@ -2883,20 +2939,21 @@ def detect_links(
         elif kind == "rule":
             action = ("rule", fed_rules.cite_spec(m))
         elif kind == "const":
-            # Link a bare prose amendment mention ("the First Amendment …", no
-            # section, not a "U.S. Const." citation) only the first time that
-            # amendment appears; formal citations always link.
+            # The Constitution is linked where the document cites it — "U.S.
+            # Const. art. I, § 3", "Article I, Section 8" — and only the first
+            # time it cites each provision: the reader has that link, and an
+            # opinion turning on one clause would otherwise be strewn with
+            # them.  A mention in prose ("the First Amendment", "Article III
+            # standing") is not linked at all (constitution.is_citation).
             spec = constitution.cite_spec(m)
-            ck, cnum, csec = (spec.split(":") + ["", "", ""])[:3]
-            prose = "const" not in re.sub(r"\s+", " ", m.group(0)).lower()
-            if ck == "amend" and cnum.isdigit():
-                cn = int(cnum)
-                if prose and not csec and cn in const_linked:
-                    action = None
-                else:
-                    const_linked.add(cn)
-                    action = ("const", spec)
+            if not constitution.is_citation(m.group(0)):
+                action = None
+            elif spec in const_linked:
+                action = None
+                # Cited all the same: still the authority an "Id." means.
+                unlinkable.append((start, end))
             else:
+                const_linked.add(spec)
                 action = ("const", spec)
         elif kind == "shortcite":
             action = ("cite", m)  # m is the pre-built "vol rep page@pin"

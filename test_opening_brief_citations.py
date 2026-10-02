@@ -323,6 +323,51 @@ class UnpublishedOpinionTests(unittest.TestCase):
         self.assertEqual(got[-1][0], "Haynes v. Ind. Univ., 2017 WL 3243895 "
                                      "(S.D. Ind. July 31, 2017)")
 
+    def test_a_state_court_s_unpublished_opinion_is_not_linked(self):
+        # RECAP is the federal courts' (PACER's) archive; a state court's
+        # docket is in none that can be searched, and nothing free finds its
+        # opinion by Westlaw or LEXIS number.
+        text = (
+            "Smith v. Jones, No. A-1234-19, 2021 WL 123456, at *3 (N.J. Super. "
+            "Ct. App. Div. Mar. 3, 2021); Smith, 2021 WL 123456, at *4; Doe "
+            "v. Roe, 2020 Cal. App. Unpub. LEXIS 1234 (Cal. Ct. App. Feb. 2, "
+            "2020); Kelly v. State, 2019 Tex. App. LEXIS 555 (Tex. App. Jan. "
+            "5, 2019); Moe v. Zoe, 2018 WL 999999 (N.D. Apr. 1, 2018); Lee v. "
+            "Kim, 2017 WL 888888 (D.C. Super. Ct. May 1, 2017); Ann v. Bob, "
+            "2016 WL 777777 (Del. Ch. June 1, 2016).")
+        self.assertEqual(_links(text), [])
+
+    def test_a_federal_court_named_like_a_state_still_links(self):
+        # "N.D." alone is North Dakota's court; "N.D. Cal." is a federal
+        # district.
+        text = (
+            "Hoe v. Poe, No. 1:19-cv-1, 2020 U.S. Dist. LEXIS 1234 (N.D. Cal. "
+            "Jan. 2, 2020); Ray v. Ford, No. 3:20-cv-5, 2016 WL 666666 (W.D. "
+            "Va. June 1, 2016).")
+        self.assertEqual([spec["court"] for _t, spec in _recap(text)],
+                         ["cand", "vawd"])
+
+    def test_an_id_after_one_does_not_reach_past_it(self):
+        # The Id. means the Chancery opinion, unlinked as it is — not Roe.
+        text = ("Roe v. Wade, 410 U.S. 113 (1973). Ann v. Bob, 2016 WL 777777 "
+                "(Del. Ch. June 1, 2016). Id. at *2.")
+        self.assertEqual([a for _t, a in _links(text)],
+                         [("cite", "410 U.S. 113")])
+
+    def test_which_courts_are_a_state_s(self):
+        for court, state in (
+                ("N.J. Super. Ct. App. Div.", True), ("Cal. Ct. App.", True),
+                ("Tex. App.—Houston [1st Dist.]", True), ("N.D.", True),
+                ("W. Va. Cir. Ct.", True), ("D.C. Super. Ct.", True),
+                ("N.D. Cal.", False), ("D.N.J.", False), ("S.D.N.Y.", False),
+                ("W.D. Va.", False), ("D.C. Cir.", False), ("9th Cir.", False),
+                ("Fed. Cl.", False), ("Bankr. S.D.N.Y.", False), ("", False)):
+            with self.subTest(court=court):
+                self.assertEqual(citations.state_court(court), state)
+        self.assertTrue(citations.state_lexis_reporter("N.J. Super. Unpub. LEXIS"))
+        self.assertFalse(citations.state_lexis_reporter("U.S. Dist. LEXIS"))
+        self.assertFalse(citations.state_lexis_reporter("Cal. App. 4th"))
+
     def test_download_cited_cases_names_each_opinion(self):
         auths = [a for a in brief_compiler.collect_authorities(
             self.STRING + " " + self.PROSE) if a.kind == "recap"]

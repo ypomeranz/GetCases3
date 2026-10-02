@@ -11,10 +11,14 @@ you read in Chrome. Click one and:
   scan is there — the official U.S. Reports at the Library of Congress or
   GovInfo for the Supreme Court (the early reporters too: "1 Cranch 137" is
   5 U.S. 137), the Caselaw Access Project's scan for any other reporter —
-  and otherwise Google Scholar's search of case law; uscode.house.gov for the
-  U.S. Code, eCFR for the C.F.R., Cornell LII for the federal rules, the
-  Library of Congress for the Constitution, GovInfo for the Statutes at
-  Large and the Federal Register.
+  and otherwise Google Scholar's search of case law; a federal court's
+  unpublished opinion (cited by Westlaw or LEXIS number, or by docket) on
+  CourtListener's search of its RECAP archive, by docket, court and date;
+  uscode.house.gov for the U.S. Code, eCFR for the C.F.R., Cornell LII for
+  the federal rules, the Library of Congress for the Constitution, GovInfo
+  for the Statutes at Large and the Federal Register. A state court's
+  unpublished opinion is not linked: there is no archive of state dockets
+  to find it in.
 
 It also works in Chrome, Edge, Brave and other Chromium browsers.
 
@@ -36,7 +40,9 @@ arrow on the extension's card in `chrome://extensions` to pick up any changes.
 
 - Citations get a dotted underline: blue for cases, green for statutes, rules
   and regulations, amber for the Constitution. Point at one to see what it
-  cites.
+  cites. The Constitution is linked where a page cites it (`U.S. Const. art.
+  I, § 3`, `Article I, Section 3`), the first time it cites each provision;
+  "the First Amendment" in a sentence is not a link.
 - **Click** a citation to open it (in GetCases if it is running, otherwise on
   the web, in a new tab). **Ctrl/Cmd-click** or **middle-click** always opens
   the web page instead, in a tab behind this one. A case's scan takes a
@@ -94,7 +100,8 @@ statutes, legislative history and more.
 When GetCases is not running, the extension reads the page itself, with a copy
 of GetCases's own citation patterns (`src/patterns.js`), and links cases, the
 U.S. Code, the C.F.R., the federal rules, the Constitution, the Statutes at
-Large, the Federal Register, the English Reports and the SEC's reports. (For
+Large, the Federal Register, federal courts' unpublished opinions, the English
+Reports and the SEC's reports. (For
 the last two, GetCases's own index names the exact page; without it the link
 opens a search of CommonLII, or HathiTrust's catalogue record.) A citation
 to the original reports the English Reports reprint ("2 Russ. & M. 639", "6

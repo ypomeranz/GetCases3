@@ -159,6 +159,17 @@ class BridgeSecurityTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(self.b.opened, [])
 
+    def test_a_refusal_arrives_however_much_body_came_with_it(self):
+        # Answered over a body left unread, the refusal was often lost on
+        # Windows: the connection was reset as it closed, and the client saw
+        # "connection aborted" instead.  So the body is read first.
+        body = {"text": "42 U.S.C. § 1983. " * 600}
+        for _ in range(25):
+            self.assertEqual(self.b.request(
+                "/open", body, headers={"X-GetCases": "0"})[0], 403)
+            self.assertEqual(self.b.request("/nothing", body)[0], 404)
+        self.assertEqual(self.b.opened, [])
+
     def test_a_web_page_is_refused(self):
         # A page can send the header only after a CORS preflight, which is
         # refused below; and a request that says it comes from a page is
@@ -276,10 +287,12 @@ class BridgeDetectTests(unittest.TestCase):
     def test_labels(self):
         labels = [l["label"] for l in self.detect(SAMPLE)]
         for want in ("42 U.S.C. § 1983(a)", "29 C.F.R. § 1614.105(a)(1)",
-                     "U.S. Const. amend. XIV, § 1", "U.S. Const. amend. V",
+                     "U.S. Const. amend. XIV, § 1",
                      "U.S. Const. art. III, § 2", "Fed. R. Civ. P. 56(a)",
                      "8 S.E.C. 893, 915 (1941)"):
             self.assertIn(want, labels)
+        # "the Fifth Amendment" is prose, not a citation of it.
+        self.assertNotIn("U.S. Const. amend. V", labels)
 
     def test_an_english_citation_names_the_case_it_opens(self):
         # The original report's citation does not say the English Reports
@@ -560,7 +573,6 @@ class FallbackReaderTests(unittest.TestCase):
             ("8 S.E.C. 893, 915", "sec", '{"page":893,"pin":915,"vol":8}'),
             ("2022 WL 2373418, at *12", "cite", "2022 WL 2373418@12"),
             ("5 U.S. (1 Cranch) 137 (1803)", "cite", "5 U.S. 137"),
-            ("Fifth Amendment", "const", "amend:5:"),
             ("Article III, § 2", "const", "art:3:2"),
             ("Rule 404 of the Federal Rules of Evidence", "rule", "fre:404:"),
             ("574 F.3d 1098, 1101 (9th Cir. 2009)", "cite",
@@ -569,6 +581,8 @@ class FallbackReaderTests(unittest.TestCase):
             self.assertIn(want, found)
         # A law review is cited like a reporter, but is none.
         self.assertFalse(any("Yale" in text for text, _k, _v in found))
+        # "the Fifth Amendment" names a provision; it does not cite it.
+        self.assertFalse(any("Fifth" in text for text, _k, _v in found))
 
     def test_the_same_actions_as_the_app(self):
         # Where both read a citation, they mean the same thing by it: the
@@ -656,6 +670,46 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
         self.assertEqual(
             got, [[browser_links.case_urls(c),
                    browser_links.browser_url(("cite", c))] for c in cites])
+
+    def test_a_state_court_s_unpublished_opinion_is_not_linked(self):
+        text = (
+            "Smith v. Jones, No. A-1234-19, 2021 WL 123456, at *3 (N.J. Super. "
+            "Ct. App. Div. Mar. 3, 2021); Smith, 2021 WL 123456, at *4; Kelly "
+            "v. State, 2019 Tex. App. LEXIS 555 (Tex. App. Jan. 5, 2019); Moe "
+            "v. Zoe, 2018 WL 999999 (N.D. Apr. 1, 2018); Hoe v. Poe, No. "
+            "1:19-cv-1, 2020 U.S. Dist. LEXIS 1234 (N.D. Cal. Jan. 2, 2020); "
+            "Care One, 2024 WL 1327972, at *7 (D.N.J. Mar. 28, 2024).")
+        links = run_node(
+            "process.stdout.write(JSON.stringify("
+            "GetCasesCitations.detect(input)));", text)
+        self.assertEqual(
+            [(l["kind"], json.loads(l["value"]).get("court")
+              if l["kind"] == "recap" else l["value"]) for l in links],
+            [("recap", "cand"), ("cite", "2024 WL 1327972@7")])
+
+    def test_a_federal_unpublished_opinion_opens_its_recap_search(self):
+        # The app's RECAP spec, character for character, and the same
+        # CourtListener search: by docket, by name where none is printed,
+        # and a slip opinion cited by docket alone.
+        import test_opening_brief_citations as briefs
+        texts = [
+            briefs.UnpublishedOpinionTests.STRING,
+            briefs.UnpublishedOpinionTests.PROSE,
+            "See Peninsula Pathology Assocs. v. Am. Int'l Indus., No. 23-1971 "
+            "(4th Cir. Feb. 12, 2024); Pecos River Talc LLC v. Emory, 2025 WL "
+            "1249947 (E.D. Va. Apr. 30, 2025).",
+            "TABLE OF AUTHORITIES\nFederal Cases\nBarnes v. E-Systems, Inc., "
+            "No. 4:90-cv-1, 1991 WL 11111 (S.D. Tex. Feb. 1, 1991) ..... 3",
+        ]
+        got = run_node(
+            "process.stdout.write(JSON.stringify(input.map(t => "
+            "GetCasesCitations.detect(t).filter(l => l.kind === 'recap')"
+            ".map(l => [l.value, l.url]))));", texts)
+        want = [[[a[1], browser_links.browser_url(a, t[s:e])]
+                 for s, e, a in citations.detect_links(t) if a[0] == "recap"]
+                for t in texts]
+        self.assertEqual(got, want)
+        self.assertEqual(sum(map(len, want)), 13)
 
     def test_the_original_reports_open_the_reprint_s_case(self):
         # Bray, Prosecuting Contempt, nn. 16, 142, 149 and 176.
