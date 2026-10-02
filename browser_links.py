@@ -11,8 +11,11 @@ that need one:
   on the pages a user reads and, when GetCases is not running, sends a click
   to this page instead.
 
-Cases go to Google Scholar, statutes, regulations, rules and the Constitution
-to the official page the app itself reads them from, and the rest to the
+A case goes to its scanned report where the citation alone gives the PDF's
+address — the official U.S. Reports at the Library of Congress or GovInfo,
+any other reporter at the Caselaw Access Project — and otherwise to Google
+Scholar's case-law search; statutes, regulations, rules and the Constitution
+go to the official page the app itself reads them from, and the rest to the
 source the app would fetch.  Tkinter-free, so the extension's bridge
 (:mod:`browser_bridge`) and the tests can use it headlessly.
 """
@@ -21,8 +24,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import urllib.parse
 
+import citations
 import eng_rep
 import fed_cas
 import fed_rules
@@ -32,10 +37,153 @@ import state_ca
 import state_fl
 import us_code
 
-#: Google Scholar's case search, the app's first source for a case's text.
-SCHOLAR_SEARCH = "https://scholar.google.com/scholar?q="
+#: Google Scholar's search of case law in every court (``as_sdt=2006``);
+#: without it Scholar searches articles, where a citation finds law reviews
+#: citing the case.
+SCHOLAR_SEARCH = "https://scholar.google.com/scholar?hl=en&as_sdt=2006&q="
 #: The Library of Congress's annotated Constitution, the app's source.
 CONSTITUTION_URL = "https://constitution.congress.gov/constitution/"
+
+# ---------------------------------------------------------------------------
+# Where a case's scan is, from its citation (the app's own routing: see
+# courtlistener_gui's _us_reports_loc_url, _us_reports_govinfo_url and
+# _static_case_law_url)
+# ---------------------------------------------------------------------------
+
+#: The Library of Congress's scan of each opinion in volumes 1–542 of the
+#: U.S. Reports, named by its first page.
+LOC_US_REPORTS = ("https://tile.loc.gov/storage-services/service/ll/usrep/"
+                  "usrep{vol:03d}/usrep{vol:03d}{page:03d}/"
+                  "usrep{vol:03d}{page:03d}.pdf")
+LOC_US_REPORTS_MAX = 542
+#: Up to this volume the Library's scan is the better one; past it GPO's.
+LOC_US_REPORTS_PREFERRED_MAX = 501
+#: GPO's edition at GovInfo, from volume 2.  Its own stable "link" address
+#: refuses some volumes (550 U.S. 544 is a 400), so the file is named
+#: directly; past the last volume known to be there it is still worth
+#: asking for, as GovInfo adds them.
+GOVINFO_US_REPORTS = ("https://www.govinfo.gov/content/pkg/USREPORTS-{vol}/"
+                      "pdf/USREPORTS-{vol}-{page}.pdf")
+GOVINFO_US_REPORTS_MAX = 583
+#: The Caselaw Access Project's scan of each case it holds, named by the
+#: case's first page (the "-01": the first case to begin there).
+CASE_LAW_PDF = ("https://static.case.law/{slug}/{vol}/case-pdfs/"
+                "{page:04d}-01.pdf")
+
+#: The Supreme Court's early reports, cited by their reporters' names: each
+#: one's volumes are U.S. Reports volumes *offset* on, page for page —
+#: Dallas 1–4 is 1–4 U.S., Cranch 1–9 is 5–13 U.S., and so on to Otto 1–17,
+#: 91–107 U.S.  (offset, volumes).
+NOMINATIVE_US_REPORTS = {
+    "dall": (0, 4), "dallas": (0, 4),
+    "cranch": (4, 9),
+    "wheat": (13, 12), "wheaton": (13, 12),
+    "pet": (25, 16), "peters": (25, 16),
+    "how": (41, 24), "howard": (41, 24),
+    "black": (65, 2),
+    "wall": (67, 23), "wallace": (67, 23),
+    "otto": (90, 17),
+}
+
+_CITE_PARTS_RE = re.compile(r"\s*(\d+)\s+(.+?)\s+(\d+)\s*")
+
+
+def _loose_key(rep: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (rep or "").lower())
+
+
+def case_law_slug(rep: str) -> str:
+    """The Caselaw Access Project's name for reporter *rep* in its
+    addresses: the reporter's own where the app knows one ("N.Y.2d" is
+    "ny-2d"), else CAP's rule — lowercase, initials closed up, a space a
+    hyphen, other punctuation gone ("F. Supp. 2d" → "f-supp-2d", "N. E." →
+    "ne")."""
+    slug = citations.case_law_reporter_slug(rep)
+    if slug:
+        return slug
+    rep = re.sub(r"(?<![A-Za-z])([A-Za-z]\.)\s+(?=[A-Za-z]\.|\d)", r"\1",
+                 rep or "")
+    s = re.sub(r"[^a-z0-9-]", "", rep.lower().replace(" ", "-"))
+    return re.sub(r"-+", "-", s).strip("-")
+
+
+def us_reports_volume(vol: int, rep: str) -> int:
+    """The U.S. Reports volume of volume *vol* of reporter *rep* — itself
+    for "U.S.", the renumbered one for the early reporters ("1 Cranch" is
+    5 U.S.) — or 0 when *rep* is neither."""
+    key = _loose_key(rep)
+    if key == "us":
+        return vol
+    offset, volumes = NOMINATIVE_US_REPORTS.get(key, (0, 0))
+    return vol + offset if 1 <= vol <= volumes else 0
+
+
+def us_reports_pdf_urls(vol: int, page: int) -> "list[str]":
+    """The official scans of the opinion beginning at page *page* of volume
+    *vol* of the U.S. Reports, the better first."""
+    loc = (LOC_US_REPORTS.format(vol=vol, page=page)
+           if 1 <= vol <= LOC_US_REPORTS_MAX else "")
+    gpo = GOVINFO_US_REPORTS.format(vol=vol, page=page) if vol >= 2 else ""
+    order = ((loc, gpo) if vol <= LOC_US_REPORTS_PREFERRED_MAX
+             else (gpo, loc))
+    return [u for u in order if u]
+
+
+def case_pdf_urls(cite: str) -> "list[str]":
+    """The scans of the case *cite* names (``"201 F. 20"``, a pin after an
+    ``@`` aside) whose addresses its citation gives, the best first: the
+    official U.S. Reports for the Supreme Court; the Caselaw Access
+    Project's for any other reporter, under the official series too where
+    the reporter's volumes were renumbered into one ("19 Pick. 234" is 36
+    Mass. 234).  Not checked: CAP holds only some of a reporter's cases,
+    so whoever opens one looks first (an unchecked list of guesses)."""
+    base = (cite or "").split("@")[0]
+    m = _CITE_PARTS_RE.fullmatch(base)
+    if not m:
+        return []
+    vol, rep, page = int(m.group(1)), m.group(2), int(m.group(3))
+    us = us_reports_volume(vol, rep)
+    if us:
+        return us_reports_pdf_urls(us, page)
+    key = _loose_key(rep)
+    if not key or key == "wl" or key.endswith("lexis"):
+        return []
+    out: "list[str]" = []
+    for official in [*citations.state_nominative_cites(base), base]:
+        om = _CITE_PARTS_RE.fullmatch(official)
+        slug = case_law_slug(om.group(2)) if om else ""
+        if slug:
+            url = CASE_LAW_PDF.format(slug=slug, vol=int(om.group(1)),
+                                      page=int(om.group(3)))
+            if url not in out:
+                out.append(url)
+    return out
+
+
+def scholar_case_url(cite: str) -> str:
+    """Google Scholar's case-law search for citation *cite*."""
+    return SCHOLAR_SEARCH + urllib.parse.quote(
+        f'"{(cite or "").split("@")[0]}"')
+
+
+def case_urls(cite: str) -> "list[str]":
+    """Every page that may show the case *cite* names, in the order to try
+    them: its scans (:func:`case_pdf_urls`), then Google Scholar — the one
+    always there."""
+    return case_pdf_urls(cite) + [scholar_case_url(cite)]
+
+
+def case_url(cite: str) -> str:
+    """The one page for the case *cite* names when there is no looking
+    first: its official U.S. Reports scan where that is surely there,
+    else Google Scholar's case-law search."""
+    base = (cite or "").split("@")[0]
+    m = _CITE_PARTS_RE.fullmatch(base)
+    if m:
+        us = us_reports_volume(int(m.group(1)), m.group(2))
+        if us and us <= GOVINFO_US_REPORTS_MAX:
+            return us_reports_pdf_urls(us, int(m.group(3)))[0]
+    return scholar_case_url(cite)
 
 
 def _split_spec(value: str) -> "tuple[str, str, list[str]]":
@@ -131,8 +279,7 @@ def browser_url(action: "tuple[str, str]", text: str = "") -> str:
             params["court"] = spec["court"]
         return "https://www.courtlistener.com/?" + urllib.parse.urlencode(params)
     if kind == "cite":
-        cite = value.split("@")[0]
-        return SCHOLAR_SEARCH + urllib.parse.quote(f'"{cite}"')
+        return case_url(value)
     if kind == "fedcas":
         # Federal Cases number → the CourtListener search the in-app lookup
         # would run, pre-filtered to the era: by printed case name when the

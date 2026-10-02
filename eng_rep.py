@@ -39,7 +39,10 @@ Adm. 109") continues the reporter last cited.  Nominate matching is
 *resolution-gated*: only a citation whose exact (reporter, volume, page) is
 an indexed start page ever becomes a link, so U.S. citations that share an
 abbreviation (New York's volumed "5 Johns. 37" vs the volumeless English
-Johnson) are never claimed.
+Johnson) are never claimed.  The one exception is a citation written right
+beside the reprint's ("2 Russ. & Mylne 639, 39 Eng. Rep. 538"): the reprint's
+citation says which case it is, whatever the abbreviation (see
+:func:`parallel_cites`).
 
 Only the citation/name/URL facts are shipped here (an index, like a citator);
 the PDFs themselves stay on CommonLII and are fetched on demand, with
@@ -86,6 +89,43 @@ ER_SHORT_CITE_RE = re.compile(
 _PIN_RE = re.compile(
     r"\s*,\s*(?:at\s+)?\*?(\d{1,5})(?:\s?[ab]\b)?"
     r"(?:\s*[-–—]\s*\d{1,5}(?:\s?[ab]\b)?)?(?!\d|\s*[A-Z])")
+
+# A citation written just before an English Reports one, with a comma
+# between — "2 Russ. & M. 639, 39 Eng. Rep. 538" — is the same case's report
+# in the series the reprint collects, however its reporter is abbreviated:
+# so the reprint's citation says where it goes, even where the nominate
+# index cannot (an abbreviation it lacks, or, in the browser extension, no
+# index at all).  One just after it ("(1854) 156 Eng. Rep. 145; 9 Ex. 341",
+# the Bluebook's order) may as well be the next authority of a string cite
+# ("…145 (1854); 8 S.E.C. 893"), so it must name a reporter the nominate
+# index knows (see nominate_form_re).  The reporter: capitalized words and
+# initials, spaced, joined by "&" or closed up after a period ("Russ. & M.",
+# "T. R.", "Bos. & P.N.R."), a "t."/"temp." among them ("Cas. t. Hard."),
+# and a closing "(n.s.)"; never a signal or an "Id.".
+_PARALLEL_REPORTER = (
+    r"(?!(?:See|Cf|Accord|But|Contra|Compare|Also|Id|Ibid|No|Nos|Vol|Art"
+    r"|Sec|Para)\b)"
+    r"[A-Z][A-Za-z'’]*\.?"
+    r"(?:(?:\s*&\s*|\s+|(?<=\.))(?:[A-Z][A-Za-z'’]*\.?|t\.|temp\.)){0,5}"
+    r"(?:\s*\([Nn]\.\s?[Ss]\.\))?")
+_PARALLEL_CITE = (
+    r"(?P<cite>(?:(?P<vol>\d{1,3})\s+)?(?P<rep>" + _PARALLEL_REPORTER + r")"
+    r",?\s+(?:at\s+)?\*?(?P<page>\d{1,5})\b(?:\s?[ab]\b)?"
+    r"(?:\s*,\s*(?:at\s+)?\*?\d{1,5}\b(?:\s?[ab]\b)?"
+    r"(?:\s*[-–—]\s*\d{1,5}\b(?:\s?[ab]\b)?)?)*)")
+# Before one: a volume standing clear of other words, or a reporter just
+# after a bracket or a comma (a year, "(1765) Wilm. 243", or a case name).
+# Searched for in the text up to the reprint's citation.
+PARALLEL_BEFORE_RE = re.compile(
+    r"(?:(?<![\w.])(?=\d)|(?<=[,;(\[\])])\s*(?=[A-Z]))"
+    + _PARALLEL_CITE + r"\s*,\s*\Z")
+# After one (and its pin, and any court or year it closes with).
+PARALLEL_AFTER_RE = re.compile(
+    r"(?:\s*\([^()]{0,40}\))?\s*[,;]\s*" + _PARALLEL_CITE)
+# The reprint's own reporter, which the citation beside it never is.
+_ER_REPORTER_RE = re.compile(_REPORTER)
+#: The span of text before a reprint citation searched for one beside it.
+PARALLEL_REACH = 90
 
 INDEX_FILENAME = "eng_rep_index.tsv.gz"
 NOMINATE_FILENAME = "eng_rep_nominate.tsv.gz"
@@ -242,6 +282,10 @@ def lookup_nearest(vol: int, page: int) -> list[ERCase]:
 
 _NOM_INDEX: "dict[tuple[str, int, int], list[tuple[int, int]]] | None" = None
 _NOM_RE: "re.Pattern | None" = None
+# Its short form, "<vol> <reporter> at <page>" ("2 Russ. & M. at 655").
+_NOM_SHORT_RE: "re.Pattern | None" = None
+# Any reporter it knows, by itself (see nominate_form_re).
+_NOM_FORM_RE: "re.Pattern | None" = None
 # First pages per (reporter key, volume) — pin-cite resolution.
 _NOM_PAGES: "dict[tuple[str, int], list[int]] | None" = None
 # Volumes each reporter key appears with — the volumeless-cite fallback.
@@ -472,6 +516,78 @@ _NOM_ALIASES: "dict[str, tuple[str, ...]]" = {
     "C & M": ("Car & M", "Cr & M"),
     "Foster & Finlason": ("F & F",),
     "Dowling & Ryland": ("Dowl & Ry NP",),
+    # The Bluebook's own abbreviations (table T2, United Kingdom) where they
+    # part from CommonLII's, and the American forms beside them: "Wellesley
+    # v. Duke of Beaufort, 2 Russ. & M. 639", "Hadley v. Baxendale, 9 Ex.
+    # 341", "5 Ad. & El. 147", "2 Wm. Bl. 785", "Cas. t. Hard. 124".  "Ex."
+    # is never the Law Reports' Exchequer ("L.R. 1 Ex. 265" — see
+    # _misdated), nor its Division ("2 Ex. D. 441", whose page is no number).
+    "Russ & M": ("Russ & My",),
+    "Ex": ("Exch",),
+    "Ad & El": ("Ad & E",),
+    "Ad & El NS": ("QB",),
+    "Wm Bl": ("Black W",),
+    "Black H": ("H Bl",),
+    "Bli": ("Bligh PC",),
+    "Bli NS": ("Bligh NS PC",),
+    "Moo PCC": ("Moo PC",),
+    "Ch Cas": ("Chan Cas",),
+    "Ch Rep": ("Rep Ch",),
+    "Coop G": ("G Coop",),
+    "Drew & Sm": ("Dr & Sm",),
+    "Eq Cas Abr": ("Eq Ca Abr",),
+    "Freem Ch": ("Freem Chy",),
+    "Freem": ("Freem KB", "Freem Chy"),
+    "Sel Cas Ch": ("Sel Cas T King",),
+    "Cas t Talb": ("Cas T Talbot",),
+    "Cas temp Talb": ("Cas T Talbot",),
+    "Cas t Hard": ("Cas T H",),
+    "Cas temp Hard": ("Cas T H",),
+    "Ridg t Hard": ("Ridg T H",),
+    "Coop t Brough": ("Coop T Br",),
+    "Y & C Ch": ("Y & CCC",),
+    "Ves Jr": ("Ves Jun",),
+    "Ves Sr": ("Ves Sen",),
+    "Term R": ("TR",),
+    "Durn & E": ("TR",),
+    "W Jones": ("Jones W",),
+    "Lat": ("Latch",),
+    "Moore KB": ("Moo KB",),
+    "Poph": ("Pop",),
+    "Show PC": ("Shower PC",),
+    "Bos & P NR": ("Bos & Pul NR",),
+    "Brod & B": ("Br & B",),
+    "Brownl": ("Br & Gold",),
+    "Man & Gr": ("Man & G",),
+    "Cromp & J": ("Cr & J",),
+    "Cromp & M": ("Cr & M",),
+    "Cromp M & R": ("CrM & R",),
+    "Hurl & C": ("H & C",),
+    "Hurl & N": ("H & N",),
+    "Hardr": ("Hard",),
+    "Hardres": ("Hard",),
+    "Deane & Sw": ("Dea & Sw",),
+    "Phill Ecc": ("Phill",),
+    "Chr Rob": ("C Rob",),
+    "Bell CC": ("Bell",),
+    "Mood CC": ("Mood",),
+    "Kel J": ("Kel",),
+    "Mood & M": ("M & M",),
+    "Mood & R": ("M & Rob",),
+    "Mood & Rob": ("M & Rob",),
+    "Moo & Rob": ("M & Rob",),
+    "Holt NP": ("Holt",),
+    "Ry & M": ("Ry & Mood",),
+    "Dow & Ry NP": ("Dowl & Ry NP",),
+    "Gouldsb": ("Gould",),
+    "Pollexf": ("Pollex",),
+    "Barn Ch": ("Barn C",),
+    "Cunn": ("Cun",),
+    "Choyce Cas Ch": ("Choyce Cases",),
+    "Hem & M": ("H & M",),
+    "Lewin CC": ("Lewin",),
+    "Ld Ken": ("Keny",),
+    "Ventr": ("Vent",),
 }
 
 
@@ -488,6 +604,10 @@ def _nom_token_pattern(tok: str) -> str:
     trailing period ('Exch' -> 'Exch.', 'Cro' -> 'Cro.')."""
     if tok == "&":
         return r"&"
+    if tok == "NS":
+        # The new series, as "N.S." or the Bluebook's "(n.s.)": "18 C.B.
+        # (n.s.) 584".
+        return r"(?:N\.?\s?S\.?|\(\s*[Nn]\.?\s?[Ss]\.?\s*\))"
     if re.fullmatch(r"[A-Z]{2,5}", tok):
         return r"\.?\s?".join(tok) + r"\.?"
     # Either apostrophe, in one pass: replacing "'" and then "’" would rewrite
@@ -497,13 +617,18 @@ def _nom_token_pattern(tok: str) -> str:
 
 
 def _nom_form_pattern(form: str) -> str:
-    """Pattern for a whole reporter form ('M & W' -> M\\.?\\s*&\\s*W\\.?)."""
+    """Pattern for a whole reporter form ('M & W' -> M\\.?\\s*&\\s*W\\.?).
+    Words are spaced apart, or closed up after a period ("Bos. & P.N.R.",
+    "C.B.N.S."); a "T" between them is "temp.", which the Bluebook writes
+    in lower case ("Cas. t. Hard.")."""
     toks = form.split()
     parts: list[str] = []
     for i, tok in enumerate(toks):
         if i:
-            parts.append(r"\s*" if "&" in (tok, toks[i - 1]) else r"\s+")
-        parts.append(_nom_token_pattern(tok))
+            parts.append(r"\s*" if "&" in (tok, toks[i - 1])
+                         else r"(?:\s+|(?<=\.))")
+        parts.append(r"[Tt]\.?" if i and tok in ("T", "t")
+                     else _nom_token_pattern(tok))
     return "".join(parts)
 
 
@@ -513,7 +638,7 @@ def _load_nominate() -> None:
     won't resolve.  Loads the main index first (case records join by neutral
     cite)."""
     global _NOM_INDEX, _NOM_RE, _NOM_PAGES, _NOM_ALIAS_KEYS, _NOM_VOLUMELESS
-    global _NOM_VOLS
+    global _NOM_VOLS, _NOM_SHORT_RE, _NOM_FORM_RE
     if _NOM_INDEX is not None:
         return
     _load()  # outside _LOCK -- it takes the same (non-reentrant) lock
@@ -572,12 +697,16 @@ def _load_nominate() -> None:
             # Longest form first, so 'Ves Jun Supp' outranks 'Ves Jun' and
             # 'CB NS' outranks 'CB' (regex alternation is first-match).
             # A comma may sit between reporter and page, as older U.S.
-            # opinions print ("1 Dodson, 37"; "Owen, 122").
+            # opinions print ("1 Dodson, 37"; "Owen, 122").  Forms of one
+            # length in name order, so the pattern is the same every run.
             alt = "|".join(_nom_form_pattern(f)
-                           for f in sorted(forms, key=len, reverse=True))
+                           for f in sorted(forms, key=lambda f: (-len(f), f)))
             _NOM_RE = re.compile(
                 r"\b(?:(\d{1,3})\s+)?(" + alt
                 + r"),?\s+(\d{1,5})(?:\s*[ab])?\b")
+            _NOM_SHORT_RE = re.compile(
+                r"\b(\d{1,3})\s+(" + alt + r"),?\s+at\s+\*?(\d{1,5})\b")
+            _NOM_FORM_RE = re.compile("(?:" + alt + ")")
         _NOM_PAGES = pages
         _NOM_ALIAS_KEYS = alias_keys
         _NOM_INDEX = idx
@@ -687,8 +816,8 @@ _NOM_ID_BREAK_RE = re.compile(r"\d\s+[A-Z]")
 _YEAR_AFTER_RE = re.compile(r"\s*\((?:[^()]{0,40}?[\s.])?((?:1[1-9]|20)\d\d)\)")
 _YEAR_BEFORE_RE = re.compile(r"[\[(]((?:1[1-9]|20)\d\d)[\])]\s*$")
 # The Law Reports (from 1865), which no page of the reprint is: "L.R. 10 Q.B.
-# 453".
-_LAW_REPORTS_BEFORE_RE = re.compile(r"L\.\s?R\.\s*$")
+# 453", "(1866) LR 1 Ex 265".
+_LAW_REPORTS_BEFORE_RE = re.compile(r"(?<![A-Za-z])L\.?\s?R\.?\s*$")
 
 #: How far past the year CommonLII files a case under the year a citation
 #: gives may run — decided one year, reported the next.
@@ -1008,6 +1137,94 @@ def _short_cite_start(vol: int, page: int, cited: "dict[int, list[int]]"
     return cases[0].page if cases else None
 
 
+def _nominate_short_cites(text: str, full: list) -> "list[tuple[int, int, str]]":
+    """Short forms of nominate citations — "Wellesley, 2 Russ. & M. at 655"
+    — as ``(start, end, spec)``: a page of the case *full* (the text's
+    resolved nominate citations, :func:`iter_nominate_cites`) has beginning
+    in that volume of that reporter a few pages before, '<spec>@<page>'."""
+    if _NOM_SHORT_RE is None or not full:
+        return []
+    starts = []
+    for _s, _e, spec, _cases in full:
+        _n, key, vol, page = split_pin(spec)[0].split(":")
+        starts.append((key, int(vol), int(page)))
+    out = []
+    for m in _NOM_SHORT_RE.finditer(text):
+        key = _nom_key(m.group(2))
+        keys = {key, *_NOM_ALIAS_KEYS.get(key, ())}
+        vol, page = int(m.group(1)), int(m.group(3))
+        near = [(start, k, v) for k, v, start in starts
+                if k in keys and v in _vols_for(k, vol)
+                and start <= page <= start + _SHORT_SPAN]
+        if near:
+            start, k, v = max(near)
+            out.append((m.start(), m.end(), f"n:{k}:{v}:{start}@{page}"))
+    return out
+
+
+#: Reporters a citation beside a reprint citation may not be: American
+#: ones (see :func:`_american_reporter`) by these keys, beside those the
+#: citation reader knows.
+_AMERICAN_KEYS = frozenset((
+    "us", "sct", "led", "led2d", "dall", "dallas", "cranch", "wheat",
+    "wheaton", "pet", "peters", "how", "howard", "black", "wall", "wallace",
+    "otto"))
+
+
+def _american_reporter(rep: str) -> bool:
+    """Whether *rep* is an American reporter — one the citation reader
+    knows, the Supreme Court's or a state's renumbered nominative series —
+    and so names a case of its own, not the English one beside it."""
+    import citations
+    if citations.reporter_family(rep) is not None:
+        return True
+    if re.sub(r"[^a-z0-9]", "", rep.lower()) in _AMERICAN_KEYS:
+        return True
+    return bool(citations.state_nominative_cites(f"1 {rep} 1"))
+
+
+def nominate_form_re() -> "re.Pattern | None":
+    """A pattern for the name of any reporter the nominate index or its
+    aliases know, as a citation writes it ("Exch.", "Russ. & M.", "T.R."),
+    or None without the index: what a citation just after a reprint
+    citation must name to be read as its parallel (see PARALLEL_AFTER_RE)."""
+    _load_nominate()
+    return _NOM_FORM_RE
+
+
+def _parallel_reporter(rep: str) -> bool:
+    """Whether *rep*, written beside a reprint citation, can be the same
+    case's nominate report: an abbreviation (a period or an "&" in it), not
+    the reprint itself, and no American reporter."""
+    return (bool(re.search(r"[.&]", rep))
+            and not _ER_REPORTER_RE.fullmatch(rep.strip())
+            and not _american_reporter(rep))
+
+
+def parallel_cites(text: str, reprint: "list[tuple[int, int, str]]"
+                   ) -> "list[tuple[int, int, str]]":
+    """The citations written beside the reprint citations *reprint* (each
+    ``(start, end, spec)``) — the same cases' reports in the nominate series
+    — as ``(start, end, spec)`` with the reprint citation's spec: "2 Russ. &
+    M. 639, 39 Eng. Rep. 538" → (0, 16, '39:538').  Those just before one
+    first: a citation between two reprint citations is the second's."""
+    out = []
+    for start, _end, spec in reprint:
+        m = PARALLEL_BEFORE_RE.search(
+            text, max(0, start - PARALLEL_REACH), start)
+        if m and _parallel_reporter(m.group("rep")):
+            out.append((m.start("cite"), m.end("cite"), spec))
+    known = nominate_form_re()
+    for _start, end, spec in reprint:
+        m = PARALLEL_AFTER_RE.match(text, end)
+        if (m and known is not None and known.fullmatch(m.group("rep").strip())
+                and _parallel_reporter(m.group("rep"))
+                and not any(s < m.end("cite") and m.start("cite") < e
+                            for s, e, _spec in out)):
+            out.append((m.start("cite"), m.end("cite"), spec))
+    return out
+
+
 def iter_cites(text: str) -> "list[tuple[int, int, str]]":
     """Every English Reports citation in *text* as ``(start, end, spec)``, in
     document order, each span running on over its pin page and the spec
@@ -1019,24 +1236,37 @@ def iter_cites(text: str) -> "list[tuple[int, int, str]]":
       * its short form, "156 Eng. Rep., at 151" → '156:145@151', the case
         the page belongs to — when the index has one there;
       * the original nominate reports, "9 Exch. 341, 354" →
-        'n:exch:9:341@354' — resolution-gated like :func:`iter_nominate_cites`.
+        'n:exch:9:341@354' — resolution-gated like :func:`iter_nominate_cites`
+        — and their short forms, "9 Exch. at 354", in a case the text cites
+        in full;
+      * any other citation written beside the reprint's, "2 Russ. & M. 639,
+        39 Eng. Rep. 538", with the reprint's spec (see
+        :func:`parallel_cites`).
 
     Overlaps go to whichever starts first (then the longer)."""
     text = text or ""
     found: list[tuple[int, int, str]] = []
+    reprint: list[tuple[int, int, str]] = []
     cited: dict[int, list[int]] = {}
     for m in ER_CITE_RE.finditer(text):
         cited.setdefault(int(m.group(1)), []).append(int(m.group(2)))
         pin, end = pin_after(text, m.end())
-        found.append((m.start(), end, with_pin(cite_spec(m), pin)))
+        reprint.append((m.start(), end, with_pin(cite_spec(m), pin)))
     for m in ER_SHORT_CITE_RE.finditer(text):
         vol, page = int(m.group(1)), int(m.group(2))
         start = _short_cite_start(vol, page, cited)
         if start is not None:
-            found.append((m.start(), m.end(), f"{vol}:{start}@{page}"))
-    for s, e, spec, _cases in iter_nominate_cites(text):
+            reprint.append((m.start(), m.end(), f"{vol}:{start}@{page}"))
+    found += reprint
+    nominate = iter_nominate_cites(text)
+    for s, e, spec, _cases in nominate:
         pin, end = pin_after(text, e)
         found.append((s, end, with_pin(spec, pin)))
+    found += _nominate_short_cites(text, nominate)
+    for s, e, spec in parallel_cites(text, reprint):
+        # A citation the nominate index places goes where it says.
+        if not any(s < fe and fs < e for fs, fe, _spec in found):
+            found.append((s, e, spec))
     found.sort(key=lambda t: (t[0], -t[1]))
     out: list[tuple[int, int, str]] = []
     for s, e, spec in found:

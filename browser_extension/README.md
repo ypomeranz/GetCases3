@@ -6,11 +6,15 @@ you read in Chrome. Click one and:
 - **with GetCases running**, it opens in GetCases, just as a citation in one of
   the app's own windows does (a case opens on its scanned pages, a statute in
   the statute viewer, and so on);
-- **without GetCases**, it opens the web page GetCases itself uses for that
-  citation (the same page as the app's right-click "open in your browser"):
-  Google Scholar for a case, uscode.house.gov for the U.S. Code, eCFR for the
-  C.F.R., Cornell LII for the federal rules, the Library of Congress for the
-  Constitution, GovInfo for the Statutes at Large and the Federal Register.
+- **without GetCases**, it opens the web page for that citation on the web:
+  a case on its scanned report when the citation says where that is and the
+  scan is there — the official U.S. Reports at the Library of Congress or
+  GovInfo for the Supreme Court (the early reporters too: "1 Cranch 137" is
+  5 U.S. 137), the Caselaw Access Project's scan for any other reporter —
+  and otherwise Google Scholar's search of case law; uscode.house.gov for the
+  U.S. Code, eCFR for the C.F.R., Cornell LII for the federal rules, the
+  Library of Congress for the Constitution, GovInfo for the Statutes at
+  Large and the Federal Register.
 
 It also works in Chrome, Edge, Brave and other Chromium browsers.
 
@@ -35,7 +39,9 @@ arrow on the extension's card in `chrome://extensions` to pick up any changes.
   cites.
 - **Click** a citation to open it (in GetCases if it is running, otherwise on
   the web, in a new tab). **Ctrl/Cmd-click** or **middle-click** always opens
-  the web page instead.
+  the web page instead, in a tab behind this one. A case's scan takes a
+  moment to find: the Caselaw Access Project has only some of each
+  reporter's cases, so the extension asks before opening one.
 - **Links a page already has** to a case or statute (a Justia or CourtListener
   opinion, a section on Cornell or uscode.house.gov, a link whose text is a
   citation) open in GetCases too while it is running. Without GetCases they
@@ -73,16 +79,22 @@ of GetCases's own citation patterns (`src/patterns.js`), and links cases, the
 U.S. Code, the C.F.R., the federal rules, the Constitution, the Statutes at
 Large, the Federal Register, the English Reports and the SEC's reports. (For
 the last two, GetCases's own index names the exact page; without it the link
-opens a search of CommonLII, or HathiTrust's catalogue record.) If you start
-GetCases later, the page is read again GetCases's way the next time you come
-back to its tab.
+opens a search of CommonLII, or HathiTrust's catalogue record.) A citation
+to the original reports the English Reports reprint ("2 Russ. & M. 639", "6
+Mod. 16") is linked when it stands beside the reprint's own ("…, 39 Eng.
+Rep. 538"), and opens the same case; GetCases reads them wherever they
+stand. If you start GetCases later, the page is read again GetCases's way
+the next time you come back to its tab.
 
 ## Privacy
 
-The extension talks only to GetCases on your own computer
+The extension talks to GetCases on your own computer
 (`http://127.0.0.1:21983`). Page text goes to GetCases only while it is
 running, and never leaves your computer; nothing is sent anywhere else. When
-you click a citation without GetCases, the web page for it opens like any link.
+you click a citation without GetCases, the web page for it opens like any link
+— and, for a case, the extension first asks the sites its scan would be at
+(the Library of Congress, GovInfo, the Caselaw Access Project) whether they
+have that one file: a request for its address alone, without cookies.
 
 GetCases answers only the extension: its door takes requests only with the
 extension's header, refuses anything a web page sends, and is reachable only

@@ -250,14 +250,23 @@ def patterns() -> "dict[str, re.Pattern]":
         "stat": statutes_at_large.STAT_CITE_RE,
         "fedReg": federal_register.FR_CITE_RE,
         "engRep": eng_rep.ER_CITE_RE,
+        "engRepShort": eng_rep.ER_SHORT_CITE_RE,
+        "engRepPin": eng_rep._PIN_RE,
+        "engRepBefore": eng_rep.PARALLEL_BEFORE_RE,
+        "engRepAfter": eng_rep.PARALLEL_AFTER_RE,
+        "engRepReporter": eng_rep._ER_REPORTER_RE,
+        # The reporters of the nominate index (not the index itself).
+        "engRepNominate": eng_rep.nominate_form_re(),
         "sec": sec_decisions.SEC_CITE_RE,
     }
 
 
 def tables() -> dict:
     """The reporter and rule tables the patterns are read against."""
+    import browser_links
     import citations as c
     import constitution
+    import eng_rep
     import fed_rules
     import sec_decisions
     import statutes_at_large
@@ -267,6 +276,32 @@ def tables() -> dict:
         "reporterCanonical": {
             k: f.canonical
             for k, f in sorted(c._REPORTER_FAMILY_BY_KEY.items())},
+        # …and the Caselaw Access Project's name for it, where it has one of
+        # its own (any other is made by rule: browser_links.case_law_slug).
+        "caseLawSlugs": {
+            k: f.case_law_slug
+            for k, f in sorted(c._REPORTER_FAMILY_BY_KEY.items())
+            if f.case_law_slug},
+        # The early Supreme Court reporters → (U.S. volume offset, volumes).
+        "nominativeUS": {
+            k: list(v)
+            for k, v in sorted(browser_links.NOMINATIVE_US_REPORTS.items())},
+        # State reporters renumbered into an official series: name key →
+        # [[series, volume offset, volumes], …].
+        "stateNominative": {
+            k: [list(s) for s in v]
+            for k, v in sorted(c._STATE_NOMINATIVE.items())},
+        "usReports": {
+            "locMax": browser_links.LOC_US_REPORTS_MAX,
+            "locPreferredMax": browser_links.LOC_US_REPORTS_PREFERRED_MAX,
+            "govinfoMax": browser_links.GOVINFO_US_REPORTS_MAX,
+        },
+        # Reporters a citation beside an English Reports one is never, how
+        # far before one such a citation is looked for, and how far past a
+        # case's first page a short form still reads as a page of it.
+        "americanKeys": sorted(eng_rep._AMERICAN_KEYS),
+        "engRepReach": eng_rep.PARALLEL_REACH,
+        "engRepShortSpan": eng_rep._SHORT_SPAN,
         "nonCaseReporters": sorted(c._NONCASE_REPORTERS),
         "plainCaseReporters": sorted(c._PLAIN_CASE_REPORTERS),
         "wordReporterKeys": sorted(c._WORD_REPORTER_KEYS),
@@ -282,6 +317,8 @@ def render() -> str:
     """The text of ``src/patterns.js``."""
     out = {}
     for name, rx in patterns().items():
+        if rx is None:
+            continue                # an index missing from this copy
         source, flags = to_js(rx.pattern, rx.flags)
         out[name] = {"source": source, "flags": flags}
     body = json.dumps({"patterns": out, "tables": tables()},

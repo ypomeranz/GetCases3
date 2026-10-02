@@ -6,8 +6,11 @@
 // themselves — a request from one is the page's, and Chrome would ask the
 // reader for local-network access — so they ask here.
 //
-// Also here: the right-click "Look up in GetCases", and sending PDFs Chrome
-// opens to the extension's own viewer, which links their citations.
+// Also here: the right-click "Look up in GetCases"; sending PDFs Chrome
+// opens to the extension's own viewer, which links their citations; and,
+// without GetCases, a case's scan: before a case opens on the web, the
+// sites its scan would be at (the Library of Congress, GovInfo, the Caselaw
+// Access Project) are asked whether they have it.
 
 importScripts("patterns.js", "citations.js");
 
@@ -106,10 +109,11 @@ function webPage(url) {
   return /^(https?|file):/i.test(url || "");
 }
 
-/** Open *url* in a tab of its own, beside the one the reader is in. */
-function openTab(url, sender) {
+/** Open *url* in a tab of its own, beside the one the reader is in (and
+ *  behind it, unless *active*). */
+function openTab(url, sender, active = true) {
   if (!webPage(url)) return Promise.resolve();
-  const props = { url, active: true };
+  const props = { url, active };
   if (sender && sender.tab) {
     props.index = sender.tab.index + 1;
     props.openerTabId = sender.tab.id;
@@ -118,14 +122,61 @@ function openTab(url, sender) {
   return chrome.tabs.create(props);
 }
 
+// ---------------------------------------------------------------------------
+// A case on the web: its scan where there is one
+// ---------------------------------------------------------------------------
+
+/** Whether *url* answers with a PDF: true or false, or null when that can't
+ *  be told (no answer in time, no network).  GovInfo answers a scan it
+ *  hasn't with a web page, not a 404, so the type is what tells. */
+async function isPdf(url) {
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      redirect: "follow",
+      credentials: "omit",
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return false;
+    return /\bpdf\b/i.test(response.headers.get("content-type") || "");
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
- * A citation clicked on a page: to GetCases if it is running; otherwise our
- * own link opens the web page the app would, and a page's own link goes
- * where it pointed.
+ * The page to open for the case citation *cite* ("201 F. 20@24"): the first
+ * of its scans that is there — the U.S. Reports at the Library of Congress
+ * or GovInfo, a lower court's at the Caselaw Access Project, which holds
+ * only some cases of a reporter — and Google Scholar's case-law search when
+ * none is.  The scans are asked about at once, and taken in order.
+ */
+async function caseUrl(cite) {
+  const urls = GetCasesCitations.caseUrls(cite);
+  const scholar = urls.pop();
+  const answers = await Promise.all(urls.map(isPdf));
+  // A scan that couldn't be asked about is opened all the same: the
+  // browser says why, if it can't reach it either.
+  const found = urls.find((_url, i) => answers[i] !== false);
+  return found || scholar;
+}
+
+/** The web page for *link*, an action as detect() gives it. */
+function linkUrl(link) {
+  if (link.kind === "cite" && link.value) return caseUrl(link.value);
+  return link.url || GetCasesCitations.browserUrl(link.kind, link.value, link.text);
+}
+
+/**
+ * A citation clicked on a page: to GetCases if it is running (unless the
+ * reader asked for the web page, with Ctrl/Cmd or the middle button);
+ * otherwise our own link opens the web page the app would, and a page's own
+ * link goes where it pointed.
  */
 async function openLink(message, sender) {
   const link = message.link || {};
-  if (await appOpen(link)) return { opened: "app" };
+  if (!message.web && (await appOpen(link))) return { opened: "app" };
   if (message.from === "anchor" && webPage(message.href)) {
     // Where the link would have gone: its own tab, unless it asked for a
     // new one or sits in a frame (whose page this can't navigate).
@@ -133,8 +184,8 @@ async function openLink(message, sender) {
     else await chrome.tabs.update(sender.tab.id, { url: message.href });
     return { opened: "web" };
   }
-  const url = link.url || GetCasesCitations.browserUrl(link.kind, link.value, link.text);
-  if (url) await openTab(url, sender);
+  const url = await linkUrl(link);
+  if (url) await openTab(url, sender, !message.behind);
   return { opened: "web" };
 }
 
@@ -190,11 +241,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (!text) return;
     if (await appOpen({ text })) return;
     // No GetCases: the page for the citation selected, or Google Scholar's
-    // search for the words.
+    // search of case law for the words (a case's name, say).
     const found = GetCasesCitations.detect(text);
     const url = found.length
-      ? found[0].url
-      : "https://scholar.google.com/scholar?q=" + encodeURIComponent(text);
+      ? await linkUrl(found[0])
+      : "https://scholar.google.com/scholar?hl=en&as_sdt=2006&q=" + encodeURIComponent(text);
     await openTab(url, sender);
   } else if (info.menuItemId === "getcases-pdf-link" && info.linkUrl) {
     await openTab(viewerUrl(info.linkUrl), sender);

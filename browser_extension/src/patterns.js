@@ -38,6 +38,30 @@ globalThis.GetCasesPatterns = {
    "flags": "",
    "source": "\\b(\\d{1,3})\\s+(?:Eng\\.?\\s?Rep\\.?(?:\\s?R\\.)?|E\\.?\\s?R\\.?)\\s+(\\d{1,5})\\b"
   },
+  "engRepAfter": {
+   "flags": "",
+   "source": "(?:\\s*\\([^()]{0,40}\\))?\\s*[,;]\\s*(?<cite>(?:(?<vol>\\d{1,3})\\s+)?(?<rep>(?!(?:See|Cf|Accord|But|Contra|Compare|Also|Id|Ibid|No|Nos|Vol|Art|Sec|Para)\\b)[A-Z][A-Za-z'’]*\\.?(?:(?:\\s*&\\s*|\\s+|(?<=\\.))(?:[A-Z][A-Za-z'’]*\\.?|t\\.|temp\\.)){0,5}(?:\\s*\\([Nn]\\.\\s?[Ss]\\.\\))?),?\\s+(?:at\\s+)?\\*?(?<page>\\d{1,5})\\b(?:\\s?[ab]\\b)?(?:\\s*,\\s*(?:at\\s+)?\\*?\\d{1,5}\\b(?:\\s?[ab]\\b)?(?:\\s*[-–—]\\s*\\d{1,5}\\b(?:\\s?[ab]\\b)?)?)*)"
+  },
+  "engRepBefore": {
+   "flags": "",
+   "source": "(?:(?<![\\w.])(?=\\d)|(?<=[,;(\\[\\])])\\s*(?=[A-Z]))(?<cite>(?:(?<vol>\\d{1,3})\\s+)?(?<rep>(?!(?:See|Cf|Accord|But|Contra|Compare|Also|Id|Ibid|No|Nos|Vol|Art|Sec|Para)\\b)[A-Z][A-Za-z'’]*\\.?(?:(?:\\s*&\\s*|\\s+|(?<=\\.))(?:[A-Z][A-Za-z'’]*\\.?|t\\.|temp\\.)){0,5}(?:\\s*\\([Nn]\\.\\s?[Ss]\\.\\))?),?\\s+(?:at\\s+)?\\*?(?<page>\\d{1,5})\\b(?:\\s?[ab]\\b)?(?:\\s*,\\s*(?:at\\s+)?\\*?\\d{1,5}\\b(?:\\s?[ab]\\b)?(?:\\s*[-–—]\\s*\\d{1,5}\\b(?:\\s?[ab]\\b)?)?)*)\\s*,\\s*$"
+  },
+  "engRepNominate": {
+   "flags": "",
+   "source": "(?:Adolphus\\.?\\s*&\\s*Ellis,\\.?(?:\\s+|(?<=\\.))New\\.?(?:\\s+|(?<=\\.))Series\\.?|Crompton\\.?(?:\\s+|(?<=\\.))Meeson\\.?\\s*&\\s*Roscoe\\.?|Barnewall\\.?\\s*&\\s*Cresswell\\.?|Carrington\\.?\\s*&\\s*Marshman\\.?|Barnewall\\.?\\s*&\\s*Adolphus\\.?|Barnewall\\.?\\s*&\\s*Alderson\\.?|House\\.?(?:\\s+|(?<=\\.))of\\.?(?:\\s+|(?<=\\.))Lords\\.?(?:\\s+|(?<=\\.))Cases\\.?|Adolphus\\.?\\s*&\\s*Ellis\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Carrington\\.?\\s*&\\s*Kirwan\\.?|Hurlstone\\.?\\s*&\\s*Coltman\\.?|Williams['’]s\\.?(?:\\s+|(?<=\\.))Saunders\\.?|Bosanquet\\.?\\s*&\\s*Puller\\.?|Broderip\\.?\\s*&\\s*Bingham\\.?|Carrington\\.?\\s*&\\s*Payne\\.?|Hurlstone\\.?\\s*&\\s*Norman\\.?|Williams['’]\\.?(?:\\s+|(?<=\\.))Saunders\\.?|Cromp\\.?(?:\\s+|(?<=\\.))Mees\\.?\\s*&\\s*Rosc\\.?|Crompton\\.?\\s*&\\s*Jervis\\.?|Crompton\\.?\\s*&\\s*Meeson\\.?|Ellis\\.?\\s*&\\s*Blackburn\\.?|Foster\\.?\\s*&\\s*Finlason\\.?|Manning\\.?\\s*&\\s*Granger\\.?|Adolphus\\.?\\s*&\\s*Ellis\\.?|Clark\\.?\\s*&\\s*Finnelly\\.?|Craig\\.?\\s*&\\s*Phillips\\.?|Dowling\\.?\\s*&\\s*Ryland\\.?|Moody\\.?\\s*&\\s*Robinson\\.?|Turner\\.?\\s*&\\s*Russell\\.?|Younge\\.?\\s*&\\s*Collyer\\.?|Durnford\\.?\\s*&\\s*East\\.?|Meeson\\.?\\s*&\\s*Welsby\\.?|Russell\\.?\\s*&\\s*Mylne\\.?|Simons\\.?\\s*&\\s*Stuart\\.?|Younge\\.?\\s*&\\s*Jervis\\.?|Dearsly\\.?\\s*&\\s*Bell\\.?|Drewry\\.?\\s*&\\s*Smale\\.?|Jacob\\.?\\s*&\\s*Walker\\.?|Maule\\.?\\s*&\\s*Selwyn\\.?|Moody\\.?\\s*&\\s*Malkin\\.?|Peere\\.?(?:\\s+|(?<=\\.))Williams\\.?|Russell\\.?\\s*&\\s*Ryan\\.?|Sel\\.?(?:\\s+|(?<=\\.))Cas\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))King\\.?|Vesey\\.?\\s*&\\s*Beames\\.?|Cas\\.?(?:\\s+|(?<=\\.))temp\\.?(?:\\s+|(?<=\\.))Hard\\.?|Cas\\.?(?:\\s+|(?<=\\.))temp\\.?(?:\\s+|(?<=\\.))Talb\\.?|Choyce\\.?(?:\\s+|(?<=\\.))Cas\\.?(?:\\s+|(?<=\\.))Ch\\.?|Coop\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Brough\\.?|Ellis\\.?\\s*&\\s*Ellis\\.?|Mylne\\.?\\s*&\\s*Craig\\.?|Peake\\.?(?:\\s+|(?<=\\.))Add\\.?(?:\\s+|(?<=\\.))Cas\\.?|Barnardiston\\.?|Best\\.?\\s*&\\s*Smith\\.?|Bos\\.?\\s*&\\s*Pul\\.?(?:\\s+|(?<=\\.))N\\.?\\s?R\\.?|Bro\\.?(?:\\s+|(?<=\\.))Parl\\.?(?:\\s+|(?<=\\.))Cas\\.?|Brown\\.?\\s*&\\s*Lush\\.?|Cas\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Talbot\\.?|Choyce\\.?(?:\\s+|(?<=\\.))Cases\\.?|Common\\.?(?:\\s+|(?<=\\.))Bench\\.?|Dowl\\.?\\s*&\\s*Ry\\.?(?:\\s+|(?<=\\.))N\\.?\\s?P\\.?|Lord\\.?(?:\\s+|(?<=\\.))Raymond\\.?|Mylne\\.?\\s*&\\s*Keen\\.?|Ryan\\.?\\s*&\\s*Moody\\.?|Term\\.?(?:\\s+|(?<=\\.))Reports\\.?|Ves\\.?(?:\\s+|(?<=\\.))Jun\\.?(?:\\s+|(?<=\\.))Supp\\.?|Ves\\.?(?:\\s+|(?<=\\.))Sen\\.?(?:\\s+|(?<=\\.))Supp\\.?|Vesey\\.?(?:\\s+|(?<=\\.))Junior\\.?|Vesey\\.?(?:\\s+|(?<=\\.))Senior\\.?|Wms\\.?(?:\\s+|(?<=\\.))Saunders\\.?|Bligh\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|Brod\\.?\\s*&\\s*Bing\\.?|Coop\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Cott\\.?|Cro\\.?(?:\\s+|(?<=\\.))Charles\\.?|Cromp\\.?(?:\\s+|(?<=\\.))M\\.?\\s*&\\s*R\\.?|Dow\\.?\\s*&\\s*Ry\\.?(?:\\s+|(?<=\\.))N\\.?\\s?P\\.?|Hag\\.?(?:\\s+|(?<=\\.))Ecc\\.?(?:\\s+|(?<=\\.))App\\.?|Moo\\.?(?:\\s+|(?<=\\.))Ind\\.?(?:\\s+|(?<=\\.))App\\.?|Ridg\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Hard\\.?|Sp\\.?(?:\\s+|(?<=\\.))Ecc\\.?\\s*&\\s*Ad\\.?|West\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Hard\\.?|Ad\\.?\\s*&\\s*El\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Anstruther\\.?|Bos\\.?\\s*&\\s*P\\.?(?:\\s+|(?<=\\.))N\\.?\\s?R\\.?|Cas\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Hard\\.?|Cas\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Talb\\.?|Comberbach\\.?|De\\.?(?:\\s+|(?<=\\.))G\\.?(?:\\s+|(?<=\\.))F\\.?\\s*&\\s*J\\.?|De\\.?(?:\\s+|(?<=\\.))G\\.?(?:\\s+|(?<=\\.))J\\.?\\s*&\\s*S\\.?|De\\.?(?:\\s+|(?<=\\.))G\\.?(?:\\s+|(?<=\\.))M\\.?\\s*&\\s*G\\.?|Deane\\.?\\s*&\\s*Sw\\.?|El\\.?(?:\\s+|(?<=\\.))Bl\\.?\\s*&\\s*El\\.?|Eq\\.?(?:\\s+|(?<=\\.))Cas\\.?(?:\\s+|(?<=\\.))Abr\\.?|Fitzgibbon\\.?|Ld\\.?(?:\\s+|(?<=\\.))Raymond\\.?|Lushington\\.?|M['’]Cle\\.?\\s*&\\s*Yo\\.?|Mood\\.?\\s*&\\s*Rob\\.?|P\\.?(?:\\s+|(?<=\\.))Williams\\.?|Phillimore\\.?|Sel\\.?(?:\\s+|(?<=\\.))Cas\\.?(?:\\s+|(?<=\\.))Ch\\.?|Sm\\.?\\s*&\\s*G\\.?(?:\\s+|(?<=\\.))App\\.?|Ad\\.?\\s*&\\s*E\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Bos\\.?\\s*&\\s*Pul\\.?|Br\\.?\\s*&\\s*Gold\\.?|Br\\.?\\s*&\\s*Lush\\.?|Bulstrode\\.?|Coop\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))Br\\.?|Cromp\\.?\\s*&\\s*J\\.?|Cromp\\.?\\s*&\\s*M\\.?|De\\.?(?:\\s+|(?<=\\.))G\\.?\\s*&\\s*Sm\\.?|Dears\\.?\\s*&\\s*B\\.?|Drew\\.?\\s*&\\s*Sm\\.?|Eq\\.?(?:\\s+|(?<=\\.))Ca\\.?(?:\\s+|(?<=\\.))Abr\\.?|Espinasse\\.?|Exchequer\\.?|Fortescue\\.?|Freem\\.?(?:\\s+|(?<=\\.))Chy\\.?|Johns\\.?\\s*&\\s*H\\.?|Lilly\\.?(?:\\s+|(?<=\\.))Ass\\.?|Lord\\.?(?:\\s+|(?<=\\.))Raym\\.?|Moo\\.?\\s*&\\s*Rob\\.?|Moo\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Phill\\.?(?:\\s+|(?<=\\.))Ecc\\.?|Russ\\.?\\s*&\\s*My\\.?|Russ\\.?\\s*&\\s*Ry\\.?|Ry\\.?\\s*&\\s*Mood\\.?|Shower\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|T\\.?(?:\\s+|(?<=\\.))Raymond\\.?|Ves\\.?\\s*&\\s*Bea\\.?|Vesey\\.?(?:\\s+|(?<=\\.))Jun\\.?|Vesey\\.?(?:\\s+|(?<=\\.))Sen\\.?|Wms\\.?(?:\\s+|(?<=\\.))Saund\\.?|Yelverton\\.?|A\\.?\\s*&\\s*E\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|B\\.?\\s*&\\s*Adol\\.?|Bligh\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Bligh\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|Brod\\.?\\s*&\\s*B\\.?|Chan\\.?(?:\\s+|(?<=\\.))Cas\\.?|Cl\\.?\\s*&\\s*Fin\\.?|Cr\\.?(?:\\s+|(?<=\\.))M\\.?\\s*&\\s*R\\.?|Cro\\.?(?:\\s+|(?<=\\.))Eliz\\.?|De\\.?(?:\\s+|(?<=\\.))G\\.?\\s*&\\s*J\\.?|Dea\\.?\\s*&\\s*Sw\\.?|Dow\\.?\\s*&\\s*Cl\\.?|Durn\\.?\\s*&\\s*E\\.?|Freem\\.?(?:\\s+|(?<=\\.))Ch\\.?|Freem\\.?(?:\\s+|(?<=\\.))K\\.?\\s?B\\.?|Gilb\\.?(?:\\s+|(?<=\\.))Cas\\.?|Gilb\\.?(?:\\s+|(?<=\\.))Rep\\.?|Hagg\\.?(?:\\s+|(?<=\\.))Adm\\.?|Hagg\\.?(?:\\s+|(?<=\\.))Con\\.?|Hagg\\.?(?:\\s+|(?<=\\.))Ecc\\.?|Hare\\.?(?:\\s+|(?<=\\.))App\\.?|Hurl\\.?\\s*&\\s*C\\.?|Hurl\\.?\\s*&\\s*N\\.?|John\\.?\\s*&\\s*H\\.?|Lewin\\.?(?:\\s+|(?<=\\.))C\\.?\\s?C\\.?|Macl\\.?\\s*&\\s*R\\.?|Man\\.?\\s*&\\s*Gr\\.?|March\\.?(?:\\s+|(?<=\\.))N\\.?\\s?R\\.?|Merivale\\.?|Mood\\.?\\s*&\\s*M\\.?|Mood\\.?\\s*&\\s*R\\.?|Moore\\.?(?:\\s+|(?<=\\.))K\\.?\\s?B\\.?|Moore\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|Ridg\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))H\\.?|Russ\\.?\\s*&\\s*M\\.?|Sess\\.?(?:\\s+|(?<=\\.))Cas\\.?|Siderfin\\.?|Sim\\.?\\s*&\\s*St\\.?|Swanston\\.?|Term\\.?(?:\\s+|(?<=\\.))Rep\\.?|Turn\\.?\\s*&\\s*R\\.?|Y\\.?\\s*&\\s*C\\.?(?:\\s+|(?<=\\.))Ch\\.?|Y\\.?\\s*&\\s*C\\.?(?:\\s+|(?<=\\.))Ex\\.?|Ad\\.?\\s*&\\s*El\\.?|B\\.?\\s*&\\s*Ald\\.?|Barn\\.?(?:\\s+|(?<=\\.))Ch\\.?|Barn\\.?(?:\\s+|(?<=\\.))K\\.?\\s?B\\.?|Bell\\.?(?:\\s+|(?<=\\.))C\\.?\\s?C\\.?|Ben\\.?\\s*&\\s*D\\.?|Bing\\.?(?:\\s+|(?<=\\.))N\\.?\\s?C\\.?|Bingham\\.?|Black\\.?(?:\\s+|(?<=\\.))H\\.?|Black\\.?(?:\\s+|(?<=\\.))W\\.?|Bos\\.?\\s*&\\s*P\\.?|Bridg\\.?(?:\\s+|(?<=\\.))J\\.?|Bridg\\.?(?:\\s+|(?<=\\.))O\\.?|Bunbury\\.?|Burrell\\.?|C\\.?(?:\\s+|(?<=\\.))M\\.?\\s*&\\s*R\\.?|C\\.?\\s?P\\.?(?:\\s+|(?<=\\.))Coop\\.?|Car\\.?\\s*&\\s*K\\.?|Car\\.?\\s*&\\s*M\\.?|Car\\.?\\s*&\\s*P\\.?|Carthew\\.?|Cas\\.?(?:\\s+|(?<=\\.))[Tt]\\.?(?:\\s+|(?<=\\.))H\\.?|Chr\\.?(?:\\s+|(?<=\\.))Rob\\.?|Collyer\\.?|Cr\\.?\\s*&\\s*Ph\\.?|CrM\\.?\\s*&\\s*R\\.?|Cro\\.?(?:\\s+|(?<=\\.))Car\\.?|Cro\\.?(?:\\s+|(?<=\\.))Jac\\.?|Dearsly\\.?|Donn\\.?(?:\\s+|(?<=\\.))Eq\\.?|Douglas\\.?|Dr\\.?\\s*&\\s*Sm\\.?|El\\.?\\s*&\\s*Bl\\.?|El\\.?\\s*&\\s*El\\.?|Giffard\\.?|Gouldsb\\.?|Hag\\.?(?:\\s+|(?<=\\.))Adm\\.?|Hag\\.?(?:\\s+|(?<=\\.))Con\\.?|Hag\\.?(?:\\s+|(?<=\\.))Ecc\\.?|Haggard\\.?|Hardres\\.?|Hay\\.?\\s*&\\s*M\\.?|Hem\\.?\\s*&\\s*M\\.?|Holt\\.?(?:\\s+|(?<=\\.))Eq\\.?|Holt\\.?(?:\\s+|(?<=\\.))K\\.?\\s?B\\.?|Holt\\.?(?:\\s+|(?<=\\.))N\\.?\\s?P\\.?|Jac\\.?\\s*&\\s*W\\.?|Jones\\.?(?:\\s+|(?<=\\.))W\\.?|Kay\\.?\\s*&\\s*J\\.?|Kay\\.?(?:\\s+|(?<=\\.))App\\.?|Ld\\.?(?:\\s+|(?<=\\.))Raym\\.?|Le\\.?\\s*&\\s*Ca\\.?|M\\.?\\s*&\\s*Rob\\.?|Mac\\.?\\s*&\\s*G\\.?|Maddock\\.?|Man\\.?\\s*&\\s*G\\.?|Mod\\.?(?:\\s+|(?<=\\.))Rep\\.?|Moo\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?\\s?C\\.?|Mood\\.?(?:\\s+|(?<=\\.))C\\.?\\s?C\\.?|My\\.?\\s*&\\s*Cr\\.?|Plowden\\.?|Pollexf\\.?|Prec\\.?(?:\\s+|(?<=\\.))Ch\\.?|Rob\\.?(?:\\s+|(?<=\\.))Ecc\\.?|Salkeld\\.?|Show\\.?(?:\\s+|(?<=\\.))K\\.?\\s?B\\.?|Show\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|Skinner\\.?|Starkie\\.?|Strange\\.?|Sw\\.?\\s*&\\s*Tr\\.?|T\\.?(?:\\s+|(?<=\\.))Jones\\.?|Taunton\\.?|Ventris\\.?|Ves\\.?\\s*&\\s*B\\.?|Ves\\.?(?:\\s+|(?<=\\.))Jun\\.?|Ves\\.?(?:\\s+|(?<=\\.))Sen\\.?|W\\.?(?:\\s+|(?<=\\.))Jones\\.?|Wils\\.?(?:\\s+|(?<=\\.))Ch\\.?|Wils\\.?(?:\\s+|(?<=\\.))Ex\\.?|Wils\\.?(?:\\s+|(?<=\\.))K\\.?\\s?B\\.?|Y\\.?\\s*&\\s*C\\.?\\s?C\\.?\\s?C\\.?|Ad\\.?\\s*&\\s*E\\.?|Addams\\.?|Ambler\\.?|Atkyns\\.?|B\\.?\\s*&\\s*Ad\\.?|Barn\\.?(?:\\s+|(?<=\\.))C\\.?|Beavan\\.?|Bl\\.?(?:\\s+|(?<=\\.))Rep\\.?|Bli\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Br\\.?\\s*&\\s*B\\.?|Bro\\.?(?:\\s+|(?<=\\.))C\\.?\\s?C\\.?|Bro\\.?(?:\\s+|(?<=\\.))Ch\\.?|Bro\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|Brooke\\.?|Brownl\\.?|Burrow\\.?|Ch\\.?(?:\\s+|(?<=\\.))Cas\\.?|Ch\\.?(?:\\s+|(?<=\\.))Rep\\.?|Cl\\.?\\s*&\\s*F\\.?|Co\\.?(?:\\s+|(?<=\\.))Rep\\.?|Colles\\.?|Comyns\\.?|Coop\\.?(?:\\s+|(?<=\\.))G\\.?|Cowper\\.?|Cr\\.?\\s*&\\s*J\\.?|Cr\\.?\\s*&\\s*M\\.?|Cro\\.?(?:\\s+|(?<=\\.))Ch\\.?|Dodson\\.?|Dow\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|Drewry\\.?|G\\.?(?:\\s+|(?<=\\.))Coop\\.?|H\\.?\\s*&\\s*Tw\\.?|H\\.?\\s?L\\.?(?:\\s+|(?<=\\.))Cas\\.?|Hetley\\.?|Hobart\\.?|Hutton\\.?|Kenyon\\.?|Ld\\.?(?:\\s+|(?<=\\.))Ken\\.?|Levinz\\.?|Modern\\.?|Moo\\.?(?:\\s+|(?<=\\.))K\\.?\\s?B\\.?|Moo\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|My\\.?\\s*&\\s*K\\.?|Pollex\\.?|Popham\\.?|Rep\\.?(?:\\s+|(?<=\\.))Ch\\.?|Ry\\.?\\s*&\\s*M\\.?|Shower\\.?|Sim\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Sm\\.?\\s*&\\s*G\\.?|Swabey\\.?|T\\.?(?:\\s+|(?<=\\.))Raym\\.?|Term\\.?(?:\\s+|(?<=\\.))R\\.?|Ves\\.?(?:\\s+|(?<=\\.))Jr\\.?|Ves\\.?(?:\\s+|(?<=\\.))Sr\\.?|Wilmot\\.?|A\\.?\\s*&\\s*E\\.?|B\\.?\\s*&\\s*A\\.?|B\\.?\\s*&\\s*C\\.?|B\\.?\\s*&\\s*P\\.?|B\\.?\\s*&\\s*S\\.?|Bar\\.?(?:\\s+|(?<=\\.))N\\.?|Bligh\\.?|Bulst\\.?|C\\.?\\s*&\\s*J\\.?|C\\.?\\s*&\\s*K\\.?|C\\.?\\s*&\\s*M\\.?|C\\.?\\s*&\\s*P\\.?|C\\.?(?:\\s+|(?<=\\.))Rob\\.?|C\\.?\\s?B\\.?(?:\\s+|(?<=\\.))(?:N\\.?\\s?S\\.?|\\(\\s*[Nn]\\.?\\s?[Ss]\\.?\\s*\\))|Calth\\.?|Carth\\.?|D\\.?\\s*&\\s*E\\.?|Dears\\.?|Dougl\\.?|E\\.?\\s*&\\s*B\\.?|E\\.?\\s*&\\s*E\\.?|F\\.?\\s*&\\s*F\\.?|Fin\\.?(?:\\s+|(?<=\\.))H\\.?|Fitzg\\.?|Freem\\.?|Gould\\.?|H\\.?\\s*&\\s*C\\.?|H\\.?\\s*&\\s*M\\.?|H\\.?\\s*&\\s*N\\.?|Hardr\\.?|J\\.?\\s*&\\s*H\\.?|Johns\\.?|K\\.?\\s*&\\s*J\\.?|Keble\\.?|Kel\\.?(?:\\s+|(?<=\\.))J\\.?|Kel\\.?(?:\\s+|(?<=\\.))W\\.?|Knapp\\.?|Latch\\.?|Leach\\.?|Lewin\\.?|Lofft\\.?|M\\.?\\s*&\\s*G\\.?|M\\.?\\s*&\\s*M\\.?|M\\.?\\s*&\\s*S\\.?|M\\.?\\s*&\\s*W\\.?|M['’]Cle\\.?|P\\.?(?:\\s+|(?<=\\.))Wms\\.?|Peake\\.?|Phill\\.?|Plowd\\.?|Price\\.?|Rolle\\.?|Saund\\.?|Sp\\.?(?:\\s+|(?<=\\.))P\\.?\\s?C\\.?|Stark\\.?|Swans\\.?|Taunt\\.?|Vaugh\\.?|Ventr\\.?|Vesey\\.?|W\\.?(?:\\s+|(?<=\\.))Rob\\.?|Wight\\.?|Winch\\.?|Wm\\.?(?:\\s+|(?<=\\.))Bl\\.?|Y\\.?\\s*&\\s*C\\.?|Y\\.?\\s*&\\s*J\\.?|Andr\\.?|Anst\\.?|Beav\\.?|Bell\\.?|Benl\\.?|Bing\\.?|Bunb\\.?|Burr\\.?|Camp\\.?|Cart\\.?|Cary\\.?|Coke\\.?|Coll\\.?|Comb\\.?|Cowp\\.?|Cunn\\.?|Dick\\.?|Dods\\.?|Doug\\.?|Drew\\.?|Dyer\\.?|East\\.?|Eden\\.?|Exch\\.?|Forr\\.?|Fort\\.?|Fost\\.?|Giff\\.?|Godb\\.?|H\\.?(?:\\s+|(?<=\\.))Bl\\.?|Hagg\\.?|Hard\\.?|Hare\\.?|Holt\\.?|Jenk\\.?|Keen\\.?|Keil\\.?|Keny\\.?|Lane\\.?|Leon\\.?|Lush\\.?|Madd\\.?|Mood\\.?|Nels\\.?|Owen\\.?|Palm\\.?|Park\\.?|Poph\\.?|Russ\\.?|Salk\\.?|Show\\.?|Skin\\.?|Stra\\.?|Swab\\.?|Taml\\.?|Term\\.?|Toth\\.?|Vent\\.?|Vern\\.?|W\\.?(?:\\s+|(?<=\\.))Bl\\.?|Wilm\\.?|Wils\\.?|Yelv\\.?|Act\\.?|Add\\.?|Amb\\.?|Atk\\.?|Bel\\.?|Bli\\.?|Com\\.?|Cox\\.?|Cun\\.?|Dan\\.?|Dav\\.?|Den\\.?|Dod\\.?|Dow\\.?|Edw\\.?|Esp\\.?|Gow\\.?|H\\.?\\s?L\\.?\\s?C\\.?|Het\\.?|Hob\\.?|Hut\\.?|Jac\\.?|Kay\\.?|Keb\\.?|Kel\\.?|Lat\\.?|Lee\\.?|Leo\\.?|Lev\\.?|Ley\\.?|Mer\\.?|Mod\\.?|Noy\\.?|Pop\\.?|Rob\\.?|Sav\\.?|Say\\.?|Sid\\.?|Sim\\.?|Str\\.?|Sty\\.?|Swa\\.?|Ves\\.?|Yel\\.?|You\\.?|Al\\.?|Bl\\.?|C\\.?\\s?B\\.?|Co\\.?|Dy\\.?|Ex\\.?|Ph\\.?|Q\\.?\\s?B\\.?|T\\.?\\s?R\\.?)"
+  },
+  "engRepPin": {
+   "flags": "",
+   "source": "\\s*,\\s*(?:at\\s+)?\\*?(\\d{1,5})(?:\\s?[ab]\\b)?(?:\\s*[-–—]\\s*\\d{1,5}(?:\\s?[ab]\\b)?)?(?!\\d|\\s*[A-Z])"
+  },
+  "engRepReporter": {
+   "flags": "",
+   "source": "(?:Eng\\.?\\s?Rep\\.?(?:\\s?R\\.)?|E\\.?\\s?R\\.?)"
+  },
+  "engRepShort": {
+   "flags": "",
+   "source": "\\b(\\d{1,3})\\s+(?:Eng\\.?\\s?Rep\\.?(?:\\s?R\\.)?|E\\.?\\s?R\\.?)\\s*,?\\s+at\\s+\\*?(\\d{1,5})\\b"
+  },
   "fedReg": {
    "flags": "i",
    "source": "\\b(\\d{1,3})\\s+(?:F\\.?\\s*R\\.?|Fed(?:eral)?\\.?\\s*Reg(?:ister)?\\.?)\\s+((?:\\d{1,3}(?:,\\d{3})*|\\d{1,6}))(?:\\s*[-–—]\\s*(?:\\d{1,3}(?:,\\d{3})*|\\d{1,6}))?\\b"
@@ -96,6 +120,270 @@ globalThis.GetCasesPatterns = {
   }
  },
  "tables": {
+  "americanKeys": [
+   "black",
+   "cranch",
+   "dall",
+   "dallas",
+   "how",
+   "howard",
+   "led",
+   "led2d",
+   "otto",
+   "pet",
+   "peters",
+   "sct",
+   "us",
+   "wall",
+   "wallace",
+   "wheat",
+   "wheaton"
+  ],
+  "caseLawSlugs": {
+   "ad": "ad",
+   "ala": "ala",
+   "alabama": "ala",
+   "appdiv": "ad",
+   "ariz": "ariz",
+   "arizona": "ariz",
+   "ark": "ark",
+   "arkansas": "ark",
+   "barb": "barb",
+   "barbour": "barb",
+   "cai": "cai",
+   "caines": "cai",
+   "cair": "cai",
+   "cal": "cal",
+   "california": "cal",
+   "colo": "colo",
+   "colorado": "colo",
+   "conn": "conn",
+   "connecticut": "conn",
+   "cow": "cow",
+   "cowen": "cow",
+   "ctcl": "us-ct-cl",
+   "del": "del",
+   "delaware": "del",
+   "denio": "denio",
+   "edsmith": "ed-smith",
+   "f": "f",
+   "f2d": "f2d",
+   "f3d": "f3d",
+   "f4th": "f4th",
+   "fappx": "f-appx",
+   "fcas": "f-cas",
+   "fed": "f",
+   "fedappx": "f-appx",
+   "fedcas": "f-cas",
+   "fedrep": "f",
+   "fedrep2d": "f2d",
+   "fedrep3d": "f3d",
+   "fedrep4th": "f4th",
+   "fedsupp": "f-supp",
+   "fla": "fla",
+   "florida": "fla",
+   "fsupp": "f-supp",
+   "ga": "ga",
+   "georgia": "ga",
+   "harmch": "h-mch",
+   "harrismchenry": "h-mch",
+   "haw": "haw",
+   "hawaii": "haw",
+   "hmch": "h-mch",
+   "ill": "ill",
+   "illinois": "ill",
+   "ind": "ind",
+   "indiana": "ind",
+   "johnch": "johns-ch",
+   "johnchan": "johns-ch",
+   "johns": "johns",
+   "johnsch": "johns-ch",
+   "johnschan": "johns-ch",
+   "johnson": "johns",
+   "kan": "kan",
+   "kans": "kan",
+   "kansas": "kan",
+   "kentucky": "ky",
+   "keyes": "keyes",
+   "ky": "ky",
+   "la": "la",
+   "laan": "la-ann",
+   "laann": "la-ann",
+   "lawed": "l-ed",
+   "led": "l-ed",
+   "louisann": "la-ann",
+   "louisiana": "la",
+   "louisianaannual": "la-ann",
+   "maine": "me",
+   "maryland": "md",
+   "mass": "mass",
+   "massachusetts": "mass",
+   "massapp": "mass-app-ct",
+   "massappct": "mass-app-ct",
+   "md": "md",
+   "me": "me",
+   "mich": "mich",
+   "michigan": "mich",
+   "minn": "minn",
+   "minnesota": "minn",
+   "miss": "miss",
+   "mississippi": "miss",
+   "misso": "mo",
+   "missouri": "mo",
+   "mo": "mo",
+   "mont": "mont",
+   "montana": "mont",
+   "nc": "nc",
+   "nd": "nd",
+   "neb": "neb",
+   "nebr": "neb",
+   "nebraska": "neb",
+   "nev": "nev",
+   "nevada": "nev",
+   "newhampshire": "nh",
+   "newjersey": "nj",
+   "newmexico": "nm",
+   "newyork": "ny",
+   "nh": "nh",
+   "nj": "nj",
+   "njl": "njl",
+   "njlaw": "njl",
+   "nm": "nm",
+   "northcarolina": "nc",
+   "northdakota": "nd",
+   "ny": "ny",
+   "ny2d": "ny-2d",
+   "nys": "nys",
+   "nysupp": "nys",
+   "okl": "okla",
+   "okla": "okla",
+   "oklacr": "okla-crim",
+   "oklacrim": "okla-crim",
+   "oklahoma": "okla",
+   "oklcr": "okla-crim",
+   "oklcrim": "okla-crim",
+   "or": "or",
+   "ore": "or",
+   "oregon": "or",
+   "pa": "pa",
+   "pacmwlth": "pa-commw",
+   "pacommonwealth": "pa-commw",
+   "pacommw": "pa-commw",
+   "pacommwct": "pa-commw",
+   "paich": "paige-ch",
+   "paige": "paige-ch",
+   "paigech": "paige-ch",
+   "past": "pa",
+   "pastate": "pa",
+   "penn": "pa",
+   "pennst": "pa",
+   "pennstate": "pa",
+   "pennsylvania": "pa",
+   "pennsylvaniastate": "pa",
+   "rhodeisland": "ri",
+   "ri": "ri",
+   "sandch": "sand-ch",
+   "sandchan": "sand-ch",
+   "sandchy": "sand-ch",
+   "sandf": "sand-ch",
+   "sandfch": "sand-ch",
+   "sandfchan": "sand-ch",
+   "sandfchy": "sand-ch",
+   "sc": "sc",
+   "sct": "s-ct",
+   "sd": "sd",
+   "sergeantrawle": "serg-rawl",
+   "sergr": "serg-rawl",
+   "sergrawl": "serg-rawl",
+   "sergrawle": "serg-rawl",
+   "southcarolina": "sc",
+   "southdakota": "sd",
+   "supct": "s-ct",
+   "tenn": "tenn",
+   "tennessee": "tenn",
+   "tex": "tex",
+   "texas": "tex",
+   "texcr": "tex-crim",
+   "texcrapp": "tex-crim",
+   "texcrim": "tex-crim",
+   "texcrimapp": "tex-crim",
+   "texcrr": "tex-crim",
+   "va": "va",
+   "vermont": "vt",
+   "virginia": "va",
+   "vt": "vt",
+   "wash": "wash",
+   "wash2d": "wash-2d",
+   "washapp": "wash-app",
+   "washington": "wash",
+   "wend": "wend",
+   "wendell": "wend",
+   "westvirginia": "w-va",
+   "wis": "wis",
+   "wisconsin": "wis",
+   "wn": "wash",
+   "wn2d": "wash-2d",
+   "wnapp": "wash-app",
+   "wva": "w-va",
+   "wyo": "wyo",
+   "wyoming": "wyo"
+  },
+  "engRepReach": 90,
+  "engRepShortSpan": 100,
+  "nominativeUS": {
+   "black": [
+    65,
+    2
+   ],
+   "cranch": [
+    4,
+    9
+   ],
+   "dall": [
+    0,
+    4
+   ],
+   "dallas": [
+    0,
+    4
+   ],
+   "how": [
+    41,
+    24
+   ],
+   "howard": [
+    41,
+    24
+   ],
+   "otto": [
+    90,
+    17
+   ],
+   "pet": [
+    25,
+    16
+   ],
+   "peters": [
+    25,
+    16
+   ],
+   "wall": [
+    67,
+    23
+   ],
+   "wallace": [
+    67,
+    23
+   ],
+   "wheat": [
+    13,
+    12
+   ],
+   "wheaton": [
+    13,
+    12
+   ]
+  },
   "nonCaseReporters": [
    "alr",
    "alr2d",
@@ -214,6 +502,7 @@ globalThis.GetCasesPatterns = {
    "connecticut": "Conn.",
    "cow": "Cow.",
    "cowen": "Cow.",
+   "ctcl": "Ct. Cl.",
    "curt": "Curt.",
    "curtis": "Curt.",
    "del": "Del.",
@@ -319,6 +608,7 @@ globalThis.GetCasesPatterns = {
    "northcarolina": "N.C.",
    "northdakota": "N.D.",
    "ny": "N.Y.",
+   "ny2d": "N.Y.2d",
    "nys": "N.Y.S.",
    "nysupp": "N.Y.S.",
    "okl": "Okla.",
@@ -442,6 +732,775 @@ globalThis.GetCasesPatterns = {
   },
   "secCatalogUrl": "https://catalog.hathitrust.org/Record/011329639",
   "statMaxVolume": 137,
+  "stateNominative": {
+   "akmarsh": [
+    [
+     "Ky.",
+     7,
+     3
+    ]
+   ],
+   "akmarshall": [
+    [
+     "Ky.",
+     7,
+     3
+    ]
+   ],
+   "allen": [
+    [
+     "Mass.",
+     82,
+     14
+    ]
+   ],
+   "barr": [
+    [
+     "Pa.",
+     0,
+     10
+    ]
+   ],
+   "baxt": [
+    [
+     "Tenn.",
+     59,
+     9
+    ]
+   ],
+   "baxter": [
+    [
+     "Tenn.",
+     59,
+     9
+    ]
+   ],
+   "benmonroe": [
+    [
+     "Ky.",
+     39,
+     18
+    ]
+   ],
+   "bibb": [
+    [
+     "Ky.",
+     3,
+     4
+    ]
+   ],
+   "bmon": [
+    [
+     "Ky.",
+     39,
+     18
+    ]
+   ],
+   "bmonroe": [
+    [
+     "Ky.",
+     39,
+     18
+    ]
+   ],
+   "bmunroe": [
+    [
+     "Ky.",
+     39,
+     18
+    ]
+   ],
+   "boyce": [
+    [
+     "Del.",
+     23,
+     7
+    ]
+   ],
+   "breese": [
+    [
+     "Ill.",
+     0,
+     1
+    ]
+   ],
+   "bush": [
+    [
+     "Ky.",
+     63,
+     14
+    ]
+   ],
+   "call": [
+    [
+     "Va.",
+     4,
+     6
+    ]
+   ],
+   "casey": [
+    [
+     "Pa.",
+     24,
+     12
+    ]
+   ],
+   "coldw": [
+    [
+     "Tenn.",
+     40,
+     7
+    ]
+   ],
+   "coldwell": [
+    [
+     "Tenn.",
+     40,
+     7
+    ]
+   ],
+   "comst": [
+    [
+     "N.Y.",
+     0,
+     4
+    ]
+   ],
+   "comstock": [
+    [
+     "N.Y.",
+     0,
+     4
+    ]
+   ],
+   "cooke": [
+    [
+     "Tenn.",
+     2,
+     1
+    ]
+   ],
+   "cush": [
+    [
+     "Mass.",
+     54,
+     12
+    ]
+   ],
+   "cushing": [
+    [
+     "Mass.",
+     54,
+     12
+    ]
+   ],
+   "cushm": [
+    [
+     "Miss.",
+     22,
+     7
+    ]
+   ],
+   "cushman": [
+    [
+     "Miss.",
+     22,
+     7
+    ]
+   ],
+   "dana": [
+    [
+     "Ky.",
+     30,
+     9
+    ]
+   ],
+   "dutch": [
+    [
+     "N.J.L.",
+     24,
+     5
+    ]
+   ],
+   "dutcher": [
+    [
+     "N.J.L.",
+     24,
+     5
+    ]
+   ],
+   "duv": [
+    [
+     "Ky.",
+     61,
+     2
+    ]
+   ],
+   "duvall": [
+    [
+     "Ky.",
+     61,
+     2
+    ]
+   ],
+   "george": [
+    [
+     "Miss.",
+     29,
+     10
+    ]
+   ],
+   "gilm": [
+    [
+     "Ill.",
+     5,
+     5
+    ]
+   ],
+   "gilman": [
+    [
+     "Ill.",
+     5,
+     5
+    ]
+   ],
+   "gilmer": [
+    [
+     "Va.",
+     20,
+     1
+    ]
+   ],
+   "gratt": [
+    [
+     "Va.",
+     41,
+     33
+    ]
+   ],
+   "grattan": [
+    [
+     "Va.",
+     41,
+     33
+    ]
+   ],
+   "gray": [
+    [
+     "Mass.",
+     66,
+     16
+    ]
+   ],
+   "greenl": [
+    [
+     "Me.",
+     0,
+     9
+    ]
+   ],
+   "greenleaf": [
+    [
+     "Me.",
+     0,
+     9
+    ]
+   ],
+   "hard": [
+    [
+     "Ky.",
+     2,
+     1
+    ]
+   ],
+   "hardin": [
+    [
+     "Ky.",
+     2,
+     1
+    ]
+   ],
+   "harr": [
+    [
+     "Del.",
+     0,
+     5
+    ]
+   ],
+   "harrington": [
+    [
+     "Del.",
+     0,
+     5
+    ]
+   ],
+   "harris": [
+    [
+     "Pa.",
+     12,
+     12
+    ]
+   ],
+   "hayw": [
+    [
+     "Tenn.",
+     3,
+     3
+    ]
+   ],
+   "haywood": [
+    [
+     "Tenn.",
+     3,
+     3
+    ]
+   ],
+   "head": [
+    [
+     "Tenn.",
+     37,
+     3
+    ]
+   ],
+   "heisk": [
+    [
+     "Tenn.",
+     47,
+     12
+    ]
+   ],
+   "heiskell": [
+    [
+     "Tenn.",
+     47,
+     12
+    ]
+   ],
+   "henm": [
+    [
+     "Va.",
+     10,
+     4
+    ]
+   ],
+   "houst": [
+    [
+     "Del.",
+     5,
+     9
+    ]
+   ],
+   "houston": [
+    [
+     "Del.",
+     5,
+     9
+    ]
+   ],
+   "hum": [
+    [
+     "Tenn.",
+     19,
+     11
+    ]
+   ],
+   "humph": [
+    [
+     "Tenn.",
+     19,
+     11
+    ]
+   ],
+   "humphreys": [
+    [
+     "Tenn.",
+     19,
+     11
+    ]
+   ],
+   "ired": [
+    [
+     "N.C.",
+     22,
+     13
+    ]
+   ],
+   "iredell": [
+    [
+     "N.C.",
+     22,
+     13
+    ]
+   ],
+   "iredelleq": [
+    [
+     "N.C.",
+     35,
+     8
+    ]
+   ],
+   "iredeq": [
+    [
+     "N.C.",
+     35,
+     8
+    ]
+   ],
+   "iredlaw": [
+    [
+     "N.C.",
+     22,
+     13
+    ]
+   ],
+   "jjmarsh": [
+    [
+     "Ky.",
+     23,
+     7
+    ]
+   ],
+   "jjmarshall": [
+    [
+     "Ky.",
+     23,
+     7
+    ]
+   ],
+   "jones": [
+    [
+     "Pa.",
+     10,
+     2
+    ]
+   ],
+   "kern": [
+    [
+     "N.Y.",
+     10,
+     4
+    ]
+   ],
+   "kernan": [
+    [
+     "N.Y.",
+     10,
+     4
+    ]
+   ],
+   "lea": [
+    [
+     "Tenn.",
+     68,
+     16
+    ]
+   ],
+   "leigh": [
+    [
+     "Va.",
+     27,
+     12
+    ]
+   ],
+   "litt": [
+    [
+     "Ky.",
+     10,
+     5
+    ]
+   ],
+   "littell": [
+    [
+     "Ky.",
+     10,
+     5
+    ]
+   ],
+   "littselcas": [
+    [
+     "Ky.",
+     15,
+     1
+    ]
+   ],
+   "martyer": [
+    [
+     "Tenn.",
+     7,
+     1
+    ]
+   ],
+   "marv": [
+    [
+     "Del.",
+     14,
+     2
+    ]
+   ],
+   "marvel": [
+    [
+     "Del.",
+     14,
+     2
+    ]
+   ],
+   "meigs": [
+    [
+     "Tenn.",
+     18,
+     1
+    ]
+   ],
+   "met": [
+    [
+     "Mass.",
+     41,
+     13
+    ],
+    [
+     "Ky.",
+     57,
+     4
+    ]
+   ],
+   "metc": [
+    [
+     "Mass.",
+     41,
+     13
+    ],
+    [
+     "Ky.",
+     57,
+     4
+    ]
+   ],
+   "metcalf": [
+    [
+     "Mass.",
+     41,
+     13
+    ],
+    [
+     "Ky.",
+     57,
+     4
+    ]
+   ],
+   "munf": [
+    [
+     "Va.",
+     14,
+     6
+    ]
+   ],
+   "munford": [
+    [
+     "Va.",
+     14,
+     6
+    ]
+   ],
+   "overt": [
+    [
+     "Tenn.",
+     0,
+     2
+    ]
+   ],
+   "overton": [
+    [
+     "Tenn.",
+     0,
+     2
+    ]
+   ],
+   "penne": [
+    [
+     "Del.",
+     16,
+     7
+    ]
+   ],
+   "pennewill": [
+    [
+     "Del.",
+     16,
+     7
+    ]
+   ],
+   "pick": [
+    [
+     "Mass.",
+     17,
+     24
+    ]
+   ],
+   "pickering": [
+    [
+     "Mass.",
+     17,
+     24
+    ]
+   ],
+   "rand": [
+    [
+     "Va.",
+     21,
+     6
+    ]
+   ],
+   "randolph": [
+    [
+     "Va.",
+     21,
+     6
+    ]
+   ],
+   "rob": [
+    [
+     "Va.",
+     39,
+     2
+    ]
+   ],
+   "scam": [
+    [
+     "Ill.",
+     1,
+     4
+    ]
+   ],
+   "scammon": [
+    [
+     "Ill.",
+     1,
+     4
+    ]
+   ],
+   "seld": [
+    [
+     "N.Y.",
+     4,
+     6
+    ]
+   ],
+   "selden": [
+    [
+     "N.Y.",
+     4,
+     6
+    ]
+   ],
+   "sm": [
+    [
+     "Miss.",
+     8,
+     14
+    ]
+   ],
+   "smedesm": [
+    [
+     "Miss.",
+     8,
+     14
+    ]
+   ],
+   "sneed": [
+    [
+     "Ky.",
+     1,
+     1
+    ],
+    [
+     "Tenn.",
+     32,
+     5
+    ]
+   ],
+   "swan": [
+    [
+     "Tenn.",
+     30,
+     2
+    ]
+   ],
+   "tbmon": [
+    [
+     "Ky.",
+     16,
+     7
+    ]
+   ],
+   "tbmonroe": [
+    [
+     "Ky.",
+     16,
+     7
+    ]
+   ],
+   "terry": [
+    [
+     "Del.",
+     39,
+     20
+    ]
+   ],
+   "tyng": [
+    [
+     "Mass.",
+     1,
+     16
+    ]
+   ],
+   "vacas": [
+    [
+     "Va.",
+     2,
+     2
+    ]
+   ],
+   "virgcas": [
+    [
+     "Va.",
+     2,
+     2
+    ]
+   ],
+   "wright": [
+    [
+     "Pa.",
+     36,
+     14
+    ]
+   ],
+   "wwharr": [
+    [
+     "Del.",
+     30,
+     9
+    ]
+   ],
+   "yer": [
+    [
+     "Tenn.",
+     8,
+     10
+    ]
+   ],
+   "yerger": [
+    [
+     "Tenn.",
+     8,
+     10
+    ]
+   ]
+  },
+  "usReports": {
+   "govinfoMax": 583,
+   "locMax": 542,
+   "locPreferredMax": 501
+  },
   "wordReporterKeys": [
    "abbottunitedstates",
    "alabama",
