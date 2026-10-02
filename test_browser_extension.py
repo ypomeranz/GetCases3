@@ -159,6 +159,17 @@ class BridgeSecurityTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(self.b.opened, [])
 
+    def test_a_refusal_arrives_however_much_body_came_with_it(self):
+        # Answered over a body left unread, the refusal was often lost on
+        # Windows: the connection was reset as it closed, and the client saw
+        # "connection aborted" instead.  So the body is read first.
+        body = {"text": "42 U.S.C. § 1983. " * 600}
+        for _ in range(25):
+            self.assertEqual(self.b.request(
+                "/open", body, headers={"X-GetCases": "0"})[0], 403)
+            self.assertEqual(self.b.request("/nothing", body)[0], 404)
+        self.assertEqual(self.b.opened, [])
+
     def test_a_web_page_is_refused(self):
         # A page can send the header only after a CORS preflight, which is
         # refused below; and a request that says it comes from a page is
@@ -671,8 +682,34 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
         links = run_node(
             "process.stdout.write(JSON.stringify("
             "GetCasesCitations.detect(input)));", text)
-        self.assertEqual([l["value"] for l in links],
-                         ["2020 U.S. Dist. LEXIS 1234", "2024 WL 1327972@7"])
+        self.assertEqual(
+            [(l["kind"], json.loads(l["value"]).get("court")
+              if l["kind"] == "recap" else l["value"]) for l in links],
+            [("recap", "cand"), ("cite", "2024 WL 1327972@7")])
+
+    def test_a_federal_unpublished_opinion_opens_its_recap_search(self):
+        # The app's RECAP spec, character for character, and the same
+        # CourtListener search: by docket, by name where none is printed,
+        # and a slip opinion cited by docket alone.
+        import test_opening_brief_citations as briefs
+        texts = [
+            briefs.UnpublishedOpinionTests.STRING,
+            briefs.UnpublishedOpinionTests.PROSE,
+            "See Peninsula Pathology Assocs. v. Am. Int'l Indus., No. 23-1971 "
+            "(4th Cir. Feb. 12, 2024); Pecos River Talc LLC v. Emory, 2025 WL "
+            "1249947 (E.D. Va. Apr. 30, 2025).",
+            "TABLE OF AUTHORITIES\nFederal Cases\nBarnes v. E-Systems, Inc., "
+            "No. 4:90-cv-1, 1991 WL 11111 (S.D. Tex. Feb. 1, 1991) ..... 3",
+        ]
+        got = run_node(
+            "process.stdout.write(JSON.stringify(input.map(t => "
+            "GetCasesCitations.detect(t).filter(l => l.kind === 'recap')"
+            ".map(l => [l.value, l.url]))));", texts)
+        want = [[[a[1], browser_links.browser_url(a, t[s:e])]
+                 for s, e, a in citations.detect_links(t) if a[0] == "recap"]
+                for t in texts]
+        self.assertEqual(got, want)
+        self.assertEqual(sum(map(len, want)), 13)
 
     def test_the_original_reports_open_the_reprint_s_case(self):
         # Bray, Prosecuting Contempt, nn. 16, 142, 149 and 176.

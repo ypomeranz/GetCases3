@@ -45,6 +45,9 @@ API_VERSION = 1
 #: The most text one /detect request may carry, in characters.
 MAX_TEXT = 3_000_000
 _MAX_BODY = 4 * MAX_TEXT + 65_536       # UTF-8 at its widest, plus JSON
+#: The most of a refused request's body read (and thrown away) before the
+#: refusal is sent; see the handler's _discard_body.
+_DISCARD_MAX = 1_048_576
 
 #: The origins a browser gives an extension's own requests.
 _EXTENSION_SCHEMES = ("chrome-extension://", "moz-extension://",
@@ -314,6 +317,26 @@ class BrowserBridge:
                     return False
                 return True
 
+            def _discard_body(self) -> None:
+                """Read a request's body, unwanted, before refusing it.
+
+                A reply sent over a body still unread is often lost: the
+                connection closes after the reply, and on Windows closing a
+                socket with data waiting in it resets the connection, so the
+                client sees "connection aborted" rather than the refusal
+                (and a client keeping the connection open would have the
+                body read as its next request).  A body past _DISCARD_MAX is
+                left: no client of ours sends one to be refused."""
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    return
+                if 0 < length <= _DISCARD_MAX:
+                    try:
+                        self.rfile.read(length)
+                    except OSError:
+                        pass
+
             def _body(self) -> "Optional[dict]":
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -346,10 +369,12 @@ class BrowserBridge:
 
             def do_POST(self) -> None:
                 if not self._allowed():
+                    self._discard_body()
                     self._reply(403, {"error": "forbidden"})
                     return
                 path = self.path.split("?")[0]
                 if path not in ("/detect", "/open"):
+                    self._discard_body()
                     self._reply(404, {"error": "not found"})
                     return
                 data = self._body()

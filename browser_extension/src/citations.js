@@ -4,7 +4,8 @@
 // app's browser_bridge), which finds everything the app's own viewers link.
 // Without it, this file reads the common ones itself — cases, the U.S. Code,
 // the C.F.R., the federal rules, the Constitution, the Statutes at Large, the
-// Federal Register, the English Reports and the SEC's reports — with the
+// Federal Register, federal courts' unpublished opinions (in RECAP), the
+// English Reports and the SEC's reports — with the
 // app's own regular expressions (patterns.js, exported from the Python), and
 // sends a click to the web page the app would open (browser_links.py): a
 // case to its scanned report where the citation gives the address and the
@@ -112,8 +113,15 @@
   // A state court's unpublished opinion is not linked: there is no docket
   // archive to find it in, as RECAP is for the federal courts', and nothing
   // free indexes it by its Westlaw or LEXIS number (citations.state_court).
-  const FEDERAL_COURTS = new Set(T.federalCourts);
+  const FEDERAL_COURT_IDS = T.federalCourtIds;
   const STATE_KEYS = new Set(T.stateKeys);
+
+  /** CourtListener's id for a federal court, as a citation abbreviates it
+   *  ("D.N.J." → "njd"), or "". */
+  function federalCourtId(court) {
+    const key = looseKey(court);
+    return Object.prototype.hasOwnProperty.call(FEDERAL_COURT_IDS, key) ? FEDERAL_COURT_IDS[key] : "";
+  }
 
   /** Whether a court or reporter abbreviation begins with a state's. */
   function namesAState(abbr) {
@@ -125,7 +133,7 @@
   /** Whether a citation's court parenthetical names a state's court ("N.D.
    *  Cal." is federal, "N.D." alone North Dakota). */
   function stateCourt(court) {
-    return !FEDERAL_COURTS.has(looseKey(court)) && namesAState(court);
+    return !federalCourtId(court) && namesAState(court);
   }
 
   /** Whether *rep* is a state's LEXIS designation ("Tex. App. LEXIS"). */
@@ -193,6 +201,14 @@
     return encodeURIComponent(s)
       .replace(/%2F/g, "/")
       .replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+  }
+
+  /** Python's urllib.parse.quote_plus, as urlencode uses it: a space is
+   *  "+", and everything but letters, digits and "_.-~" percent-encoded. */
+  function pyQuotePlus(s) {
+    return encodeURIComponent(s)
+      .replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
+      .replace(/%20/g, "+");
   }
 
   const google = (text) => "https://www.google.com/search?q=" + pyQuote(squash(text));
@@ -323,6 +339,18 @@
         return caseUrl(value);
       case "sec":
         return T.secCatalogUrl;
+      case "recap": {
+        // CourtListener's search of RECAP, filtered to the docket (or, with
+        // none printed, the case's name), the court and the opinion's date.
+        let spec = {};
+        try { spec = JSON.parse(value); } catch (e) { /* no spec: an empty search */ }
+        const params = [["type", "rd"], ["q", ""],
+          ["entry_date_filed_after", spec.date || ""], ["entry_date_filed_before", spec.date || ""]];
+        if (spec.docket) params.push(["docket_number", spec.docket]);
+        else if (spec.name) params.push(["case_name", spec.name]);
+        if (spec.court) params.push(["court", spec.court]);
+        return "https://www.courtlistener.com/?" + params.map(([k, v]) => `${pyQuotePlus(k)}=${pyQuotePlus(v)}`).join("&");
+      }
       case "engrep": {
         const m = /^(\d+):(\d+)/.exec(value);
         if (m) {
@@ -456,11 +484,249 @@
   // Detection
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Unpublished opinions in RECAP (citations.iter_recap_cites and
+  // iter_docket_cites): a federal court's, cited by Westlaw or LEXIS number
+  // or by docket alone, found in CourtListener's archive of PACER by its
+  // docket (or, printing none, its name), court and date.
+  // -------------------------------------------------------------------------
+
+  const NAME_CONNECTORS = new Set(T.nameConnectors);
+  const NAME_STOPPERS = new Set(T.nameStoppers);
+  const SPELLED_OUT = new Set(T.nameSpelledOut);
+  const HEADING_WORDS = new Set(T.headingWords);
+  const TABLE_ABBREVS = new Set(T.nameTableAbbrevs);
+  const WORD_MAP = new Set(T.nameWordMap);
+  const NAME_TRAIL = ",;:”\"’')]}";
+  const NAME_LOOKBEHIND = 200;
+  const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+  /** Python's str.strip / rstrip / lstrip with a set of characters. */
+  const rstrip = (s, chars) => { let e = s.length; while (e > 0 && chars.includes(s[e - 1])) e--; return s.slice(0, e); };
+  const lstrip = (s, chars) => { let b = 0; while (b < s.length && chars.includes(s[b])) b++; return s.slice(b); };
+  const strip = (s, chars) => lstrip(rstrip(s, chars), chars);
+  const isUpper = (ch) => !!ch && ch !== ch.toLowerCase() && ch === ch.toUpperCase();
+
+  /** citations._is_name_abbreviation: whether a period-ended word can sit
+   *  inside a case name ("Corp.", "U.S."), rather than end a sentence. */
+  function isNameAbbreviation(core) {
+    const word = rstrip(core, ".").replace(/’/g, "'").toLowerCase();
+    if (!rx("nameAbbrev", "").test(core)) {
+      return isUpper(core[0]) && core.endsWith(".") &&
+        TABLE_ABBREVS.has(word.replace(/[^a-z]/g, "")) && !WORD_MAP.has(word);
+    }
+    if (word.includes(".")) return true;
+    return !SPELLED_OUT.has(word) && !WORD_MAP.has(word);
+  }
+
+  function nameTokenOk(tok) {
+    const low = strip(tok.toLowerCase(), ",;:");
+    if (NAME_STOPPERS.has(low)) return false;
+    return rx("nameToken", "").test(tok) || NAME_CONNECTORS.has(low);
+  }
+
+  /** Whether the words after a caption's "v." can all be the second party. */
+  function partyOk(words) {
+    return words.every((w, k) => nameTokenOk(w) ||
+      (w === "at" && k > 0 && k < words.length - 1 &&
+       rx("nameToken", "").test(words[k - 1]) && rx("nameToken", "").test(words[k + 1])));
+  }
+
+  function closesParenthetical(tok) {
+    const core = rstrip(tok, ",;:”\"’'");
+    return core.endsWith(")") && !core.includes("(");
+  }
+
+  function headingLine(line) {
+    const letters = [...line].filter((ch) => /\p{L}/u.test(ch));
+    const words = line.split(/\s+/).filter(Boolean);
+    return words.length > 0 && (
+      (letters.length > 1 && letters.every((ch) => ch === ch.toUpperCase())) ||
+      HEADING_WORDS.has(words[words.length - 1].toLowerCase()));
+  }
+
+  function pastConnectors(toks, i) {
+    while (i < toks.length && NAME_CONNECTORS.has(strip(toks[i].text.toLowerCase(), ",;:"))) i++;
+    return i;
+  }
+
+  /** citations._past_headings: past a heading line the scan read into a
+   *  name ("TABLE OF AUTHORITIES / Federal Cases / Barnes v. E-Systems"). */
+  function pastHeadings(text, base, head, toks, i) {
+    const last = toks[toks.length - 1].start;
+    while (i < toks.length) {
+      const lineEnd = head.indexOf("\n", toks[i].start);
+      if (lineEnd < 0 || lineEnd > last) break;
+      const at = base + toks[i].start;
+      const lineStart = at > 0 ? text.lastIndexOf("\n", at - 1) + 1 : 0;
+      if (text.slice(lineStart, at).trim()) break;
+      if (!headingLine(head.slice(toks[i].start, lineEnd))) break;
+      let k = i;
+      while (k < toks.length && toks[k].start <= lineEnd) k++;
+      i = pastConnectors(toks, k);
+    }
+    return i;
+  }
+
+  /** citations._case_name_start (without italics): where the case name
+   *  introducing the citation at *citeStart* begins, or null. */
+  function caseNameStart(text, citeStart) {
+    const base = Math.max(0, citeStart - NAME_LOOKBEHIND);
+    let head = text.slice(base, citeStart);
+    const tail = /,\s*$/.exec(head);
+    if (!tail) return null;
+    head = head.slice(0, tail.index);
+    const docket = rx("docketAfterName", "").exec(head);
+    if (docket) head = head.slice(0, docket.index);
+    if (!head.trim()) return null;
+    const nov = rx("nameNoV", "").exec(head);
+    if (nov) return base + nov.index;
+    let leftEnd = null;
+    const splits = [...head.matchAll(/(?<=[\p{L}\p{N}_.'’)\]])\s+vs?\.\s+/gu)];
+    if (splits.length) {
+      const split = splits[splits.length - 1];
+      const right = head.slice(split.index + split[0].length);
+      if (right && squash(right).length <= 70 && partyOk(right.split(/\s+/).filter(Boolean))) {
+        leftEnd = split.index;
+      }
+    }
+    const lone = leftEnd === null;
+    if (lone) leftEnd = head.length;
+    const toks = [...head.slice(0, leftEnd).matchAll(/\S+/g)].map((m) => ({ text: m[0], start: m.index }));
+    let i = toks.length;
+    while (i > 0) {
+      const tok = toks[i - 1].text;
+      if (tok.endsWith(";")) break;
+      const low = strip(tok.replace(/[￾­]/g, "").toLowerCase(), ",;:");
+      if (NAME_STOPPERS.has(low) || NAME_STOPPERS.has(lstrip(low, "([\"“‘'"))) break;
+      if (lone && i < toks.length && tok.endsWith(",")) break;
+      if (closesParenthetical(tok)) break;
+      if (rx("nameToken", "").test(tok)) {
+        const core = rstrip(tok, NAME_TRAIL);
+        if (core.endsWith(".") && !isNameAbbreviation(core)) break;
+        i--;
+        continue;
+      }
+      if (NAME_CONNECTORS.has(low)) { i--; continue; }
+      break;
+    }
+    i = pastConnectors(toks, i);
+    if (i < toks.length) i = pastHeadings(text, base, head, toks, i);
+    if (i >= toks.length) return null;
+    if (lone && toks.length - i > 4) return null;
+    let start = toks[i].start;
+    if ("([".includes(head[start])) start++;
+    const glued = /^\d{1,3}(?=[A-Z][a-z]{2,})/.exec(head.slice(start));
+    if (glued) start += glued[0].length;
+    if (squash(head.slice(start, leftEnd)).length > 90) return null;
+    return base + start;
+  }
+
+  /** Whether *name* holds a case citation (a grab that ran too far). */
+  function holdsCaseCite(name) {
+    if (rx("caseCite", "").test(name)) return true;
+    for (const m of matchAll("broadCite", name)) if (validCaseReporter(m[2])) return true;
+    return false;
+  }
+
+  /** citations._recap_name: the caption of the case cited at *citeStart*,
+   *  or "" — only a whole caption ("X v. Y", "In re X") keys a search. */
+  function recapName(text, citeStart) {
+    const start = caseNameStart(text, citeStart);
+    if (start === null) return "";
+    let head = text.slice(start, citeStart).replace(/,\s*$/, "");
+    const docket = rx("docketAfterName", "").exec(head);
+    if (docket) head = head.slice(0, docket.index);
+    let name = strip(head.replace(/\s+/g, " "), " ,;");
+    for (let m; (m = rx("nameSignal", "").exec(name)); ) name = name.slice(m[0].length);
+    if (name.length < 6 || holdsCaseCite(name)) return "";
+    return rx("caption", "").test(name) ? name : "";
+  }
+
+  /** Python's json.dumps of a flat object of strings, so the extension's
+   *  RECAP spec is the app's, character for character. */
+  function pyJson(obj) {
+    const str = (s) => JSON.stringify(s).replace(/[\u0080-￿]/g,
+      (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+    return "{" + Object.entries(obj).map(([k, v]) => `${str(k)}: ${str(v)}`).join(", ") + "}";
+  }
+
+  const isoDate = (year, month, day) => `${year}-${pad(month, 2)}-${pad(+day, 2)}`;
+  const wlKey = (m) => `${m[1]}|${m[2].replace(/\s+/g, "").toLowerCase()}|${m[3]}`;
+
+  /** citations.iter_recap_cites: each Westlaw/LEXIS citation as [start,
+   *  end, spec] — the RECAP lookup's JSON spec; "" for a state court's,
+   *  left unlinked; null when it is no RECAP lookup (an ordinary cite). */
+  function recapCites(text) {
+    const index = new Map();
+    const occurrences = [];
+    for (const m of matchAll("wlCite", text)) {
+      const key = wlKey(m);
+      if (!index.has(key)) index.set(key, { cite: m[0].replace(/\s+/g, " ") });
+      const info = index.get(key);
+      const end = m.index + m[0].length;
+      const before = text.slice(Math.max(0, m.index - 260), m.index).replace(/\s+/g, " ");
+      const dm = rx("recapDocket", "").exec(before);
+      if (dm && !("docket" in info)) info.docket = dm[1].trim();
+      if (!("name" in info)) {
+        const name = recapName(text, m.index);
+        if (name) info.name = name;
+      }
+      const am = rx("recapAfter", "").exec(text.slice(end, end + 180).replace(/\s+/g, " "));
+      if (am) {
+        if (!("court" in info)) info.court = squash(am[1]);
+        const month = MONTHS[am[2].slice(0, 3).toLowerCase()];
+        if (month && !("date" in info)) info.date = isoDate(am[4], month, am[3]);
+      }
+      occurrences.push([m.index, end, key]);
+    }
+    return occurrences.map(([start, end, key]) => {
+      const info = index.get(key);
+      const court = info.court || "";
+      if (stateCourt(court)) return [start, end, ""];
+      const courtId = federalCourtId(court);
+      let spec = null;
+      if (info.date && ((info.docket && (courtId || !court)) || (!info.docket && info.name && courtId))) {
+        const fields = { cite: info.cite, date: info.date };
+        if (info.docket) fields.docket = info.docket;
+        if (courtId) fields.court = courtId;
+        if (info.name) fields.name = info.name;
+        spec = pyJson(fields);
+      }
+      return [start, end, spec];
+    });
+  }
+
+  /** citations.iter_docket_cites: a federal slip opinion cited by docket
+   *  alone, "No. 23-1971 (4th Cir. Feb. 12, 2024)", as [start, end, spec]. */
+  function docketCites(text) {
+    const out = [];
+    for (const m of matchAll("docketCite", text)) {
+      const courtId = federalCourtId(squash(m[3]));
+      const month = MONTHS[m[4].slice(0, 3).toLowerCase()];
+      if (!courtId || !month) continue;
+      const fields = { docket: m[1].trim(), date: isoDate(m[6], month, m[5]), court: courtId };
+      const name = recapName(text, m.index);
+      if (name) fields.name = name;
+      out.push([m.index, m.index + m[0].length, pyJson(fields)]);
+    }
+    return out;
+  }
+
+  /** Where a Westlaw/LEXIS citation ending at *end* ends: past its star-page
+   *  pin and its court/date parenthetical (citations._recap_end). */
+  function recapEnd(text, end) {
+    const pin = matchAt("recapPin", text, end);
+    if (pin) end = pin.index + pin[0].length;
+    const paren = matchAt("courtYearParen", text, end);
+    return paren ? paren.index + paren[0].length : end;
+  }
+
   const COURT_YEAR_PAREN = /\s*\((?:[^()]{0,60}?[\s.])?(?:1[6-9]|20)\d{2}\)/y;
 
   /** A quick look for anything worth reading: most pages have no citation,
    *  and need not be read at all. */
-  const CANDIDATE = /\d\s*(?:U\.\s?S\.|S\.\s?Ct\.|L\.\s?Ed|F\.|[A-Z][A-Za-z.'’]*\.?\s*\d|Stat\.|Fed\.\s?Reg|Eng\.\s?Rep|E\.\s?R\.|S\.\s?E\.\s?C\.|WL\s)|§|U\.\s?S\.\s?C|C\.\s?F\.\s?R|Const|Amendment|Fed\.?\s*R\.|Federal Rules? of|Article\s+[IV]/;
+  const CANDIDATE = /\d\s*(?:U\.\s?S\.|S\.\s?Ct\.|L\.\s?Ed|F\.|[A-Z][A-Za-z.'’]*\.?\s*\d|Stat\.|Fed\.\s?Reg|Eng\.\s?Rep|E\.\s?R\.|S\.\s?E\.\s?C\.|WL\s)|§|U\.\s?S\.\s?C|C\.\s?F\.\s?R|Const|Amendment|Fed\.?\s*R\.|Federal Rules? of|Article\s+[IV]|\bNos?\.\s*\w/;
 
   function mightHaveCitations(text) {
     return CANDIDATE.test(text || "");
@@ -544,25 +810,23 @@
         claim(m.index, m.index + m[0].length, "frpdf", `https://www.govinfo.gov/link/fr/${vol}/${page}?link-type=pdf`);
       }
     }
-    // Unpublished opinions by Westlaw/LEXIS number: the court is in the
-    // parenthetical after any of a number's citations (the first, usually),
-    // and a state court's is not linked — but still claimed, so no other
-    // reading links it either.
-    const wlKey = (m) => `${m[1]}|${m[2].replace(/\s+/g, "").toLowerCase()}|${m[3]}`;
-    const wlCourts = new Map();
-    const wlCites = [...matchAll("wlCite", text)];
-    for (const m of wlCites) {
-      const after = rx("recapAfter", "").exec(text.slice(m.index + m[0].length, m.index + m[0].length + 180).replace(/\s+/g, " "));
-      if (after && !wlCourts.has(wlKey(m))) wlCourts.set(wlKey(m), squash(after[1]));
-    }
-    for (const m of wlCites) {
-      let end = m.index + m[0].length;
-      if (overlaps(claimed, m.index, end)) continue;
-      let value = squash(m[0]);
+    // Unpublished opinions by Westlaw/LEXIS number (citations.iter_recap_cites):
+    // a federal court's opens CourtListener's search of RECAP for it; a
+    // state court's is left unlinked, but claimed so no other reading links
+    // it; the rest are ordinary citations.  Then a federal slip opinion
+    // cited by docket alone.
+    for (const [start, numberEnd, spec] of recapCites(text)) {
+      if (overlaps(claimed, start, numberEnd)) continue;
+      if (spec === "") { claimed.push([start, recapEnd(text, numberEnd)]); continue; }
+      if (spec) { claim(start, recapEnd(text, numberEnd), "recap", spec); continue; }
+      let end = numberEnd;
+      let value = squash(text.slice(start, numberEnd));
       const p = matchAt("pinAfter", text, end);         // ", at *12"
       if (p) { value += "@" + p[1]; end = p.index + p[0].length; }
-      if (stateCourt(wlCourts.get(wlKey(m)) || "")) { claimed.push([m.index, end]); continue; }
-      claim(m.index, end, "cite", value);
+      claim(start, end, "cite", value);
+    }
+    for (const [start, end, spec] of docketCites(text)) {
+      if (!overlaps(claimed, start, end)) claim(start, end, "recap", spec);
     }
     for (const m of matchAll("earlyFedCite", text)) {
       if (overlaps(claimed, m.index, m.index + m[0].length)) continue;
