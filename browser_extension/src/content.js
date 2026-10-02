@@ -42,6 +42,9 @@
   const links = new Map();          // our link's id → its action
   const anchorActions = new WeakMap();  // a page's own <a> → the action it cites
   let scanned = new WeakSet();      // text nodes already read
+  // Provisions of the Constitution linked on the page: each the first time
+  // only — in the page, not in each part of it read as it loads.
+  let constLinked = new Set();
   let observer = null;
   let pending = new Set();
   let timer = 0;
@@ -229,6 +232,8 @@
       if (reply && Array.isArray(reply.links)) found = reply.links;
     }
     if (!found) found = local;
+    found = found.filter((l) => l.kind !== "const" ||
+      (!constLinked.has(l.value) && !!constLinked.add(l.value)));
     if (found.length) apply(col, found);
   }
 
@@ -237,6 +242,7 @@
     for (const a of document.querySelectorAll("a.getcases-known")) a.classList.remove("getcases-known");
     links.clear();
     scanned = new WeakSet();
+    constLinked = new Set();
     if (observer) observer.takeRecords();       // our changes, not the page's
   }
 

@@ -505,6 +505,39 @@ class PrintRoutingTests(unittest.TestCase):
         dialog = _source_of("_PrintDialog", "_open_viewer")
         self.assertIn("_open_pdf_externally(self._path)", dialog)
 
+    def test_the_dialog_stands_over_a_window_on_screen(self):
+        # GetCases runs with its main window hidden in the tray, and Print
+        # reaches back to it (or to a reader that hid itself once a floating
+        # viewer took its scan).  Tk withdraws a transient window with its
+        # master, so a dialog tied to either never appeared.
+        ns = _load_functions(["_dialog_owner"])
+
+        class Window:
+            def __init__(self, shown, focus=None):
+                self.shown, self.focus = shown, focus
+
+            def focus_get(self):
+                return self.focus
+
+            def winfo_toplevel(self):
+                return self
+
+            def winfo_viewable(self):
+                return self.shown
+
+        viewer = Window(True)
+        hidden_root = Window(False, focus=viewer)
+        self.assertIs(ns["_dialog_owner"](hidden_root), viewer)
+        # The window the reader is in, before the one Print was handed.
+        reader = Window(True, focus=viewer)
+        self.assertIs(ns["_dialog_owner"](reader), viewer)
+        self.assertIs(ns["_dialog_owner"](Window(True)).shown, True)
+        # Nothing on screen: tied to nothing, so it still appears.
+        self.assertIsNone(ns["_dialog_owner"](Window(False, focus=Window(False))))
+        dialog = _source_of("_PrintDialog", "__init__")
+        self.assertIn("owner = _dialog_owner(parent)", dialog)
+        self.assertNotIn("transient(parent", dialog)
+
     def test_a_queue_that_refuses_does_not_close_the_dialog(self):
         # The reader is left somewhere they can act, not with a vanished
         # dialog and nothing printed.

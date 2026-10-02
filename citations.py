@@ -2842,7 +2842,7 @@ def detect_links(
     # "Id." may have to look past the nearest one to find what it means.
     recent: list[tuple[tuple[str, str], int, int]] = []
     last_cite_end: int | None = None
-    const_linked: set[int] = set()  # amendments already linked (prose dedup)
+    const_linked: set[str] = set()  # provisions of the Constitution linked
     for start, end, kind, m in matches:
         if start < pos:
             continue  # overlapping match — first/longest wins
@@ -2883,20 +2883,21 @@ def detect_links(
         elif kind == "rule":
             action = ("rule", fed_rules.cite_spec(m))
         elif kind == "const":
-            # Link a bare prose amendment mention ("the First Amendment …", no
-            # section, not a "U.S. Const." citation) only the first time that
-            # amendment appears; formal citations always link.
+            # The Constitution is linked where the document cites it — "U.S.
+            # Const. art. I, § 3", "Article I, Section 8" — and only the first
+            # time it cites each provision: the reader has that link, and an
+            # opinion turning on one clause would otherwise be strewn with
+            # them.  A mention in prose ("the First Amendment", "Article III
+            # standing") is not linked at all (constitution.is_citation).
             spec = constitution.cite_spec(m)
-            ck, cnum, csec = (spec.split(":") + ["", "", ""])[:3]
-            prose = "const" not in re.sub(r"\s+", " ", m.group(0)).lower()
-            if ck == "amend" and cnum.isdigit():
-                cn = int(cnum)
-                if prose and not csec and cn in const_linked:
-                    action = None
-                else:
-                    const_linked.add(cn)
-                    action = ("const", spec)
+            if not constitution.is_citation(m.group(0)):
+                action = None
+            elif spec in const_linked:
+                action = None
+                # Cited all the same: still the authority an "Id." means.
+                unlinkable.append((start, end))
             else:
+                const_linked.add(spec)
                 action = ("const", spec)
         elif kind == "shortcite":
             action = ("cite", m)  # m is the pre-built "vol rep page@pin"

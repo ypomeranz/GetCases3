@@ -247,6 +247,7 @@ def patterns() -> "dict[str, re.Pattern]":
         "cfr": ecfr.CFR_CITE_RE,
         "rule": fed_rules.RULE_CITE_RE,
         "const": constitution.CONST_CITE_RE,
+        "constCitation": constitution.CITATION_MARK_RE,
         "stat": statutes_at_large.STAT_CITE_RE,
         "fedReg": federal_register.FR_CITE_RE,
         "engRep": eng_rep.ER_CITE_RE,

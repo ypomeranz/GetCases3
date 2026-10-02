@@ -588,23 +588,27 @@
     for (const m of matchAll("usc", text)) found.push([m.index, m.index + m[0].length, "usc", uscSpec(m)]);
     for (const m of matchAll("cfr", text)) found.push([m.index, m.index + m[0].length, "cfr", uscSpec(m)]);
     for (const m of matchAll("rule", text)) found.push([m.index, m.index + m[0].length, "rule", ruleSpec(m)]);
-    const amendments = new Set();
+    // The Constitution where it is cited — "U.S. Const. art. I, § 3",
+    // "Article I, Section 8" — never a mention in prose ("the First
+    // Amendment", "Article III standing"); each provision only the first time
+    // (below), as the app does (constitution.is_citation).
     for (const m of matchAll("const", text)) {
+      if (!rx("constCitation", "").test(m[0])) continue;
       const parts = constParts(m[0]);
       const [kind, n, sec] = parts || ["pmbl", 0, ""];
-      // A prose "First Amendment" is linked the first time only; a formal
-      // citation every time.
-      const prose = !squash(m[0]).toLowerCase().includes("const");
-      if (kind === "amend" && prose && !sec && amendments.has(n)) continue;
-      if (kind === "amend") amendments.add(n);
       found.push([m.index, m.index + m[0].length, "const", `${kind}:${n}:${sec}`]);
     }
 
     found.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
     const out = [];
+    const constLinked = new Set();
     let pos = 0;
     for (const [start, end, kind, value] of found) {
       if (start < pos) continue;
+      if (kind === "const") {
+        if (constLinked.has(value)) { pos = end; continue; }
+        constLinked.add(value);
+      }
       const matched = text.slice(start, end);
       out.push({
         start, end, kind, value,

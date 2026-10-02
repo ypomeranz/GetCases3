@@ -276,10 +276,12 @@ class BridgeDetectTests(unittest.TestCase):
     def test_labels(self):
         labels = [l["label"] for l in self.detect(SAMPLE)]
         for want in ("42 U.S.C. § 1983(a)", "29 C.F.R. § 1614.105(a)(1)",
-                     "U.S. Const. amend. XIV, § 1", "U.S. Const. amend. V",
+                     "U.S. Const. amend. XIV, § 1",
                      "U.S. Const. art. III, § 2", "Fed. R. Civ. P. 56(a)",
                      "8 S.E.C. 893, 915 (1941)"):
             self.assertIn(want, labels)
+        # "the Fifth Amendment" is prose, not a citation of it.
+        self.assertNotIn("U.S. Const. amend. V", labels)
 
     def test_an_english_citation_names_the_case_it_opens(self):
         # The original report's citation does not say the English Reports
@@ -560,7 +562,6 @@ class FallbackReaderTests(unittest.TestCase):
             ("8 S.E.C. 893, 915", "sec", '{"page":893,"pin":915,"vol":8}'),
             ("2022 WL 2373418, at *12", "cite", "2022 WL 2373418@12"),
             ("5 U.S. (1 Cranch) 137 (1803)", "cite", "5 U.S. 137"),
-            ("Fifth Amendment", "const", "amend:5:"),
             ("Article III, § 2", "const", "art:3:2"),
             ("Rule 404 of the Federal Rules of Evidence", "rule", "fre:404:"),
             ("574 F.3d 1098, 1101 (9th Cir. 2009)", "cite",
@@ -569,6 +570,8 @@ class FallbackReaderTests(unittest.TestCase):
             self.assertIn(want, found)
         # A law review is cited like a reporter, but is none.
         self.assertFalse(any("Yale" in text for text, _k, _v in found))
+        # "the Fifth Amendment" names a provision; it does not cite it.
+        self.assertFalse(any("Fifth" in text for text, _k, _v in found))
 
     def test_the_same_actions_as_the_app(self):
         # Where both read a citation, they mean the same thing by it: the

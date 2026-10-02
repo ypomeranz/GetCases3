@@ -36,7 +36,9 @@ arrow on the extension's card in `chrome://extensions` to pick up any changes.
 
 - Citations get a dotted underline: blue for cases, green for statutes, rules
   and regulations, amber for the Constitution. Point at one to see what it
-  cites.
+  cites. The Constitution is linked where a page cites it (`U.S. Const. art.
+  I, § 3`, `Article I, Section 3`), the first time it cites each provision;
+  "the First Amendment" in a sentence is not a link.
 - **Click** a citation to open it (in GetCases if it is running, otherwise on
   the web, in a new tab). **Ctrl/Cmd-click** or **middle-click** always opens
   the web page instead, in a tab behind this one. A case's scan takes a

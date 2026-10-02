@@ -1170,16 +1170,43 @@ class ConstitutionCiteTests(unittest.TestCase):
             ("U. S. Const. amend. XIV, § 1", "amend:14:1"),
             ("U.S. Const. art. I, § 8, cl. 3", "art:1:8"),
             ("U.S. Const. pmbl.", "pmbl:0:"),
-            ("the Fourteenth Amendment", "amend:14:"),
-            ("the Fourth Amendment's protections", "amend:4:"),
-            ("Amendment XIV", "amend:14:"),
-            ("Article III", "art:3:"),
+            # Prose that pins a section cites it.
+            ("Article I, Section 8", "art:1:8"),
+            ("Amendment XIV, § 1", "amend:14:1"),
         ]:
             with self.subTest(text=text):
                 found = [(text[s:e], a) for s, e, a in detect_links(text)
                          if a[0] == "const"]
                 self.assertEqual(len(found), 1, found)
                 self.assertEqual(found[0][1], ("const", spec))
+
+    def test_a_provision_named_in_prose_is_not_a_link(self):
+        # The writer talking about a provision, not pointing the reader to it.
+        for text in ("the Fourteenth Amendment", "the First Amendment's text",
+                     "the Fourth Amendment's protections", "Amendment XIV",
+                     "Article III standing", "Article I and Article II",
+                     "the Fifth and Fourteenth Amendments"):
+            with self.subTest(text=text):
+                self.assertEqual(self._consts(text), [])
+
+    def test_each_provision_is_linked_the_first_time_only(self):
+        text = ("U.S. Const. art. I, § 3, cl. 4. Later, Article I, Section 3, "
+                "and U.S. Const. art. I, § 3 again; U.S. Const. art. I, § 8; "
+                "U.S. Const. amend. XIV, § 1; U.S. Const. amend. XIV, § 1.")
+        self.assertEqual(
+            [(text[s:e], a[1]) for s, e, a in detect_links(text)
+             if a[0] == "const"],
+            [("U.S. Const. art. I, § 3, cl. 4", "art:1:3"),
+             ("U.S. Const. art. I, § 8", "art:1:8"),
+             ("U.S. Const. amend. XIV, § 1", "amend:14:1")])
+
+    def test_a_citation_not_linked_again_is_what_an_id_means(self):
+        # The second "art. I, § 3" is the authority the Id. refers to — not
+        # Roe, three sentences back.
+        text = ("U.S. Const. art. I, § 3. Roe v. Wade, 410 U.S. 113 (1973). "
+                "U.S. Const. art. I, § 3. Id. at 120.")
+        self.assertFalse(any(a[0] == "cite" and "@120" in a[1]
+                             for _s, _e, a in detect_links(text)))
 
     def test_the_reporters_own_abbreviation_is_read(self):
         # "U. S. Const., Amdt. 1" is how the Court's reporter writes it; the
@@ -1205,14 +1232,14 @@ class ConstitutionCiteTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self._consts(text), [])
 
-    def test_a_plural_amendment_still_links(self):
-        # "the Fifth and Fourteenth Amendments" is ordinary prose; the closing
-        # word boundary must not exclude the "s".
-        found = [(t, a) for t, a in
-                 _spans("under the Fifth and Fourteenth Amendments")
-                 if a[0] == "const"]
-        self.assertEqual(found,
-                         [("Fourteenth Amendments", ("const", "amend:14:"))])
+    def test_a_plural_amendment_is_still_read(self):
+        # Prose, so not a link; but the closing word boundary must not leave
+        # out the "s" — typed into the lookup box, it opens the amendment.
+        import constitution
+        m = constitution.CONST_CITE_RE.search(
+            "under the Fifth and Fourteenth Amendments")
+        self.assertEqual(m.group(0), "Fourteenth Amendments")
+        self.assertEqual(constitution.cite_spec(m), "amend:14:")
 
 
 class IdChainTests(unittest.TestCase):

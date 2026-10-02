@@ -129,6 +129,25 @@ CONST_CITE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# What makes a match a *citation* of the Constitution rather than a mention of
+# one of its parts in prose: it names the document ("U.S. Const. amend. XIV",
+# "U. S. Const., Art. III") or pins a section or clause ("Article I, Section
+# 8", "Amendment XIV, § 1").  "The First Amendment", "Article III standing",
+# "Amendment XIV" are the writer talking about a provision, not pointing the
+# reader to it, and are not linked (see is_citation) — though typed into the
+# lookup box, they still open it.
+CITATION_MARK_RE = re.compile(
+    r"const|§|\bsec(?:tion|\.)?\s*\d|\bcls?\.?\s*\d", re.IGNORECASE)
+
+
+def is_citation(text: str) -> bool:
+    """Whether *text*, a ``CONST_CITE_RE`` match, cites the Constitution — the
+    only references a document's links are made for (see CITATION_MARK_RE).
+    Each provision is linked only the first time a document cites it; that is
+    for the link detector to keep track of."""
+    return bool(CITATION_MARK_RE.search(text or ""))
+
+
 # The whole document, with no part named.  Never a link in running prose (see
 # above), but a fair thing to type into the lookup box, where it opens at the
 # Preamble.
