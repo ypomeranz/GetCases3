@@ -157,15 +157,20 @@ class CaseCiteSpanTests(unittest.TestCase):
         self.assertEqual(_spans(text)[0][0], "Pringle, 540 U.S. 366, 372 (2003)")
 
     def test_a_docket_number_before_the_cite_is_part_of_it(self):
-        # The number is no name: the name is the caption before it.
-        text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3, "
-                "2008 WL 465653 (N.J. Super. Ct. App. Div. Feb. 22, 2008) is "
-                "a state case.")
+        # The number is no name: the name is the caption before it.  (Dated
+        # by year alone, the opinion is no RECAP lookup, but a citation.)
+        text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, "
+                "2008 WL 465653 (D.N.J. 2008) is a federal case.")
         self.assertEqual(
             _spans(text),
-            [("Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3, 2008 "
-              "WL 465653 (N.J. Super. Ct. App. Div. Feb. 22, 2008)",
+            [("Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, 2008 "
+              "WL 465653 (D.N.J. 2008)",
               ("cite", "2008 WL 465653"))])
+        # A state court's unpublished opinion is not linked at all.
+        self.assertEqual(
+            _spans("But Foxtons, Inc. v. Cirri Germain Realty, No. "
+                   "A-61210-05T3, 2008 WL 465653 (N.J. Super. Ct. App. Div. "
+                   "Feb. 22, 2008) is a state case."), [])
 
     def test_multi_word_party_names(self):
         text = ("The Court in District of Columbia v. Wesby, 583 U. S. 48, 57 "

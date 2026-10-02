@@ -156,6 +156,13 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
   I, § 3`, `Article I, Section 3`), and only the first time it cites each
   provision. A provision named in a sentence ("the First Amendment",
   "Article III standing") is not a link; type it into Spotlight to open it.
+- An **unpublished opinion** cited by Westlaw or LEXIS number is linked when a
+  federal court decided it (`No. 12-6371, 2024 WL 1327972 (D.N.J. Mar. 28,
+  2024)`): its docket and date find it in CourtListener's RECAP archive of
+  PACER. A state court's (`2021 WL 123456 (N.J. Super. Ct. App. Div. …)`,
+  `2019 Tex. App. LEXIS 555`) is left unlinked: state dockets are in no
+  archive GetCases can search, and nothing free finds the opinion by its
+  Westlaw or LEXIS number.
 - A citation to the **SEC's Decisions and Reports** (`8 S.E.C. 893, 915`, and
   the short form `8 S.E.C. at 917`) opens HathiTrust's scan of the volume at
   the cited page, **in your web browser**. HathiTrust lets people, not apps,

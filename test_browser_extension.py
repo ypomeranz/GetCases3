@@ -660,6 +660,20 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
             got, [[browser_links.case_urls(c),
                    browser_links.browser_url(("cite", c))] for c in cites])
 
+    def test_a_state_court_s_unpublished_opinion_is_not_linked(self):
+        text = (
+            "Smith v. Jones, No. A-1234-19, 2021 WL 123456, at *3 (N.J. Super. "
+            "Ct. App. Div. Mar. 3, 2021); Smith, 2021 WL 123456, at *4; Kelly "
+            "v. State, 2019 Tex. App. LEXIS 555 (Tex. App. Jan. 5, 2019); Moe "
+            "v. Zoe, 2018 WL 999999 (N.D. Apr. 1, 2018); Hoe v. Poe, No. "
+            "1:19-cv-1, 2020 U.S. Dist. LEXIS 1234 (N.D. Cal. Jan. 2, 2020); "
+            "Care One, 2024 WL 1327972, at *7 (D.N.J. Mar. 28, 2024).")
+        links = run_node(
+            "process.stdout.write(JSON.stringify("
+            "GetCasesCitations.detect(input)));", text)
+        self.assertEqual([l["value"] for l in links],
+                         ["2020 U.S. Dist. LEXIS 1234", "2024 WL 1327972@7"])
+
     def test_the_original_reports_open_the_reprint_s_case(self):
         # Bray, Prosecuting Contempt, nn. 16, 142, 149 and 176.
         text = ("Wellesley v. The Duke of Beaufort [1831] 2 Russ. & M. 639, "

@@ -237,6 +237,7 @@ def patterns() -> "dict[str, re.Pattern]":
         "usNominativeParallel": c.US_NOMINATIVE_PARALLEL_RE,
         "earlyFedCite": c.EARLY_FED_CITE_RE,
         "wlCite": c.WL_CITE_RE,
+        "recapAfter": c._RECAP_AFTER_RE,
         "runningHead": c.RUNNING_HEAD_CITE_RE,
         "journalReporter": c._JOURNAL_REPORTER_RE,
         "agOpinion": c._AG_OPINION_RE,
@@ -304,6 +305,11 @@ def tables() -> dict:
         "engRepReach": eng_rep.PARALLEL_REACH,
         "engRepShortSpan": eng_rep._SHORT_SPAN,
         "nonCaseReporters": sorted(c._NONCASE_REPORTERS),
+        # Federal courts (their abbreviations, as keys), and the states by
+        # the words their courts' abbreviations begin with: a state court's
+        # unpublished opinion is not linked (citations.state_court).
+        "federalCourts": sorted(c._FED_COURT_IDS),
+        "stateKeys": sorted(c._STATE_KEYS),
         "plainCaseReporters": sorted(c._PLAIN_CASE_REPORTERS),
         "wordReporterKeys": sorted(c._WORD_REPORTER_KEYS),
         "ruleSets": {k: {"abbr": v[0], "path": v[2]}

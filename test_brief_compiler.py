@@ -93,11 +93,17 @@ class RunningTextTests(unittest.TestCase):
         ])
 
     def test_a_docket_number_is_not_the_name(self):
-        text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3, "
-                "2008 WL 465653 (N.J. Super. Ct. App. Div. Feb. 22, 2008).")
+        text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, "
+                "2008 WL 465653 (D.N.J. 2008).")
         self.assertEqual(_cases(text), [
             ("2008 WL 465653", "Foxtons, Inc. v. Cirri Germain Realty",
              "2008")])
+
+    def test_a_state_court_s_unpublished_opinion_is_not_collected(self):
+        # There is nowhere to fetch it from (see citations.state_court).
+        text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. A-61210-05T3, "
+                "2008 WL 465653 (N.J. Super. Ct. App. Div. Feb. 22, 2008).")
+        self.assertEqual(collect_authorities(text), [])
 
     def test_a_footnote_mark_does_not_disturb_the_name(self):
         text = "Hollingsworth v. Perry, 558 U.S. 183⁵ (2010)."

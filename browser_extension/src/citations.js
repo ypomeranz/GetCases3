@@ -109,6 +109,30 @@
     return !rep.includes(".") && WORD.has(looseKey(reporterWithoutSuffix(rep)));
   }
 
+  // A state court's unpublished opinion is not linked: there is no docket
+  // archive to find it in, as RECAP is for the federal courts', and nothing
+  // free indexes it by its Westlaw or LEXIS number (citations.state_court).
+  const FEDERAL_COURTS = new Set(T.federalCourts);
+  const STATE_KEYS = new Set(T.stateKeys);
+
+  /** Whether a court or reporter abbreviation begins with a state's. */
+  function namesAState(abbr) {
+    const words = (abbr || "").trim().split(/\s+/);
+    const heads = words.length > 1 ? [words[0], words[0] + words[1]] : [words[0]];
+    return heads.some((h) => STATE_KEYS.has(looseKey(h)));
+  }
+
+  /** Whether a citation's court parenthetical names a state's court ("N.D.
+   *  Cal." is federal, "N.D." alone North Dakota). */
+  function stateCourt(court) {
+    return !FEDERAL_COURTS.has(looseKey(court)) && namesAState(court);
+  }
+
+  /** Whether *rep* is a state's LEXIS designation ("Tex. App. LEXIS"). */
+  function stateLexisReporter(rep) {
+    return looseKey(rep).endsWith("lexis") && namesAState(rep);
+  }
+
   const AMERICAN = new Set(T.americanKeys);
   const ER_REPORTER = new RegExp(`^(?:${DATA.patterns.engRepReporter.source})$`);
 
@@ -520,12 +544,24 @@
         claim(m.index, m.index + m[0].length, "frpdf", `https://www.govinfo.gov/link/fr/${vol}/${page}?link-type=pdf`);
       }
     }
-    for (const m of matchAll("wlCite", text)) {
+    // Unpublished opinions by Westlaw/LEXIS number: the court is in the
+    // parenthetical after any of a number's citations (the first, usually),
+    // and a state court's is not linked — but still claimed, so no other
+    // reading links it either.
+    const wlKey = (m) => `${m[1]}|${m[2].replace(/\s+/g, "").toLowerCase()}|${m[3]}`;
+    const wlCourts = new Map();
+    const wlCites = [...matchAll("wlCite", text)];
+    for (const m of wlCites) {
+      const after = rx("recapAfter", "").exec(text.slice(m.index + m[0].length, m.index + m[0].length + 180).replace(/\s+/g, " "));
+      if (after && !wlCourts.has(wlKey(m))) wlCourts.set(wlKey(m), squash(after[1]));
+    }
+    for (const m of wlCites) {
       let end = m.index + m[0].length;
       if (overlaps(claimed, m.index, end)) continue;
       let value = squash(m[0]);
       const p = matchAt("pinAfter", text, end);         // ", at *12"
       if (p) { value += "@" + p[1]; end = p.index + p[0].length; }
+      if (stateCourt(wlCourts.get(wlKey(m)) || "")) { claimed.push([m.index, end]); continue; }
       claim(m.index, end, "cite", value);
     }
     for (const m of matchAll("earlyFedCite", text)) {
@@ -553,6 +589,7 @@
       const s = m.index, e = s + m[0].length;
       if (!validCaseReporter(m[2]) || taken(s, e)) continue;
       if (bareWordReporter(m[2]) && !atCitationStart(text, s)) continue;
+      if (stateLexisReporter(m[2])) { claimed.push([s, e]); continue; }   // a state court's, by LEXIS number
       cases.push({ start: s, end: e, m });
     }
     const index = new Map();      // "vol|reporter key" → first pages
@@ -575,7 +612,7 @@
     // Short forms, "410 U.S. at 152": a page of a case cited in full.
     for (const m of matchAll("broadShortCite", text)) {
       const s = m.index, e = s + m[0].length;
-      if (overlaps(claimed, s, e)) continue;
+      if (overlaps(claimed, s, e) || stateLexisReporter(m[2])) continue;
       const pages = index.get(`${m[1]}|${reporterKey(m[2])}`);
       if (!pages) continue;
       const pin = +m[3];
