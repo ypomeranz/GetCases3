@@ -63,7 +63,10 @@ from bluebook_names import (
     strip_related_case_note,
 )
 
-_SCHEMA_VERSION = 6
+# v7 re-reads every stored opinion's decision date and year from its front
+# matter, past the dates of later events — an affirmance, a rehearing, an
+# amendment — that older releases saved as the decision's.
+_SCHEMA_VERSION = 7
 
 # Record field holding the reporter pagination recovered from an official scan
 # (see :meth:`OpinionDB.save_pagination`).  Records written before this field
@@ -307,50 +310,104 @@ def decision_date_from_blocks(blocks: list) -> str:
 
     A labelled ``Decided``/``Filed`` date wins over argued and reargued dates.
     Short orders often print only ``[May 4, 2026]`` or a bare centered date, so
-    those forms are conservative fallbacks.
+    those forms are conservative fallbacks.  A date its line gives to another
+    event — the argument, an amendment, a rehearing, the case's later history
+    ("Judgment Affirmed April 17, 1978.") — is never the decision's.  An
+    opinion withdrawn and refiled is dated by the refiling: that is the
+    opinion the reports print ("Refiled February 14, 2000." under "Decided
+    August 23, 1999." is Al-Shabazz v. State, 338 S.C. 354 (2000)).
     """
     header = _front_matter_text(blocks)
     centers = _front_matter_text(blocks, centers_only=True)
-    labelled = re.search(
-        rf"\b(?:Decided|Filed|Released|Entered)\b[^A-Za-z0-9]{{0,20}}"
-        rf"((?:{_MONTHS})\s+\d{{1,2}},?\s+(?:1[6-9]|20)\d{{2}})\b",
-        header,
-        re.IGNORECASE,
-    )
-    if labelled:
-        return _iso_full_date(labelled.group(1))
-    bracketed = re.search(
-        rf"\[\s*((?:{_MONTHS})\s+\d{{1,2}},?\s+"
-        rf"(?:1[6-9]|20)\d{{2}})\s*\]",
-        header,
-        re.IGNORECASE,
-    )
+    refiled = re.search(rf"\bRe-?filed\b[^A-Za-z0-9]{{0,20}}({_FULL_DATE})",
+                        header, re.IGNORECASE)
+    if refiled:
+        return _iso_full_date(refiled.group(1))
+    # "Petition for Certiorari Filed …" is not the opinion's filing.
+    for labelled in re.finditer(
+            rf"\b(?:Decided|Filed|Released|Entered)\b[^A-Za-z0-9]{{0,20}}"
+            rf"({_FULL_DATE})\b", header, re.IGNORECASE):
+        if not _NOT_DECISION_RE.search(_date_lead_in(header, labelled.start(1))):
+            return _iso_full_date(labelled.group(1))
+    bracketed = re.search(rf"\[\s*({_FULL_DATE})\s*\]", header, re.IGNORECASE)
     if bracketed:
         return _iso_full_date(bracketed.group(1))
     # A bare date is the decision's unless its line says it is another
     # event's: "October 22, 1975." is Brown v. United States, 524 F.2d 693,
     # decided; "As Amended January 9, 1976." beneath it is not — the year a
-    # citation gives is the decision's (rule 10.5).
+    # citation gives is the decision's (rule 10.5).  The decision's date
+    # closes its line, too: one inside a caption ("In re Terrorist Attacks on
+    # September 11, 2001 (Asat Trust Reg.) …") dates something else.
     dates = [m for m in _FULL_DATE_RE.finditer(centers)
-             if not _NOT_DECISION_RE.search(_date_lead_in(centers, m.start()))]
+             if not _NOT_DECISION_RE.search(_date_lead_in(centers, m.start()))
+             and _DATE_LINE_END_RE.match(centers, m.end())]
     return _iso_full_date(dates[-1].group(0)) if dates else ""
 
 
+_FULL_DATE = rf"(?:{_MONTHS})\s+\d{{1,2}},?\s+(?:1[6-9]|20)\d{{2}}"
+
 #: What a date in an opinion's front matter is when it is not the decision's:
-#: the argument or submission before it, an amendment, correction or
-#: rehearing after it, the Supreme Court's later word on it.
+#: the argument or submission before it; an amendment, correction or
+#: rehearing after it; a separate opinion filed later; and the case's later
+#: history ("Judgment Affirmed April 17, 1978.", "Writ of Certiorari Granted
+#: March 4, 1957.", "Transfer denied October 31, 1967.", "Probable
+#: Jurisdiction Noted March 30, 1990.").  Stems, so "affirm" is "Affirmed"
+#: and "concurr" is "Concurring Opinion".  A judgment's entry is the
+#: decision, as Ohio dates it ("Judgment Entry: October 28, 2020.").
 _NOT_DECISION_RE = re.compile(
-    r"\b(?:argued|reargued|submitted|heard|amended|modified|corrected|"
-    r"rehearing|reh'g|certiorari|cert\.|withdrawn|superseded|vacated)",
+    r"\b(?:argued|reargu|submitted|resubmitted|submission|heard|restored|"
+    r"amended|modified|corrected|revised|rehearing|reh'g|reconsider|"
+    r"certiorari|cert\.|withdrawn|superseded|vacated|affirm|aff'd|"
+    r"revers|rev'd|remand|denied|granted|dismiss|noted|concurr|dissent|"
+    r"judgment(?!\s+entr)|decree|mandate)",
     re.IGNORECASE,
 )
+
+#: What may follow the decision's date on its line: the full stop, a
+#: footnote mark — "October 5, 1989.", "May 15, 2008.[*]", "[May 4, 2026]."
+_DATE_LINE_END_RE = re.compile(
+    r"(?:[.,;:)\]*†‡]|\[[^\]\s]{0,6}\])*(?:\s{2,}|\s*\n|\s*$)")
+
+
+def decision_year_from_blocks(blocks: list, guess: bool = True) -> str:
+    """The year a citation to the opinion gives — its decision's (rule
+    10.5) — read off its front matter, most reliable first: the year Google
+    Scholar prints after the case's own citation ("524 F.2d 693 (1975)"),
+    then the decision date (see :func:`decision_date_from_blocks`), then —
+    unless *guess* is false — any year in parentheses, beside a "Decided …"
+    label, or bare.  Page markers are left out: a star page or an S. Ct.
+    page number (1600–2099) reads like a year.  "" where the front matter
+    prints none, as the earliest U.S. Reports do ("2 U.S. 409 (____)")."""
+    header = _front_matter_text(blocks)
+    # Only the parenthetical closing a citation: a docket line's
+    # "No. 20-794 (R46-44/OT 2020)" is no date of decision.
+    cited = re.search(r"\d\s*\(\s*(1[6-9]\d{2}|20\d{2})\s*\)", header)
+    if cited:
+        return cited.group(1)
+    decided = decision_date_from_blocks(blocks)
+    if decided or not guess:
+        return decided[:4]
+    years = (
+        re.findall(r"\([^()]{0,40}?(1[6-9]\d{2}|20\d{2})\s*\)", header)
+        or re.findall(
+            r"\b(?:Decided|Filed|Released|Entered)\b[^0-9]{0,40}?"
+            r"(1[6-9]\d{2}|20\d{2})", header, re.IGNORECASE)
+    )
+    if years:
+        return years[0]
+    years = re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", header)
+    return years[-1] if years else ""
 
 
 def _date_lead_in(text: str, at: int) -> str:
     """The words before the date at *at* in the front matter, back to the
-    start of its line or sentence: "As Amended " before "January 9,
-    1976"."""
-    return re.split(r"\s{2,}|[.;:]\s", text[:at])[-1]
+    start of its line or sentence, or the end of the date before it:
+    "As Amended " before "January 9, 1976", "Decided " in "Argued May 1,
+    1990, Decided June 1, 1990".  An abbreviation's full stop does not end
+    the sentence ("Cert. denied "), nor does a label's colon ("Petition for
+    Certiorari Filed: ")."""
+    return re.split(r"\s{2,}|\n|[.;]\s+(?=[A-Z(\[])|(?<=\d{4}),?\s+",
+                    text[:at])[-1]
 
 
 def _header_dockets(blocks: list) -> list[str]:
@@ -504,49 +561,16 @@ def extract_record(
         item.get("dateFiled") or item.get("date_filed") or ""
     ).strip()
     header_date = decision_date_from_blocks(blocks)
-    # Scholar-only records otherwise retain just a year.  For SCOTUS, trust
-    # the opinion's own "Decided ..." line even when external metadata carries
-    # a later rehearing date.
-    if header_date and (
-        not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_filed)
-        or header_court == "scotus"
-    ):
+    # Scholar-only records otherwise retain just a year.  The opinion's own
+    # front matter dates the decision even where external metadata carries a
+    # later date — a rehearing's, an amendment's — and it is what the index
+    # reads back (see OpinionDB._index_record).
+    if header_date:
         date_filed = header_date
     year = date_filed[:4] if len(str(date_filed)) >= 4 else ""
     if not year:
-        # Same ladder as the viewer's Bluebook year: page markers are
-        # stripped first (a star page or S. Ct. page number, 1600–2099,
-        # is indistinguishable from a year), then a parenthesized year
-        # next to a citation wins, then a "Decided …" line, then a bare
-        # centered date, then any bare year.
-        def _no_markers(b) -> str:
-            spans = getattr(b, "spans", None)
-            if spans is None:
-                return b.text()
-            return "".join(
-                s.text for s in spans if not getattr(s, "pagenum", False))
-
-        hdr = " ".join(
-            _no_markers(b) for b in blocks[:16]
-            if getattr(b, "kind", None) in ("center", "heading")
-        )
-        hdr_center = " ".join(
-            _no_markers(b) for b in blocks[:16]
-            if getattr(b, "kind", None) == "center"
-        )
-        years = (
-            re.findall(r"\([^()]{0,40}?(1[6-9]\d{2}|20\d{2})\s*\)", hdr)
-            or re.findall(
-                r"\b(?:Decided|Filed|Released|Entered)\b[^0-9]{0,40}?"
-                r"(1[6-9]\d{2}|20\d{2})", hdr, re.IGNORECASE)
-            or re.findall(
-                r"\b(?:January|February|March|April|May|June|July|August|"
-                r"September|October|November|December)\s+\d{1,2},?\s+"
-                r"(1[6-9]\d{2}|20\d{2})\b", hdr_center, re.IGNORECASE)
-            or re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", hdr)
-        )
-        if years:
-            year = years[-1]
+        # The viewer's Bluebook year, read the same way.
+        year = decision_year_from_blocks(blocks)
 
     return {
         "v": _SCHEMA_VERSION,
@@ -906,16 +930,20 @@ class OpinionDB:
         parties = rec.get("parties")
         if parties is None:
             parties = parties_from_name(rec.get("name", ""))
+        # The opinion's front matter dates it, read as extract_record reads
+        # it now: a record saved by an earlier release can carry a later
+        # event's date ("Rehearing Denied January 23, 1990." beneath
+        # "Decided December 6, 1989."), or a year read off a star page, and
+        # the year follows the date.
         date_filed = str(rec.get("date_filed") or "").strip()
         header_date = decision_date_from_blocks(blocks)
-        if header_date and (
-            not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_filed)
-            or _court_from_header(blocks) == "scotus"
-        ):
+        if header_date:
             date_filed = header_date
-        year = str(rec.get("year") or "").strip()
-        if not year and date_filed:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_filed):
             year = date_filed[:4]
+        else:
+            year = (str(rec.get("year") or "").strip()
+                    or decision_year_from_blocks(blocks) or date_filed[:4])
         court = str(rec.get("court") or "").strip().lower()
         if not court:
             court = _court_from_cites(cites) or _court_from_header(blocks)

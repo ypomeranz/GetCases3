@@ -19,8 +19,11 @@ court for the reporter the scan prints.  A scan whose record still names no
 court asks CourtListener itself, before the text is ever opened.
 """
 
+import os
 import unittest
 from unittest.mock import Mock, patch
+
+os.environ["GETCASES_SKIP_DEPENDENCY_PROMPT"] = "1"
 
 import courtlistener_gui as g
 from google_scholar import Block, Span
