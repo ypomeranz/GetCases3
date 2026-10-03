@@ -35636,10 +35636,13 @@ def _open_printer_settings(printer: str) -> bool:
 def _two_sided_supported() -> bool:
     """Whether we can ask for double-sided ourselves.
 
-    Through CUPS we can (``-o sides=…``).  Windows prints by handing the file
-    to whatever program owns PDFs, which takes no such instruction — duplex
-    there is set in the printer's own settings, which the dialog links to."""
-    return not sys.platform.startswith("win") and bool(shutil.which("lp"))
+    Through CUPS we can (``-o sides=…``), and on Windows when GetCases prints
+    the pages itself (:func:`_windows_print_pdf`), which asks the printer for
+    duplex with the rest of its settings.  Elsewhere duplex is set in the
+    printer's own settings, which the dialog links to."""
+    if sys.platform.startswith("win"):
+        return _windows_pdf_printing_available()
+    return bool(shutil.which("lp"))
 
 
 #: PDF readers that will print to a named printer from the command line, and
@@ -35686,6 +35689,209 @@ def _windows_program_path(exe: str) -> str:
     return ""
 
 
+class _PrintCancelled(Exception):
+    """The reader called printing off in a dialog the printer itself put up
+    (the Save As of "Microsoft Print to PDF"): nothing to report, and no
+    other way to be tried."""
+
+
+def _windows_pdf_printing_available() -> bool:
+    """Whether :func:`_windows_print_pdf` can run here: Windows, and a pdfium
+    that draws on a device context (FPDF_RenderPage is Windows-only)."""
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import pypdfium2.raw as pdfium_c
+        return hasattr(pdfium_c, "FPDF_RenderPage")
+    except Exception:
+        return False
+
+
+def _windows_print_pdf(path: str, printer: str, two_sided: bool = False,
+                       output: str = "") -> bool:
+    """Print *path* to the Windows printer named *printer*, the pages drawn
+    by pdfium straight on to the printer — any printer, not just the default.
+
+    Windows has no command that prints a PDF to a chosen printer (the shell's
+    "printto" works only if the program owning PDFs registers it, and Edge
+    does not), but it opens any printer by name for a program to draw on, and
+    pdfium — Chrome's PDF engine, which prints the same way — draws a page on
+    it (FPDF_RenderPage) at the printer's own resolution, so text stays sharp.
+    The printer's own settings are the starting point (paper, quality, what
+    "Printer Settings…" set); *two_sided* asks for long-edge duplex on top.
+    Each page is fitted to the printable area and centred, a landscape page
+    turned to suit a portrait sheet.  *output* names a file for a printer
+    that writes one ("Microsoft Print to PDF"), in place of its Save dialog.
+
+    True when the document was handed to the spooler, False when it could
+    not be (the caller then tries the other ways); :class:`_PrintCancelled`
+    when the reader cancelled a dialog the printer put up."""
+    if not _windows_pdf_printing_available():
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+    class _DevModeHead(ctypes.Structure):
+        # DEVMODEW as far as dmDuplex: the printer half of its union.
+        _fields_ = [
+            ("dmDeviceName", wintypes.WCHAR * 32),
+            ("dmSpecVersion", wintypes.WORD),
+            ("dmDriverVersion", wintypes.WORD),
+            ("dmSize", wintypes.WORD),
+            ("dmDriverExtra", wintypes.WORD),
+            ("dmFields", wintypes.DWORD),
+            ("dmOrientation", ctypes.c_short),
+            ("dmPaperSize", ctypes.c_short),
+            ("dmPaperLength", ctypes.c_short),
+            ("dmPaperWidth", ctypes.c_short),
+            ("dmScale", ctypes.c_short),
+            ("dmCopies", ctypes.c_short),
+            ("dmDefaultSource", ctypes.c_short),
+            ("dmPrintQuality", ctypes.c_short),
+            ("dmColor", ctypes.c_short),
+            ("dmDuplex", ctypes.c_short),
+        ]
+
+    class _DocInfo(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_int),
+            ("lpszDocName", wintypes.LPCWSTR),
+            ("lpszOutput", wintypes.LPCWSTR),
+            ("lpszDatatype", wintypes.LPCWSTR),
+            ("fwType", wintypes.DWORD),
+        ]
+
+    winspool.OpenPrinterW.argtypes = [wintypes.LPCWSTR,
+                                      ctypes.POINTER(wintypes.HANDLE),
+                                      ctypes.c_void_p]
+    winspool.DocumentPropertiesW.argtypes = [
+        wintypes.HWND, wintypes.HANDLE, wintypes.LPCWSTR,
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD]
+    winspool.DocumentPropertiesW.restype = ctypes.c_long
+    winspool.ClosePrinter.argtypes = [wintypes.HANDLE]
+    gdi32.CreateDCW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                wintypes.LPCWSTR, ctypes.c_void_p]
+    gdi32.CreateDCW.restype = wintypes.HDC
+    gdi32.GetDeviceCaps.argtypes = [wintypes.HDC, ctypes.c_int]
+    gdi32.StartDocW.argtypes = [wintypes.HDC, ctypes.POINTER(_DocInfo)]
+    for name in ("StartPage", "EndPage", "EndDoc", "AbortDoc", "DeleteDC"):
+        getattr(gdi32, name).argtypes = [wintypes.HDC]
+
+    DM_OUT_BUFFER, DM_IN_BUFFER = 2, 8
+    DM_DUPLEX, DMDUP_VERTICAL = 0x1000, 2       # long edge, portrait
+    HORZRES, VERTRES = 8, 10
+    PHYSICALWIDTH, PHYSICALHEIGHT = 110, 111
+    PHYSICALOFFSETX, PHYSICALOFFSETY = 112, 113
+    ERROR_CANCELLED = 1223
+
+    # The printer's own settings, with duplex asked for on top.
+    devmode = None
+    handle = wintypes.HANDLE()
+    if winspool.OpenPrinterW(printer, ctypes.byref(handle), None):
+        try:
+            size = winspool.DocumentPropertiesW(None, handle, printer,
+                                                None, None, 0)
+            if size > 0:
+                devmode = ctypes.create_string_buffer(size)
+                if winspool.DocumentPropertiesW(
+                        None, handle, printer, devmode, None,
+                        DM_OUT_BUFFER) < 0:
+                    devmode = None
+                elif two_sided:
+                    head = ctypes.cast(devmode,
+                                       ctypes.POINTER(_DevModeHead)).contents
+                    head.dmFields |= DM_DUPLEX
+                    head.dmDuplex = DMDUP_VERTICAL
+                    winspool.DocumentPropertiesW(
+                        None, handle, printer, devmode, devmode,
+                        DM_IN_BUFFER | DM_OUT_BUFFER)
+        finally:
+            winspool.ClosePrinter(handle)
+    else:
+        print(f"[print] Windows has no printer {printer!r}")
+        return False
+
+    hdc = gdi32.CreateDCW("WINSPOOL", printer, None, devmode)
+    if not hdc:
+        print(f"[print] could not open {printer!r} to draw on "
+              f"(error {ctypes.get_last_error()})")
+        return False
+    started = False
+    try:
+        paper_w = gdi32.GetDeviceCaps(hdc, PHYSICALWIDTH)
+        paper_h = gdi32.GetDeviceCaps(hdc, PHYSICALHEIGHT)
+        off_x = gdi32.GetDeviceCaps(hdc, PHYSICALOFFSETX)
+        off_y = gdi32.GetDeviceCaps(hdc, PHYSICALOFFSETY)
+        area_w = gdi32.GetDeviceCaps(hdc, HORZRES)
+        area_h = gdi32.GetDeviceCaps(hdc, VERTRES)
+        if area_w <= 0 or area_h <= 0:
+            return False
+        info = _DocInfo(ctypes.sizeof(_DocInfo), os.path.basename(path),
+                        output or None, None, 0)
+        if gdi32.StartDocW(hdc, ctypes.byref(info)) <= 0:
+            if ctypes.get_last_error() == ERROR_CANCELLED:
+                raise _PrintCancelled()
+            print(f"[print] {printer!r} would not start the document "
+                  f"(error {ctypes.get_last_error()})")
+            return False
+        started = True
+        with _PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(path)
+            try:
+                for i in range(len(doc)):
+                    page = doc[i]
+                    try:
+                        w_pt, h_pt = page.get_size()
+                        # A landscape page on a portrait sheet (or the other
+                        # way round) is turned a quarter to fit it.
+                        turn = (w_pt > h_pt) != (paper_w > paper_h)
+                        if turn:
+                            w_pt, h_pt = h_pt, w_pt
+                        scale = min(area_w / w_pt, area_h / h_pt)
+                        draw_w = int(w_pt * scale)
+                        draw_h = int(h_pt * scale)
+                        # Centred on the sheet, in the printable area's
+                        # coordinates (its origin is the printer's margin).
+                        x = max(0, (paper_w - draw_w) // 2 - off_x)
+                        y = max(0, (paper_h - draw_h) // 2 - off_y)
+                        x = min(x, max(0, area_w - draw_w))
+                        y = min(y, max(0, area_h - draw_h))
+                        if gdi32.StartPage(hdc) <= 0:
+                            raise OSError(f"page {i + 1} would not start")
+                        pdfium_c.FPDF_RenderPage(
+                            hdc, page.raw, x, y, draw_w, draw_h,
+                            1 if turn else 0,
+                            pdfium_c.FPDF_ANNOT | pdfium_c.FPDF_PRINTING)
+                        if gdi32.EndPage(hdc) <= 0:
+                            raise OSError(f"page {i + 1} would not finish")
+                    finally:
+                        page.close()
+            finally:
+                doc.close()
+        if gdi32.EndDoc(hdc) <= 0:
+            started = False
+            print(f"[print] {printer!r} would not finish the document")
+            return False
+        started = False
+        print(f"[print] printed {os.path.basename(path)} to {printer!r}")
+        return True
+    except _PrintCancelled:
+        raise
+    except Exception as exc:
+        print(f"[print] drawing on {printer!r} failed: {exc}")
+        return False
+    finally:
+        if started:
+            gdi32.AbortDoc(hdc)
+        gdi32.DeleteDC(hdc)
+
+
 def _windows_print_via_reader(path: str, printer: str) -> bool:
     """Print through a PDF reader that takes a printer on its command line."""
     for exe, build in _WINDOWS_PDF_PRINTERS:
@@ -35706,11 +35912,14 @@ def _send_pdf_to_printer(path: str, printer: str,
     """Hand *path* to *printer*.  False when it could not be done.
 
     Unix hands it to CUPS, which takes both the queue and the options.
-    Windows has no equivalent, so three things are tried in turn: the shell's
-    "printto" verb, which works when the program owning PDFs registers it; a
-    PDF reader that prints to a named printer from the command line; and
-    finally the plain "print" verb, which prints to the *default* printer and
-    so is only used when that is the printer asked for."""
+    Windows has no equivalent, so GetCases prints the pages itself — pdfium
+    drawing them on the printer chosen, double-sided if asked (see
+    :func:`_windows_print_pdf`).  Should that fail, three things are tried in
+    turn: the shell's "printto" verb, which works when the program owning
+    PDFs registers it; a PDF reader that prints to a named printer from the
+    command line; and finally the plain "print" verb, which prints to the
+    *default* printer and so is only used when that is the printer asked for.
+    :class:`_PrintCancelled` passes through: the reader called it off."""
     if not sys.platform.startswith("win"):
         try:
             cmd = ["lp", "-d", printer]
@@ -35722,6 +35931,8 @@ def _send_pdf_to_printer(path: str, printer: str,
         except Exception as exc:
             print(f"[print] sending to {printer!r} failed: {exc}")
             return False
+    if _windows_print_pdf(path, printer, two_sided):
+        return True
     try:
         os.startfile(path, "printto", f'"{printer}"')  # type: ignore[attr-defined]
         return True
@@ -35894,22 +36105,49 @@ class _PrintDialog:
         if not printer:
             self._status_var.set("Choose a printer first.")
             return
+        if getattr(self, "_sending", False):
+            return
+        self._sending = True
         self._status_var.set(f"Sending to {printer}…")
+        two_sided = self._two_sided.get()
+        result: list = []
+
+        # Off the Tk thread: drawing the pages takes a moment, and a printer
+        # that writes a file ("Microsoft Print to PDF") takes its time
+        # finishing it — seconds a page — before the document is done.
+        def send() -> None:
+            try:
+                result.append(
+                    _send_pdf_to_printer(self._path, printer, two_sided))
+            except _PrintCancelled:
+                result.append(None)
+            except Exception as exc:
+                print(f"[print] sending to {printer!r} failed: {exc}")
+                result.append(False)
+
+        threading.Thread(target=send, daemon=True,
+                         name="getcases-print").start()
+        self._await_print(result, printer)
+
+    def _await_print(self, result: list, printer: str) -> None:
+        """Wait, on the Tk thread, for the send :meth:`_print` started."""
         try:
-            self._win.update_idletasks()
+            if not self._win.winfo_exists():
+                return
         except tk.TclError:
-            pass
-        if _send_pdf_to_printer(self._path, printer, self._two_sided.get()):
+            return
+        if not result:
+            self._win.after(150, lambda: self._await_print(result, printer))
+            return
+        self._sending = False
+        if result[0]:
             self._status(f"Sent to {printer}.")
             self._close()
-            return
-        # It could not be sent — say what stands in the way and leave the
-        # reader somewhere they can act, rather than at a dead end.
-        if sys.platform.startswith("win"):
-            self._status_var.set(
-                "Windows' PDF app can't print to a chosen printer from here. "
-                "Use Open in Viewer, or make this one the default printer.")
+        elif result[0] is None:
+            self._status_var.set("Printing was cancelled.")
         else:
+            # It could not be sent — say so, and leave the reader somewhere
+            # they can act, rather than at a dead end.
             self._status_var.set(
                 f"{printer} would not take the document. "
                 "Try Open in Viewer and print from there.")

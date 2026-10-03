@@ -17,10 +17,12 @@ absent on a headless run) and driven against stubs.
 """
 
 import ast
+import os
 import pathlib
 import re
 import sys
 import tempfile
+import time
 import typing
 import unittest
 from unittest import mock
@@ -158,13 +160,41 @@ class _FakeBrowser:
         return True
 
 
+class _PrintCancelled(Exception):
+    pass
+
+
+class _FakeDirectPrint:
+    """GetCases printing the pages itself on Windows (_windows_print_pdf):
+    declines unless a test says otherwise, so the other ways get their
+    turn."""
+
+    calls: list = []
+    answer = False           # True, False, or an exception to raise
+    available = True
+
+    @classmethod
+    def reset(cls):
+        cls.calls, cls.answer, cls.available = [], False, True
+
+    @classmethod
+    def print_pdf(cls, path, printer, two_sided=False, output=""):
+        cls.calls.append((path, printer, two_sided))
+        if isinstance(cls.answer, BaseException):
+            raise cls.answer
+        return cls.answer
+
+
 NS = _load_functions([
     "_run_text", "_first_line", "_system_printers", "_open_printer_settings",
     "_two_sided_supported", "_send_pdf_to_printer", "_macos_print_dialog",
     "_open_pdf_externally", "_write_output_pdf", "_windows_program_path",
     "_windows_print_via_reader",
 ], {"_PRINT_TIMEOUT": 8,
-    "_WINDOWS_PDF_PRINTERS": _module_value("_WINDOWS_PDF_PRINTERS")})
+    "_WINDOWS_PDF_PRINTERS": _module_value("_WINDOWS_PDF_PRINTERS"),
+    "_windows_print_pdf": _FakeDirectPrint.print_pdf,
+    "_windows_pdf_printing_available": lambda: _FakeDirectPrint.available,
+    "_PrintCancelled": _PrintCancelled})
 
 
 def _reset(platform="linux"):
@@ -173,6 +203,7 @@ def _reset(platform="linux"):
     _FakeOS.fail_startfile = False
     _FakeShutil.present = set()
     _FakeBrowser.opened = []
+    _FakeDirectPrint.reset()
     NS["sys"] = mock.Mock(platform=platform)
     return NS
 
@@ -380,24 +411,111 @@ class WindowsPrintFallbackTests(unittest.TestCase):
         self.assertEqual(_FakeOS.startfiles, [])
 
     def test_the_dialog_says_what_stands_in_the_way(self):
-        src = _source_of("_PrintDialog", "_print")
-        self.assertIn('sys.platform.startswith("win")', src)
-        self.assertIn("make this one the default printer", src)
+        src = _source_of("_PrintDialog", "_await_print")
+        self.assertIn("would not take the document", src)
+        self.assertIn("Open in Viewer", src)
+        self.assertIn("Printing was cancelled", src)
 
     def test_double_sided_is_offered_only_where_it_can_be_honoured(self):
-        # Windows prints by handing the file to whatever owns PDFs, which
-        # takes no such instruction — duplex there lives in the printer's own
-        # settings, which the dialog links to instead.
+        # Through CUPS, and on Windows when GetCases prints the pages itself
+        # (asking the printer for duplex with the rest of its settings);
+        # otherwise duplex lives in the printer's own settings, which the
+        # dialog links to instead.
         ns = _reset("linux")
         _FakeShutil.present = {"lp"}
         self.assertTrue(ns["_two_sided_supported"]())
         ns = _reset("win32")
-        _FakeShutil.present = {"lp"}
+        self.assertTrue(ns["_two_sided_supported"]())
+        _FakeDirectPrint.available = False
         self.assertFalse(ns["_two_sided_supported"]())
 
     def test_nor_without_cups(self):
         ns = _reset("linux")
         self.assertFalse(ns["_two_sided_supported"]())
+
+
+class WindowsDirectPrintTests(unittest.TestCase):
+    """GetCases printing the pages itself, to the printer chosen."""
+
+    def test_it_is_tried_first_and_to_the_printer_chosen(self):
+        ns = _reset("win32")
+        _FakeDirectPrint.answer = True
+        self.assertTrue(ns["_send_pdf_to_printer"](
+            "C:/a.pdf", "Brother HL-L2340D", two_sided=True))
+        self.assertEqual(_FakeDirectPrint.calls,
+                         [("C:/a.pdf", "Brother HL-L2340D", True)])
+        # Nothing else was asked: not the shell, not a reader.
+        self.assertEqual(_FakeOS.startfiles, [])
+        self.assertEqual(_FakeSubprocess.popens, [])
+
+    def test_a_print_called_off_goes_nowhere_else(self):
+        ns = _reset("win32")
+        _FakeDirectPrint.answer = _PrintCancelled()
+        with self.assertRaises(_PrintCancelled):
+            ns["_send_pdf_to_printer"]("C:/a.pdf", "Microsoft Print to PDF")
+        self.assertEqual(_FakeOS.startfiles, [])
+
+    def test_when_it_cannot_the_other_ways_are_tried(self):
+        ns = _reset("win32")
+        self.assertTrue(ns["_send_pdf_to_printer"]("C:/a.pdf", "Office"))
+        self.assertEqual(_FakeOS.startfiles[-1],
+                         ("C:/a.pdf", "printto", '"Office"'))
+
+    def test_the_dialog_sends_off_the_tk_thread(self):
+        src = _source_of("_PrintDialog", "_print")
+        self.assertIn("threading.Thread(", src)
+        # The checkbox is read on the Tk thread, before the send starts.
+        self.assertLess(src.index("two_sided = self._two_sided.get()"),
+                        src.index("threading.Thread("))
+
+
+@unittest.skipUnless(sys.platform.startswith("win"), "Windows printing")
+class WindowsDirectPrintLiveTests(unittest.TestCase):
+    """The real thing, on Windows' own "Microsoft Print to PDF", which
+    writes a file in place of paper."""
+
+    PRINTER = "Microsoft Print to PDF"
+
+    def setUp(self):
+        try:
+            import courtlistener_gui as gui
+            import pypdfium2 as pdfium
+        except Exception as exc:  # pragma: no cover - depends on the machine
+            self.skipTest(f"needs the app's PDF libraries: {exc}")
+        printers, _default = gui._system_printers()
+        if self.PRINTER not in printers or \
+                not gui._windows_pdf_printing_available():
+            self.skipTest("no Microsoft Print to PDF here")
+        self.gui, self.pdfium = gui, pdfium
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.dir, True)
+
+    def _two_pages(self) -> str:
+        path = os.path.join(self.dir, "in.pdf")
+        doc = self.pdfium.PdfDocument.new()
+        for width, height in ((612, 792), (792, 612)):   # portrait, landscape
+            doc.new_page(width, height)
+        doc.save(path)
+        doc.close()
+        return path
+
+    def test_it_prints_every_page_to_a_printer_that_is_not_the_default(self):
+        out = os.path.join(self.dir, "out.pdf")
+        self.assertTrue(self.gui._windows_print_pdf(
+            self._two_pages(), self.PRINTER, output=out))
+        for _ in range(60):
+            if os.path.exists(out) and os.path.getsize(out):
+                break
+            time.sleep(0.5)
+        doc = self.pdfium.PdfDocument(out)
+        try:
+            self.assertEqual(len(doc), 2)
+        finally:
+            doc.close()
+
+    def test_a_printer_windows_does_not_have(self):
+        self.assertFalse(self.gui._windows_print_pdf(
+            self._two_pages(), "No Such Printer 12345"))
 
 
 class PrinterSettingsTests(unittest.TestCase):
@@ -541,10 +659,12 @@ class PrintRoutingTests(unittest.TestCase):
     def test_a_queue_that_refuses_does_not_close_the_dialog(self):
         # The reader is left somewhere they can act, not with a vanished
         # dialog and nothing printed.
-        printing = _source_of("_PrintDialog", "_print")
-        self.assertIn("would not take the document", printing)
-        self.assertLess(printing.index("if _send_pdf_to_printer"),
-                        printing.index("would not take the document"))
+        waiting = _source_of("_PrintDialog", "_await_print")
+        self.assertIn("would not take the document", waiting)
+        self.assertLess(waiting.index("if result[0]:"),
+                        waiting.index("would not take the document"))
+        self.assertLess(waiting.index("self._close()"),
+                        waiting.index("would not take the document"))
 
 
 # ---------------------------------------------------------------------------
