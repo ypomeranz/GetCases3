@@ -5047,6 +5047,66 @@ def _is_the_named_case(name: str, candidate: str) -> bool:
     return _name_match_score(name, candidate) >= _NAME_MATCH_MIN
 
 
+#: The states by the words of their Bluebook abbreviation, longest first:
+#: (("W", "Va"), "west virginia"), … (("Va",), "virginia").
+_STATE_ABBR_WORDS: list[tuple[tuple[str, ...], str]] = sorted(
+    {(tuple(re.findall(r"[A-Za-z]+", abbr)), name)
+     for name, abbr in _STATE_BLUEBOOK.items()
+     if name != "hawai'i"},
+    key=lambda pair: -len(pair[0]))
+
+
+def _state_of_abbreviation(abbr: str) -> str:
+    """The state a reporter's or court's abbreviation opens with — "Va." and
+    "Va. App." → "virginia", "N.Y.S.2d" → "new york", "W Va" → "west
+    virginia" — or "" for a regional, federal or nominative reporter.  The
+    words must match whole: "Mont." is no "Mo."."""
+    family = _reporter_family(abbr or "")
+    words = re.findall(r"[A-Za-z]+", family.canonical if family else abbr or "")
+    for state_words, name in _STATE_ABBR_WORDS:
+        if tuple(words[:len(state_words)]) == state_words:
+            return name
+    return ""
+
+
+def _cite_state(cite: str) -> str:
+    """The state whose reports *cite* is to ("2 Va. 319" → "virginia")."""
+    m = _CITE_PARSE_RE.match((cite or "").strip())
+    return _state_of_abbreviation(m.group(2)) if m else ""
+
+
+def _scholar_result_state(result) -> str:
+    """The state whose court decided a Google Scholar result: its byline's
+    prefix ("429 Mass. 266 - Mass: Supreme Judicial Court, 1999"), else the
+    reporter of its first citation; "" for a federal court."""
+    segs = _scholar_source_segments(getattr(result, "source", "") or "")
+    if segs:
+        m = re.match(r"\s*([A-Za-z][A-Za-z. ]{0,8}):", segs[-1])
+        if m:
+            return _state_of_abbreviation(m.group(1))
+        if len(segs) > 1:
+            return _cite_state(re.split(r"\s*,\s*", segs[0])[0])
+    return ""
+
+
+def _named_hit_is_the_case(hit, name: str, case_cites: list, year: str,
+                           state: str) -> bool:
+    """Whether a search *hit* that does not bear the citation asked for is
+    the case all the same, on its name: the caption must be the case's (see
+    :func:`_is_the_named_case`), and then it must bear one of the case's
+    other citations — those CourtListener keeps for it — or be of the same
+    year from the same state's courts.  A name alone is no proof: picking
+    Commonwealth v. Carter at "2 Va. 319" (Virginia, 1822) opened
+    Commonwealth v. Carter, 429 Mass. 266 (1999)."""
+    if not _is_the_named_case(name, getattr(hit, "title", "") or ""):
+        return False
+    if any(_scholar_bears_citation(hit, c) for c in case_cites if c):
+        return True
+    return bool(year and state
+                and _scholar_source_year(getattr(hit, "source", "")) == year
+                and _scholar_result_state(hit) == state)
+
+
 def _filter_to_best_tier(query: str,
                          tagged: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
     """Across all sources, keep only the best match tier present (see
@@ -12323,6 +12383,33 @@ class CourtListenerGUI:
                 self._post_root(lambda: self._open_case_law_text(
                     target_parent, cap, cite, pin, prefetch_pdf))
                 return True
+        # CourtListener's record of the case at this citation: asked for at
+        # most once, by the first step that needs it.
+        cl_case: dict = {}
+
+        def cl_target() -> "Optional[dict]":
+            if "item" not in cl_case:
+                cl_case["item"] = None
+                if client is not None and cite:
+                    try:
+                        cl_case["item"] = _cl_item_for_citation(
+                            client, cite, name=name)
+                    except Exception as exc:
+                        print(f"[citelist] courtlistener {cite!r}: {exc}")
+            return cl_case["item"]
+
+        def case_facts() -> tuple:
+            """The case's citations, year and state, from the citation
+            and CourtListener's record of it — what a hit found by its
+            name alone must agree with."""
+            target = cl_target() or {}
+            cites = [cite, *_official_series_cites(cite),
+                     *[str(c) for c in target.get("citation") or []]]
+            case_year = year or str(target.get("dateFiled")
+                                    or target.get("date_filed") or "")[:4]
+            state = next((s for s in map(_cite_state, cites) if s), "")
+            return cites, case_year, state
+
         if fetcher is not None:
             result = None
             try:
@@ -12334,18 +12421,23 @@ class CourtListenerGUI:
                         # itself is this case — bearing an equivalent cite in
                         # its title/byline (and, of several cases beginning on
                         # that page, the one answering to the name), or else
-                        # matching the case name — never merely because
-                        # another opinion quotes the query, nor because it is
-                        # the other case printed on the same page.
+                        # matching the case name and bearing another of its
+                        # citations, or its year and state — never merely
+                        # because another opinion quotes the query, nor
+                        # because it is the other case printed on the same
+                        # page, nor because it shares the name.
                         hits = fetcher.search_cases(
                             f"{name} {lookup_cite}", limit=3,
                         )
                         hit = fetcher.pick_cited_result(
                             hits, lookup_cite, name, year)
                         if hit is None:
+                            named = [h for h in hits
+                                     if _is_the_named_case(name, h.title or "")]
+                            facts = case_facts() if named else ()
                             hit = next(
-                                (h for h in hits
-                                 if _is_the_named_case(name, h.title or "")),
+                                (h for h in named
+                                 if _named_hit_is_the_case(h, name, *facts)),
                                 None,
                             )
                         if hit is not None:
@@ -12386,7 +12478,7 @@ class CourtListenerGUI:
             return True
         if client is not None:
             try:
-                target = _cl_item_for_citation(client, cite, name=name)
+                target = cl_target()
                 if target:
                     parts, blocks, plain, cluster = _assemble_case_parts(
                         client, target,

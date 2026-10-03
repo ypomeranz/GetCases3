@@ -79,6 +79,92 @@ class NameMatchTests(unittest.TestCase):
         self.assertTrue(named("In re Gault", "In re Gault"))
 
 
+MASS_CARTER = ScholarResult(
+    "Commonwealth v. Carter",
+    "https://scholar.google.com/scholar_case?case=497949744644382689",
+    "429 Mass. 266, 708 NE 2d 943 - Mass: Supreme Judicial Court, 1999 - "
+    "Google Scholar") if gui else None
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class SameNameAnotherCaseTests(unittest.TestCase):
+    """A hit found by its name alone is the case only if it bears another
+    of the case's citations, or is of its year from its state's courts:
+    Commonwealth v. Carter at "2 Va. 319" (Virginia, 1822) is no
+    Commonwealth v. Carter, 429 Mass. 266 (1999)."""
+
+    VA = (["2 Va 319", "2 Va. 319"], "1822", "virginia")
+
+    def test_the_state_a_citation_or_a_byline_names(self):
+        self.assertEqual(gui._cite_state("2 Va 319"), "virginia")
+        self.assertEqual(gui._cite_state("100 W. Va. 1"), "west virginia")
+        self.assertEqual(gui._cite_state("10 Mont. 5"), "montana")
+        self.assertEqual(gui._cite_state("12 N.Y.S.2d 345"), "new york")
+        self.assertEqual(gui._cite_state("46 Wn.2d 197"), "washington")
+        for regional in ("543 P.3d 440", "708 NE 2d 943", "2 Call 319",
+                         "410 U.S. 113"):
+            self.assertEqual(gui._cite_state(regional), "", regional)
+        self.assertEqual(gui._scholar_result_state(MASS_CARTER),
+                         "massachusetts")
+        self.assertEqual(gui._scholar_result_state(ScholarResult(
+            "Barnette", "u", "319 US 624 - Supreme Court, 1943")), "")
+
+    def test_the_same_name_from_another_state_and_year_is_not_it(self):
+        self.assertFalse(gui._named_hit_is_the_case(
+            MASS_CARTER, "Commonwealth v. Carter", *self.VA))
+
+    def test_nor_from_the_same_state_another_year(self):
+        later = ScholarResult("Commonwealth v. Carter", "u",
+                              "100 Va. 1 - Va: Supreme Court, 1902")
+        self.assertFalse(gui._named_hit_is_the_case(
+            later, "Commonwealth v. Carter", *self.VA))
+
+    def test_its_year_from_its_state_is_it(self):
+        call = ScholarResult("Commonwealth v. Carter", "u",
+                             "4 Va. 319 - Va: General Court, 1822")
+        self.assertTrue(gui._named_hit_is_the_case(
+            call, "Commonwealth v. Carter", *self.VA))
+
+    def test_so_is_one_bearing_another_of_its_citations(self):
+        parallel = ScholarResult("Commonwealth v. Carter", "u",
+                                 "4 Va. 319 - Google Scholar")
+        self.assertTrue(gui._named_hit_is_the_case(
+            parallel, "Commonwealth v. Carter",
+            ["2 Va. 319", "4 Va. 319"], "", ""))
+
+    def test_a_year_or_state_unknown_proves_nothing(self):
+        call = ScholarResult("Commonwealth v. Carter", "u",
+                             "Va: General Court, 1822")
+        self.assertFalse(gui._named_hit_is_the_case(
+            call, "Commonwealth v. Carter", ["2 Call 319"], "1822", ""))
+
+    def test_courtlistener_s_text_opens_instead(self):
+        fetcher = mock.Mock()
+        fetcher.fetch_by_citation.return_value = None
+        fetcher.search_cases.return_value = [MASS_CARTER]
+        fetcher.pick_cited_result.return_value = None
+        fetcher.take_post_search_failure.return_value = ""
+        target = {"caseName": "Commonwealth v. Carter", "cluster_id": 7736613,
+                  "citation": ["2 Va. 319"], "dateFiled": "1822-11-15"}
+        app = object.__new__(gui.CourtListenerGUI)
+        app.root = object()
+        app._post_root = mock.Mock()
+        with mock.patch.object(gui, "_case_law_text_source",
+                               return_value=None), \
+                mock.patch.object(gui, "_cl_item_for_citation",
+                                  return_value=target) as lookup, \
+                mock.patch.object(gui, "_assemble_case_parts",
+                                  return_value=([], [], "WHITE, J;", {})):
+            self.assertTrue(app._try_open_citation(
+                "Commonwealth v. Carter", "2 Va 319", "", fetcher, object()))
+        fetcher.fetch_by_url.assert_not_called()
+        lookup.assert_called_once()          # asked once, used twice
+        (open_cl,), _kw = app._post_root.call_args
+        with mock.patch.object(gui, "_ScholarTextWindow") as window:
+            open_cl()
+        self.assertIs(window.call_args.kwargs["item"], target)
+
+
 @unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
 class LastResortTests(unittest.TestCase):
     """CourtListener's text opens when nothing better is the case."""
