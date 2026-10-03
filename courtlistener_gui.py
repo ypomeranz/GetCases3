@@ -1288,6 +1288,7 @@ from court_catalog import (
     all_court_ids as _all_court_ids,
     bluebook_court_from_name as _bluebook_court_from_name,
     bluebook_federal_trial_court as _bluebook_federal_trial_court,
+    plain_state_names as _plain_state_names,
     state_of_court as _state_of_court,
 )
 
@@ -2629,9 +2630,9 @@ def _us_reports_page_choice(
     Brobst and Ex parte Milligan — the case being opened is matched against
     the name each scan carries in its own PDF title, since the citation cannot
     tell them apart.  A name matching none of them, or two of them equally
-    well, leaves the first scan (what the citation has always opened) and
-    returns every opinion for the window's PDF menu, so the reader can pick
-    the other; otherwise the list comes back empty.
+    well, leaves the first scan and returns every opinion, marked for the
+    reader to pick from (see CourtListenerGUI.open_cited_case_pdf) and kept
+    for the window's PDF menu; otherwise the list comes back empty.
     """
     try:
         opinions = _us_reports_page_opinions(citation, url)
@@ -2653,6 +2654,7 @@ def _us_reports_page_choice(
             cite=citation, url=o.url,
             label=f"{citation} — {o.name}" if o.name
             else f"{citation} — Opinion {i}",
+            pick=True, opinion=o,
         )
         for i, o in enumerate(opinions, 1)
     ]
@@ -2865,6 +2867,12 @@ class _CaseLawPdfChoice:
     cite: str
     url: str
     label: str = ""
+    #: One of several cases beginning on the cited page, which the case's
+    #: name could not tell apart: the reader is asked which is meant (see
+    #: CourtListenerGUI.open_cited_case_pdf) rather than shown the first.
+    pick: bool = False
+    #: The page opinion it is (a _CaseLawPageOpinion), for asking by name.
+    opinion: object = field(default=None, compare=False, hash=False)
 
 
 @dataclass(frozen=True)
@@ -3047,7 +3055,10 @@ def _case_law_pdf_choices_for_cites(
             # of its own: one the name does not pick out is no answer at all,
             # least of all the first.
             orders = bool(page_opinions) and bool(_normalized_us_cite(cite))
-            if page_opinions and (expected_name or orders):
+            # Several cases begin there: the name picks one, and with no name
+            # — a bare citation clicked, "18 F. App'x 81" — the reader does.
+            # The first was opened before, whichever case was meant.
+            if page_opinions:
                 matched = (_match_page_opinion(page_opinions, expected_name)
                            if expected_name else None)
                 if matched is not None:
@@ -3075,6 +3086,7 @@ def _case_law_pdf_choices_for_cites(
                         )
                         choices.append(_CaseLawPdfChoice(
                             cite=cite, url=opinion.url, label=label,
+                            pick=True, opinion=opinion,
                         ))
                     continue
             choices.append(_CaseLawPdfChoice(cite=cite, url=chosen_url))
@@ -3319,7 +3331,36 @@ def _case_law_pdf_for_cite(cite: str) -> Optional[str]:
     case.law has neither."""
     choices = _case_law_pdf_choices_for_cites(
         [cite, *_official_series_cites(cite)])
-    return choices[0].url if choices else None
+    return _settled_choice(choices).url if choices else None
+
+
+def _take_page_mates(fetcher) -> list:
+    """The cases Google Scholar's last citation lookup on this thread could
+    not choose among (GoogleScholarFetcher.take_page_mates), or []."""
+    take = getattr(fetcher, "take_page_mates", None)
+    try:
+        mates = take() if callable(take) else []
+    except Exception:
+        return []
+    return mates if isinstance(mates, list) and len(mates) > 1 else []
+
+
+def _settled_choice(choices: list) -> "_CaseLawPdfChoice":
+    """The first of *choices* that is the case for certain — not one of a
+    page's several the reader has to pick among — else the first."""
+    return next((c for c in choices if not c.pick), choices[0])
+
+
+def _choices_to_ask(choices: list, url: str) -> list:
+    """The cases the reader must choose among, when the scan *url* about to
+    open is one of several beginning on its page that nothing told apart:
+    those of its page.  [] when it is the case for certain."""
+    picks = [c for c in choices or () if getattr(c, "pick", False)]
+    mine = next((c for c in picks if c.url == url), None)
+    if mine is None:
+        return []
+    mates = [c for c in picks if c.cite == mine.cite]
+    return mates if len(mates) > 1 else []
 
 
 def _case_law_pdf_for_json_url(json_url: str) -> str:
@@ -4220,6 +4261,38 @@ def _item_from_cluster(cluster: dict) -> dict:
     return item
 
 
+def _cases_bearing_citation(client, cite: str) -> list[dict]:
+    """The different cases CourtListener has at *cite* — ``{"name", "year"}``
+    each, oldest first, one however many records it keeps of a case — what a
+    citation alone cannot choose among when there are several.  [] when it
+    has none, or cannot be asked."""
+    cases: list[dict] = []
+    for lookup_cite in _citation_search_variants(
+            (cite or "").split("@", 1)[0].strip()):
+        try:
+            entries = client.lookup_citation(lookup_cite)
+        except Exception as exc:
+            print(f"[cl-cite] citation-lookup failed for {lookup_cite!r}: "
+                  f"{exc}")
+            continue
+        for entry in entries:
+            if entry.get("status") not in (200, 300):
+                continue
+            for cl in entry.get("clusters") or []:
+                name = re.sub(r"<[^>]+>", "", str(
+                    cl.get("case_name") or cl.get("case_name_full") or ""))
+                year = str(cl.get("date_filed") or "")[:4]
+                if name and not any(
+                        seen["year"] == year
+                        and (_name_tokens(name) == _name_tokens(seen["name"])
+                             or _match_tier(seen["name"], name) == 3)
+                        for seen in cases):
+                    cases.append({"name": name, "year": year})
+        if cases:
+            break
+    return sorted(cases, key=lambda case: case["year"] or "9999")
+
+
 def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     """Resolve a reporter citation to the CourtListener cluster that actually
     bears it, as a search-result-shaped item (or ``None``).
@@ -4930,8 +5003,19 @@ def _name_match_score(query: str, candidate: str) -> float:
         q = set(_name_tokens(query))
         c = set(_name_tokens(candidate))
         return _party_overlap(q, c) if q else 0.0
-    per_side = [max(_party_overlap(qp, cp) for cp in c_parties)
-                for qp in q_parties]
+    if len(q_parties) == 2 and len(c_parties) == 2:
+        # Each side of the query against a side of its own, as captioned or
+        # swapped: one candidate party cannot answer for both.  Matched
+        # freely, "Pleasants v. Pleasants" found itself twice in "Pleasant
+        # Grove City v. Summum" and scored it a perfect match.
+        (qa, qb), (ca, cb) = q_parties, c_parties
+        per_side = max(
+            [_party_overlap(qa, ca), _party_overlap(qb, cb)],
+            [_party_overlap(qa, cb), _party_overlap(qb, ca)],
+            key=sum)
+    else:
+        per_side = [max(_party_overlap(qp, cp) for cp in c_parties)
+                    for qp in q_parties]
     avg = sum(per_side) / len(per_side)
     # Reward a both-sides hit so an exact "A v. B" outranks a one-party match.
     bonus = 0.15 if sum(1 for s in per_side if s >= 0.6) >= 2 else 0.0
@@ -4988,6 +5072,79 @@ def _match_tier(query: str, candidate: str) -> int:
     # One side matched (or both, but on the same candidate party): distinctive
     # unless every matched party is a frequent name.
     return 0 if all(_is_common_party(qp) for qp in matched) else 1
+
+
+def _is_the_named_case(name: str, candidate: str) -> bool:
+    """Whether *candidate* is the case *name* names, on the names alone — a
+    search hit that does not bear the citation asked for, taken for the case
+    only on the strength of its caption.  Both parties of an "A v. B" name
+    must answer to it: a hit sharing one party with it is another case
+    ("Pleasant Grove City v. Summum" is no "Pleasants v. Pleasants"), and
+    taking it opened that case in place of the one asked for."""
+    if _match_tier(name, candidate) < (2 if len(_name_parties(name)) == 2
+                                        else 1):
+        return False
+    return _name_match_score(name, candidate) >= _NAME_MATCH_MIN
+
+
+#: The states by the words of their Bluebook abbreviation, longest first:
+#: (("W", "Va"), "west virginia"), … (("Va",), "virginia").
+_STATE_ABBR_WORDS: list[tuple[tuple[str, ...], str]] = sorted(
+    {(tuple(re.findall(r"[A-Za-z]+", abbr)), name)
+     for name, abbr in _STATE_BLUEBOOK.items()
+     if name != "hawai'i"},
+    key=lambda pair: -len(pair[0]))
+
+
+def _state_of_abbreviation(abbr: str) -> str:
+    """The state a reporter's or court's abbreviation opens with — "Va." and
+    "Va. App." → "virginia", "N.Y.S.2d" → "new york", "W Va" → "west
+    virginia" — or "" for a regional, federal or nominative reporter.  The
+    words must match whole: "Mont." is no "Mo."."""
+    family = _reporter_family(abbr or "")
+    words = re.findall(r"[A-Za-z]+", family.canonical if family else abbr or "")
+    for state_words, name in _STATE_ABBR_WORDS:
+        if tuple(words[:len(state_words)]) == state_words:
+            return name
+    return ""
+
+
+def _cite_state(cite: str) -> str:
+    """The state whose reports *cite* is to ("2 Va. 319" → "virginia")."""
+    m = _CITE_PARSE_RE.match((cite or "").strip())
+    return _state_of_abbreviation(m.group(2)) if m else ""
+
+
+def _scholar_result_state(result) -> str:
+    """The state whose court decided a Google Scholar result: its byline's
+    prefix ("429 Mass. 266 - Mass: Supreme Judicial Court, 1999"), else the
+    reporter of its first citation; "" for a federal court."""
+    segs = _scholar_source_segments(getattr(result, "source", "") or "")
+    if segs:
+        m = re.match(r"\s*([A-Za-z][A-Za-z. ]{0,8}):", segs[-1])
+        if m:
+            return _state_of_abbreviation(m.group(1))
+        if len(segs) > 1:
+            return _cite_state(re.split(r"\s*,\s*", segs[0])[0])
+    return ""
+
+
+def _named_hit_is_the_case(hit, name: str, case_cites: list, year: str,
+                           state: str) -> bool:
+    """Whether a search *hit* that does not bear the citation asked for is
+    the case all the same, on its name: the caption must be the case's (see
+    :func:`_is_the_named_case`), and then it must bear one of the case's
+    other citations — those CourtListener keeps for it — or be of the same
+    year from the same state's courts.  A name alone is no proof: picking
+    Commonwealth v. Carter at "2 Va. 319" (Virginia, 1822) opened
+    Commonwealth v. Carter, 429 Mass. 266 (1999)."""
+    if not _is_the_named_case(name, getattr(hit, "title", "") or ""):
+        return False
+    if any(_scholar_bears_citation(hit, c) for c in case_cites if c):
+        return True
+    return bool(year and state
+                and _scholar_source_year(getattr(hit, "source", "")) == year
+                and _scholar_result_state(hit) == state)
 
 
 def _filter_to_best_tier(query: str,
@@ -5071,6 +5228,8 @@ def _case_signature(name: str, cite: str, year: str, court: str = "",
         "nk": nk, "cites": cites, "series": series,
         "court": re.sub(r"[^a-z0-9]", "", (court or "").lower()),
         "opinion_id": str(opinion_id or "").strip().lower(),
+        "name": re.sub(r"<[^>]+>", "", name or "").strip()
+        if include_name else "",
     }
 
 
@@ -5084,14 +5243,24 @@ def _same_case(a: dict, b: dict) -> bool:
     known to one side but not the other is not a disagreement — the cases may
     still be one, so name-and-year still merges them.  Parallel citations in
     different series ("59 N.W.2d 336" and "157 Neb. 226") do not disagree, so a
-    case reported two ways still collapses to one row."""
+    case reported two ways still collapses to one row.
+
+    A shared citation is not proof when the two names have no party in
+    common: a page can open more than one case, and a reporter normalized
+    past its nominatives files several under one cite — CourtListener has
+    Pleasants v. Pleasants, Commonwealth v. Carter and Swope v. Chambers all
+    at "2 Va. 319", which came out as a single row.  A shared frequent name
+    ("Commonwealth") is no party in common; one source's "Com." for
+    another's "Commonwealth" still is, by the other party."""
     if (
         a.get("opinion_id")
         and a["opinion_id"] == b.get("opinion_id")
     ):
         return True
     if a["cites"] & b["cites"]:
-        return True
+        na, nb = a.get("name") or "", b.get("name") or ""
+        return not (na and nb and max(_match_tier(na, nb),
+                                      _match_tier(nb, na)) <= 0)
     if a["nk"] and a["nk"] == b["nk"]:
         if a["court"] and b["court"] and a["court"] != b["court"]:
             return False
@@ -7207,16 +7376,48 @@ def _mac_activate_app(allow_osascript: bool = True) -> bool:
 
 def _fetch_recent_scotus() -> tuple:
     """The Court's latest opinions, as the Recent SCOTUS lists show them:
-    ``(decisions, merits, orders)`` — the homepage's Recent Decisions, or,
-    when it lists none, the Term's ten latest opinions of the Court; then the
-    five latest orders that drew separate writings.  Worker thread: this
-    waits on supremecourt.gov whenever scotus_recent's cache has gone
-    stale."""
+    ``(decisions, merits, orders)`` — the homepage's Recent Decisions, filled
+    out to ten with the latest opinions of the Court it does not list (all
+    ten of them when it lists none: between Terms, and early in one, when the
+    sitting Term's own tables are filled out from the last); then the five
+    latest orders that drew separate writings.  Worker thread: this waits on
+    supremecourt.gov whenever scotus_recent's cache has gone stale."""
     import scotus_recent
     decisions = scotus_recent.fetch_recent_decisions()
-    merits = [] if decisions else scotus_recent.recent_merits_opinions(10)
+    linked = sum(1 for d in decisions if d.opinion_url)
+    merits: list = []
+    if not decisions:
+        merits = scotus_recent.recent_merits_opinions(10)
+    elif linked < 10:
+        # The homepage lists only the Term's newest few: the Term's tables
+        # carry on from there, less what it has already — unless they have
+        # anything newer, when the homepage's list is an old one (kept from
+        # the last time the site answered) and the tables' own ten stand.
+        term = scotus_recent.recent_merits_opinions(10)
+        newest = max((iso for iso in (scotus_recent.iso_date(d.date)
+                                      for d in decisions) if iso), default="")
+        if newest and any(m.date > newest for m in term):
+            decisions, merits = [], term
+        else:
+            merits = scotus_recent.up_to_linked(
+                [m for m in term
+                 if not any(_same_recent_case(m, d) for d in decisions)],
+                10 - linked)
     orders = scotus_recent.recent_order_opinions(5)
     return decisions, merits, orders
+
+
+def _same_recent_case(a, b) -> bool:
+    """Whether two of the Court's listings are one decision: a docket number
+    in common (however its dash is set; the homepage may list several), or
+    the same name."""
+    import scotus_recent
+    if scotus_recent._docket_tokens(a.docket) & scotus_recent._docket_tokens(
+            b.docket):
+        return True
+    def name(x) -> str:
+        return re.sub(r"\W+", " ", (x.name or "").lower()).strip()
+    return bool(name(a)) and name(a) == name(b)
 
 
 def _recent_scotus_menu_rows(decisions, merits, orders, *,
@@ -7234,14 +7435,15 @@ def _recent_scotus_menu_rows(decisions, merits, orders, *,
         return {"name": name, "date": date, "url": url, "docket": docket,
                 "decided": decided, "citation": citation, "writing": writing}
 
+    # The homepage's decisions, then the Term's opinions of the Court that
+    # fill the list out (all of it, when the homepage lists none).
     opinions = [row(d.name, d.date, d.opinion_url, docket=d.docket,
                     decided=scotus_recent.iso_date(d.date))
                 for d in decisions if d.opinion_url]
-    if not decisions:
-        opinions = [row(m.name, scotus_recent.display_date(m.date),
-                        m.opinion_url, docket=m.docket, decided=m.date,
-                        citation=m.citation)
-                    for m in merits if m.opinion_url]
+    opinions += [row(m.name, scotus_recent.display_date(m.date),
+                     m.opinion_url, docket=m.docket, decided=m.date,
+                     citation=m.citation)
+                 for m in merits if m.opinion_url]
     on_orders = [row(o.name, scotus_recent.display_date(o.date),
                      o.opinion_url, docket=o.docket, decided=o.date,
                      citation=o.citation, writing="order")
@@ -9756,36 +9958,95 @@ class CourtListenerGUI:
             )
             if fetcher is not None or client is not None:
                 before_open()
-
-                def run() -> None:
-                    # The popup is already gone; a citation that
-                    # resolves nowhere would otherwise end in silence,
-                    # which reads as the app having hung.
-                    if not self._try_open_citation(
-                        name, cite, pin, fetcher, client, year=year,
-                    ):
-                        label = f"{name}, {cite}" if name else cite
-                        self._post_root(self._notify_lookup_miss,
-                                        f"No case found for {label}.")
-
-                def as_text() -> None:
-                    threading.Thread(target=run, daemon=True).start()
-
-                # The case's own pages first, as a search result opens:
-                # the scan is up the moment it is found, and the text
-                # comes in behind it — Google Scholar's, or failing that
-                # static.case.law's or CourtListener's — for T to show.
-                # With no scan anywhere, the text opens instead.  The
-                # Federal Appendix keeps its own scan route, as a search
-                # result's does.
-                action = ("cite", f"{cite}@{pin}" if pin else cite)
-                if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
-                        self.root, action, query, self._status_var.set,
-                        fallback=as_text, name=name):
-                    as_text()
+                self._open_typed_case_citation(query, name, cite, pin, year,
+                                               fetcher, client)
                 return True
 
         return False
+
+    def _open_typed_case_citation(self, query: str, name: str, cite: str,
+                                  pin: str, year: str, fetcher, client, *,
+                                  choose: bool = True) -> None:
+        """Open a case citation as typed (see :meth:`_open_lookup_query`):
+        its scan first, as a search result opens — the scan is up the moment
+        it is found, and the text comes in behind it for T to show — and with
+        no scan anywhere, its text: Google Scholar's, or failing that
+        static.case.law's, or CourtListener's as the last resort.  The
+        Federal Appendix keeps its own scan route, as a search result's does.
+
+        Where nothing opens because several cases bear the citation and
+        nothing typed says which — CourtListener files three under "2 Va.
+        319" — the reader is asked which (*choose*), and the one picked is
+        opened the same way, by its name and year."""
+
+        def run() -> None:
+            # The popup is already gone; a citation that resolves nowhere
+            # would otherwise end in silence, which reads as the app having
+            # hung.
+            if self._try_open_citation(
+                name, cite, pin, fetcher, client, year=year,
+            ):
+                return
+            cases = (_cases_bearing_citation(client, cite)
+                     if choose and client is not None else [])
+            if len(cases) > 1:
+                self._post_root(self._ask_which_cited_case, query, cite,
+                                pin, cases, fetcher, client)
+                return
+            label = f"{name}, {cite}" if name else cite
+            self._post_root(self._notify_lookup_miss,
+                            f"No case found for {label}.")
+
+        def as_text() -> None:
+            threading.Thread(target=run, daemon=True).start()
+
+        action = ("cite", f"{cite}@{pin}" if pin else cite)
+        if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
+                self.root, action, query, self._status_var.set,
+                fallback=as_text, name=name):
+            as_text()
+
+    def _ask_which_scholar_case(self, parent, cite: str, pin: str,
+                                mates: list, fetcher, client,
+                                prefetch_pdf: bool = True) -> None:
+        """Ask which of the cases Google Scholar lists at *cite* is meant
+        (see GoogleScholarFetcher.take_page_mates), then open that one — by
+        its name and year, which pick it from the same results."""
+        # Scholar's titles come in capitals as often as not ("NAT INST OF
+        # HEALTH v. AM PUBLIC HEALTH ASSN").
+        cases = [{"name": normal_case_caption(r.title) or r.title,
+                  "year": _scholar_source_year(r.source)} for r in mates]
+        try:
+            host = parent if parent.winfo_exists() else self.root
+        except (AttributeError, tk.TclError):
+            host = self.root
+        chosen = _choose_cited_case(host, cite, cases,
+                                    bring_to_front=self._bring_to_front)
+        if chosen is None:
+            return
+
+        def run() -> None:
+            if not self._try_open_citation(
+                    chosen["name"], cite, pin, fetcher, client,
+                    prefetch_pdf=prefetch_pdf, view_parent=parent,
+                    year=chosen.get("year", "")):
+                self._post_root(
+                    self._notify_lookup_miss,
+                    f"Couldn't open {chosen['name']}, {cite}.", parent)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ask_which_cited_case(self, query: str, cite: str, pin: str,
+                              cases: list, fetcher, client) -> None:
+        """Ask which of *cases* the citation means, and open that one — asked
+        once: if the case picked cannot be opened either, that is a miss."""
+        chosen = _choose_cited_case(self.root, cite, cases,
+                                    bring_to_front=self._bring_to_front)
+        if chosen is None:
+            return
+        self._open_typed_case_citation(
+            query, chosen["name"], cite, pin, chosen.get("year", ""),
+            fetcher, client, choose=False)
 
     def _open_main_from_spotlight(
         self, popup: tk.Toplevel, query: str = "",
@@ -10657,8 +10918,14 @@ class CourtListenerGUI:
             scholar_page[:] = results
             if is_reporter_cite:
                 # A reporter citation in the query pins the case, so keep
-                # Google Scholar's own relevance order (top few).
-                results = results[:3]
+                # Google Scholar's own relevance order (top few) — of the
+                # results that are the cited case: its full-text search
+                # answers "2 Va 319" with "319 U.S. 624" and opinions that
+                # merely cite the page.
+                results = [
+                    r for r in results
+                    if any(_scholar_bears_citation(r, c) for c in lookup_cites)
+                ][:3]
             else:
                 # Just a name: Google Scholar, like CourtListener, ranks on
                 # the whole opinion text, so rank the entire first page of
@@ -10714,7 +10981,11 @@ class CourtListenerGUI:
                     try:
                         candidate_results = []
                         for entry in client.lookup_citation(lookup_cite):
-                            if entry.get("status") != 200:
+                            # 300: several cases bear the citation ("2 Va.
+                            # 319" is Pleasants v. Pleasants and two others
+                            # to CourtListener) — every one of them is a row
+                            # for the reader to choose from.
+                            if entry.get("status") not in (200, 300):
                                 continue
                             for cl in entry.get("clusters") or []:
                                 candidate_results.append(_item_from_cluster(cl))
@@ -11192,12 +11463,24 @@ class CourtListenerGUI:
                            "can't tell which, so nothing opened")
 
                 def refuse() -> None:
+                    # The load's window says it, or the reader is told
+                    # (see _LoadWatch.fail).
                     safe_status(message)
                     watch.fail(message)
-                    self._spotlight_notify(message, duration_ms=6000)
 
                 self._post_root(refuse)
                 return
+            # Several cases begin on the page, and nothing said which is meant
+            # — the citation came bare ("18 F. App'x 81"), or with a name none
+            # of them answers to: the reader picks.  The first used to open,
+            # whichever case it was.
+            mates = _choices_to_ask(item.get("_case_law_pdf_choices"), url)
+            if mates:
+                self._post_root(lambda: ask(mates, item))
+                return
+            open_scan(url, item)
+
+        def open_scan(url: str, item: dict, picked: str = "") -> None:
             fetched = None
             if url:
                 try:
@@ -11219,8 +11502,9 @@ class CourtListenerGUI:
                 return
             # An order picked off a page of them is named for its own case;
             # the page shown for no one order in it, for none.
-            shown_name = ("" if item.get("_orders_page")
-                          else name or str(item.get("_order_name") or ""))
+            shown_name = picked or (
+                "" if item.get("_orders_page")
+                else name or str(item.get("_order_name") or ""))
             # The cluster this scan was found through is worth keeping: it is
             # what the T button falls back to when Google Scholar has no copy
             # of the case, and it saves looking the citation up a second time.
@@ -11231,6 +11515,47 @@ class CourtListenerGUI:
                     page_meta=meta,
                 )
             )
+
+        def ask(mates: list, item: dict) -> None:
+            """Which of the page's cases, asked on the Tk thread; the one
+            picked is fetched and opened as a found scan would be."""
+            if watch.cancelled:
+                return
+            try:
+                host = parent if parent.winfo_exists() else self.root
+            except (AttributeError, tk.TclError):
+                host = self.root
+            chosen = _choose_case_law_page_opinion(
+                host, [c.opinion for c in mates], cite,
+                bring_to_front=self._bring_to_front)
+            if chosen is None:
+                safe_status("Case selection cancelled.")
+                watch.finish()
+                return
+            picked = (_case_law_opinion_name(chosen)
+                      or str(getattr(chosen, "name", "") or ""))
+            # What the scan's T button looks the text up by: the case picked,
+            # not whatever the bare citation could not tell apart — nor a
+            # CourtListener record of another case at the citation.
+            if picked:
+                known = str(item.get("caseName") or item.get("case_name")
+                            or "")
+                item = (dict(item, caseName=picked)
+                        if not known or _is_the_named_case(picked, known)
+                        else {"citation": list(item.get("citation") or []),
+                              "caseName": picked})
+
+            def go() -> None:
+                with _watching(watch):
+                    try:
+                        open_scan(chosen.url, item, picked)
+                    except Exception as exc:
+                        print(f"[cite-pdf] opening {chosen.url} failed: {exc}")
+                        problem = str(exc) or type(exc).__name__
+                        self._post_root(lambda: watch.fail(
+                            f"Something went wrong: {problem}"))
+
+            threading.Thread(target=go, daemon=True).start()
 
         def run() -> None:
             with _watching(watch):
@@ -12181,30 +12506,67 @@ class CourtListenerGUI:
                 self._post_root(lambda: self._open_case_law_text(
                     target_parent, cap, cite, pin, prefetch_pdf))
                 return True
+        # CourtListener's record of the case at this citation: asked for at
+        # most once, by the first step that needs it.
+        cl_case: dict = {}
+
+        def cl_target() -> "Optional[dict]":
+            if "item" not in cl_case:
+                cl_case["item"] = None
+                if client is not None and cite:
+                    try:
+                        cl_case["item"] = _cl_item_for_citation(
+                            client, cite, name=name)
+                    except Exception as exc:
+                        print(f"[citelist] courtlistener {cite!r}: {exc}")
+            return cl_case["item"]
+
+        def case_facts() -> tuple:
+            """The case's citations, year and state, from the citation
+            and CourtListener's record of it — what a hit found by its
+            name alone must agree with."""
+            target = cl_target() or {}
+            cites = [cite, *_official_series_cites(cite),
+                     *[str(c) for c in target.get("citation") or []]]
+            case_year = year or str(target.get("dateFiled")
+                                    or target.get("date_filed") or "")[:4]
+            state = next((s for s in map(_cite_state, cites) if s), "")
+            return cites, case_year, state
+
         if fetcher is not None:
             result = None
+            mates: list = []
             try:
                 for lookup_cite in _citation_search_variants(cite):
                     result = fetcher.fetch_by_citation(
                         lookup_cite, case_name=name, year=year)
+                    # Several cases begin at it and nothing said which: the
+                    # reader is asked (below), not handed Scholar's first.
+                    mates = _take_page_mates(fetcher)
+                    if mates:
+                        break
                     if not result and name:
                         # Accept a name+cite search hit only when the *result*
                         # itself is this case — bearing an equivalent cite in
                         # its title/byline (and, of several cases beginning on
                         # that page, the one answering to the name), or else
-                        # matching the case name — never merely because
-                        # another opinion quotes the query, nor because it is
-                        # the other case printed on the same page.
+                        # matching the case name and bearing another of its
+                        # citations, or its year and state — never merely
+                        # because another opinion quotes the query, nor
+                        # because it is the other case printed on the same
+                        # page, nor because it shares the name.
                         hits = fetcher.search_cases(
                             f"{name} {lookup_cite}", limit=3,
                         )
                         hit = fetcher.pick_cited_result(
                             hits, lookup_cite, name, year)
                         if hit is None:
+                            named = [h for h in hits
+                                     if _is_the_named_case(name, h.title or "")]
+                            facts = case_facts() if named else ()
                             hit = next(
-                                (h for h in hits
-                                 if _name_match_score(name, h.title or "")
-                                 >= _NAME_MATCH_MIN),
+                                (h for h in named
+                                 if _named_hit_is_the_case(h, name, *facts)),
                                 None,
                             )
                         if hit is not None:
@@ -12213,6 +12575,11 @@ class CourtListenerGUI:
                         break
             except Exception as exc:
                 print(f"[citelist] scholar {cite!r}: {exc}")
+            if mates:
+                self._post_root(self._ask_which_scholar_case, target_parent,
+                                cite, pin, mates, fetcher, client,
+                                prefetch_pdf)
+                return True
             if result:
                 url, html = result
 
@@ -12245,7 +12612,7 @@ class CourtListenerGUI:
             return True
         if client is not None:
             try:
-                target = _cl_item_for_citation(client, cite, name=name)
+                target = cl_target()
                 if target:
                     parts, blocks, plain, cluster = _assemble_case_parts(
                         client, target,
@@ -14101,8 +14468,11 @@ class CourtListenerGUI:
                 all_cites, expected_name=expected_name)
             if choices:
                 item["_case_law_pdf_choices"] = choices
-                print(f"[resolve] using static.case.law PDF: {choices[0].url}")
-                return choices[0].url
+                # A parallel cite that settles which case it is beats a page
+                # of several the reader would have to choose among.
+                url = _settled_choice(choices).url
+                print(f"[resolve] using static.case.law PDF: {url}")
+                return url
 
         # 1. local_path already present on the search result
         local = item.get("local_path") or item.get("localPath") or ""
@@ -16402,7 +16772,9 @@ def _scholar_court_id(blocks) -> str:
     for b in blocks[:8]:
         if b.kind != "center":
             continue
-        t = re.sub(r"\s+", " ", b.text()).strip().rstrip(".").lower()
+        # "Supreme Court of Hawai`i" is the Hawaii Supreme Court.
+        t = re.sub(r"\s+", " ", _plain_state_names(b.text())
+                   ).strip().rstrip(".").lower()
         if not t or "court" not in t or "district court" in t or "bankruptcy" in t:
             continue
         if "supreme court" in t and "united states" in t:
@@ -19378,7 +19750,8 @@ def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
     return pages
 
 
-def _page_content_box_pts(page) -> Optional[tuple]:
+def _page_content_box_pts(page, visible: Optional[tuple] = None
+                          ) -> Optional[tuple]:
     """The bounding box of a page's actual content in PDF points
     ``(left, bottom, right, top)``, or ``None`` when it can't be determined
     (e.g. a bare scanned image with no text or vector objects).
@@ -19392,7 +19765,15 @@ def _page_content_box_pts(page) -> Optional[tuple]:
     printer's slug ("553US2 Unit: $U42 … PAGES PGT: OPIN") in invisible type
     above the running head, and counting it left a band of blank page atop
     every page saved, which the viewer, cropping to what it can see, does
-    not show."""
+    not show.
+
+    Nor is a drawing that puts no ink on the page.  The Court's own PDFs —
+    its slip opinions in the U.S. Reports' form, its preliminary prints and
+    bound volumes — lay a white box the width of the page across its foot
+    and a band of nothing across its head, and with them in the box no page
+    was cropped at all.  Given *visible*, the box ``(left, bottom, right,
+    top)`` the viewer found ink in, a drawing counts only as far as it lies
+    within it."""
     import ctypes
     import math
     import pypdfium2.raw as C
@@ -19455,6 +19836,11 @@ def _page_content_box_pts(page) -> Optional[tuple]:
             ol, ob, orr, ot = bounds
             if (orr - ol) * (ot - ob) >= 0.9 * page_area:
                 continue
+            if visible is not None:
+                ol, ob = max(ol, visible[0]), max(ob, visible[1])
+                orr, ot = min(orr, visible[2]), min(ot, visible[3])
+                if orr <= ol or ot <= ob:
+                    continue
             l, r = min(l, ol), max(r, orr)
             b, t = min(b, ob), max(t, ot)
     except Exception:
@@ -19626,7 +20012,13 @@ def _crop_pdf_to_content(
     — the viewer's margin as a share of the content's width (see
     :meth:`_PdfPane._margin_ratio`) — the margin is the one the viewer
     draws instead, when wider: the U.S. Reports' small type block, shown on
-    a roomy margin, came out of Save cropped close."""
+    a roomy margin, came out of Save cropped close.
+
+    Pages the viewer frames alike — one box shared by every page of an
+    opinion (see :meth:`_PdfPane._apply_uniform_crop`) — are saved alike,
+    each in the box that holds all their content.  Cropped page by page, an
+    opinion's short last page came out a short sheet, which a printer, fitting
+    each page to the paper, set in larger type than the rest."""
     import io
 
     import pypdfium2 as pdfium
@@ -19634,28 +20026,79 @@ def _crop_pdf_to_content(
     with _PDFIUM_LOCK:
         doc = pdfium.PdfDocument(pdf_bytes)
         try:
+            def union(a: tuple, b: tuple) -> tuple:
+                return (min(a[0], b[0]), min(a[1], b[1]),
+                        max(a[2], b[2]), max(a[3], b[3]))
+
+            # Pass 1 — each page's content, and the frame the viewer put it in.
+            pages: list = []   # [media box, content box, frame, digital]
             for i in range(len(doc)):
                 page = doc[i]
                 try:
                     mb = tuple(page.get_mediabox())
-                    ink = (_frac_box_to_points(frac_boxes[i], mb)
-                           if frac_boxes and i < len(frac_boxes)
-                           and frac_boxes[i] else None)
-                    box = None
-                    if not _page_has_scan_background(page):
-                        box = _page_content_box_pts(page)
+                    frac = (frac_boxes[i] if frac_boxes and i < len(frac_boxes)
+                            else None)
+                    ink = _frac_box_to_points(frac, mb) if frac else None
+                    digital = not _page_has_scan_background(page)
+                    box = (_page_content_box_pts(page, visible=ink)
+                           if digital else None)
                     if box is None:
                         box = ink
-                    if box is None:
-                        continue  # leave this page at full size
-                    l, b, r, t = box
-                    m = margin_pt
-                    if margin_ratio:
-                        m = max(m, (r - l) * margin_ratio)
-                    l, b = max(mb[0], l - m), max(mb[1], b - m)
-                    r, t = min(mb[2], r + m), min(mb[3], t + m)
-                    if r - l < 1 or t - b < 1:
-                        continue  # implausibly tight — skip rather than clip
+                    frame = ((tuple(frac), tuple(round(v, 1) for v in mb))
+                             if ink is not None else None)
+                    pages.append([mb, box, frame, digital])
+                finally:
+                    page.close()
+            # Pass 2 — one box for the pages that share a frame.
+            shared: dict = {}
+            counts: dict = {}
+            for _mb, box, frame, _digital in pages:
+                if frame is None or box is None:
+                    continue
+                shared[frame] = (union(shared[frame], box)
+                                 if frame in shared else box)
+                counts[frame] = counts.get(frame, 0) + 1
+            # A born-digital page the viewer could not measure — a short last
+            # page, too little on it to be sure of — and so shows whole is
+            # framed as the rest of the opinion is, when that frame holds it:
+            # its own box alone made a scrap of a page.
+            sizes: dict = {}
+            for mb, _box, _frame, _digital in pages:
+                key = tuple(round(v, 1) for v in mb)
+                sizes[key] = sizes.get(key, 0) + 1
+            usual: dict = {}   # media box → the frame most of its pages are in
+            for frame, n in counts.items():
+                if n >= 2 and 2 * n >= sizes.get(frame[1], 0) and (
+                        frame[1] not in usual or n > counts[usual[frame[1]]]):
+                    usual[frame[1]] = frame
+            for i, entry in enumerate(pages):
+                mb, _box, frame, digital = entry
+                common = usual.get(tuple(round(v, 1) for v in mb))
+                if frame is not None or not digital or common is None:
+                    continue
+                page = doc[i]
+                try:
+                    box = _page_content_box_pts(
+                        page, visible=_frac_box_to_points(common[0], mb))
+                finally:
+                    page.close()
+                entry[1] = (union(shared[common], box) if box is not None
+                            else shared[common])
+            # Pass 3 — crop.
+            for i, (mb, box, frame, _digital) in enumerate(pages):
+                box = shared.get(frame, box)
+                if box is None:
+                    continue  # leave this page at full size
+                l, b, r, t = box
+                m = margin_pt
+                if margin_ratio:
+                    m = max(m, (r - l) * margin_ratio)
+                l, b = max(mb[0], l - m), max(mb[1], b - m)
+                r, t = min(mb[2], r + m), min(mb[3], t + m)
+                if r - l < 1 or t - b < 1:
+                    continue  # implausibly tight — skip rather than clip
+                page = doc[i]
+                try:
                     page.set_mediabox(l, b, r, t)
                     page.set_cropbox(l, b, r, t)
                 finally:
@@ -22749,12 +23192,25 @@ class _LoadWatch:
 
     def fail(self, message: str) -> None:
         """Nothing could be opened.  A window showing says so, and why, until
-        the reader closes it; one that never showed stays unshown, the status
-        line of the window the load was asked for from having said it."""
+        the reader closes it.  One that never showed stays unshown, and the
+        reader is told all the same (CourtListenerGUI._notify_lookup_miss):
+        the status line of the window the load was asked for from was all
+        that ever said it, and a citation clicked to nothing — tried on Google
+        Scholar, static.case.law and CourtListener in turn — looked like a
+        click that did nothing."""
         if self.done:
             return
         if self._win is None:
             self._end()
+            notify = getattr(self._app, "_notify_lookup_miss", None)
+            if notify is not None:
+                text = f"Couldn't open {self.label}."
+                if message:
+                    text += f" {message}"
+                try:
+                    notify(text, self._parent)
+                except tk.TclError:
+                    pass
             return
         self.done = self.failed = True
         self._cancel_timers()
@@ -30837,8 +31293,6 @@ class _ScholarTextWindow:
         ]
         if decisions:
             lines.append(("title", "Recent decisions"))
-        elif merits:
-            lines.append(("title", "Opinions of the Court"))
         for d in decisions:
             lines.append(("h", d.name))
             sub = " · ".join(p for p in (
@@ -30852,37 +31306,41 @@ class _ScholarTextWindow:
                 opener(d.opinion_url, d.name, d.description, docket=d.docket,
                        decided=scotus_recent.iso_date(d.date)),
             ))
-        if not decisions:
-            for m in merits:
-                lines.append(("h", m.name))
-                sub = " · ".join(p for p in (
-                    scotus_recent.display_date(m.date),
-                    f"No. {m.docket}" if m.docket else "",
-                    scotus_recent.author_label(m.author),
-                ) if p)
-                lines.append(("lbl", sub))
-                if m.description:
-                    lines.append(("", m.description))
-                if m.opinion_url:
-                    lines.append((
-                        "", "Open the opinion",
-                        opener(m.opinion_url, m.name, m.description,
-                               citation=m.citation, docket=m.docket,
-                               decided=m.date),
-                    ))
-                    continue
-                # Listed before the Court has linked its PDF: the docket is
-                # where it will appear.
-                try:
-                    import scotus_docket
-                    docket_url = scotus_docket.official_docket_url(m.docket)
-                except Exception:
-                    docket_url = ""
-                if docket_url:
-                    lines.append(("", "Opinion not yet posted — the docket",
-                                  docket_url))
-                else:
-                    lines.append(("lbl", "Opinion not yet posted"))
+        # The Term's opinions of the Court: the list itself when the homepage
+        # has none, else carrying on past the homepage's few.
+        if merits:
+            lines.append(("title", "Earlier opinions of the Court"
+                          if decisions else "Opinions of the Court"))
+        for m in merits:
+            lines.append(("h", m.name))
+            sub = " · ".join(p for p in (
+                scotus_recent.display_date(m.date),
+                f"No. {m.docket}" if m.docket else "",
+                scotus_recent.author_label(m.author),
+            ) if p)
+            lines.append(("lbl", sub))
+            if m.description:
+                lines.append(("", m.description))
+            if m.opinion_url:
+                lines.append((
+                    "", "Open the opinion",
+                    opener(m.opinion_url, m.name, m.description,
+                           citation=m.citation, docket=m.docket,
+                           decided=m.date),
+                ))
+                continue
+            # Listed before the Court has linked its PDF: the docket is
+            # where it will appear.
+            try:
+                import scotus_docket
+                docket_url = scotus_docket.official_docket_url(m.docket)
+            except Exception:
+                docket_url = ""
+            if docket_url:
+                lines.append(("", "Opinion not yet posted — the docket",
+                              docket_url))
+            else:
+                lines.append(("lbl", "Opinion not yet posted"))
         if not (decisions or merits):
             lines.append(("lbl", "No recent decisions were found on "
                                  "supremecourt.gov."))
@@ -32121,6 +32579,7 @@ class _ScholarTextWindow:
             # answered that it has no copy (no use asking it again) or could
             # not be asked.
             absent = False
+            mates: list = []
             try:
                 if url_val:
                     result = fetcher.fetch_by_url(url_val)
@@ -32128,14 +32587,31 @@ class _ScholarTextWindow:
                     # The caption highlighted with the cite picks the case
                     # when more than one begins on the cited page.
                     result = fetcher.fetch_by_citation(cite, case_name=name)
+                    mates = _take_page_mates(fetcher)
                 absent = not result and fetcher.last_fetch_absent()
             except Exception as exc:
                 print(f"[scholar] link fetch failed: {exc}")
                 result = None
+            if mates:
+                # No caption came with it to pick the case: the reader does.
+                self._post(self._ask_page_mates, cite, pin, mates)
+                return
             self._post(self._on_link_ready, result, cite, pin, url_val, name,
                        absent)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _ask_page_mates(self, cite: str, pin: str, mates: list) -> None:
+        """Several cases begin at a citation clicked here with no caption to
+        say which: ask, as Spotlight does (see
+        CourtListenerGUI._ask_which_scholar_case)."""
+        self._status_var.set(f"{len(mates)} cases begin at {cite} — "
+                             "choose one.")
+        self._end_text_load(cite)       # the load ends in the question
+        app = self._app
+        client = app._get_client() if app._token_var.get().strip() else None
+        app._ask_which_scholar_case(self._live_parent(), cite, pin, mates,
+                                    app._get_scholar(), client)
 
     def _claim_text_load(self, cite: str) -> None:
         """Take up the load waiting on the text of *cite* — its scan could not
@@ -32154,11 +32630,16 @@ class _ScholarTextWindow:
     def _end_text_load(self, cite: str, failure: str = "") -> None:
         """The text lookup for *cite* is over: it opened, or — *failure*
         says why — it found nothing.  Told to the load waiting on it, if one
-        is (see _claim_text_load)."""
+        is (see _claim_text_load); a failure no load waits on is told the
+        reader directly, as a load's own would be (see _LoadWatch.fail)."""
         loads = getattr(self, "_text_loads", None)
         watch = loads.pop(cite, None) if loads and cite else None
         if watch is not None:
             self._app.end_text_load(watch, failure)
+        elif failure:
+            label = f"Couldn't open {cite}. " if cite else ""
+            self._app._notify_lookup_miss(f"{label}{failure}",
+                                          self._live_parent())
 
     def _follow_how_cited(self, tag: str, url: str, pin: str,
                           name: str) -> None:
@@ -34525,8 +35006,11 @@ def _stat_cite_from_url(url: str) -> str:
 
 def _choose_case_law_page_opinion(
     parent: tk.Misc, opinions: list[_CaseLawPageOpinion], title: str,
+    bring_to_front=None,
 ) -> Optional[_CaseLawPageOpinion]:
-    """Ask which CAP case to open when several begin on one reporter page."""
+    """Ask which CAP case to open when several begin on one reporter page.
+    *bring_to_front* puts the dialog before whatever is in front — a
+    citation clicked in Chrome leaves the app behind the browser."""
     dlg = _ui_toplevel(parent)
     _ensure_modern_ttk_styles(dlg)
     dlg.title("Choose Case")
@@ -34579,6 +35063,8 @@ def _choose_case_law_page_opinion(
     dlg.update_idletasks()
     dlg.deiconify()
     dlg.lift()
+    if bring_to_front is not None:
+        bring_to_front(dlg)
     lb.focus_set()
     try:
         dlg.grab_set()
@@ -35636,10 +36122,13 @@ def _open_printer_settings(printer: str) -> bool:
 def _two_sided_supported() -> bool:
     """Whether we can ask for double-sided ourselves.
 
-    Through CUPS we can (``-o sides=…``).  Windows prints by handing the file
-    to whatever program owns PDFs, which takes no such instruction — duplex
-    there is set in the printer's own settings, which the dialog links to."""
-    return not sys.platform.startswith("win") and bool(shutil.which("lp"))
+    Through CUPS we can (``-o sides=…``), and on Windows when GetCases prints
+    the pages itself (:func:`_windows_print_pdf`), which asks the printer for
+    duplex with the rest of its settings.  Elsewhere duplex is set in the
+    printer's own settings, which the dialog links to."""
+    if sys.platform.startswith("win"):
+        return _windows_pdf_printing_available()
+    return bool(shutil.which("lp"))
 
 
 #: PDF readers that will print to a named printer from the command line, and
@@ -35686,6 +36175,209 @@ def _windows_program_path(exe: str) -> str:
     return ""
 
 
+class _PrintCancelled(Exception):
+    """The reader called printing off in a dialog the printer itself put up
+    (the Save As of "Microsoft Print to PDF"): nothing to report, and no
+    other way to be tried."""
+
+
+def _windows_pdf_printing_available() -> bool:
+    """Whether :func:`_windows_print_pdf` can run here: Windows, and a pdfium
+    that draws on a device context (FPDF_RenderPage is Windows-only)."""
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import pypdfium2.raw as pdfium_c
+        return hasattr(pdfium_c, "FPDF_RenderPage")
+    except Exception:
+        return False
+
+
+def _windows_print_pdf(path: str, printer: str, two_sided: bool = False,
+                       output: str = "") -> bool:
+    """Print *path* to the Windows printer named *printer*, the pages drawn
+    by pdfium straight on to the printer — any printer, not just the default.
+
+    Windows has no command that prints a PDF to a chosen printer (the shell's
+    "printto" works only if the program owning PDFs registers it, and Edge
+    does not), but it opens any printer by name for a program to draw on, and
+    pdfium — Chrome's PDF engine, which prints the same way — draws a page on
+    it (FPDF_RenderPage) at the printer's own resolution, so text stays sharp.
+    The printer's own settings are the starting point (paper, quality, what
+    "Printer Settings…" set); *two_sided* asks for long-edge duplex on top.
+    Each page is fitted to the printable area and centred, a landscape page
+    turned to suit a portrait sheet.  *output* names a file for a printer
+    that writes one ("Microsoft Print to PDF"), in place of its Save dialog.
+
+    True when the document was handed to the spooler, False when it could
+    not be (the caller then tries the other ways); :class:`_PrintCancelled`
+    when the reader cancelled a dialog the printer put up."""
+    if not _windows_pdf_printing_available():
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+
+    class _DevModeHead(ctypes.Structure):
+        # DEVMODEW as far as dmDuplex: the printer half of its union.
+        _fields_ = [
+            ("dmDeviceName", wintypes.WCHAR * 32),
+            ("dmSpecVersion", wintypes.WORD),
+            ("dmDriverVersion", wintypes.WORD),
+            ("dmSize", wintypes.WORD),
+            ("dmDriverExtra", wintypes.WORD),
+            ("dmFields", wintypes.DWORD),
+            ("dmOrientation", ctypes.c_short),
+            ("dmPaperSize", ctypes.c_short),
+            ("dmPaperLength", ctypes.c_short),
+            ("dmPaperWidth", ctypes.c_short),
+            ("dmScale", ctypes.c_short),
+            ("dmCopies", ctypes.c_short),
+            ("dmDefaultSource", ctypes.c_short),
+            ("dmPrintQuality", ctypes.c_short),
+            ("dmColor", ctypes.c_short),
+            ("dmDuplex", ctypes.c_short),
+        ]
+
+    class _DocInfo(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_int),
+            ("lpszDocName", wintypes.LPCWSTR),
+            ("lpszOutput", wintypes.LPCWSTR),
+            ("lpszDatatype", wintypes.LPCWSTR),
+            ("fwType", wintypes.DWORD),
+        ]
+
+    winspool.OpenPrinterW.argtypes = [wintypes.LPCWSTR,
+                                      ctypes.POINTER(wintypes.HANDLE),
+                                      ctypes.c_void_p]
+    winspool.DocumentPropertiesW.argtypes = [
+        wintypes.HWND, wintypes.HANDLE, wintypes.LPCWSTR,
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD]
+    winspool.DocumentPropertiesW.restype = ctypes.c_long
+    winspool.ClosePrinter.argtypes = [wintypes.HANDLE]
+    gdi32.CreateDCW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                wintypes.LPCWSTR, ctypes.c_void_p]
+    gdi32.CreateDCW.restype = wintypes.HDC
+    gdi32.GetDeviceCaps.argtypes = [wintypes.HDC, ctypes.c_int]
+    gdi32.StartDocW.argtypes = [wintypes.HDC, ctypes.POINTER(_DocInfo)]
+    for name in ("StartPage", "EndPage", "EndDoc", "AbortDoc", "DeleteDC"):
+        getattr(gdi32, name).argtypes = [wintypes.HDC]
+
+    DM_OUT_BUFFER, DM_IN_BUFFER = 2, 8
+    DM_DUPLEX, DMDUP_VERTICAL = 0x1000, 2       # long edge, portrait
+    HORZRES, VERTRES = 8, 10
+    PHYSICALWIDTH, PHYSICALHEIGHT = 110, 111
+    PHYSICALOFFSETX, PHYSICALOFFSETY = 112, 113
+    ERROR_CANCELLED = 1223
+
+    # The printer's own settings, with duplex asked for on top.
+    devmode = None
+    handle = wintypes.HANDLE()
+    if winspool.OpenPrinterW(printer, ctypes.byref(handle), None):
+        try:
+            size = winspool.DocumentPropertiesW(None, handle, printer,
+                                                None, None, 0)
+            if size > 0:
+                devmode = ctypes.create_string_buffer(size)
+                if winspool.DocumentPropertiesW(
+                        None, handle, printer, devmode, None,
+                        DM_OUT_BUFFER) < 0:
+                    devmode = None
+                elif two_sided:
+                    head = ctypes.cast(devmode,
+                                       ctypes.POINTER(_DevModeHead)).contents
+                    head.dmFields |= DM_DUPLEX
+                    head.dmDuplex = DMDUP_VERTICAL
+                    winspool.DocumentPropertiesW(
+                        None, handle, printer, devmode, devmode,
+                        DM_IN_BUFFER | DM_OUT_BUFFER)
+        finally:
+            winspool.ClosePrinter(handle)
+    else:
+        print(f"[print] Windows has no printer {printer!r}")
+        return False
+
+    hdc = gdi32.CreateDCW("WINSPOOL", printer, None, devmode)
+    if not hdc:
+        print(f"[print] could not open {printer!r} to draw on "
+              f"(error {ctypes.get_last_error()})")
+        return False
+    started = False
+    try:
+        paper_w = gdi32.GetDeviceCaps(hdc, PHYSICALWIDTH)
+        paper_h = gdi32.GetDeviceCaps(hdc, PHYSICALHEIGHT)
+        off_x = gdi32.GetDeviceCaps(hdc, PHYSICALOFFSETX)
+        off_y = gdi32.GetDeviceCaps(hdc, PHYSICALOFFSETY)
+        area_w = gdi32.GetDeviceCaps(hdc, HORZRES)
+        area_h = gdi32.GetDeviceCaps(hdc, VERTRES)
+        if area_w <= 0 or area_h <= 0:
+            return False
+        info = _DocInfo(ctypes.sizeof(_DocInfo), os.path.basename(path),
+                        output or None, None, 0)
+        if gdi32.StartDocW(hdc, ctypes.byref(info)) <= 0:
+            if ctypes.get_last_error() == ERROR_CANCELLED:
+                raise _PrintCancelled()
+            print(f"[print] {printer!r} would not start the document "
+                  f"(error {ctypes.get_last_error()})")
+            return False
+        started = True
+        with _PDFIUM_LOCK:
+            doc = pdfium.PdfDocument(path)
+            try:
+                for i in range(len(doc)):
+                    page = doc[i]
+                    try:
+                        w_pt, h_pt = page.get_size()
+                        # A landscape page on a portrait sheet (or the other
+                        # way round) is turned a quarter to fit it.
+                        turn = (w_pt > h_pt) != (paper_w > paper_h)
+                        if turn:
+                            w_pt, h_pt = h_pt, w_pt
+                        scale = min(area_w / w_pt, area_h / h_pt)
+                        draw_w = int(w_pt * scale)
+                        draw_h = int(h_pt * scale)
+                        # Centred on the sheet, in the printable area's
+                        # coordinates (its origin is the printer's margin).
+                        x = max(0, (paper_w - draw_w) // 2 - off_x)
+                        y = max(0, (paper_h - draw_h) // 2 - off_y)
+                        x = min(x, max(0, area_w - draw_w))
+                        y = min(y, max(0, area_h - draw_h))
+                        if gdi32.StartPage(hdc) <= 0:
+                            raise OSError(f"page {i + 1} would not start")
+                        pdfium_c.FPDF_RenderPage(
+                            hdc, page.raw, x, y, draw_w, draw_h,
+                            1 if turn else 0,
+                            pdfium_c.FPDF_ANNOT | pdfium_c.FPDF_PRINTING)
+                        if gdi32.EndPage(hdc) <= 0:
+                            raise OSError(f"page {i + 1} would not finish")
+                    finally:
+                        page.close()
+            finally:
+                doc.close()
+        if gdi32.EndDoc(hdc) <= 0:
+            started = False
+            print(f"[print] {printer!r} would not finish the document")
+            return False
+        started = False
+        print(f"[print] printed {os.path.basename(path)} to {printer!r}")
+        return True
+    except _PrintCancelled:
+        raise
+    except Exception as exc:
+        print(f"[print] drawing on {printer!r} failed: {exc}")
+        return False
+    finally:
+        if started:
+            gdi32.AbortDoc(hdc)
+        gdi32.DeleteDC(hdc)
+
+
 def _windows_print_via_reader(path: str, printer: str) -> bool:
     """Print through a PDF reader that takes a printer on its command line."""
     for exe, build in _WINDOWS_PDF_PRINTERS:
@@ -35706,11 +36398,14 @@ def _send_pdf_to_printer(path: str, printer: str,
     """Hand *path* to *printer*.  False when it could not be done.
 
     Unix hands it to CUPS, which takes both the queue and the options.
-    Windows has no equivalent, so three things are tried in turn: the shell's
-    "printto" verb, which works when the program owning PDFs registers it; a
-    PDF reader that prints to a named printer from the command line; and
-    finally the plain "print" verb, which prints to the *default* printer and
-    so is only used when that is the printer asked for."""
+    Windows has no equivalent, so GetCases prints the pages itself — pdfium
+    drawing them on the printer chosen, double-sided if asked (see
+    :func:`_windows_print_pdf`).  Should that fail, three things are tried in
+    turn: the shell's "printto" verb, which works when the program owning
+    PDFs registers it; a PDF reader that prints to a named printer from the
+    command line; and finally the plain "print" verb, which prints to the
+    *default* printer and so is only used when that is the printer asked for.
+    :class:`_PrintCancelled` passes through: the reader called it off."""
     if not sys.platform.startswith("win"):
         try:
             cmd = ["lp", "-d", printer]
@@ -35722,6 +36417,8 @@ def _send_pdf_to_printer(path: str, printer: str,
         except Exception as exc:
             print(f"[print] sending to {printer!r} failed: {exc}")
             return False
+    if _windows_print_pdf(path, printer, two_sided):
+        return True
     try:
         os.startfile(path, "printto", f'"{printer}"')  # type: ignore[attr-defined]
         return True
@@ -35894,22 +36591,49 @@ class _PrintDialog:
         if not printer:
             self._status_var.set("Choose a printer first.")
             return
+        if getattr(self, "_sending", False):
+            return
+        self._sending = True
         self._status_var.set(f"Sending to {printer}…")
+        two_sided = self._two_sided.get()
+        result: list = []
+
+        # Off the Tk thread: drawing the pages takes a moment, and a printer
+        # that writes a file ("Microsoft Print to PDF") takes its time
+        # finishing it — seconds a page — before the document is done.
+        def send() -> None:
+            try:
+                result.append(
+                    _send_pdf_to_printer(self._path, printer, two_sided))
+            except _PrintCancelled:
+                result.append(None)
+            except Exception as exc:
+                print(f"[print] sending to {printer!r} failed: {exc}")
+                result.append(False)
+
+        threading.Thread(target=send, daemon=True,
+                         name="getcases-print").start()
+        self._await_print(result, printer)
+
+    def _await_print(self, result: list, printer: str) -> None:
+        """Wait, on the Tk thread, for the send :meth:`_print` started."""
         try:
-            self._win.update_idletasks()
+            if not self._win.winfo_exists():
+                return
         except tk.TclError:
-            pass
-        if _send_pdf_to_printer(self._path, printer, self._two_sided.get()):
+            return
+        if not result:
+            self._win.after(150, lambda: self._await_print(result, printer))
+            return
+        self._sending = False
+        if result[0]:
             self._status(f"Sent to {printer}.")
             self._close()
-            return
-        # It could not be sent — say what stands in the way and leave the
-        # reader somewhere they can act, rather than at a dead end.
-        if sys.platform.startswith("win"):
-            self._status_var.set(
-                "Windows' PDF app can't print to a chosen printer from here. "
-                "Use Open in Viewer, or make this one the default printer.")
+        elif result[0] is None:
+            self._status_var.set("Printing was cancelled.")
         else:
+            # It could not be sent — say so, and leave the reader somewhere
+            # they can act, rather than at a dead end.
             self._status_var.set(
                 f"{printer} would not take the document. "
                 "Try Open in Viewer and print from there.")
@@ -36543,6 +37267,79 @@ def _choose_eng_rep_case(parent: tk.Misc,
     return chosen["case"]
 
 
+def _choose_cited_case(parent: tk.Misc, cite: str,
+                       cases: "list[dict]",
+                       bring_to_front=None) -> "Optional[dict]":
+    """Several cases bear one citation and nothing typed says which — let the
+    reader pick, as :func:`_choose_eng_rep_case` does for an E.R. page.
+    *cases* are ``{"name", "year"}`` (see :func:`_cases_bearing_citation`).
+    *bring_to_front* puts the dialog in front of whatever the reader went to
+    while the lookup ran: it comes up seconds after Spotlight closed, and
+    Windows keeps a program that is not in front from putting itself there.
+    Returns the chosen case, or None if cancelled."""
+    dlg = _ui_toplevel(parent)
+    _ensure_modern_ttk_styles(dlg)
+    dlg.title(f"{cite} — {len(cases)} cases")
+    dlg.geometry("640x380")
+    # Spotlight leaves the main window withdrawn: a dialog transient to (or
+    # grabbing against) a hidden window stays invisible.
+    if parent.winfo_viewable():
+        dlg.transient(parent)
+    _ui_label(dlg, f"{len(cases)} cases are reported at {cite}. Pick one:",
+              size=13, weight="bold", anchor="w").pack(
+        anchor="w", fill="x", padx=14, pady=(12, 0))
+    box = _ui_frame(dlg, card=True)
+    box.pack(fill="both", expand=True, padx=12, pady=(8, 8))
+    sb_style = ("Modern.Vertical.TScrollbar" if _CTK_AVAILABLE
+                else "Vertical.TScrollbar")
+    lb_kw = dict(activestyle="dotbox", borderwidth=0, highlightthickness=0)
+    if _CTK_AVAILABLE:
+        lb_kw.update(bg=_UI["window"], fg=_UI["text"],
+                     selectbackground=_UI["selection"],
+                     selectforeground=_UI["text"], font=("TkDefaultFont", 11))
+    lb = tk.Listbox(box, **lb_kw)
+    sb = ttk.Scrollbar(box, orient="vertical", command=lb.yview, style=sb_style)
+    lb.configure(yscrollcommand=sb.set)
+    pad = 8 if _CTK_AVAILABLE else 0
+    sb.pack(side="right", fill="y", pady=pad, padx=(0, pad))
+    lb.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=pad)
+    for case in cases:
+        lb.insert("end", f"{case['name']}  ·  {case['year']}"
+                  if case.get("year") else case["name"])
+    lb.selection_set(0)
+    chosen: dict[str, "Optional[dict]"] = {"case": None}
+
+    def ok() -> None:
+        sel = lb.curselection()
+        chosen["case"] = cases[sel[0]] if sel else None
+        dlg.destroy()
+
+    def cancel() -> None:
+        chosen["case"] = None
+        dlg.destroy()
+
+    lb.bind("<Double-Button-1>", lambda _e: ok())
+    btns = _ui_frame(dlg)
+    btns.pack(fill="x", padx=14, pady=(0, 12))
+    _ui_button(btns, "Open", command=ok, primary=True, width=92).pack(side="right")
+    _ui_button(btns, "Cancel", command=cancel, width=88).pack(side="right", padx=8)
+    dlg.bind("<Return>", lambda _e: ok())
+    dlg.bind("<Escape>", lambda _e: cancel())
+    dlg.update_idletasks()
+    dlg.deiconify()
+    dlg.lift()
+    if bring_to_front is not None:
+        bring_to_front(dlg)
+    dlg.focus_force()
+    lb.focus_set()
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+    parent.wait_window(dlg)
+    return chosen["case"]
+
+
 class _SlipTextWindow:
     """The copyable-text view of a slip opinion: the PDF converted to clean
     text (running heads and page numbers stripped, paragraphs rebuilt — see
@@ -37155,6 +37952,25 @@ def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
         pass
 
 
+def _recap_opinion_is_cited(html: str, court: str, date: str) -> bool:
+    """Whether a Google Scholar opinion *html*, found by the case name of a
+    docket-only citation, is the one cited: decided by *court* (a
+    CourtListener id, "mdd") on *date* ("2001-06-25"), as its own header
+    says.  Neither stated by the header proves nothing, and is no match."""
+    try:
+        blocks = parse_opinion_blocks(html)
+    except Exception:
+        return False
+    from opinion_db import decision_date_from_blocks
+    header_court = _scholar_header_court(blocks)
+    if court and (not header_court or (
+            header_court != court
+            and _COURT_BLUEBOOK.get(court, "") != header_court)):
+        return False
+    decided = decision_date_from_blocks(blocks)
+    return bool(decided) and (not date or decided == date)
+
+
 def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
                          spec_json: str, status=lambda _s: None) -> None:
     """Open an unpublished opinion from CourtListener's RECAP (PACER)
@@ -37172,7 +37988,11 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
         return
     cite = spec.get("cite") or ""
     docket = spec.get("docket") or ""
-    name = spec.get("name") or ""
+    # A name read off a scan can carry its line-break marks ("Brax￾ton")
+    # and a comma for a space ("United,States").
+    name = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾­]", "",
+                  spec.get("name") or "")
+    name = re.sub(r"\bUnited,\s*States\b", "United States", name).strip()
     label = cite or (f"No. {docket}" if docket else name) or "unpublished opinion"
     title = f"{name} — {label}" if name and name != label else (name or label)
 
@@ -37226,6 +38046,15 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
                     name, (spec.get("date") or "")[:4] or None)
             except Exception as exc:
                 print(f"[recap] scholar name lookup failed for {label!r}: {exc}")
+            # A name and a year are no proof: "United States v. Braxton,
+            # 2001" brought up an opinion in another case altogether.  The
+            # court and day the citation gives must be the opinion's own.
+            if result and not _recap_opinion_is_cited(
+                    result[1], spec.get("court") or "",
+                    spec.get("date") or ""):
+                print(f"[recap] Scholar's {name!r} is another court's or "
+                      f"another day's opinion")
+                result = None
             if result:
                 def open_scholar(u=result[0], h=result[1]) -> None:
                     try:
@@ -37237,13 +38066,44 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
                 ok = True
         if ok:
             app._post_root(lambda: safe_status(f"Opened {label}."))
-        elif info and info.get("web_url"):
+            return
+        if info and info.get("web_url"):
             webbrowser.open(info["web_url"])
             app._post_root(lambda: safe_status(
                 f"{label}: PDF not in RECAP — opened the docket in your "
                 "browser."))
-        else:
-            app._post_root(lambda: safe_status(f"Not found: {label}"))
+            return
+        # Nothing filed that day is in RECAP — an order from before the
+        # courts filed electronically, say — but the docket may be: the
+        # case, at least, is something to show for the click.
+        found = None
+        if docket:
+            try:
+                found = cl_api.find_recap_docket(
+                    docket, spec.get("court"), name or None,
+                    session=(client._session if client is not None else None))
+            except Exception as exc:
+                print(f"[recap] docket lookup failed for {label!r}: {exc}")
+        if found and found.get("web_url"):
+            webbrowser.open(found["web_url"])
+            several = found.get("count", 1) > 1
+            filed = found.get("case_name") or ""
+            note = (f"{label}: the opinion isn't in RECAP — opened "
+                    + (f"CourtListener's {found['count']} dockets under "
+                       f"{found['docket_number']}" if several
+                       else f"its docket ({found['docket_number']})")
+                    + " in your browser"
+                    + (f", filed as {filed}." if filed and name
+                       and not _is_the_named_case(name, filed) else "."))
+            app._post_root(lambda: safe_status(note))
+            return
+        # Said where it can be seen: the status line alone made a click that
+        # found nothing look like one that did nothing.
+        miss = (f"Couldn't find {name + ', ' if name else ''}{label}: it "
+                "isn't in RECAP" + (", nor is its docket" if docket else "")
+                + ", and no other copy of it turned up.")
+        app._post_root(lambda: safe_status(f"Not found: {label}"))
+        app._post_root(app._notify_lookup_miss, miss, parent)
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -37504,7 +38364,12 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
         safe_status(f"Opened {cite}." if ok else f"Not found: {cite}")
         if watch is not None:
             app.end_text_load(watch, "" if ok else
-                              "Its text could not be found either.")
+                              "Neither its scan nor its text could be "
+                              "found.")
+        elif not ok:
+            # No load to tell (see _LoadWatch.fail): tell the reader.
+            label = f"{name}, {cite}" if name else cite
+            app._notify_lookup_miss(f"No case found for {label}.", parent)
 
     def run() -> None:
         ok = app._try_open_citation(name, cite, pin, fetcher, client,

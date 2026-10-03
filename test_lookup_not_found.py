@@ -199,7 +199,9 @@ class WhereItIsAskedTests(unittest.TestCase):
                       self._source("_toggle_quick_search_popup"))
         src = self._source("_open_lookup_query")
         self.assertIn("on_missing=self._notify_lookup_miss", src)
-        self.assertIn('f"No case found for {label}."', src)
+        self.assertIn("self._open_typed_case_citation(", src)
+        self.assertIn('f"No case found for {label}."',
+                      self._source("_open_typed_case_citation"))
 
     def test_quick_look_up_and_the_statute_dialog(self):
         for name in ("_show_quick_lookup", "_show_statute_lookup"):

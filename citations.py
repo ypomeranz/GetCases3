@@ -2063,7 +2063,12 @@ def _clean_case_name(raw: str) -> str:
     Jones, 123 F. Supp. 3d 456, 2015 WL …" makes the lazy name regex run to
     the end of the window) is rejected outright — reporter junk is not a
     name RECAP or Scholar can search."""
-    name = (raw or "").strip(" ,;")
+    # A scan's text layer marks a word broken at a line's end with U+FFFE
+    # (or a control character, as PDFium spells some), and can set a comma
+    # where the space was: "United,States v. Brax￾ton".
+    name = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾­]", "", raw or "")
+    name = re.sub(r"\bUnited,\s*States\b", "United States", name)
+    name = name.strip(" ,;")
     while True:
         m = _NAME_SIGNAL_RE.match(name)
         if not m:

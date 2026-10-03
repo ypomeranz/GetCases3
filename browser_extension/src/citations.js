@@ -597,7 +597,7 @@
     while (i > 0) {
       const tok = toks[i - 1].text;
       if (tok.endsWith(";")) break;
-      const low = strip(tok.replace(/[￾­]/g, "").toLowerCase(), ",;:");
+      const low = strip(tok.replace(/[\ufffe\u00ad]/g, "").toLowerCase(), ",;:");
       if (NAME_STOPPERS.has(low) || NAME_STOPPERS.has(lstrip(low, "([\"“‘'"))) break;
       if (lone && i < toks.length && tok.endsWith(",")) break;
       if (closesParenthetical(tok)) break;
@@ -646,7 +646,7 @@
   /** Python's json.dumps of a flat object of strings, so the extension's
    *  RECAP spec is the app's, character for character. */
   function pyJson(obj) {
-    const str = (s) => JSON.stringify(s).replace(/[\u0080-￿]/g,
+    const str = (s) => JSON.stringify(s).replace(/[\u0080-\uffff]/g,
       (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
     return "{" + Object.entries(obj).map(([k, v]) => `${str(k)}: ${str(v)}`).join(", ") + "}";
   }

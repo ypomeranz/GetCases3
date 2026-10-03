@@ -2675,6 +2675,18 @@ _WRIT_TAIL_RE = re.compile(
 _APPLICANT_RE = re.compile(
     r"^(?:the\s+)?(?:application|petition)\s+of\s+", re.IGNORECASE)
 
+# Where the one party a procedural caption is cited by ends (rule 10.2.1(a),
+# (b)): at an appositive describing it — "a Pennsylvania Corporation", "an
+# Infant" — or its role in the proceeding, "Bankrupt", "Debtor", after which a
+# bankruptcy caption runs on to the creditors: "In the Matter of Lenrick
+# Sales, Inc., a Pennsylvania Corporation, Bankrupt, James Talcott, Inc., …,
+# Factors" is In re Lenrick Sales, Inc.  ("a/k/a" is no appositive.)
+_PROCEDURAL_PARTY_END_RE = re.compile(
+    r",\s*(?:an?\s+(?=[A-Za-z])"
+    r"|(?:alleged\s+|involuntary\s+)?(?:bankrupts?|debtors?"
+    r"(?:[\s-]+in[\s-]+possession)?)\b)",
+    re.IGNORECASE)
+
 
 def _format_procedural(party: str, *, recognize_initials: bool,
                        names: _OpinionNames | None = None) -> str | None:
@@ -2686,6 +2698,9 @@ def _format_procedural(party: str, *, recognize_initials: bool,
     if not m:
         return None
     rest = party[m.end():].strip()
+    end = _PROCEDURAL_PARTY_END_RE.search(rest)
+    if end:
+        rest = rest[:end.start()].strip(" ,")
     writ = _WRIT_TAIL_RE.search(rest)
     if writ:
         rest = _APPLICANT_RE.sub("", rest[:writ.start()]).strip(" ,")

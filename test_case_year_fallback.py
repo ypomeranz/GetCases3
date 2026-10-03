@@ -229,7 +229,9 @@ class SpotlightCitationTests(unittest.TestCase):
         # Spotlight reads a typed citation through _open_lookup_query.
         self.assertIn("self._open_lookup_query(query",
                       gui_source("_toggle_quick_search_popup"))
-        src = gui_source("_open_lookup_query")
+        self.assertIn("self._open_typed_case_citation(",
+                      gui_source("_open_lookup_query"))
+        src = gui_source("_open_typed_case_citation")
         self.assertIn("self.open_cited_case_pdf(", src)
         self.assertIn("fallback=as_text", src)
 

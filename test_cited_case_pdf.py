@@ -31,6 +31,7 @@ import tempfile
 import types
 import typing
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import citations
@@ -396,8 +397,22 @@ APP_NS = _load(
      "messagebox": mock.Mock(),
      # The real reading of the name and year the text lookup is given.
      "_case_name_and_year": _load_function("_case_name_and_year"),
+     # Which of a page's several cases to ask about (the real rule); the
+     # asking itself, a test's to answer (see PICKED).
+     "_choices_to_ask": _load_function("_choices_to_ask"),
+     "_choose_case_law_page_opinion": (
+         lambda parent, opinions, title, bring_to_front=None:
+         ASKED.append((title, [o.name for o in opinions]))
+         or (PICKED[0](opinions) if PICKED else None)),
+     "_case_law_opinion_name": lambda opinion: opinion.name,
+     "_is_the_named_case": lambda name, other: name == other,
      },
 )
+
+#: What the reader was asked (title, the cases offered), and how a test has
+#: them answer: PICKED[0](opinions) -> the one chosen, or None to cancel.
+ASKED: list = []
+PICKED: list = []
 
 TEXT_OPENS: list = []
 FILENAMES: list = []
@@ -872,6 +887,76 @@ class _OrdersApp(_App):
         self.toasts.append(message)
 
 
+_APPX = "18 F. App'x 81"
+_MCCARTHY = "https://static.case.law/f-appx/18/case-pdfs/0081-01.pdf"
+_JOHNSON = "https://static.case.law/f-appx/18/case-pdfs/0081-02.pdf"
+
+
+class _PageMatesApp(_App):
+    """The resolver meeting 18 F. App'x 81, where United States v. McCarthy
+    and Johnson v. United States both begin, with nothing to say which: it
+    offers both, the first's scan to hand (see _case_law_pdf_choices_for_cites
+    and _us_reports_page_choice)."""
+
+    def _resolve_pdf_url(self, client, item):
+        self.resolved_items.append(dict(item))
+        item["_case_law_pdf_choices"] = [
+            SimpleNamespace(cite=_APPX, url=url, pick=True,
+                            opinion=SimpleNamespace(url=url, name=name))
+            for url, name in ((_MCCARTHY, "United States v. McCarthy"),
+                              (_JOHNSON, "Johnson v. United States"))]
+        return _MCCARTHY
+
+
+class PageMatesAskTests(unittest.TestCase):
+    """A citation several cases begin at, clicked in Chrome or in a case on
+    screen with nothing to say which, asks — it opened the first."""
+
+    def setUp(self):
+        RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
+        TEXT_OPENS.clear(); _FakeViewer.opened.clear(); _Thread.started.clear()
+        ASKED.clear(); PICKED.clear()
+        FETCHED[_MCCARTHY] = (b"%PDF-mccarthy", _MCCARTHY)
+        FETCHED[_JOHNSON] = (b"%PDF-johnson", _JOHNSON)
+        self.app = _PageMatesApp()
+        self.app._bring_to_front = lambda win: None
+
+    def _click(self):
+        return self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", _APPX), _APPX, lambda _s: None,
+            fallback=lambda: None)
+
+    def test_the_reader_picks_and_that_case_opens(self):
+        PICKED.append(lambda opinions: opinions[1])
+        self.assertTrue(self._click())
+        self.assertEqual(ASKED, [(_APPX, ["United States v. McCarthy",
+                                          "Johnson v. United States"])])
+        (viewer,) = _FakeViewer.opened
+        self.assertEqual(viewer.data, b"%PDF-johnson")
+        self.assertIn("Johnson v. United States", viewer.title)
+
+    def test_cancelling_opens_nothing(self):
+        self.assertTrue(self._click())          # no answer: cancelled
+        self.assertEqual(len(ASKED), 1)
+        self.assertEqual(_FakeViewer.opened, [])
+        self.assertEqual(self.app.watches[-1].told, [("finish", "")])
+
+    def test_a_case_settled_by_its_name_is_not_asked_about(self):
+        app = self.app
+
+        def settled(client, item):
+            app.resolved_items.append(dict(item))
+            item["_case_law_pdf_choices"] = [
+                SimpleNamespace(cite=_APPX, url=_JOHNSON, pick=False,
+                                opinion=None)]
+            return _JOHNSON
+
+        app._resolve_pdf_url = settled
+        self._click()
+        self.assertEqual(ASKED, [])
+        self.assertEqual(_FakeViewer.opened[0].data, b"%PDF-johnson")
+
+
 class CitedScanBookmarkTests(unittest.TestCase):
     """A case's scan, opened from a citation, bookmarked while its pages are
     what is on screen — and reopened from the bookmark."""
@@ -986,10 +1071,13 @@ class OrdersPageTests(unittest.TestCase):
         self.assertTrue(self._click())
         self.assertEqual(self.fell_back, [])     # no text to guess with
         self.assertEqual(_FakeViewer.opened, [])
+        # Said by the load: in its window, or to the reader directly when it
+        # never showed (see _LoadWatch.fail) — and only once.
         self.assertEqual(
-            self.app.toasts,
-            ["11 cases begin at 498 U.S. 807 — can't tell which, so "
-             "nothing opened"])
+            self.app.watches[-1].told,
+            [("fail", "11 cases begin at 498 U.S. 807 — can't tell which, "
+                      "so nothing opened")])
+        self.assertEqual(self.app.toasts, [])
 
     def test_the_case_read_in_is_offered_when_the_link_names_none(self):
         self._click(context_name="California v. Acevedo")

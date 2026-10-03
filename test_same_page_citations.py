@@ -184,9 +184,19 @@ class _SamePageFixture(unittest.TestCase):
 class SamePageResultsTests(_SamePageFixture):
     """Which of the results bearing the citation is opened."""
 
-    def test_without_a_name_the_first_result_bearing_the_cite_is_taken(self):
-        # Nothing to tell the cases apart by: Scholar's order, as before.
-        self.assertOpened(self.fetcher.fetch_by_citation(SCT), OTHER)
+    def test_without_a_name_the_reader_is_asked_which(self):
+        # Nothing to tell the cases apart by: Scholar's first opened before,
+        # whichever case was meant.  Now none opens, and the cases at the
+        # page come back for the reader to choose among.
+        self.assertIsNone(self.fetcher.fetch_by_citation(SCT))
+        self.assertEqual(
+            sorted(_case_id(r.url) for r in self.fetcher.take_page_mates()),
+            sorted([NETCHOICE, OTHER]))
+        self.assertEqual(self.fetcher.take_page_mates(), [])   # told once
+
+    def test_a_name_leaves_nothing_to_ask(self):
+        self.fetcher.fetch_by_citation(SCT, case_name="Harmon v. Delgado")
+        self.assertEqual(self.fetcher.take_page_mates(), [])
 
     def test_the_name_picks_the_case_meant(self):
         got = self.fetcher.fetch_by_citation(
@@ -220,8 +230,9 @@ class SamePageResultsTests(_SamePageFixture):
         # result away either.
         for name in ("In re", "et al.", "v."):
             with self.subTest(name=name):
-                self.assertOpened(
-                    self.fetcher.fetch_by_citation(SCT, case_name=name), OTHER)
+                self.assertIsNone(
+                    self.fetcher.fetch_by_citation(SCT, case_name=name))
+                self.assertEqual(len(self.fetcher.take_page_mates()), 2)
 
     def test_nor_does_a_lone_result_naming_another_case(self):
         self.scholar.results = ONLY_THE_OTHER
@@ -349,9 +360,11 @@ class CopiesOnHandTests(_SamePageFixture):
         self.assertEqual(self.scholar.urls, [])
 
     def test_without_a_name_two_stored_cases_are_left_to_scholar(self):
+        # Which the reader is then asked to choose between.
         self._with_database(NETCHOICE, OTHER)
-        self.assertOpened(self.fetcher.fetch_by_citation(SCT), OTHER)
+        self.assertIsNone(self.fetcher.fetch_by_citation(SCT))
         self.assertEqual(len(self.scholar.searches), 1)
+        self.assertEqual(len(self.fetcher.take_page_mates()), 2)
 
 
 class NameComparisonTests(_SamePageFixture):

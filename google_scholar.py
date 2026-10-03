@@ -455,6 +455,16 @@ def _name_tokens(name: str) -> set[str]:
     }
 
 
+def _different_cases(results: "list[ScholarResult]") -> bool:
+    """Whether *results* — those bearing one citation — are more than one
+    case: titles naming different parties, not the same case listed twice."""
+    keys = {frozenset(w for w in re.findall(r"[a-z]{3,}", (r.title or "")
+                                              .lower())
+                      if w not in ("the", "and", "inc", "corp", "llc"))
+            for r in results}
+    return len(keys) > 1
+
+
 def bears_citation(result: "ScholarResult", citation: str) -> bool:
     """True when a Scholar search *result* itself carries *citation* — in
     its title or its byline's citation segment.  The snippet doesn't count:
@@ -2154,6 +2164,7 @@ class GoogleScholarFetcher:
         """
         self._post_search_failure = None
         self._note_absent(False)
+        self._miss.page_mates = []
         citation = citation.strip()
         case_name = self._usable_name(case_name)
         year = str(year or "").strip()[:4]
@@ -2212,6 +2223,15 @@ class GoogleScholarFetcher:
         bearing = self._cited_results(resp.text, citation)
         if _RESULTS_PAGE_RE.search(resp.text):
             self._cited_search_cache[citation] = bearing
+        # Several cases begin on the page and nothing came with the citation
+        # to say which: handed back for the reader to choose (see
+        # take_page_mates) rather than guessed at.
+        if not case_name and not year and _different_cases(bearing):
+            print(f"[scholar] {len(bearing)} cases begin at {citation!r} "
+                  "and nothing says which: "
+                  + "; ".join(repr(r.title) for r in bearing))
+            self._miss.page_mates = list(bearing)
+            return fallback
         pick = self._pick_cited(bearing, case_name, year)
         if pick is None:
             if not bearing:
@@ -2395,6 +2415,16 @@ class GoogleScholarFetcher:
 
     def _note_absent(self, absent: bool) -> None:
         self._miss.absent = absent
+
+    def take_page_mates(self) -> list["ScholarResult"]:
+        """The cases the last :meth:`fetch_by_citation` on this thread found
+        beginning at the citation and could not choose among — no name or
+        year came with it — returned once and cleared; [] otherwise.  The
+        caller asks the reader which is meant: Scholar's first was opened
+        before, whichever case it was."""
+        mates = getattr(self._miss, "page_mates", None) or []
+        self._miss.page_mates = []
+        return list(mates)
 
     def how_cited_heading(self, url: str) -> str:
         """The heading of a "How cited" page (see :func:`is_how_cited_url`):

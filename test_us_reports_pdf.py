@@ -554,6 +554,7 @@ PAGE_NS = _load(
             "_NAME_PARTY_SPLIT_RE", "_US_PARTY_RE", "_MAX_CLEAN_PARTY",
             "_COMMON_PARTY_NAMES"),
     extra={"threading": threading, "dataclass": dataclasses.dataclass,
+           "field": dataclasses.field,
            "Optional": typing.Optional, "difflib": difflib,
            "_STATE_COURTS": STATE_COURTS,      # the frequent-party names
            "print": lambda *a, **k: None},

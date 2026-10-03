@@ -239,24 +239,44 @@ def _born_digital(slug: bool = True, rule: bool = False) -> bytes:
     visible block of text, the invisible printer's slug GovInfo's U.S.
     Reports carry above the running head (text render mode 3), and (with
     *rule*) a line drawn well below the text."""
+    return _pdf_of([_page_ops(LINES, slug=slug, rule=rule)])
+
+
+def _page_ops(lines: list, slug: bool = False, rule: bool = False,
+              bands: bool = False) -> bytes:
+    """One page's content: *lines* of text from near the top, and what the
+    flags add.  *bands* lays white boxes the width of the page across its
+    head and foot, as the Court's own PDFs do."""
     ops = ["BT /F1 11 Tf 14 TL 150 600 Td"]
-    ops += [f"({line}) Tj T*" for line in LINES]
+    ops += [f"({line}) Tj T*" for line in lines]
     ops.append("ET")
     if slug:
         ops.append("BT 3 Tr /F1 8 Tf 150 770 Td "
                    "(553US2 Unit: $U42 [11-26-12 13:39:59] PAGES PGT: OPIN) "
                    "Tj ET")
     if rule:
-        ops.append("150 300 m 400 300 l S")
-    stream = "\n".join(ops).encode("latin-1")
+        ops.append("3 w 150 300 m 400 300 l S")
+    if bands:
+        ops.append("q 1 1 1 rg 0 0 612 50 re f 0 742 612 50 re f Q")
+    return "\n".join(ops).encode("latin-1")
+
+
+def _pdf_of(streams: list) -> bytes:
+    """A letter-size PDF with a page for each content stream."""
+    kids = " ".join(f"{4 + 2 * k} 0 R" for k in range(len(streams)))
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Pages /Kids [%s] /Count %d >>"
+        % (kids.encode(), len(streams)),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>",
-        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream),
     ]
+    for k, stream in enumerate(streams):
+        objects.append(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>"
+            % (5 + 2 * k))
+        objects.append(b"<< /Length %d >>\nstream\n%s\nendstream"
+                       % (len(stream), stream))
     out, offsets = bytearray(b"%PDF-1.4\n"), []
     for number, body in enumerate(objects, 1):
         offsets.append(len(out))
@@ -307,6 +327,75 @@ class SavedMarginTests(unittest.TestCase):
         # the file saved is framed alike at any zoom.
         pane = SimpleNamespace(_margin=54, _base_w=900, _target_w=1800)
         self.assertAlmostEqual(g._PdfPane._margin_ratio(pane), 54 / 792)
+
+
+@unittest.skipUnless(_HAVE_PDFIUM, "needs pypdfium2 and tkinter")
+class CourtPdfFramingTests(unittest.TestCase):
+    """The Court's own PDFs — its slip opinions in the U.S. Reports' form,
+    preliminary prints and bound volumes — are saved framed as the viewer
+    shows them, not on the page as published."""
+
+    OPINION = LINES * 3      # enough type for the viewer to measure
+
+    def _viewer_boxes(self, data: bytes) -> list:
+        """The boxes the viewer frames each page in, an opinion's pages
+        sharing one as they do on screen."""
+        pane = SimpleNamespace(_meta=g._PdfPane.measure_pdf(data))
+        g._PdfPane._apply_uniform_crop(pane)
+        return [m[2] for m in pane._meta]
+
+    def _sizes(self, data: bytes) -> list:
+        doc = pdfium.PdfDocument(io.BytesIO(data))
+        return [tuple(round(v) for v in doc[i].get_size())
+                for i in range(len(doc))]
+
+    def test_a_drawing_that_puts_down_no_ink_is_no_part_of_the_page(self):
+        # The white boxes across the head and foot left every page whole.
+        data = _pdf_of([_page_ops(self.OPINION, bands=True)])
+        out = g._crop_pdf_to_content(data,
+                                     frac_boxes=self._viewer_boxes(data))
+        l, b, r, t = _box(out)
+        self.assertGreater(b, 250)
+        self.assertLess(t, 640)
+
+    def test_a_drawing_the_viewer_sees_still_counts(self):
+        data = _pdf_of([_page_ops(self.OPINION, rule=True, bands=True)])
+        out = g._crop_pdf_to_content(data,
+                                     frac_boxes=self._viewer_boxes(data))
+        l, b, r, t = _box(out)
+        self.assertLessEqual(b, 298)
+
+    def test_the_pages_of_an_opinion_are_saved_one_size(self):
+        # Cropped page by page, the short last page came out a short sheet,
+        # which a printer fitting it to the paper set in larger type.
+        data = _pdf_of([_page_ops(self.OPINION, bands=True),
+                        _page_ops(LINES * 2, bands=True)])
+        out = g._crop_pdf_to_content(data,
+                                     frac_boxes=self._viewer_boxes(data))
+        first, last = self._sizes(out)
+        self.assertEqual(first, last)
+        self.assertLess(first[0], 500)
+
+    def test_a_page_too_bare_to_measure_is_framed_with_the_rest(self):
+        # The viewer shows such a page whole, unsure of so little type; its
+        # own box alone made a scrap of a page.
+        data = _pdf_of([_page_ops(self.OPINION), _page_ops(self.OPINION),
+                        _page_ops(["It is so ordered."])])
+        boxes = self._viewer_boxes(data)
+        self.assertEqual(boxes[2], (0.0, 0.0, 1.0, 1.0))
+        sizes = self._sizes(g._crop_pdf_to_content(data, frac_boxes=boxes))
+        self.assertEqual(sizes[2], sizes[0])
+
+    def test_the_margin_is_the_viewers(self):
+        data = _pdf_of([_page_ops(self.OPINION, bands=True)])
+        out = g._crop_pdf_to_content(data, frac_boxes=self._viewer_boxes(data),
+                                     margin_ratio=54 / 792)
+        doc = pdfium.PdfDocument(io.BytesIO(data))
+        cl, cb, cr, ct = g._page_content_box_pts(
+            doc[0], visible=g._frac_box_to_points(
+                self._viewer_boxes(data)[0], (0, 0, 612, 792)))
+        l, b, r, t = _box(out)
+        self.assertAlmostEqual(cl - l, (cr - cl) * 54 / 792, places=1)
 
 
 def _dark_pixels_bytes(data: bytes, page: int = 0, below: int = 40) -> int:
