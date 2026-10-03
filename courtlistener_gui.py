@@ -4221,6 +4221,35 @@ def _item_from_cluster(cluster: dict) -> dict:
     return item
 
 
+def _cases_bearing_citation(client, cite: str) -> list[str]:
+    """The names of the different cases CourtListener has at *cite*, one per
+    case however many records it keeps of it — what a citation alone cannot
+    choose among when there are several.  [] when it has none, or cannot be
+    asked."""
+    names: list[str] = []
+    for lookup_cite in _citation_search_variants(
+            (cite or "").split("@", 1)[0].strip()):
+        try:
+            entries = client.lookup_citation(lookup_cite)
+        except Exception as exc:
+            print(f"[cl-cite] citation-lookup failed for {lookup_cite!r}: "
+                  f"{exc}")
+            continue
+        for entry in entries:
+            if entry.get("status") not in (200, 300):
+                continue
+            for cl in entry.get("clusters") or []:
+                name = re.sub(r"<[^>]+>", "", str(
+                    cl.get("case_name") or cl.get("case_name_full") or ""))
+                if name and not any(
+                        _name_tokens(name) == _name_tokens(seen)
+                        or _match_tier(seen, name) == 3 for seen in names):
+                    names.append(name)
+        if names:
+            break
+    return names
+
+
 def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     """Resolve a reporter citation to the CourtListener cluster that actually
     bears it, as a search-result-shaped item (or ``None``).
@@ -4931,8 +4960,19 @@ def _name_match_score(query: str, candidate: str) -> float:
         q = set(_name_tokens(query))
         c = set(_name_tokens(candidate))
         return _party_overlap(q, c) if q else 0.0
-    per_side = [max(_party_overlap(qp, cp) for cp in c_parties)
-                for qp in q_parties]
+    if len(q_parties) == 2 and len(c_parties) == 2:
+        # Each side of the query against a side of its own, as captioned or
+        # swapped: one candidate party cannot answer for both.  Matched
+        # freely, "Pleasants v. Pleasants" found itself twice in "Pleasant
+        # Grove City v. Summum" and scored it a perfect match.
+        (qa, qb), (ca, cb) = q_parties, c_parties
+        per_side = max(
+            [_party_overlap(qa, ca), _party_overlap(qb, cb)],
+            [_party_overlap(qa, cb), _party_overlap(qb, ca)],
+            key=sum)
+    else:
+        per_side = [max(_party_overlap(qp, cp) for cp in c_parties)
+                    for qp in q_parties]
     avg = sum(per_side) / len(per_side)
     # Reward a both-sides hit so an exact "A v. B" outranks a one-party match.
     bonus = 0.15 if sum(1 for s in per_side if s >= 0.6) >= 2 else 0.0
@@ -4989,6 +5029,19 @@ def _match_tier(query: str, candidate: str) -> int:
     # One side matched (or both, but on the same candidate party): distinctive
     # unless every matched party is a frequent name.
     return 0 if all(_is_common_party(qp) for qp in matched) else 1
+
+
+def _is_the_named_case(name: str, candidate: str) -> bool:
+    """Whether *candidate* is the case *name* names, on the names alone — a
+    search hit that does not bear the citation asked for, taken for the case
+    only on the strength of its caption.  Both parties of an "A v. B" name
+    must answer to it: a hit sharing one party with it is another case
+    ("Pleasant Grove City v. Summum" is no "Pleasants v. Pleasants"), and
+    taking it opened that case in place of the one asked for."""
+    if _match_tier(name, candidate) < (2 if len(_name_parties(name)) == 2
+                                        else 1):
+        return False
+    return _name_match_score(name, candidate) >= _NAME_MATCH_MIN
 
 
 def _filter_to_best_tier(query: str,
@@ -5072,6 +5125,8 @@ def _case_signature(name: str, cite: str, year: str, court: str = "",
         "nk": nk, "cites": cites, "series": series,
         "court": re.sub(r"[^a-z0-9]", "", (court or "").lower()),
         "opinion_id": str(opinion_id or "").strip().lower(),
+        "name": re.sub(r"<[^>]+>", "", name or "").strip()
+        if include_name else "",
     }
 
 
@@ -5085,14 +5140,24 @@ def _same_case(a: dict, b: dict) -> bool:
     known to one side but not the other is not a disagreement — the cases may
     still be one, so name-and-year still merges them.  Parallel citations in
     different series ("59 N.W.2d 336" and "157 Neb. 226") do not disagree, so a
-    case reported two ways still collapses to one row."""
+    case reported two ways still collapses to one row.
+
+    A shared citation is not proof when the two names have no party in
+    common: a page can open more than one case, and a reporter normalized
+    past its nominatives files several under one cite — CourtListener has
+    Pleasants v. Pleasants, Commonwealth v. Carter and Swope v. Chambers all
+    at "2 Va. 319", which came out as a single row.  A shared frequent name
+    ("Commonwealth") is no party in common; one source's "Com." for
+    another's "Commonwealth" still is, by the other party."""
     if (
         a.get("opinion_id")
         and a["opinion_id"] == b.get("opinion_id")
     ):
         return True
     if a["cites"] & b["cites"]:
-        return True
+        na, nb = a.get("name") or "", b.get("name") or ""
+        return not (na and nb and max(_match_tier(na, nb),
+                                      _match_tier(nb, na)) <= 0)
     if a["nk"] and a["nk"] == b["nk"]:
         if a["court"] and b["court"] and a["court"] != b["court"]:
             return False
@@ -9415,12 +9480,15 @@ class CourtListenerGUI:
                                  f"{label}, so it is open in your browser "
                                  "instead.")
 
-    def _spotlight_search(self, query: str) -> None:
-        """Open Spotlight with *query* typed in, and run it."""
+    def _spotlight_search(self, query: str, list_note: str = "") -> None:
+        """Open Spotlight with *query* typed in, and run it.  With
+        *list_note*, it lists what the query finds — a citation included,
+        which would otherwise open at once — and says *list_note* over the
+        list: the cases a citation could be, for the reader to choose."""
         if self._quick_popup is not None:
             self._close_quick_popup()
         self._spotlight_toggle_at = 0.0     # not a second press of the key
-        self._toggle_quick_search_popup(query=query)
+        self._toggle_quick_search_popup(query=query, list_note=list_note)
 
     def _on_window_mapped(self, event) -> None:
         """Bring the first window a click in Chrome opens to the front.  The
@@ -9515,8 +9583,9 @@ class CourtListenerGUI:
 
     def _toggle_quick_search_popup(
             self, pressed_at: "Optional[float]" = None,
-            query: str = "") -> None:
-        # *query*: opening, type it in and run it (see _spotlight_search).
+            query: str = "", list_note: str = "") -> None:
+        # *query*: opening, type it in and run it (see _spotlight_search) —
+        # as a list of results with *list_note* over it, when there is one.
         # One press = one toggle: a duplicate hotkey delivery (macOS event
         # taps can fire twice for one chord) would close the popup and
         # immediately reopen it, so a burst within the debounce window is
@@ -9673,7 +9742,11 @@ class CourtListenerGUI:
         popup.after(10, _grab_focus)
         if query:
             entry_var.set(query)
-            popup.after(30, _submit)
+            if list_note:
+                popup.after(30, lambda: self._show_spotlight_dropdown(
+                    popup, border, entry, query, note=list_note))
+            else:
+                popup.after(30, _submit)
 
     def _open_lookup_query(self, query: str,
                            before_open=lambda: None) -> bool:
@@ -9795,12 +9868,25 @@ class CourtListenerGUI:
                     # The popup is already gone; a citation that
                     # resolves nowhere would otherwise end in silence,
                     # which reads as the app having hung.
-                    if not self._try_open_citation(
+                    if self._try_open_citation(
                         name, cite, pin, fetcher, client, year=year,
                     ):
-                        label = f"{name}, {cite}" if name else cite
-                        self._post_root(self._notify_lookup_miss,
-                                        f"No case found for {label}.")
+                        return
+                    # Several cases begin there and nothing typed says
+                    # which: "No case found" would be wrong, so Spotlight
+                    # comes back listing them — CourtListener files three
+                    # cases under "2 Va. 319".
+                    cases = (_cases_bearing_citation(client, cite)
+                             if client is not None else [])
+                    if len(cases) > 1:
+                        self._post_root(
+                            self._spotlight_search, query,
+                            f"{len(cases)} cases begin at {cite} — "
+                            "choose one")
+                        return
+                    label = f"{name}, {cite}" if name else cite
+                    self._post_root(self._notify_lookup_miss,
+                                    f"No case found for {label}.")
 
                 def as_text() -> None:
                     threading.Thread(target=run, daemon=True).start()
@@ -10088,10 +10174,12 @@ class CourtListenerGUI:
 
     def _show_spotlight_dropdown(
         self, popup: tk.Toplevel, border: tk.Frame,
-        entry: tk.Entry, query: str,
+        entry: tk.Entry, query: str, note: str = "",
     ) -> None:
         """Expand the popup into a spotlight-style dropdown with streaming
-        search results from Google Scholar and CourtListener."""
+        search results from Google Scholar and CourtListener.  *note*, when
+        given, is what the status line says once results are in, in place
+        of their count."""
 
         # A fresh search retracts any dropdown still showing from the previous
         # query: bump the generation token so stale background callbacks are
@@ -10615,6 +10703,8 @@ class CourtListenerGUI:
                         status_lbl.configure(
                             text=f"No case of that name — {n} results "
                                  "for this phrase")
+                    elif note and n:
+                        status_lbl.configure(text=note)
                     else:
                         status_lbl.configure(
                             text=f"{n} results" if n else "No results found"
@@ -10691,8 +10781,14 @@ class CourtListenerGUI:
             scholar_page[:] = results
             if is_reporter_cite:
                 # A reporter citation in the query pins the case, so keep
-                # Google Scholar's own relevance order (top few).
-                results = results[:3]
+                # Google Scholar's own relevance order (top few) — of the
+                # results that are the cited case: its full-text search
+                # answers "2 Va 319" with "319 U.S. 624" and opinions that
+                # merely cite the page.
+                results = [
+                    r for r in results
+                    if any(_scholar_bears_citation(r, c) for c in lookup_cites)
+                ][:3]
             else:
                 # Just a name: Google Scholar, like CourtListener, ranks on
                 # the whole opinion text, so rank the entire first page of
@@ -10748,7 +10844,11 @@ class CourtListenerGUI:
                     try:
                         candidate_results = []
                         for entry in client.lookup_citation(lookup_cite):
-                            if entry.get("status") != 200:
+                            # 300: several cases bear the citation ("2 Va.
+                            # 319" is Pleasants v. Pleasants and two others
+                            # to CourtListener) — every one of them is a row
+                            # for the reader to choose from.
+                            if entry.get("status") not in (200, 300):
                                 continue
                             for cl in entry.get("clusters") or []:
                                 candidate_results.append(_item_from_cluster(cl))
@@ -12237,8 +12337,7 @@ class CourtListenerGUI:
                         if hit is None:
                             hit = next(
                                 (h for h in hits
-                                 if _name_match_score(name, h.title or "")
-                                 >= _NAME_MATCH_MIN),
+                                 if _is_the_named_case(name, h.title or "")),
                                 None,
                             )
                         if hit is not None:
