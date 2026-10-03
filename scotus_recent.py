@@ -742,20 +742,51 @@ def _release_number(release: str) -> int:
     return int(digits) if digits else 0
 
 
+#: How many Terms before the sitting one the recent lists may reach into, to
+#: fill out a Term that has only begun (or not begun: in early October the
+#: new Term's tables are empty).
+REACH_BACK_TERMS = 2
+
+
+def up_to_linked(rows: list, limit: int) -> list:
+    """The first of *rows* (newest first) up to and including the *limit*-th
+    the Court has linked a PDF to.  Only those can be opened, so it is their
+    number that fills a list; a row listed before its PDF, newer than the
+    last kept, comes along — the newest news there is."""
+    kept: list = []
+    linked = 0
+    for row in rows:
+        if linked >= limit:
+            break
+        kept.append(row)
+        if row.opinion_url:
+            linked += 1
+    return kept
+
+
+def _latest_terms(kind: str, limit: int, prepare, *, session=None) -> list:
+    """Rows of the sitting Term's *kind* table, and as many Terms before it
+    (up to REACH_BACK_TERMS) as it takes for *limit* of them to have PDFs —
+    each Term's rows through *prepare* first (orders are grouped)."""
+    out: list = []
+    year = _current_term_year()
+    for term in range(year, year - REACH_BACK_TERMS - 1, -1):
+        out.extend(prepare(fetch_term_opinions(term, kind, session=session)))
+        if sum(1 for row in out if row.opinion_url) >= limit:
+            break
+    return out
+
+
 def recent_merits_opinions(limit: int = 10, *, session=None) -> list[TermOpinion]:
     """The Court's latest opinions of the Court, newest first: the sitting
-    Term's table, reaching back into the last Term while this one has fewer
-    than *limit*.  What stands in for the homepage's Recent Decisions panel
-    when it is empty."""
-    out: list[TermOpinion] = []
-    year = _current_term_year()
-    for term in (year, year - 1):
-        out.extend(fetch_term_opinions(term, MERITS, session=session))
-        if len(out) >= limit:
-            break
+    Term's table, reaching back a Term at a time (see REACH_BACK_TERMS)
+    until *limit* of them have PDFs to open — so a Term that has just begun
+    is filled out from the last.  What fills out the homepage's Recent
+    Decisions panel, or stands in for it when it is empty."""
+    out = _latest_terms(MERITS, limit, list, session=session)
     out.sort(key=lambda row: (row.date, _release_number(row.release)),
              reverse=True)
-    return out[:limit]
+    return up_to_linked(out, limit)
 
 
 def pdf_page(url: str) -> int:
@@ -803,18 +834,12 @@ def group_order_opinions(rows: list[TermOpinion]) -> list[OrderOpinion]:
 def recent_order_opinions(limit: int = 5, *, session=None) -> list[OrderOpinion]:
     """The latest orders that drew separate writings, newest first, each
     listed once with the Justices who wrote (see :func:`group_order_opinions`)
-    — from the sitting Term, reaching back into the last while it has fewer
-    than *limit*."""
-    out: list[OrderOpinion] = []
-    year = _current_term_year()
-    for term in (year, year - 1):
-        out.extend(group_order_opinions(
-            fetch_term_opinions(term, RELATING_TO_ORDERS, session=session)
-        ))
-        if len(out) >= limit:
-            break
+    — from the sitting Term, reaching back a Term at a time (see
+    REACH_BACK_TERMS) until *limit* of them have PDFs to open."""
+    out = _latest_terms(RELATING_TO_ORDERS, limit, group_order_opinions,
+                        session=session)
     out.sort(key=lambda order: order.date, reverse=True)  # stable within a day
-    return out[:limit]
+    return up_to_linked(out, limit)
 
 
 def author_label(initials: str) -> str:

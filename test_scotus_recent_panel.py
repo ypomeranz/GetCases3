@@ -191,6 +191,44 @@ class RecentListsTests(unittest.TestCase):
         self.assertEqual({c.args[1] for c in fetch.call_args_list},
                          {scotus_recent.MERITS})
 
+    def test_only_opinions_with_pdfs_count_toward_the_number(self):
+        # A Term just begun lists its newest before their PDFs are up: they
+        # come along, but the list is filled out to three that can open.
+        terms = {
+            2026: [merits("2026-10-14", "Posted v. Later", url=""),
+                   merits("2026-10-07", "First v. Term")],
+            2025: [merits("2026-06-30", "Trump v. Barbara"),
+                   merits("2026-06-29", "Trump v. Slaughter"),
+                   merits("2026-06-01", "Older v. Case")],
+        }
+        with patch("scotus_recent._current_term_year", return_value=2026), \
+                patch("scotus_recent.fetch_term_opinions",
+                      side_effect=lambda term, kind, session=None:
+                      terms.get(term, [])):
+            rows = scotus_recent.recent_merits_opinions(3)
+        self.assertEqual([r.name for r in rows],
+                         ["Posted v. Later", "First v. Term",
+                          "Trump v. Barbara", "Trump v. Slaughter"])
+
+    def test_two_terms_back_when_the_last_is_short_too(self):
+        terms = {
+            2026: [],                        # October: no tables yet
+            2025: [merits("2026-06-30", "Trump v. Barbara")],
+            2024: [merits("2025-06-27", "Trump v. CASA"),
+                   merits("2025-06-26", "Mahmoud v. Taylor")],
+        }
+        with patch("scotus_recent._current_term_year", return_value=2026), \
+                patch("scotus_recent.fetch_term_opinions",
+                      side_effect=lambda term, kind, session=None:
+                      terms.get(term, [])) as fetch:
+            rows = scotus_recent.recent_merits_opinions(3)
+        self.assertEqual([r.name for r in rows],
+                         ["Trump v. Barbara", "Trump v. CASA",
+                          "Mahmoud v. Taylor"])
+        # Never further back than that.
+        self.assertEqual(sorted({c.args[0] for c in fetch.call_args_list}),
+                         [2024, 2025, 2026])
+
     def test_a_full_term_needs_no_other(self):
         rows = [merits(f"2026-06-{d:02d}", f"Case {d}") for d in range(1, 13)]
         with patch("scotus_recent._current_term_year", return_value=2025), \
@@ -353,13 +391,61 @@ class PanelLoadTests(unittest.TestCase):
         orders_fetch.assert_called_once_with(5)
         self.assertIn(("h", "Trump v. Barbara"), [l[:2] for l in lines])
 
-    def test_a_homepage_with_decisions_needs_no_fallback(self):
+    def test_a_short_homepage_is_filled_out_from_the_term(self):
+        # Early in a Term (or at its end) the homepage lists a few: the
+        # Term's opinions of the Court carry on after them.
         decision = scotus_recent.RecentDecision(
             name="NRSC v. FEC", docket="24-621", date="June 30, 2026",
             description="", opinion_url="u")
-        _lines, merits_fetch, orders_fetch = self.load([decision])
-        merits_fetch.assert_not_called()
+        lines, merits_fetch, orders_fetch = self.load([decision])
+        merits_fetch.assert_called_once_with(10)
         orders_fetch.assert_called_once_with(5)
+        heads = [l[:2] for l in lines]
+        self.assertLess(heads.index(("h", "NRSC v. FEC")),
+                        heads.index(("title", "Earlier opinions of the Court")))
+        self.assertIn(("h", "Trump v. Barbara"), heads)
+
+    def test_a_homepage_with_ten_needs_no_other(self):
+        decisions = [scotus_recent.RecentDecision(
+            name=f"Case {i}", docket=f"25-{i}", date="June 30, 2026",
+            description="", opinion_url="u") for i in range(10)]
+        _lines, merits_fetch, _orders = self.load(decisions)
+        merits_fetch.assert_not_called()
+
+    def test_an_old_homepage_list_gives_way_to_the_term(self):
+        # Kept from the last time the site answered: July's end-of-Term list,
+        # with September's opinions since.  The Term's ten stand alone.
+        old = scotus_recent.RecentDecision(
+            name="NRSC v. FEC", docket="24-621", date="June 30, 2026",
+            description="", opinion_url="u")
+        term = [merits("2026-09-25", "People Not Politicians v. Onder"),
+                merits("2026-06-30", "Trump v. Barbara")]
+        with patch("scotus_recent.fetch_recent_decisions", return_value=[old]), \
+                patch("scotus_recent.recent_merits_opinions",
+                      return_value=term), \
+                patch("scotus_recent.recent_order_opinions", return_value=[]):
+            decisions, filled, _orders = courtlistener_gui._fetch_recent_scotus()
+        self.assertEqual(decisions, [])
+        self.assertEqual(filled, term)
+
+    def test_what_the_homepage_lists_is_not_listed_twice(self):
+        decision = scotus_recent.RecentDecision(
+            name="NRSC v. FEC", docket="24-621, 24-622",
+            date="June 30, 2026", description="", opinion_url="u")
+        term = [
+            scotus_recent.TermOpinion(
+                term="25", date="2026-06-30", docket="24‑621",
+                name="National Republican Senatorial Committee v. FEC",
+                author="K", opinion_url="u2"),
+            merits("2026-06-29", "Trump v. Slaughter"),
+        ]
+        with patch("scotus_recent.fetch_recent_decisions",
+                   return_value=[decision]), \
+                patch("scotus_recent.recent_merits_opinions",
+                      return_value=term), \
+                patch("scotus_recent.recent_order_opinions", return_value=[]):
+            _decisions, filled, _orders = courtlistener_gui._fetch_recent_scotus()
+        self.assertEqual([m.name for m in filled], ["Trump v. Slaughter"])
 
 
 class PageLinkTests(unittest.TestCase):

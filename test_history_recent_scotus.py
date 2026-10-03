@@ -112,8 +112,10 @@ class MenuRowsTests(unittest.TestCase):
             [decision("NRSC v. FEC"), decision("No PDF v. Yet", url="")],
             [merits("Trump v. Slaughter")], [order("Postal Service v. California")])
 
+        # …and the Term's opinions that fill out the list follow them.
         self.assertEqual([(r["name"], r["date"]) for r in opinions],
-                         [("NRSC v. FEC", "June 30, 2026")])
+                         [("NRSC v. FEC", "June 30, 2026"),
+                          ("Trump v. Slaughter", "June 29, 2026")])
         self.assertEqual(opinions[0]["decided"], "2026-06-30")
         self.assertEqual(opinions[0]["writing"], "merits")
         self.assertEqual([(r["name"], r["date"], r["writing"]) for r in orders],

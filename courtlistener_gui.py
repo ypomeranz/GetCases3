@@ -7207,16 +7207,48 @@ def _mac_activate_app(allow_osascript: bool = True) -> bool:
 
 def _fetch_recent_scotus() -> tuple:
     """The Court's latest opinions, as the Recent SCOTUS lists show them:
-    ``(decisions, merits, orders)`` — the homepage's Recent Decisions, or,
-    when it lists none, the Term's ten latest opinions of the Court; then the
-    five latest orders that drew separate writings.  Worker thread: this
-    waits on supremecourt.gov whenever scotus_recent's cache has gone
-    stale."""
+    ``(decisions, merits, orders)`` — the homepage's Recent Decisions, filled
+    out to ten with the latest opinions of the Court it does not list (all
+    ten of them when it lists none: between Terms, and early in one, when the
+    sitting Term's own tables are filled out from the last); then the five
+    latest orders that drew separate writings.  Worker thread: this waits on
+    supremecourt.gov whenever scotus_recent's cache has gone stale."""
     import scotus_recent
     decisions = scotus_recent.fetch_recent_decisions()
-    merits = [] if decisions else scotus_recent.recent_merits_opinions(10)
+    linked = sum(1 for d in decisions if d.opinion_url)
+    merits: list = []
+    if not decisions:
+        merits = scotus_recent.recent_merits_opinions(10)
+    elif linked < 10:
+        # The homepage lists only the Term's newest few: the Term's tables
+        # carry on from there, less what it has already — unless they have
+        # anything newer, when the homepage's list is an old one (kept from
+        # the last time the site answered) and the tables' own ten stand.
+        term = scotus_recent.recent_merits_opinions(10)
+        newest = max((iso for iso in (scotus_recent.iso_date(d.date)
+                                      for d in decisions) if iso), default="")
+        if newest and any(m.date > newest for m in term):
+            decisions, merits = [], term
+        else:
+            merits = scotus_recent.up_to_linked(
+                [m for m in term
+                 if not any(_same_recent_case(m, d) for d in decisions)],
+                10 - linked)
     orders = scotus_recent.recent_order_opinions(5)
     return decisions, merits, orders
+
+
+def _same_recent_case(a, b) -> bool:
+    """Whether two of the Court's listings are one decision: a docket number
+    in common (however its dash is set; the homepage may list several), or
+    the same name."""
+    import scotus_recent
+    if scotus_recent._docket_tokens(a.docket) & scotus_recent._docket_tokens(
+            b.docket):
+        return True
+    def name(x) -> str:
+        return re.sub(r"\W+", " ", (x.name or "").lower()).strip()
+    return bool(name(a)) and name(a) == name(b)
 
 
 def _recent_scotus_menu_rows(decisions, merits, orders, *,
@@ -7234,14 +7266,15 @@ def _recent_scotus_menu_rows(decisions, merits, orders, *,
         return {"name": name, "date": date, "url": url, "docket": docket,
                 "decided": decided, "citation": citation, "writing": writing}
 
+    # The homepage's decisions, then the Term's opinions of the Court that
+    # fill the list out (all of it, when the homepage lists none).
     opinions = [row(d.name, d.date, d.opinion_url, docket=d.docket,
                     decided=scotus_recent.iso_date(d.date))
                 for d in decisions if d.opinion_url]
-    if not decisions:
-        opinions = [row(m.name, scotus_recent.display_date(m.date),
-                        m.opinion_url, docket=m.docket, decided=m.date,
-                        citation=m.citation)
-                    for m in merits if m.opinion_url]
+    opinions += [row(m.name, scotus_recent.display_date(m.date),
+                     m.opinion_url, docket=m.docket, decided=m.date,
+                     citation=m.citation)
+                 for m in merits if m.opinion_url]
     on_orders = [row(o.name, scotus_recent.display_date(o.date),
                      o.opinion_url, docket=o.docket, decided=o.date,
                      citation=o.citation, writing="order")
@@ -30837,8 +30870,6 @@ class _ScholarTextWindow:
         ]
         if decisions:
             lines.append(("title", "Recent decisions"))
-        elif merits:
-            lines.append(("title", "Opinions of the Court"))
         for d in decisions:
             lines.append(("h", d.name))
             sub = " · ".join(p for p in (
@@ -30852,37 +30883,41 @@ class _ScholarTextWindow:
                 opener(d.opinion_url, d.name, d.description, docket=d.docket,
                        decided=scotus_recent.iso_date(d.date)),
             ))
-        if not decisions:
-            for m in merits:
-                lines.append(("h", m.name))
-                sub = " · ".join(p for p in (
-                    scotus_recent.display_date(m.date),
-                    f"No. {m.docket}" if m.docket else "",
-                    scotus_recent.author_label(m.author),
-                ) if p)
-                lines.append(("lbl", sub))
-                if m.description:
-                    lines.append(("", m.description))
-                if m.opinion_url:
-                    lines.append((
-                        "", "Open the opinion",
-                        opener(m.opinion_url, m.name, m.description,
-                               citation=m.citation, docket=m.docket,
-                               decided=m.date),
-                    ))
-                    continue
-                # Listed before the Court has linked its PDF: the docket is
-                # where it will appear.
-                try:
-                    import scotus_docket
-                    docket_url = scotus_docket.official_docket_url(m.docket)
-                except Exception:
-                    docket_url = ""
-                if docket_url:
-                    lines.append(("", "Opinion not yet posted — the docket",
-                                  docket_url))
-                else:
-                    lines.append(("lbl", "Opinion not yet posted"))
+        # The Term's opinions of the Court: the list itself when the homepage
+        # has none, else carrying on past the homepage's few.
+        if merits:
+            lines.append(("title", "Earlier opinions of the Court"
+                          if decisions else "Opinions of the Court"))
+        for m in merits:
+            lines.append(("h", m.name))
+            sub = " · ".join(p for p in (
+                scotus_recent.display_date(m.date),
+                f"No. {m.docket}" if m.docket else "",
+                scotus_recent.author_label(m.author),
+            ) if p)
+            lines.append(("lbl", sub))
+            if m.description:
+                lines.append(("", m.description))
+            if m.opinion_url:
+                lines.append((
+                    "", "Open the opinion",
+                    opener(m.opinion_url, m.name, m.description,
+                           citation=m.citation, docket=m.docket,
+                           decided=m.date),
+                ))
+                continue
+            # Listed before the Court has linked its PDF: the docket is
+            # where it will appear.
+            try:
+                import scotus_docket
+                docket_url = scotus_docket.official_docket_url(m.docket)
+            except Exception:
+                docket_url = ""
+            if docket_url:
+                lines.append(("", "Opinion not yet posted — the docket",
+                              docket_url))
+            else:
+                lines.append(("lbl", "Opinion not yet posted"))
         if not (decisions or merits):
             lines.append(("lbl", "No recent decisions were found on "
                                  "supremecourt.gov."))
