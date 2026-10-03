@@ -617,6 +617,23 @@ for _state, _courts in STATE_COURTS:
     for _cid, _abbr, _label in _courts:
         COURT_BLUEBOOK[_cid] = _abbr
 
+# --- Hawaiʻi, spelled with its ʻokina -----------------------------------------
+# The state's courts write their name "Hawaiʻi", and the ʻokina comes through
+# as whatever the source had to hand: Google Scholar sets it as a backtick
+# ("Supreme Court of Hawai`i"), others as an apostrophe or a curly quote.
+# Every table here is keyed on plain "Hawaii", and a court named any other
+# way went unrecognized: no court in the parenthetical, and the State's own
+# courts not known for its own ("State of Hawai`i" cited as "Hawai'i").
+_HAWAII_OKINA_RE = re.compile(
+    r"\bhawai[`'‘’ʻʼ]i\b", re.IGNORECASE)
+
+
+def plain_state_names(text: str) -> str:
+    """*text* with every ʻokina spelling of Hawaiʻi made plain "Hawaii", for
+    matching against the state names the court tables are keyed on."""
+    return _HAWAII_OKINA_RE.sub("Hawaii", text or "")
+
+
 # --- Bluebook abbreviation from a court's full name ---------------------------
 # CourtListener knows thousands of courts; COURT_BLUEBOOK maps only the ids
 # the picker offers (plus EXTRA_BLUEBOOK).  For everything else the GUI falls
@@ -784,7 +801,7 @@ def bluebook_court_from_name(name: str) -> str:
     of last resort, and New York's "Supreme Court" is its trial court."""
     import re
 
-    t = re.sub(r"\s+", " ", (name or "")).strip()
+    t = re.sub(r"\s+", " ", plain_state_names(name)).strip()
     if not t:
         return ""
     low = t.lower()

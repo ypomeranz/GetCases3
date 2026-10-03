@@ -413,6 +413,68 @@ class CaptionCapitalizationTests(unittest.TestCase):
         self.assertEqual(_bluebook_display_name(item),
                          "State v. McKelvey, 544 P.3d 632 (Alaska 2024)")
 
+    WILSON = (
+        '<div id="gs_opinion"><center><b>543 P.3d 440 (2024)</b></center>'
+        '<center><h3 id="gsl_case_name">STATE of Hawai`i, Plaintiff-'
+        "Appellant,<br/> v.<br/> Christopher L. WILSON, Defendant-Appellee."
+        "</h3></center><center>SCAP-22-0000561.</center><center><p><b>"
+        "Supreme Court of Hawai`i.</b></p></center><center>February 7, "
+        "2024.</center><p>We hold that in Hawai`i there is no state "
+        "constitutional right to carry a firearm in public. The State "
+        "appeals an order dismissing charges against Christopher Wilson."
+        "</p></div>")
+
+    def test_hawaii_spelled_with_its_okina_is_hawaii(self):
+        # State v. Wilson, 543 P.3d 440 (Haw. 2024): Scholar sets the ʻokina
+        # as a backtick, "Supreme Court of Hawai`i", which no table knew —
+        # cited "Hawai'i v. Wilson, 543 P.3d 440 (2024)", the court lost and
+        # the State's own court not known for its own.
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import extract_record
+        blocks = parse_opinion_blocks(self.WILSON)
+        self.assertEqual(_bluebook_display_name(_scholar_item_from_blocks(
+            blocks)), "State v. Wilson, 543 P.3d 440 (Haw. 2024)")
+        self.assertEqual(
+            extract_record("https://scholar.google.com/scholar_case?case=1",
+                           self.WILSON)["name"], "State v. Wilson")
+
+    def test_every_okina_spelling_names_the_same_courts(self):
+        from court_catalog import bluebook_court_from_name
+        for okina in ("`", "'", "‘", "’", "ʻ", ""):
+            hawaii = f"Hawai{okina}i"
+            self.assertEqual(
+                bluebook_court_from_name(f"Supreme Court of {hawaii}"),
+                "Haw.", hawaii)
+            self.assertEqual(bluebook_court_from_name(
+                f"Intermediate Court of Appeals of {hawaii}"),
+                "Haw. Ct. App.", hawaii)
+            self.assertEqual(
+                state_of_court("", f"Supreme Court of {hawaii}"), "hawaii")
+        self.assertEqual(state_of_court(
+            "", "United States District Court, D. Hawai`i"), "")
+
+    def test_a_state_named_only_by_its_courts_header_keeps_the_designation(
+            self):
+        # Saved from Scholar alone, a state case had no court to tell the
+        # name rule it was the State's own: "Pennsylvania v. Pierce".
+        from opinion_db import extract_record
+        page = (
+            '<div id="gs_opinion"><center><b>786 A.2d 203 (2001)</b>'
+            '</center><center><h3 id="gsl_case_name">COMMONWEALTH of '
+            "Pennsylvania, Appellee,<br/> v.<br/> Charles PIERCE, Appellant."
+            "</h3></center><center><p><b>Supreme Court of Pennsylvania.</b>"
+            "</p></center><center>Decided December 19, 2001.</center>"
+            "<p>Charles Pierce appeals.</p></div>")
+        self.assertEqual(extract_record(
+            "https://scholar.google.com/scholar_case?case=2", page)["name"],
+            "Commonwealth v. Pierce")
+        # A federal court's case keeps the State's name.
+        federal = page.replace("Supreme Court of Pennsylvania",
+                               "United States Court of Appeals, Third Circuit")
+        self.assertEqual(extract_record(
+            "https://scholar.google.com/scholar_case?case=3", federal)["name"],
+            "Pennsylvania v. Pierce")
+
     def test_apostrophe_and_mc_names_from_all_caps(self):
         self.assertEqual(
             normal_case_caption("O'BRIEN v. MCFADDEN"),

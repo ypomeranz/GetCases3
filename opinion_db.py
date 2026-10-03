@@ -428,6 +428,26 @@ def _court_from_header(blocks: list) -> str:
     return ""
 
 
+def _state_from_header(blocks: list) -> str:
+    """The state whose own court the front matter names as deciding the case
+    ("Supreme Court of Hawai`i." → "hawaii"), or "" for a federal court or
+    none.  The first line naming a court is the one: a caption naming one as
+    a party ("Smith v. Superior Court") or a line naming the court below is
+    no such line."""
+    for b in blocks[:10]:
+        if getattr(b, "kind", None) != "center":
+            continue
+        t = re.sub(r"\s+", " ", b.text()).strip()
+        if (not re.search(r"\bcourt\b", t, re.IGNORECASE)
+                or re.search(r"\svs?\.\s", t, re.IGNORECASE)
+                or re.match(r"(?:on\s+)?(?:appeal|certiorari|petition|"
+                            r"original\s+proceeding|in\s+the\s+matter)\b",
+                            t, re.IGNORECASE)):
+            continue
+        return state_of_court("", t)
+    return ""
+
+
 def _caption_name(blocks: list) -> str:
     """Raw case name from the Scholar caption (a centered block with a 'v.'
     separator, or an 'In re'/'Ex parte' form).  Light, ``tkinter``-free cousin
@@ -548,11 +568,14 @@ def extract_record(
         court = _court_from_cites(cites) or header_court
 
     # Rule 10.2.1(f): whether a "People of the State of …" party keeps the
-    # designation or the state name turns on the deciding court.
+    # designation or the state name turns on the deciding court — which,
+    # for an opinion with no CourtListener record, only the header names.
     # The prose also settles a surname the given-name lists don't know
     # ("Chad Everet Brackeen" is Brackeen, rule 10.2.1(g)).
+    court_state = (state_of_court(court) if court
+                   else _state_from_header(blocks))
     name = abbreviate_case_name(
-        raw_name, court_state=state_of_court(court),
+        raw_name, court_state=court_state,
         body_text=prose) if raw_name else ""
 
     parties = parties_from_name(name or raw_name)

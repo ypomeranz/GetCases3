@@ -1288,6 +1288,7 @@ from court_catalog import (
     all_court_ids as _all_court_ids,
     bluebook_court_from_name as _bluebook_court_from_name,
     bluebook_federal_trial_court as _bluebook_federal_trial_court,
+    plain_state_names as _plain_state_names,
     state_of_court as _state_of_court,
 )
 
@@ -16435,7 +16436,9 @@ def _scholar_court_id(blocks) -> str:
     for b in blocks[:8]:
         if b.kind != "center":
             continue
-        t = re.sub(r"\s+", " ", b.text()).strip().rstrip(".").lower()
+        # "Supreme Court of Hawai`i" is the Hawaii Supreme Court.
+        t = re.sub(r"\s+", " ", _plain_state_names(b.text())
+                   ).strip().rstrip(".").lower()
         if not t or "court" not in t or "district court" in t or "bankruptcy" in t:
             continue
         if "supreme court" in t and "united states" in t:
