@@ -1236,6 +1236,55 @@ class AcronymCaseTests(unittest.TestCase):
         self.assertEqual(
             refine_caption_case("Nifla v. Becerra", body), "NIFLA v. Becerra")
 
+    def test_a_long_acronym_the_prose_writes_in_capitals(self):
+        # CBOCS West, Inc. v. Humphries, 553 U.S. 442 (2008): the opinion
+        # never defines "(CBOCS)", but writes it in capitals in its
+        # sentences throughout — which a five-letter word set in capitals
+        # by a heading or a running head never is.
+        body = ("442 OCTOBER TERM, 2007\nSyllabus\nCBOCS WEST, INC. v. "
+                "HUMPHRIES\nClaiming that petitioner CBOCS West, Inc., "
+                "dismissed him because he is black, respondent Humphries "
+                "filed suit charging that CBOCS’ actions violated Title "
+                "VII.\n444 CBOCS WEST, INC. v. HUMPHRIES\nThe Court of "
+                "Appeals rejected CBOCS’ argument that § 1981 did not "
+                "encompass a claim of retaliation.")
+        name = refine_caption_case(
+            normal_case_caption("CBOCS WEST, INC. v. HUMPHRIES"), body)
+        self.assertEqual(name, "CBOCS West, Inc. v. Humphries")
+        self.assertEqual(abbreviate_case_name(name),
+                         "CBOCS W., Inc. v. Humphries")
+        self.assertEqual(caption_case_reference_tokens(name, body), ())
+
+    def test_but_not_capitals_only_in_its_headings_nor_a_name(self):
+        # Capitals in the caption and running heads alone say nothing.
+        self.assertEqual(
+            refine_caption_case(
+                "Cbocs West, Inc. v. Humphries",
+                "CBOCS WEST, INC. v. HUMPHRIES\nSyllabus\n444 CBOCS WEST, "
+                "INC. v. HUMPHRIES\nThe company dismissed him."),
+            "Cbocs West, Inc. v. Humphries")
+        # A surname some opinions set in capitals as they go stays a name.
+        self.assertEqual(
+            refine_caption_case(
+                "Roberts West v. Smith",
+                "The court denied ROBERTS West's motion, and then rejected "
+                "ROBERTS' appeal."),
+            "Roberts West v. Smith")
+
+    def test_a_reference_name_lends_a_long_acronym_beside_mixed_case(self):
+        self.assertEqual(
+            apply_caption_case_reference(
+                "Cbocs W., Inc. v. Humphries",
+                "CBOCS West, Inc. v. Humphries", ("cbocs",)),
+            "CBOCS W., Inc. v. Humphries")
+        # A caption set in capitals throughout is typography.
+        self.assertEqual(
+            apply_caption_case_reference(
+                "In re National Prescription Opiate Litigation",
+                "In re NATIONAL PRESCRIPTION OPIATE LITIGATION",
+                ("prescription",)),
+            "In re National Prescription Opiate Litigation")
+
     def test_each_piece_of_a_hyphenated_word(self):
         body = ("Americo Norberto Pena-Irala was the Inspector General. "
                 "Pena-Irala had tortured Joelito. Later Pena-Irala left.")
@@ -4846,6 +4895,33 @@ class WriterParentheticalTests(unittest.TestCase):
         self.assertEqual(win._PART_BOX_TAGS["separate"], "box-separate")
         self.assertEqual(win._PART_LABEL_COLORS["separate"], "#59636f")
         self.assertEqual(win._SEPARATE_BG, "#f1f3f5")
+
+    def test_a_lead_opinion_that_only_announces_the_judgment(self):
+        part = self._part(
+            "majority",
+            "JUSTICE O'CONNOR announced the judgment of the Court and "
+            "delivered an opinion, in which THE CHIEF JUSTICE, JUSTICE "
+            "STEVENS, and JUSTICE SOUTER join.")
+        self.assertEqual(self._win()._writer_parenthetical(part),
+                         "plurality opinion")
+
+    def test_the_opinion_of_the_court_but_for_some_parts(self):
+        # Mullin v. Doe, Nos. 25-1083, 25-1084 (U.S. June 25, 2026): only
+        # Part III-A is a plurality's, so the opinion is cited as the
+        # Court's; a quotation from III-A is the quoter's to mark.
+        for byline in (
+                "JUSTICE ALITO, announced the judgment of the Court and "
+                "delivered the opinion of the Court with respect to all but "
+                "Part III-A, and an opinion with respect to Part III-A, in "
+                "which THE CHIEF JUSTICE, JUSTICE THOMAS, and JUSTICE "
+                "KAVANAUGH join.",
+                "Justice THOMAS announced the judgment of the Court and "
+                "delivered the opinion of the Court with respect to Parts I, "
+                "III-B, III-C, and IV, and an opinion with respect to Parts "
+                "II and III-A."):
+            with self.subTest(byline=byline[:40]):
+                part = self._part("majority", byline)
+                self.assertEqual(self._win()._writer_parenthetical(part), "")
 
     def test_spelled_out_bare_judge_byline(self):
         part = self._part("concurrence", "CLINTON, Judge.")

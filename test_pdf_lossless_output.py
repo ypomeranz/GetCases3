@@ -20,6 +20,7 @@ import io
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 try:
     import pypdfium2 as pdfium
@@ -31,8 +32,12 @@ try:
 except ImportError:  # pragma: no cover - exercised on a bare checkout
     _READY = False
 
-if _READY:
+try:  # the saved-margin tests need only pdfium (and the app's tkinter)
+    import pypdfium2 as pdfium
     import courtlistener_gui as g
+    _HAVE_PDFIUM = True
+except ImportError:  # pragma: no cover - exercised on a bare checkout
+    _HAVE_PDFIUM = False
 
 
 LINES = [
@@ -227,6 +232,81 @@ class LosslessOutputTests(unittest.TestCase):
             self.assertGreater(tp.count_chars(), 100)
         finally:
             tp.close()
+
+
+def _born_digital(slug: bool = True, rule: bool = False) -> bytes:
+    """A born-digital letter page, written by hand (no reportlab needed): a
+    visible block of text, the invisible printer's slug GovInfo's U.S.
+    Reports carry above the running head (text render mode 3), and (with
+    *rule*) a line drawn well below the text."""
+    ops = ["BT /F1 11 Tf 14 TL 150 600 Td"]
+    ops += [f"({line}) Tj T*" for line in LINES]
+    ops.append("ET")
+    if slug:
+        ops.append("BT 3 Tr /F1 8 Tf 150 770 Td "
+                   "(553US2 Unit: $U42 [11-26-12 13:39:59] PAGES PGT: OPIN) "
+                   "Tj ET")
+    if rule:
+        ops.append("150 300 m 400 300 l S")
+    stream = "\n".join(ops).encode("latin-1")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream),
+    ]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += (b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objects) + 1, xref))
+    return bytes(out)
+
+
+def _box(data: bytes) -> tuple:
+    doc = pdfium.PdfDocument(io.BytesIO(data))
+    return tuple(doc[0].get_mediabox())
+
+
+@unittest.skipUnless(_HAVE_PDFIUM, "needs pypdfium2 and tkinter")
+class SavedMarginTests(unittest.TestCase):
+    """A born-digital page saved is framed as the viewer shows it."""
+
+    def test_invisible_text_is_no_part_of_the_page(self):
+        # Counting the slug left a band of blank page atop every page saved.
+        l, b, r, t = _box(g._crop_pdf_to_content(_born_digital()))
+        self.assertLess(t, 640)
+
+    def test_a_drawn_figure_is_not_cropped_away(self):
+        l, b, r, t = _box(g._crop_pdf_to_content(_born_digital(rule=True)))
+        self.assertLessEqual(b, 300)
+
+    def test_the_viewers_margin_carries_over(self):
+        # The U.S. Reports are shown on a margin three times the default:
+        # 54 pixels beside a type block drawn 792 wide.
+        data = _born_digital(slug=False)
+        doc = pdfium.PdfDocument(io.BytesIO(data))
+        cl, cb, cr, ct = g._page_content_box_pts(doc[0])
+        ratio = 54 / 792
+        l, b, r, t = _box(g._crop_pdf_to_content(data, margin_ratio=ratio))
+        margin = (cr - cl) * ratio
+        self.assertAlmostEqual(cl - l, margin, places=1)
+        self.assertAlmostEqual(t - ct, margin, places=1)
+        # Without it, the old close crop.
+        l, b, r, t = _box(g._crop_pdf_to_content(data))
+        self.assertAlmostEqual(cl - l, 7.0, places=1)
+
+    def test_the_share_is_the_viewers_at_its_fit_width(self):
+        # Fixed in pixels, a margin is a smaller share of a zoomed-in page;
+        # the file saved is framed alike at any zoom.
+        pane = SimpleNamespace(_margin=54, _base_w=900, _target_w=1800)
+        self.assertAlmostEqual(g._PdfPane._margin_ratio(pane), 54 / 792)
 
 
 def _dark_pixels_bytes(data: bytes, page: int = 0, below: int = 40) -> int:

@@ -1564,6 +1564,38 @@ def _initialism_in_prose(spelling: str, body_text: str) -> bool:
     return found
 
 
+def _caps_in_running_prose(spelling: str, body_text: str) -> bool:
+    """Whether the opinion writes *spelling*, all capitals, in the run of its
+    sentences again and again — "petitioner CBOCS West, Inc.", "rejecting
+    CBOCS’ argument" in CBOCS West, Inc. v. Humphries, 553 U.S. 442 (2008) —
+    which makes the capitals the name's own spelling, long as it is.
+
+    An occurrence counts when an ordinary lowercase word stands just before
+    it on its line: a caption, a running head or a heading is set in
+    capitals throughout and never does.  Unlike :func:`_initialism_in_prose`
+    the word may appear outside the prose too (the scan's running heads
+    repeat the caption on every page), so it must appear in the prose at
+    least twice.  A name the Census files record is never taken this way: an
+    opinion can set a party's surname in capitals as it goes ("denied ROE's
+    motion", "SMITH argues")."""
+    if not body_text or not spelling.isupper():
+        return False
+    key = spelling.lower()
+    given, surnames, _mostly_given = _census_names()
+    if key in given or key in surnames or key in _GIVEN_NAMES:
+        return False
+    in_prose = 0
+    for m in re.finditer(r"(?<![A-Za-z])%s(?![A-Za-z])" % re.escape(spelling),
+                         body_text):
+        line_start = body_text.rfind("\n", 0, m.start()) + 1
+        before = _PROSE_BEFORE_RE.search(body_text[line_start:m.start()])
+        if before and before.group(1).islower():
+            in_prose += 1
+            if in_prose >= 2:
+                return True
+    return False
+
+
 def _reliable_caption_spelling(
     core: str, votes: dict[str, int], unanchored: bool, body_text: str = "",
 ) -> str:
@@ -1576,8 +1608,10 @@ def _reliable_caption_spelling(
         best = core
     if best.isupper():
         # Long caps are typography, not acronym spelling — unless the
-        # opinion defines the acronym ("… Advocates (NIFLA)").
-        if len(core) > 4 and not _defined_acronym(best, body_text):
+        # opinion defines the acronym ("… Advocates (NIFLA)") or writes it
+        # so in its sentences ("rejecting CBOCS’ argument").
+        if len(core) > 4 and not (_defined_acronym(best, body_text)
+                                  or _caps_in_running_prose(best, body_text)):
             return ""
         if unanchored and (votes[best] < 3 or votes[best] <= 2 * cur) and not (
                 cur == 0 and len(votes) == 1
@@ -1795,16 +1829,29 @@ def apply_caption_case_reference(
     wanted = set(unresolved)
     if not name or not reference_name or not wanted:
         return name
+    words = list(re.finditer(r"[A-Za-z]+", reference_name))
+
+    def mixed(word: str) -> bool:
+        return word[:1].isupper() and any(ch.islower() for ch in word[1:])
+
     spellings: dict[str, set[str]] = {}
-    for m in re.finditer(r"[A-Za-z]+", reference_name):
+    for k, m in enumerate(words):
         spelling = m.group(0)
         key = spelling.lower()
         if key not in wanted or spelling.islower():
             continue
         # Long ALL-CAPS words in metadata may be display typography rather
-        # than an entity's spelling.  Mixed case is the useful brand signal.
+        # than an entity's spelling: a caption set in capitals throughout
+        # ("In re NATIONAL PRESCRIPTION OPIATE LITIGATION").  Mixed case is
+        # the useful brand signal — and so is one word in capitals among
+        # mixed-case ones ("CBOCS West, Inc."), unless it is a name.
         if spelling.isupper() and len(spelling) > 4:
-            continue
+            beside = [words[j].group(0) for j in (k - 1, k + 1)
+                      if 0 <= j < len(words)]
+            given, surnames, _mostly_given = _census_names()
+            if (not any(mixed(w) for w in beside)
+                    or key in given or key in surnames):
+                continue
         spellings.setdefault(key, set()).add(spelling)
     donors = {
         key: next(iter(values)) for key, values in spellings.items()

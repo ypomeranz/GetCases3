@@ -19386,13 +19386,27 @@ def _page_content_box_pts(page) -> Optional[tuple]:
     Built from the page's own objects so it is exact for born-digital PDFs:
     the union of every glyph box (the selectable text) plus any image/vector
     object that does not span almost the whole page — a near-full-page image is
-    treated as a scan background and left to the caller's raster fallback."""
+    treated as a scan background and left to the caller's raster fallback.
+
+    Text set *invisible* is no content: GovInfo's U.S. Reports carry the
+    printer's slug ("553US2 Unit: $U42 … PAGES PGT: OPIN") in invisible type
+    above the running head, and counting it left a band of blank page atop
+    every page saved, which the viewer, cropping to what it can see, does
+    not show."""
     import ctypes
     import math
     import pypdfium2.raw as C
 
     l = b = math.inf
     r = t = -math.inf
+
+    def invisible(text_obj) -> bool:
+        try:
+            return bool(text_obj) and (
+                C.FPDFTextObj_GetTextRenderMode(text_obj)
+                == C.FPDF_TEXTRENDERMODE_INVISIBLE)
+        except Exception:
+            return False
 
     tp = None
     try:
@@ -19402,6 +19416,8 @@ def _page_content_box_pts(page) -> Optional[tuple]:
     if tp is not None:
         try:
             for k in range(tp.count_chars()):
+                if invisible(C.FPDFText_GetTextObject(tp.raw, k)):
+                    continue
                 cl, cr, cb, ct = (ctypes.c_double() for _ in range(4))
                 if not C.FPDFText_GetCharBox(
                     tp.raw, k, ctypes.byref(cl), ctypes.byref(cr),
@@ -19423,14 +19439,20 @@ def _page_content_box_pts(page) -> Optional[tuple]:
     # Include drawn objects (images, vector graphics) so a figure isn't clipped,
     # but skip any single object covering ~the whole page — that is the scan
     # image itself, whose own margins are exactly what we want to crop away.
+    # Text is in the glyph boxes above, invisible text left out.  (Asked for
+    # its bounds as get_pos, which pypdfium2 5 calls get_bounds, every drawn
+    # object used to be passed over, a figure's included: see
+    # _pdf_object_bounds.)
     try:
         mb = tuple(page.get_mediabox())
         page_area = max(1.0, (mb[2] - mb[0]) * (mb[3] - mb[1]))
         for obj in page.get_objects():
-            try:
-                ol, ob, orr, ot = obj.get_pos()
-            except Exception:
+            if obj.type == C.FPDF_PAGEOBJ_TEXT:
                 continue
+            bounds = _pdf_object_bounds(obj)
+            if bounds is None:
+                continue
+            ol, ob, orr, ot = bounds
             if (orr - ol) * (ot - ob) >= 0.9 * page_area:
                 continue
             l, r = min(l, ol), max(r, orr)
@@ -19585,6 +19607,7 @@ def _crop_pdf_to_content(
     pdf_bytes: bytes,
     frac_boxes: Optional[list] = None,
     margin_pt: float = 7.0,
+    margin_ratio: Optional[float] = None,
 ) -> bytes:
     """Return *pdf_bytes* cropped to each page's content by tightening the page
     boxes — a lossless crop that removes the wide blank borders while leaving
@@ -19599,7 +19622,11 @@ def _crop_pdf_to_content(
     box from *frac_boxes* instead, which is what the reader sees on screen.
 
     A small *margin_pt* is left around the content and the result is clamped to
-    the original media box so a page is never enlarged."""
+    the original media box so a page is never enlarged.  Given *margin_ratio*
+    — the viewer's margin as a share of the content's width (see
+    :meth:`_PdfPane._margin_ratio`) — the margin is the one the viewer
+    draws instead, when wider: the U.S. Reports' small type block, shown on
+    a roomy margin, came out of Save cropped close."""
     import io
 
     import pypdfium2 as pdfium
@@ -19622,8 +19649,11 @@ def _crop_pdf_to_content(
                     if box is None:
                         continue  # leave this page at full size
                     l, b, r, t = box
-                    l, b = max(mb[0], l - margin_pt), max(mb[1], b - margin_pt)
-                    r, t = min(mb[2], r + margin_pt), min(mb[3], t + margin_pt)
+                    m = margin_pt
+                    if margin_ratio:
+                        m = max(m, (r - l) * margin_ratio)
+                    l, b = max(mb[0], l - m), max(mb[1], b - m)
+                    r, t = min(mb[2], r + m), min(mb[3], t + m)
                     if r - l < 1 or t - b < 1:
                         continue  # implausibly tight — skip rather than clip
                     page.set_mediabox(l, b, r, t)
@@ -22257,7 +22287,7 @@ class _PdfPane(ttk.Frame):
         from PIL import Image
         scale = dpi / 72.0
         # Keep the same margin-to-content proportion the viewer displays.
-        margin_ratio = self._margin / max(1, self._inner_w)
+        margin_ratio = self._margin_ratio()
         whitened = 0
         omitted = 0
         pages: list = []
@@ -22425,9 +22455,18 @@ class _PdfPane(ttk.Frame):
             data, frac_boxes = _paint_out_pdf_redactions(
                 data, self._redaction_plan(header_cite), frac_boxes,
                 header_text=header_cite)
-        out = _crop_pdf_to_content(data, frac_boxes=frac_boxes)
+        out = _crop_pdf_to_content(data, frac_boxes=frac_boxes,
+                                   margin_ratio=self._margin_ratio())
         with open(path, "wb") as fh:
             fh.write(out)
+
+    def _margin_ratio(self) -> float:
+        """The margin this viewer draws around a page, as a share of the
+        page's content width — at its fit-to-window width, so the file saved
+        is framed alike at any zoom.  A margin is fixed in pixels while the
+        page grows with the zoom, so at the zoomed width the share would
+        shrink as the reader zooms in."""
+        return self._margin / max(1, self._base_w - 2 * self._margin)
 
     def export_best(self, path: str) -> None:
         """Save the cropped PDF the user expects: a lossless crop that keeps the
@@ -28714,10 +28753,20 @@ class _ScholarTextWindow:
                 if re.match(r"PER\s+CURIAM\b", bt, re.IGNORECASE):
                     return "per curiam"
                 # "JUSTICE O'CONNOR announced the judgment of the Court…" —
-                # a lead opinion without a majority (Bluebook rule 10.6.1)
+                # a lead opinion without a majority (Bluebook rule 10.6.1) —
+                # unless it also delivered the opinion of the Court for all
+                # but some of its parts: "JUSTICE ALITO announced the
+                # judgment of the Court and delivered the opinion of the
+                # Court with respect to all but Part III-A, and an opinion
+                # with respect to Part III-A" (Mullin v. Doe (2026)).  That
+                # is cited as the Court's; a quotation from a plurality part
+                # is marked by whoever quotes it.
                 if re.search(
                     r"announced the judgment of the Court", bt, re.IGNORECASE
                 ):
+                    if re.search(r"delivered\s+the\s+opinion\s+of\s+the\s+"
+                                 r"Court", bt, re.IGNORECASE):
+                        return ""
                     return "plurality opinion"
             # CourtListener sub-opinion parts carry the signal in the label.
             if re.search(r"\(per\s+curiam\)", part.label or "", re.IGNORECASE):
