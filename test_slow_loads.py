@@ -159,13 +159,22 @@ class WatchTests(unittest.TestCase):
         app.root.run()
         self.assertEqual(w._bytes, (1000, 1000))
 
-    def test_a_failure_before_the_window_shows_is_left_to_the_status_line(self):
+    def test_a_failure_before_the_window_shows_is_told_the_reader(self):
+        # The status line was all that said it: a citation clicked to
+        # nothing — Forth v. Chapman, 1 Wms. 663, tried on Google Scholar
+        # and static.case.law — looked like a click that did nothing.
         app = FakeApp()
+        app._notify_lookup_miss = mock.Mock()
         w = watch(app)
         w.fail("No scan of it could be found.")
         self.assertTrue(w.done)
         self.assertFalse(w.failed)              # nothing was shown to fail
         self.assertEqual(app._load_watches, [])
+        app._notify_lookup_miss.assert_called_once_with(
+            f"Couldn't open {w.label}. No scan of it could be found.",
+            w._parent)
+        w.fail("again")                         # told once
+        app._notify_lookup_miss.assert_called_once()
 
     def test_stop_waiting_gives_up_the_scan(self):
         w = watch()
@@ -549,7 +558,7 @@ class TextFallbackReportingTests(unittest.TestCase):
                                      lambda _s: None, snippet="Kilburn")
         app.claim_text_load.assert_called_once_with(parent, "5 Johns. 37")
         app.end_text_load.assert_called_once_with(
-            watch_, "Its text could not be found either.")
+            watch_, "Neither its scan nor its text could be found.")
 
     def test_and_one_that_opened_it_ends_the_wait(self):
         app = mock.Mock()
@@ -593,10 +602,34 @@ class TextFallbackReportingTests(unittest.TestCase):
         win._on_cl_link_error("again", "5 Johns. 37")
         self.assertEqual(win._app.end_text_load.call_count, 1)
 
-    def test_a_lookup_nobody_waits_on_tells_nobody(self):
+    def test_a_lookup_nobody_waits_on_tells_the_reader(self):
         win = self.text_window()
         win._on_cl_link_error("No match.", "5 Johns. 37")
         win._app.end_text_load.assert_not_called()
+        win._app._notify_lookup_miss.assert_called_once_with(
+            "Couldn't open 5 Johns. 37. No match.", win._win)
+
+    def test_one_that_opened_tells_nobody(self):
+        win = self.text_window()
+        win._end_text_load("5 Johns. 37")
+        win._app._notify_lookup_miss.assert_not_called()
+
+    def test_a_brief_s_lookup_nobody_waits_on_tells_the_reader(self):
+        app = mock.Mock()
+        app._following_as_text = True
+        app.claim_text_load.return_value = None
+        app._token_var.get.return_value = "token"
+        app._try_open_citation.return_value = False
+        parent = mock.Mock()
+        parent.after.side_effect = lambda ms, fn: fn()
+        with mock.patch.object(gui.threading, "Thread",
+                               lambda target, daemon=None: SimpleNamespace(
+                                   start=target)):
+            gui._follow_brief_action(app, parent, ("cite", "1 Wms. 663"),
+                                     lambda _s: None,
+                                     snippet="Forth v. Chapman, 1 Wms. 663")
+        app._notify_lookup_miss.assert_called_once_with(
+            "No case found for Forth v. Chapman, 1 Wms. 663.", parent)
 
 
 if __name__ == "__main__":

@@ -4221,12 +4221,12 @@ def _item_from_cluster(cluster: dict) -> dict:
     return item
 
 
-def _cases_bearing_citation(client, cite: str) -> list[str]:
-    """The names of the different cases CourtListener has at *cite*, one per
-    case however many records it keeps of it — what a citation alone cannot
-    choose among when there are several.  [] when it has none, or cannot be
-    asked."""
-    names: list[str] = []
+def _cases_bearing_citation(client, cite: str) -> list[dict]:
+    """The different cases CourtListener has at *cite* — ``{"name", "year"}``
+    each, oldest first, one however many records it keeps of a case — what a
+    citation alone cannot choose among when there are several.  [] when it
+    has none, or cannot be asked."""
+    cases: list[dict] = []
     for lookup_cite in _citation_search_variants(
             (cite or "").split("@", 1)[0].strip()):
         try:
@@ -4241,13 +4241,16 @@ def _cases_bearing_citation(client, cite: str) -> list[str]:
             for cl in entry.get("clusters") or []:
                 name = re.sub(r"<[^>]+>", "", str(
                     cl.get("case_name") or cl.get("case_name_full") or ""))
+                year = str(cl.get("date_filed") or "")[:4]
                 if name and not any(
-                        _name_tokens(name) == _name_tokens(seen)
-                        or _match_tier(seen, name) == 3 for seen in names):
-                    names.append(name)
-        if names:
+                        seen["year"] == year
+                        and (_name_tokens(name) == _name_tokens(seen["name"])
+                             or _match_tier(seen["name"], name) == 3)
+                        for seen in cases):
+                    cases.append({"name": name, "year": year})
+        if cases:
             break
-    return names
+    return sorted(cases, key=lambda case: case["year"] or "9999")
 
 
 def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
@@ -9480,15 +9483,12 @@ class CourtListenerGUI:
                                  f"{label}, so it is open in your browser "
                                  "instead.")
 
-    def _spotlight_search(self, query: str, list_note: str = "") -> None:
-        """Open Spotlight with *query* typed in, and run it.  With
-        *list_note*, it lists what the query finds — a citation included,
-        which would otherwise open at once — and says *list_note* over the
-        list: the cases a citation could be, for the reader to choose."""
+    def _spotlight_search(self, query: str) -> None:
+        """Open Spotlight with *query* typed in, and run it."""
         if self._quick_popup is not None:
             self._close_quick_popup()
         self._spotlight_toggle_at = 0.0     # not a second press of the key
-        self._toggle_quick_search_popup(query=query, list_note=list_note)
+        self._toggle_quick_search_popup(query=query)
 
     def _on_window_mapped(self, event) -> None:
         """Bring the first window a click in Chrome opens to the front.  The
@@ -9583,9 +9583,8 @@ class CourtListenerGUI:
 
     def _toggle_quick_search_popup(
             self, pressed_at: "Optional[float]" = None,
-            query: str = "", list_note: str = "") -> None:
-        # *query*: opening, type it in and run it (see _spotlight_search) —
-        # as a list of results with *list_note* over it, when there is one.
+            query: str = "") -> None:
+        # *query*: opening, type it in and run it (see _spotlight_search).
         # One press = one toggle: a duplicate hotkey delivery (macOS event
         # taps can fire twice for one chord) would close the popup and
         # immediately reopen it, so a burst within the debounce window is
@@ -9742,11 +9741,7 @@ class CourtListenerGUI:
         popup.after(10, _grab_focus)
         if query:
             entry_var.set(query)
-            if list_note:
-                popup.after(30, lambda: self._show_spotlight_dropdown(
-                    popup, border, entry, query, note=list_note))
-            else:
-                popup.after(30, _submit)
+            popup.after(30, _submit)
 
     def _open_lookup_query(self, query: str,
                            before_open=lambda: None) -> bool:
@@ -9863,49 +9858,65 @@ class CourtListenerGUI:
             )
             if fetcher is not None or client is not None:
                 before_open()
-
-                def run() -> None:
-                    # The popup is already gone; a citation that
-                    # resolves nowhere would otherwise end in silence,
-                    # which reads as the app having hung.
-                    if self._try_open_citation(
-                        name, cite, pin, fetcher, client, year=year,
-                    ):
-                        return
-                    # Several cases begin there and nothing typed says
-                    # which: "No case found" would be wrong, so Spotlight
-                    # comes back listing them — CourtListener files three
-                    # cases under "2 Va. 319".
-                    cases = (_cases_bearing_citation(client, cite)
-                             if client is not None else [])
-                    if len(cases) > 1:
-                        self._post_root(
-                            self._spotlight_search, query,
-                            f"{len(cases)} cases begin at {cite} — "
-                            "choose one")
-                        return
-                    label = f"{name}, {cite}" if name else cite
-                    self._post_root(self._notify_lookup_miss,
-                                    f"No case found for {label}.")
-
-                def as_text() -> None:
-                    threading.Thread(target=run, daemon=True).start()
-
-                # The case's own pages first, as a search result opens:
-                # the scan is up the moment it is found, and the text
-                # comes in behind it — Google Scholar's, or failing that
-                # static.case.law's or CourtListener's — for T to show.
-                # With no scan anywhere, the text opens instead.  The
-                # Federal Appendix keeps its own scan route, as a search
-                # result's does.
-                action = ("cite", f"{cite}@{pin}" if pin else cite)
-                if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
-                        self.root, action, query, self._status_var.set,
-                        fallback=as_text, name=name):
-                    as_text()
+                self._open_typed_case_citation(query, name, cite, pin, year,
+                                               fetcher, client)
                 return True
 
         return False
+
+    def _open_typed_case_citation(self, query: str, name: str, cite: str,
+                                  pin: str, year: str, fetcher, client, *,
+                                  choose: bool = True) -> None:
+        """Open a case citation as typed (see :meth:`_open_lookup_query`):
+        its scan first, as a search result opens — the scan is up the moment
+        it is found, and the text comes in behind it for T to show — and with
+        no scan anywhere, its text: Google Scholar's, or failing that
+        static.case.law's, or CourtListener's as the last resort.  The
+        Federal Appendix keeps its own scan route, as a search result's does.
+
+        Where nothing opens because several cases bear the citation and
+        nothing typed says which — CourtListener files three under "2 Va.
+        319" — the reader is asked which (*choose*), and the one picked is
+        opened the same way, by its name and year."""
+
+        def run() -> None:
+            # The popup is already gone; a citation that resolves nowhere
+            # would otherwise end in silence, which reads as the app having
+            # hung.
+            if self._try_open_citation(
+                name, cite, pin, fetcher, client, year=year,
+            ):
+                return
+            cases = (_cases_bearing_citation(client, cite)
+                     if choose and client is not None else [])
+            if len(cases) > 1:
+                self._post_root(self._ask_which_cited_case, query, cite,
+                                pin, cases, fetcher, client)
+                return
+            label = f"{name}, {cite}" if name else cite
+            self._post_root(self._notify_lookup_miss,
+                            f"No case found for {label}.")
+
+        def as_text() -> None:
+            threading.Thread(target=run, daemon=True).start()
+
+        action = ("cite", f"{cite}@{pin}" if pin else cite)
+        if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
+                self.root, action, query, self._status_var.set,
+                fallback=as_text, name=name):
+            as_text()
+
+    def _ask_which_cited_case(self, query: str, cite: str, pin: str,
+                              cases: list, fetcher, client) -> None:
+        """Ask which of *cases* the citation means, and open that one — asked
+        once: if the case picked cannot be opened either, that is a miss."""
+        chosen = _choose_cited_case(self.root, cite, cases,
+                                    bring_to_front=self._bring_to_front)
+        if chosen is None:
+            return
+        self._open_typed_case_citation(
+            query, chosen["name"], cite, pin, chosen.get("year", ""),
+            fetcher, client, choose=False)
 
     def _open_main_from_spotlight(
         self, popup: tk.Toplevel, query: str = "",
@@ -10174,12 +10185,10 @@ class CourtListenerGUI:
 
     def _show_spotlight_dropdown(
         self, popup: tk.Toplevel, border: tk.Frame,
-        entry: tk.Entry, query: str, note: str = "",
+        entry: tk.Entry, query: str,
     ) -> None:
         """Expand the popup into a spotlight-style dropdown with streaming
-        search results from Google Scholar and CourtListener.  *note*, when
-        given, is what the status line says once results are in, in place
-        of their count."""
+        search results from Google Scholar and CourtListener."""
 
         # A fresh search retracts any dropdown still showing from the previous
         # query: bump the generation token so stale background callbacks are
@@ -10703,8 +10712,6 @@ class CourtListenerGUI:
                         status_lbl.configure(
                             text=f"No case of that name — {n} results "
                                  "for this phrase")
-                    elif note and n:
-                        status_lbl.configure(text=note)
                     else:
                         status_lbl.configure(
                             text=f"{n} results" if n else "No results found"
@@ -11326,9 +11333,10 @@ class CourtListenerGUI:
                            "can't tell which, so nothing opened")
 
                 def refuse() -> None:
+                    # The load's window says it, or the reader is told
+                    # (see _LoadWatch.fail).
                     safe_status(message)
                     watch.fail(message)
-                    self._spotlight_notify(message, duration_ms=6000)
 
                 self._post_root(refuse)
                 return
@@ -22955,12 +22963,25 @@ class _LoadWatch:
 
     def fail(self, message: str) -> None:
         """Nothing could be opened.  A window showing says so, and why, until
-        the reader closes it; one that never showed stays unshown, the status
-        line of the window the load was asked for from having said it."""
+        the reader closes it.  One that never showed stays unshown, and the
+        reader is told all the same (CourtListenerGUI._notify_lookup_miss):
+        the status line of the window the load was asked for from was all
+        that ever said it, and a citation clicked to nothing — tried on Google
+        Scholar, static.case.law and CourtListener in turn — looked like a
+        click that did nothing."""
         if self.done:
             return
         if self._win is None:
             self._end()
+            notify = getattr(self._app, "_notify_lookup_miss", None)
+            if notify is not None:
+                text = f"Couldn't open {self.label}."
+                if message:
+                    text += f" {message}"
+                try:
+                    notify(text, self._parent)
+                except tk.TclError:
+                    pass
             return
         self.done = self.failed = True
         self._cancel_timers()
@@ -32362,11 +32383,16 @@ class _ScholarTextWindow:
     def _end_text_load(self, cite: str, failure: str = "") -> None:
         """The text lookup for *cite* is over: it opened, or — *failure*
         says why — it found nothing.  Told to the load waiting on it, if one
-        is (see _claim_text_load)."""
+        is (see _claim_text_load); a failure no load waits on is told the
+        reader directly, as a load's own would be (see _LoadWatch.fail)."""
         loads = getattr(self, "_text_loads", None)
         watch = loads.pop(cite, None) if loads and cite else None
         if watch is not None:
             self._app.end_text_load(watch, failure)
+        elif failure:
+            label = f"Couldn't open {cite}. " if cite else ""
+            self._app._notify_lookup_miss(f"{label}{failure}",
+                                          self._live_parent())
 
     def _follow_how_cited(self, tag: str, url: str, pin: str,
                           name: str) -> None:
@@ -36989,6 +37015,79 @@ def _choose_eng_rep_case(parent: tk.Misc,
     return chosen["case"]
 
 
+def _choose_cited_case(parent: tk.Misc, cite: str,
+                       cases: "list[dict]",
+                       bring_to_front=None) -> "Optional[dict]":
+    """Several cases bear one citation and nothing typed says which — let the
+    reader pick, as :func:`_choose_eng_rep_case` does for an E.R. page.
+    *cases* are ``{"name", "year"}`` (see :func:`_cases_bearing_citation`).
+    *bring_to_front* puts the dialog in front of whatever the reader went to
+    while the lookup ran: it comes up seconds after Spotlight closed, and
+    Windows keeps a program that is not in front from putting itself there.
+    Returns the chosen case, or None if cancelled."""
+    dlg = _ui_toplevel(parent)
+    _ensure_modern_ttk_styles(dlg)
+    dlg.title(f"{cite} — {len(cases)} cases")
+    dlg.geometry("640x380")
+    # Spotlight leaves the main window withdrawn: a dialog transient to (or
+    # grabbing against) a hidden window stays invisible.
+    if parent.winfo_viewable():
+        dlg.transient(parent)
+    _ui_label(dlg, f"{len(cases)} cases are reported at {cite}. Pick one:",
+              size=13, weight="bold", anchor="w").pack(
+        anchor="w", fill="x", padx=14, pady=(12, 0))
+    box = _ui_frame(dlg, card=True)
+    box.pack(fill="both", expand=True, padx=12, pady=(8, 8))
+    sb_style = ("Modern.Vertical.TScrollbar" if _CTK_AVAILABLE
+                else "Vertical.TScrollbar")
+    lb_kw = dict(activestyle="dotbox", borderwidth=0, highlightthickness=0)
+    if _CTK_AVAILABLE:
+        lb_kw.update(bg=_UI["window"], fg=_UI["text"],
+                     selectbackground=_UI["selection"],
+                     selectforeground=_UI["text"], font=("TkDefaultFont", 11))
+    lb = tk.Listbox(box, **lb_kw)
+    sb = ttk.Scrollbar(box, orient="vertical", command=lb.yview, style=sb_style)
+    lb.configure(yscrollcommand=sb.set)
+    pad = 8 if _CTK_AVAILABLE else 0
+    sb.pack(side="right", fill="y", pady=pad, padx=(0, pad))
+    lb.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=pad)
+    for case in cases:
+        lb.insert("end", f"{case['name']}  ·  {case['year']}"
+                  if case.get("year") else case["name"])
+    lb.selection_set(0)
+    chosen: dict[str, "Optional[dict]"] = {"case": None}
+
+    def ok() -> None:
+        sel = lb.curselection()
+        chosen["case"] = cases[sel[0]] if sel else None
+        dlg.destroy()
+
+    def cancel() -> None:
+        chosen["case"] = None
+        dlg.destroy()
+
+    lb.bind("<Double-Button-1>", lambda _e: ok())
+    btns = _ui_frame(dlg)
+    btns.pack(fill="x", padx=14, pady=(0, 12))
+    _ui_button(btns, "Open", command=ok, primary=True, width=92).pack(side="right")
+    _ui_button(btns, "Cancel", command=cancel, width=88).pack(side="right", padx=8)
+    dlg.bind("<Return>", lambda _e: ok())
+    dlg.bind("<Escape>", lambda _e: cancel())
+    dlg.update_idletasks()
+    dlg.deiconify()
+    dlg.lift()
+    if bring_to_front is not None:
+        bring_to_front(dlg)
+    dlg.focus_force()
+    lb.focus_set()
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+    parent.wait_window(dlg)
+    return chosen["case"]
+
+
 class _SlipTextWindow:
     """The copyable-text view of a slip opinion: the PDF converted to clean
     text (running heads and page numbers stripped, paragraphs rebuilt — see
@@ -37950,7 +38049,12 @@ def _follow_brief_action(app: "CourtListenerGUI", parent: tk.Misc,
         safe_status(f"Opened {cite}." if ok else f"Not found: {cite}")
         if watch is not None:
             app.end_text_load(watch, "" if ok else
-                              "Its text could not be found either.")
+                              "Neither its scan nor its text could be "
+                              "found.")
+        elif not ok:
+            # No load to tell (see _LoadWatch.fail): tell the reader.
+            label = f"{name}, {cite}" if name else cite
+            app._notify_lookup_miss(f"No case found for {label}.", parent)
 
     def run() -> None:
         ok = app._try_open_citation(name, cite, pin, fetcher, client,

@@ -8,7 +8,8 @@ for the case — so CourtListener's text of the real one, the last resort, was
 never reached.  And "2 Va 319" alone said "No case found", though
 CourtListener has three cases at that citation (it files the Virginia
 nominatives under "Va."): Pleasants v. Pleasants, Commonwealth v. Carter and
-Swope v. Chambers.  Spotlight now lists them to choose from.
+Swope v. Chambers.  The reader is now asked which, in a window like the
+English Reports' for a page several cases share.
 """
 
 import ast
@@ -17,6 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 try:
+    import tkinter as tk
+
     import courtlistener_gui as gui
     from google_scholar import ScholarResult
 except ImportError:  # pragma: no cover - exercised on a bare checkout
@@ -28,20 +31,24 @@ SRC = Path(__file__).with_name("courtlistener_gui.py").read_text(
 SUMMUM = "Pleasant Grove City, Utah v. Summum"
 
 
-def _cluster(name: str, cid: int) -> dict:
-    return {"case_name": name, "id": cid,
+def _cluster(name: str, cid: int, filed: str = "") -> dict:
+    return {"case_name": name, "id": cid, "date_filed": filed,
             "citations": [{"volume": 2, "reporter": "Va.", "page": 319}]}
 
 
 # CourtListener's answer for "2 Va. 319": six records of three cases.
 VA_319 = [{"status": 300, "citation": "2 Va. 319", "clusters": [
-    _cluster("Commonwealth v. Carter", 7736613),
-    _cluster("Commonwealth v. Carter", 7736612),
-    _cluster("Commonwealth v. Carter", 7736611),
-    _cluster("Pleasants v. Pleasants", 7730721),
-    _cluster("Pleasants v. Pleasants", 7730722),
-    _cluster("Swope v. Chambers", 6907096),
+    _cluster("Commonwealth v. Carter", 7736613, "1822-11-15"),
+    _cluster("Commonwealth v. Carter", 7736612, "1822-11-15"),
+    _cluster("Commonwealth v. Carter", 7736611, "1822-11-15"),
+    _cluster("Pleasants v. Pleasants", 7730721, "1800-04-15"),
+    _cluster("Pleasants v. Pleasants", 7730722, "1800-04-15"),
+    _cluster("Swope v. Chambers", 6907096, "1845-07-15"),
 ]}]
+
+THREE = [{"name": "Pleasants v. Pleasants", "year": "1800"},
+         {"name": "Commonwealth v. Carter", "year": "1822"},
+         {"name": "Swope v. Chambers", "year": "1845"}]
 
 
 @unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
@@ -116,18 +123,16 @@ class SharedCitationTests(unittest.TestCase):
         client = mock.Mock()
         client.lookup_citation.side_effect = (
             lambda cite: VA_319 if cite == "2 Va. 319" else [])
-        self.assertEqual(
-            gui._cases_bearing_citation(client, "2 Va 319"),
-            ["Commonwealth v. Carter", "Pleasants v. Pleasants",
-             "Swope v. Chambers"])
+        self.assertEqual(gui._cases_bearing_citation(client, "2 Va 319"),
+                         THREE)
 
     def test_one_case_is_no_choice(self):
         client = mock.Mock()
         client.lookup_citation.return_value = [{"status": 200, "clusters": [
-            _cluster("Pleasants v. Pleasants", 1),
-            _cluster("Pleasants v. Pleasants", 2)]}]
+            _cluster("Pleasants v. Pleasants", 1, "1800-04-15"),
+            _cluster("Pleasants v. Pleasants", 2, "1800-04-15")]}]
         self.assertEqual(gui._cases_bearing_citation(client, "2 Va. 319"),
-                         ["Pleasants v. Pleasants"])
+                         [{"name": "Pleasants v. Pleasants", "year": "1800"}])
 
     def _sig(self, name, cite="2 Va. 319"):
         return gui._case_signature(name, cite, "")
@@ -153,30 +158,120 @@ class SharedCitationTests(unittest.TestCase):
             self._sig("Roe v. Wade", "410 U.S. 113")))
 
 
-class SpotlightListsThemTests(unittest.TestCase):
-    """Wiring: a citation several cases share brings Spotlight back as a
-    list of them, which the direct open would otherwise skip."""
+class _NowThread:
+    """threading.Thread, run where it is started."""
 
-    def _source(self, name):
+    def __init__(self, target=None, daemon=None, **_kw):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class WhichCaseTests(unittest.TestCase):
+    """A citation several cases share asks which, in a window of its own."""
+
+    def _app(self):
+        win = object.__new__(gui.CourtListenerGUI)
+        win.root = object()
+        win._post_root = mock.Mock()
+        win._status_var = mock.Mock()
+        win.open_cited_case_pdf = mock.Mock(return_value=False)  # no scan
+        win._try_open_citation = mock.Mock(return_value=False)  # no text
+        return win
+
+    def _open(self, app, name="", choose=True):
+        client = mock.Mock()
+        with mock.patch.object(gui, "_cases_bearing_citation",
+                               return_value=THREE), \
+                mock.patch.object(gui.threading, "Thread", _NowThread):
+            app._open_typed_case_citation("2 Va 319", name, "2 Va 319", "",
+                                          "", None, client, choose=choose)
+        return client
+
+    def test_nothing_opening_at_a_shared_citation_asks_which(self):
+        app = self._app()
+        client = self._open(app)
+        app._post_root.assert_called_once_with(
+            app._ask_which_cited_case, "2 Va 319", "2 Va 319", "", THREE,
+            None, client)
+
+    def test_the_case_picked_opens_by_its_name_and_year(self):
+        app = self._app()
+        app._open_typed_case_citation = mock.Mock()
+        with mock.patch.object(gui, "_choose_cited_case",
+                               return_value=THREE[0]) as choose:
+            app._ask_which_cited_case("2 Va 319", "2 Va 319", "", THREE,
+                                      "fetcher", "client")
+        choose.assert_called_once_with(app.root, "2 Va 319", THREE,
+                                       bring_to_front=app._bring_to_front)
+        app._open_typed_case_citation.assert_called_once_with(
+            "2 Va 319", "Pleasants v. Pleasants", "2 Va 319", "", "1800",
+            "fetcher", "client", choose=False)
+
+    def test_cancelling_opens_nothing(self):
+        app = self._app()
+        app._open_typed_case_citation = mock.Mock()
+        with mock.patch.object(gui, "_choose_cited_case", return_value=None):
+            app._ask_which_cited_case("2 Va 319", "2 Va 319", "", THREE,
+                                      None, None)
+        app._open_typed_case_citation.assert_not_called()
+
+    def test_asked_once_a_miss_is_a_miss(self):
+        # The case picked that cannot be opened either is not asked about
+        # again.
+        app = self._app()
+        self._open(app, name="Pleasants v. Pleasants", choose=False)
+        (fn, message), _kw = app._post_root.call_args
+        self.assertEqual(fn, app._notify_lookup_miss)
+        self.assertEqual(message,
+                         "No case found for Pleasants v. Pleasants, 2 Va 319.")
+
+    def test_the_window_lists_them_and_opens_the_one_picked(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("no display")
+        root.withdraw()
+        try:
+            def pick_second():
+                dlg = next(w for w in root.winfo_children()
+                           if isinstance(w, tk.Toplevel))
+                self.assertEqual(dlg.title(), "2 Va 319 — 3 cases")
+                lb = next(w for w in _descendants(dlg)
+                          if isinstance(w, tk.Listbox))
+                self.assertEqual(lb.get(0, "end"), (
+                    "Pleasants v. Pleasants  ·  1800",
+                    "Commonwealth v. Carter  ·  1822",
+                    "Swope v. Chambers  ·  1845"))
+                lb.selection_clear(0, "end")
+                lb.selection_set(1)
+                dlg.event_generate("<Return>")
+
+            root.after(200, pick_second)
+            self.assertEqual(gui._choose_cited_case(root, "2 Va 319", THREE),
+                             THREE[1])
+        finally:
+            root.destroy()
+
+
+def _descendants(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _descendants(child)
+
+
+class DropdownTests(unittest.TestCase):
+
+    def test_the_dropdown_takes_every_case_at_the_citation(self):
         tree = ast.parse(SRC)
         body = next(n.body for n in tree.body
                     if isinstance(n, ast.ClassDef)
                     and n.name == "CourtListenerGUI")
-        node = next(n for n in body
-                    if isinstance(n, ast.FunctionDef) and n.name == name)
-        return ast.get_source_segment(SRC, node)
-
-    def test_a_miss_at_a_shared_citation_lists_the_cases(self):
-        src = self._source("_open_lookup_query")
-        self.assertIn("_cases_bearing_citation(client, cite)", src)
-        self.assertIn("self._spotlight_search, query", src)
-
-    def test_the_list_skips_the_direct_open(self):
-        src = self._source("_toggle_quick_search_popup")
-        self.assertIn("note=list_note", src)
-
-    def test_the_dropdown_takes_every_case_at_the_citation(self):
-        src = self._source("_show_spotlight_dropdown")
+        node = next(n for n in body if isinstance(n, ast.FunctionDef)
+                    and n.name == "_show_spotlight_dropdown")
+        src = ast.get_source_segment(SRC, node)
         self.assertIn('entry.get("status") not in (200, 300)', src)
         self.assertIn("_scholar_bears_citation(r, c)", src)
 

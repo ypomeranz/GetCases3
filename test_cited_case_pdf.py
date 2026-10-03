@@ -986,10 +986,13 @@ class OrdersPageTests(unittest.TestCase):
         self.assertTrue(self._click())
         self.assertEqual(self.fell_back, [])     # no text to guess with
         self.assertEqual(_FakeViewer.opened, [])
+        # Said by the load: in its window, or to the reader directly when it
+        # never showed (see _LoadWatch.fail) — and only once.
         self.assertEqual(
-            self.app.toasts,
-            ["11 cases begin at 498 U.S. 807 — can't tell which, so "
-             "nothing opened"])
+            self.app.watches[-1].told,
+            [("fail", "11 cases begin at 498 U.S. 807 — can't tell which, "
+                      "so nothing opened")])
+        self.assertEqual(self.app.toasts, [])
 
     def test_the_case_read_in_is_offered_when_the_link_names_none(self):
         self._click(context_name="California v. Acevedo")

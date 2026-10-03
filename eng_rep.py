@@ -383,6 +383,10 @@ _NOM_ALIASES: "dict[str, tuple[str, ...]]" = {
     "Atkyns": ("Atk",),
     "Peere Williams": ("P Wms",),
     "P Williams": ("P Wms",),
+    # Without its "P.", as the early American courts often printed it:
+    # "Forth v. Chapman, 1 Wms. 663" (Pleasants v. Pleasants, 2 Call 319).
+    # Williams's Saunders always says "Saund.", which keeps it apart.
+    "Wms": ("P Wms",),
     "Williams' Saunders": ("Wms Saund",),
     "Williams's Saunders": ("Wms Saund",),
     "Wms Saunders": ("Wms Saund",),

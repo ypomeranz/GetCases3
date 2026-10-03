@@ -75,6 +75,17 @@ class ReportersByNameTests(unittest.TestCase):
                 self.assertEqual(specs(text), [spec])
                 self.assertTrue(any(name in n for n in names(spec)))
 
+    def test_peere_williams_without_its_p(self):
+        # Pleasants v. Pleasants, 2 Call 319 (Va. 1800), cites "Forth v.
+        # Chapman, 1 Wms. 663" — 1 P. Wms. 663, 24 Eng. Rep. 559 — which was
+        # followed as an American case, and found nowhere.
+        self.assertEqual(specs("Forth v. Chapman, 1 Wms. 663, there was"),
+                         ["n:pwms:1:663"])
+        self.assertEqual([(c.vol, c.page) for c in eng_rep.resolve(
+            "n:pwms:1:663")], [(24, 559)])
+        # Williams's Saunders keeps its own.
+        self.assertEqual(specs("1 Wms. Saund. 1"), ["n:wmssaund:1:1"])
+
     def test_a_name_with_an_apostrophe_is_read(self):
         # "M'Cle." never matched: the pattern builder mangled the apostrophe.
         eng_rep._load_nominate()
