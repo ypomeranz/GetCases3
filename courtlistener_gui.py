@@ -8981,7 +8981,8 @@ class CourtListenerGUI:
         # download.  "Download PDF" remains on the button below.
         self._tree.bind("<Double-1>", lambda _e: self._fetch_scholar_text())
         self._tree.bind("<<TreeviewSelect>>", lambda _e: self._on_row_select(self._tree))
-        self._tree.bind("<Button-3>", lambda e: self._on_right_click(e, self._tree))
+        # No right-click here: a case's citing cases are its window's side
+        # panel's to show ("Citing cases").
 
         # Orders / short-opinion section
         orders_sep = ttk.Frame(left_frame)
@@ -9008,7 +9009,6 @@ class CourtListenerGUI:
         self._orders_tree.bind(
             "<<TreeviewSelect>>", lambda _e: self._on_row_select(self._orders_tree)
         )
-        self._orders_tree.bind("<Button-3>", lambda e: self._on_right_click(e, self._orders_tree))
 
         # -- Right pane: Google Scholar results --
         scholar_pane = ttk.Frame(paned)
@@ -13798,17 +13798,6 @@ class CourtListenerGUI:
             if 0 <= idx < len(self._scholar_results):
                 return self._scholar_results[idx]
         return None
-
-    def _on_right_click(self, event: tk.Event, tree: ttk.Treeview) -> None:
-        """Right-click: open the 'Citing Opinions' window for the clicked row."""
-        iid = tree.identify_row(event.y)
-        if not iid:
-            return
-        tree.selection_set(iid)
-        idx = self._iid_to_idx(iid)
-        if 0 <= idx < len(self._results):
-            item = self._results[idx]
-            _CitingOpinionsWindow(self.root, self, item)
 
     def _get_client(self) -> Optional[CourtListenerClient]:
         token = self._token_var.get().strip()
