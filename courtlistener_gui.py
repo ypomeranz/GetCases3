@@ -19411,7 +19411,8 @@ def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
     return pages
 
 
-def _page_content_box_pts(page) -> Optional[tuple]:
+def _page_content_box_pts(page, visible: Optional[tuple] = None
+                          ) -> Optional[tuple]:
     """The bounding box of a page's actual content in PDF points
     ``(left, bottom, right, top)``, or ``None`` when it can't be determined
     (e.g. a bare scanned image with no text or vector objects).
@@ -19425,7 +19426,15 @@ def _page_content_box_pts(page) -> Optional[tuple]:
     printer's slug ("553US2 Unit: $U42 … PAGES PGT: OPIN") in invisible type
     above the running head, and counting it left a band of blank page atop
     every page saved, which the viewer, cropping to what it can see, does
-    not show."""
+    not show.
+
+    Nor is a drawing that puts no ink on the page.  The Court's own PDFs —
+    its slip opinions in the U.S. Reports' form, its preliminary prints and
+    bound volumes — lay a white box the width of the page across its foot
+    and a band of nothing across its head, and with them in the box no page
+    was cropped at all.  Given *visible*, the box ``(left, bottom, right,
+    top)`` the viewer found ink in, a drawing counts only as far as it lies
+    within it."""
     import ctypes
     import math
     import pypdfium2.raw as C
@@ -19488,6 +19497,11 @@ def _page_content_box_pts(page) -> Optional[tuple]:
             ol, ob, orr, ot = bounds
             if (orr - ol) * (ot - ob) >= 0.9 * page_area:
                 continue
+            if visible is not None:
+                ol, ob = max(ol, visible[0]), max(ob, visible[1])
+                orr, ot = min(orr, visible[2]), min(ot, visible[3])
+                if orr <= ol or ot <= ob:
+                    continue
             l, r = min(l, ol), max(r, orr)
             b, t = min(b, ob), max(t, ot)
     except Exception:
@@ -19659,7 +19673,13 @@ def _crop_pdf_to_content(
     — the viewer's margin as a share of the content's width (see
     :meth:`_PdfPane._margin_ratio`) — the margin is the one the viewer
     draws instead, when wider: the U.S. Reports' small type block, shown on
-    a roomy margin, came out of Save cropped close."""
+    a roomy margin, came out of Save cropped close.
+
+    Pages the viewer frames alike — one box shared by every page of an
+    opinion (see :meth:`_PdfPane._apply_uniform_crop`) — are saved alike,
+    each in the box that holds all their content.  Cropped page by page, an
+    opinion's short last page came out a short sheet, which a printer, fitting
+    each page to the paper, set in larger type than the rest."""
     import io
 
     import pypdfium2 as pdfium
@@ -19667,28 +19687,79 @@ def _crop_pdf_to_content(
     with _PDFIUM_LOCK:
         doc = pdfium.PdfDocument(pdf_bytes)
         try:
+            def union(a: tuple, b: tuple) -> tuple:
+                return (min(a[0], b[0]), min(a[1], b[1]),
+                        max(a[2], b[2]), max(a[3], b[3]))
+
+            # Pass 1 — each page's content, and the frame the viewer put it in.
+            pages: list = []   # [media box, content box, frame, digital]
             for i in range(len(doc)):
                 page = doc[i]
                 try:
                     mb = tuple(page.get_mediabox())
-                    ink = (_frac_box_to_points(frac_boxes[i], mb)
-                           if frac_boxes and i < len(frac_boxes)
-                           and frac_boxes[i] else None)
-                    box = None
-                    if not _page_has_scan_background(page):
-                        box = _page_content_box_pts(page)
+                    frac = (frac_boxes[i] if frac_boxes and i < len(frac_boxes)
+                            else None)
+                    ink = _frac_box_to_points(frac, mb) if frac else None
+                    digital = not _page_has_scan_background(page)
+                    box = (_page_content_box_pts(page, visible=ink)
+                           if digital else None)
                     if box is None:
                         box = ink
-                    if box is None:
-                        continue  # leave this page at full size
-                    l, b, r, t = box
-                    m = margin_pt
-                    if margin_ratio:
-                        m = max(m, (r - l) * margin_ratio)
-                    l, b = max(mb[0], l - m), max(mb[1], b - m)
-                    r, t = min(mb[2], r + m), min(mb[3], t + m)
-                    if r - l < 1 or t - b < 1:
-                        continue  # implausibly tight — skip rather than clip
+                    frame = ((tuple(frac), tuple(round(v, 1) for v in mb))
+                             if ink is not None else None)
+                    pages.append([mb, box, frame, digital])
+                finally:
+                    page.close()
+            # Pass 2 — one box for the pages that share a frame.
+            shared: dict = {}
+            counts: dict = {}
+            for _mb, box, frame, _digital in pages:
+                if frame is None or box is None:
+                    continue
+                shared[frame] = (union(shared[frame], box)
+                                 if frame in shared else box)
+                counts[frame] = counts.get(frame, 0) + 1
+            # A born-digital page the viewer could not measure — a short last
+            # page, too little on it to be sure of — and so shows whole is
+            # framed as the rest of the opinion is, when that frame holds it:
+            # its own box alone made a scrap of a page.
+            sizes: dict = {}
+            for mb, _box, _frame, _digital in pages:
+                key = tuple(round(v, 1) for v in mb)
+                sizes[key] = sizes.get(key, 0) + 1
+            usual: dict = {}   # media box → the frame most of its pages are in
+            for frame, n in counts.items():
+                if n >= 2 and 2 * n >= sizes.get(frame[1], 0) and (
+                        frame[1] not in usual or n > counts[usual[frame[1]]]):
+                    usual[frame[1]] = frame
+            for i, entry in enumerate(pages):
+                mb, _box, frame, digital = entry
+                common = usual.get(tuple(round(v, 1) for v in mb))
+                if frame is not None or not digital or common is None:
+                    continue
+                page = doc[i]
+                try:
+                    box = _page_content_box_pts(
+                        page, visible=_frac_box_to_points(common[0], mb))
+                finally:
+                    page.close()
+                entry[1] = (union(shared[common], box) if box is not None
+                            else shared[common])
+            # Pass 3 — crop.
+            for i, (mb, box, frame, _digital) in enumerate(pages):
+                box = shared.get(frame, box)
+                if box is None:
+                    continue  # leave this page at full size
+                l, b, r, t = box
+                m = margin_pt
+                if margin_ratio:
+                    m = max(m, (r - l) * margin_ratio)
+                l, b = max(mb[0], l - m), max(mb[1], b - m)
+                r, t = min(mb[2], r + m), min(mb[3], t + m)
+                if r - l < 1 or t - b < 1:
+                    continue  # implausibly tight — skip rather than clip
+                page = doc[i]
+                try:
                     page.set_mediabox(l, b, r, t)
                     page.set_cropbox(l, b, r, t)
                 finally:
