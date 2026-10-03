@@ -28753,10 +28753,20 @@ class _ScholarTextWindow:
                 if re.match(r"PER\s+CURIAM\b", bt, re.IGNORECASE):
                     return "per curiam"
                 # "JUSTICE O'CONNOR announced the judgment of the Court…" —
-                # a lead opinion without a majority (Bluebook rule 10.6.1)
+                # a lead opinion without a majority (Bluebook rule 10.6.1) —
+                # unless it also delivered the opinion of the Court for all
+                # but some of its parts: "JUSTICE ALITO announced the
+                # judgment of the Court and delivered the opinion of the
+                # Court with respect to all but Part III-A, and an opinion
+                # with respect to Part III-A" (Mullin v. Doe (2026)).  That
+                # is cited as the Court's; a quotation from a plurality part
+                # is marked by whoever quotes it.
                 if re.search(
                     r"announced the judgment of the Court", bt, re.IGNORECASE
                 ):
+                    if re.search(r"delivered\s+the\s+opinion\s+of\s+the\s+"
+                                 r"Court", bt, re.IGNORECASE):
+                        return ""
                     return "plurality opinion"
             # CourtListener sub-opinion parts carry the signal in the label.
             if re.search(r"\(per\s+curiam\)", part.label or "", re.IGNORECASE):

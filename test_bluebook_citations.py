@@ -4896,6 +4896,33 @@ class WriterParentheticalTests(unittest.TestCase):
         self.assertEqual(win._PART_LABEL_COLORS["separate"], "#59636f")
         self.assertEqual(win._SEPARATE_BG, "#f1f3f5")
 
+    def test_a_lead_opinion_that_only_announces_the_judgment(self):
+        part = self._part(
+            "majority",
+            "JUSTICE O'CONNOR announced the judgment of the Court and "
+            "delivered an opinion, in which THE CHIEF JUSTICE, JUSTICE "
+            "STEVENS, and JUSTICE SOUTER join.")
+        self.assertEqual(self._win()._writer_parenthetical(part),
+                         "plurality opinion")
+
+    def test_the_opinion_of_the_court_but_for_some_parts(self):
+        # Mullin v. Doe, Nos. 25-1083, 25-1084 (U.S. June 25, 2026): only
+        # Part III-A is a plurality's, so the opinion is cited as the
+        # Court's; a quotation from III-A is the quoter's to mark.
+        for byline in (
+                "JUSTICE ALITO, announced the judgment of the Court and "
+                "delivered the opinion of the Court with respect to all but "
+                "Part III-A, and an opinion with respect to Part III-A, in "
+                "which THE CHIEF JUSTICE, JUSTICE THOMAS, and JUSTICE "
+                "KAVANAUGH join.",
+                "Justice THOMAS announced the judgment of the Court and "
+                "delivered the opinion of the Court with respect to Parts I, "
+                "III-B, III-C, and IV, and an opinion with respect to Parts "
+                "II and III-A."):
+            with self.subTest(byline=byline[:40]):
+                part = self._part("majority", byline)
+                self.assertEqual(self._win()._writer_parenthetical(part), "")
+
     def test_spelled_out_bare_judge_byline(self):
         part = self._part("concurrence", "CLINTON, Judge.")
         self.assertEqual(
