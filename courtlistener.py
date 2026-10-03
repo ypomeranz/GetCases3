@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 import time
 from typing import Any, Generator, Iterator
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
 
 try:
     import requests
@@ -1043,6 +1043,108 @@ def _case_name_queries(case_name: str | None) -> list[str]:
     return queries
 
 
+_PACER_CASE_TYPES = {"cr": "cr", "crim": "cr", "cv": "cv", "civ": "cv",
+                     "mj": "mj", "mc": "mc", "bk": "bk"}
+
+
+def _docket_variants(docket_number: str) -> list[str]:
+    """The forms of a printed docket number worth searching RECAP by: as
+    printed; without a judge's initials after it ("12-6371-JFM" →
+    "12-6371"); and in PACER's own order, which is how the archive files a
+    district court's dockets — "CR-90-135-JFM" is "1:90-cr-00135" there,
+    and the search matches "90-cr-135"."""
+    import re as _re
+
+    docket = (docket_number or "").strip()
+    if not docket:
+        return []
+    variants = [docket]
+    core = _re.sub(r"(?<=\d)-[A-Za-z]{1,4}(?:-[A-Za-z]{1,4})*$", "", docket)
+    if core != docket:
+        variants.append(core)
+    m = _re.match(r"(?:\d:)?(cr|crim|cv|civ|mj|mc|bk)\.?[\s-]*(\d{2})-(\d{1,6})"
+                  r"\b", core, _re.IGNORECASE)
+    if m:
+        pacer = (f"{m.group(2)}-{_PACER_CASE_TYPES[m.group(1).lower()]}-"
+                 f"{int(m.group(3))}")
+        if pacer not in variants:
+            variants.append(pacer)
+    return variants
+
+
+def find_recap_docket(
+    docket_number: str,
+    court: str | None,
+    case_name: str | None = None,
+    session: "Session | None" = None,
+    timeout: int = 30,
+) -> dict | None:
+    """The docket a citation's number names, when the document it cites is
+    not in RECAP — an order from before the courts filed electronically, or
+    one nobody has bought — so the reader can at least see the case.
+
+    Returns ``{"web_url", "case_name", "docket_number", "count"}``: the
+    docket's page when the number names one docket, or the one of several
+    whose parties include the cited case's; otherwise CourtListener's list
+    of every docket under the number (a multi-defendant case keeps one per
+    defendant, all captioned for the first: United States v. Braxton, No.
+    CR-90-135-JFM (D. Md.), is filed under United States v. Williams).
+    ``None`` when no docket has the number."""
+    import re as _re
+
+    s = session or requests.Session()
+    url = urljoin(BASE_URL, "search/")
+    wanted = {w.lower() for w in _re.findall(r"[A-Za-z]{4,}", case_name or "")
+              } - {"united", "states", "america", "people", "state",
+                   "commonwealth"}
+    for variant in _docket_variants(docket_number):
+        params = {"type": "r", "q": "", "docket_number": variant}
+        if court:
+            params["court"] = court
+        try:
+            resp = s.get(url, params=params, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+        except Exception:
+            continue
+        results = data.get("results") or []
+        count = data.get("count") or len(results)
+        if not results or count > 40:
+            continue
+
+        def named(doc: dict) -> bool:
+            names = " ".join([str(doc.get("caseName") or "")]
+                             + [str(p) for p in doc.get("party") or []])
+            return bool(wanted) and bool(
+                wanted & {w.lower() for w in _re.findall(r"[A-Za-z]{4,}",
+                                                         names)})
+
+        pick = next((doc for doc in results if named(doc)), None)
+        if pick is None and count == 1:
+            pick = results[0]
+        if pick is not None:
+            web = pick.get("docket_absolute_url") or pick.get(
+                "absolute_url") or ""
+            return {
+                "web_url": ("https://www.courtlistener.com" + web) if web
+                else "",
+                "case_name": pick.get("caseName") or "",
+                "docket_number": pick.get("docketNumber") or variant,
+                "count": 1,
+            }
+        listing = {"type": "r", "docket_number": variant}
+        if court:
+            listing["court"] = court
+        return {
+            "web_url": "https://www.courtlistener.com/?" + urlencode(listing),
+            "case_name": results[0].get("caseName") or "",
+            "docket_number": results[0].get("docketNumber") or variant,
+            "count": count,
+        }
+    return None
+
+
 def find_recap_document(
     docket_number: str,
     court: str | None,
@@ -1090,12 +1192,8 @@ def find_recap_document(
     url = urljoin(BASE_URL, "search/")
     attempts: list[dict] = []
     if docket_number:
-        variants = [docket_number]
-        core = _re.sub(r"(?<=\d)-[A-Za-z]{1,4}(?:-[A-Za-z]{1,4})*$", "",
-                       docket_number)
-        if core != docket_number:
-            variants.append(core)
-        attempts += [{"docket_number": v} for v in variants]
+        attempts += [{"docket_number": v}
+                     for v in _docket_variants(docket_number)]
     attempts += [{"case_name": q} for q in _case_name_queries(case_name)]
 
     for extra in attempts:

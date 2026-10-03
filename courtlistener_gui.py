@@ -2630,9 +2630,9 @@ def _us_reports_page_choice(
     Brobst and Ex parte Milligan — the case being opened is matched against
     the name each scan carries in its own PDF title, since the citation cannot
     tell them apart.  A name matching none of them, or two of them equally
-    well, leaves the first scan (what the citation has always opened) and
-    returns every opinion for the window's PDF menu, so the reader can pick
-    the other; otherwise the list comes back empty.
+    well, leaves the first scan and returns every opinion, marked for the
+    reader to pick from (see CourtListenerGUI.open_cited_case_pdf) and kept
+    for the window's PDF menu; otherwise the list comes back empty.
     """
     try:
         opinions = _us_reports_page_opinions(citation, url)
@@ -2654,6 +2654,7 @@ def _us_reports_page_choice(
             cite=citation, url=o.url,
             label=f"{citation} — {o.name}" if o.name
             else f"{citation} — Opinion {i}",
+            pick=True, opinion=o,
         )
         for i, o in enumerate(opinions, 1)
     ]
@@ -2866,6 +2867,12 @@ class _CaseLawPdfChoice:
     cite: str
     url: str
     label: str = ""
+    #: One of several cases beginning on the cited page, which the case's
+    #: name could not tell apart: the reader is asked which is meant (see
+    #: CourtListenerGUI.open_cited_case_pdf) rather than shown the first.
+    pick: bool = False
+    #: The page opinion it is (a _CaseLawPageOpinion), for asking by name.
+    opinion: object = field(default=None, compare=False, hash=False)
 
 
 @dataclass(frozen=True)
@@ -3048,7 +3055,10 @@ def _case_law_pdf_choices_for_cites(
             # of its own: one the name does not pick out is no answer at all,
             # least of all the first.
             orders = bool(page_opinions) and bool(_normalized_us_cite(cite))
-            if page_opinions and (expected_name or orders):
+            # Several cases begin there: the name picks one, and with no name
+            # — a bare citation clicked, "18 F. App'x 81" — the reader does.
+            # The first was opened before, whichever case was meant.
+            if page_opinions:
                 matched = (_match_page_opinion(page_opinions, expected_name)
                            if expected_name else None)
                 if matched is not None:
@@ -3076,6 +3086,7 @@ def _case_law_pdf_choices_for_cites(
                         )
                         choices.append(_CaseLawPdfChoice(
                             cite=cite, url=opinion.url, label=label,
+                            pick=True, opinion=opinion,
                         ))
                     continue
             choices.append(_CaseLawPdfChoice(cite=cite, url=chosen_url))
@@ -3320,7 +3331,36 @@ def _case_law_pdf_for_cite(cite: str) -> Optional[str]:
     case.law has neither."""
     choices = _case_law_pdf_choices_for_cites(
         [cite, *_official_series_cites(cite)])
-    return choices[0].url if choices else None
+    return _settled_choice(choices).url if choices else None
+
+
+def _take_page_mates(fetcher) -> list:
+    """The cases Google Scholar's last citation lookup on this thread could
+    not choose among (GoogleScholarFetcher.take_page_mates), or []."""
+    take = getattr(fetcher, "take_page_mates", None)
+    try:
+        mates = take() if callable(take) else []
+    except Exception:
+        return []
+    return mates if isinstance(mates, list) and len(mates) > 1 else []
+
+
+def _settled_choice(choices: list) -> "_CaseLawPdfChoice":
+    """The first of *choices* that is the case for certain — not one of a
+    page's several the reader has to pick among — else the first."""
+    return next((c for c in choices if not c.pick), choices[0])
+
+
+def _choices_to_ask(choices: list, url: str) -> list:
+    """The cases the reader must choose among, when the scan *url* about to
+    open is one of several beginning on its page that nothing told apart:
+    those of its page.  [] when it is the case for certain."""
+    picks = [c for c in choices or () if getattr(c, "pick", False)]
+    mine = next((c for c in picks if c.url == url), None)
+    if mine is None:
+        return []
+    mates = [c for c in picks if c.cite == mine.cite]
+    return mates if len(mates) > 1 else []
 
 
 def _case_law_pdf_for_json_url(json_url: str) -> str:
@@ -9966,6 +10006,36 @@ class CourtListenerGUI:
                 fallback=as_text, name=name):
             as_text()
 
+    def _ask_which_scholar_case(self, parent, cite: str, pin: str,
+                                mates: list, fetcher, client,
+                                prefetch_pdf: bool = True) -> None:
+        """Ask which of the cases Google Scholar lists at *cite* is meant
+        (see GoogleScholarFetcher.take_page_mates), then open that one — by
+        its name and year, which pick it from the same results."""
+        # Scholar's titles come in capitals as often as not ("NAT INST OF
+        # HEALTH v. AM PUBLIC HEALTH ASSN").
+        cases = [{"name": normal_case_caption(r.title) or r.title,
+                  "year": _scholar_source_year(r.source)} for r in mates]
+        try:
+            host = parent if parent.winfo_exists() else self.root
+        except (AttributeError, tk.TclError):
+            host = self.root
+        chosen = _choose_cited_case(host, cite, cases,
+                                    bring_to_front=self._bring_to_front)
+        if chosen is None:
+            return
+
+        def run() -> None:
+            if not self._try_open_citation(
+                    chosen["name"], cite, pin, fetcher, client,
+                    prefetch_pdf=prefetch_pdf, view_parent=parent,
+                    year=chosen.get("year", "")):
+                self._post_root(
+                    self._notify_lookup_miss,
+                    f"Couldn't open {chosen['name']}, {cite}.", parent)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _ask_which_cited_case(self, query: str, cite: str, pin: str,
                               cases: list, fetcher, client) -> None:
         """Ask which of *cases* the citation means, and open that one — asked
@@ -11400,6 +11470,17 @@ class CourtListenerGUI:
 
                 self._post_root(refuse)
                 return
+            # Several cases begin on the page, and nothing said which is meant
+            # — the citation came bare ("18 F. App'x 81"), or with a name none
+            # of them answers to: the reader picks.  The first used to open,
+            # whichever case it was.
+            mates = _choices_to_ask(item.get("_case_law_pdf_choices"), url)
+            if mates:
+                self._post_root(lambda: ask(mates, item))
+                return
+            open_scan(url, item)
+
+        def open_scan(url: str, item: dict, picked: str = "") -> None:
             fetched = None
             if url:
                 try:
@@ -11421,8 +11502,9 @@ class CourtListenerGUI:
                 return
             # An order picked off a page of them is named for its own case;
             # the page shown for no one order in it, for none.
-            shown_name = ("" if item.get("_orders_page")
-                          else name or str(item.get("_order_name") or ""))
+            shown_name = picked or (
+                "" if item.get("_orders_page")
+                else name or str(item.get("_order_name") or ""))
             # The cluster this scan was found through is worth keeping: it is
             # what the T button falls back to when Google Scholar has no copy
             # of the case, and it saves looking the citation up a second time.
@@ -11433,6 +11515,47 @@ class CourtListenerGUI:
                     page_meta=meta,
                 )
             )
+
+        def ask(mates: list, item: dict) -> None:
+            """Which of the page's cases, asked on the Tk thread; the one
+            picked is fetched and opened as a found scan would be."""
+            if watch.cancelled:
+                return
+            try:
+                host = parent if parent.winfo_exists() else self.root
+            except (AttributeError, tk.TclError):
+                host = self.root
+            chosen = _choose_case_law_page_opinion(
+                host, [c.opinion for c in mates], cite,
+                bring_to_front=self._bring_to_front)
+            if chosen is None:
+                safe_status("Case selection cancelled.")
+                watch.finish()
+                return
+            picked = (_case_law_opinion_name(chosen)
+                      or str(getattr(chosen, "name", "") or ""))
+            # What the scan's T button looks the text up by: the case picked,
+            # not whatever the bare citation could not tell apart — nor a
+            # CourtListener record of another case at the citation.
+            if picked:
+                known = str(item.get("caseName") or item.get("case_name")
+                            or "")
+                item = (dict(item, caseName=picked)
+                        if not known or _is_the_named_case(picked, known)
+                        else {"citation": list(item.get("citation") or []),
+                              "caseName": picked})
+
+            def go() -> None:
+                with _watching(watch):
+                    try:
+                        open_scan(chosen.url, item, picked)
+                    except Exception as exc:
+                        print(f"[cite-pdf] opening {chosen.url} failed: {exc}")
+                        problem = str(exc) or type(exc).__name__
+                        self._post_root(lambda: watch.fail(
+                            f"Something went wrong: {problem}"))
+
+            threading.Thread(target=go, daemon=True).start()
 
         def run() -> None:
             with _watching(watch):
@@ -12412,10 +12535,16 @@ class CourtListenerGUI:
 
         if fetcher is not None:
             result = None
+            mates: list = []
             try:
                 for lookup_cite in _citation_search_variants(cite):
                     result = fetcher.fetch_by_citation(
                         lookup_cite, case_name=name, year=year)
+                    # Several cases begin at it and nothing said which: the
+                    # reader is asked (below), not handed Scholar's first.
+                    mates = _take_page_mates(fetcher)
+                    if mates:
+                        break
                     if not result and name:
                         # Accept a name+cite search hit only when the *result*
                         # itself is this case — bearing an equivalent cite in
@@ -12446,6 +12575,11 @@ class CourtListenerGUI:
                         break
             except Exception as exc:
                 print(f"[citelist] scholar {cite!r}: {exc}")
+            if mates:
+                self._post_root(self._ask_which_scholar_case, target_parent,
+                                cite, pin, mates, fetcher, client,
+                                prefetch_pdf)
+                return True
             if result:
                 url, html = result
 
@@ -14334,8 +14468,11 @@ class CourtListenerGUI:
                 all_cites, expected_name=expected_name)
             if choices:
                 item["_case_law_pdf_choices"] = choices
-                print(f"[resolve] using static.case.law PDF: {choices[0].url}")
-                return choices[0].url
+                # A parallel cite that settles which case it is beats a page
+                # of several the reader would have to choose among.
+                url = _settled_choice(choices).url
+                print(f"[resolve] using static.case.law PDF: {url}")
+                return url
 
         # 1. local_path already present on the search result
         local = item.get("local_path") or item.get("localPath") or ""
@@ -32442,6 +32579,7 @@ class _ScholarTextWindow:
             # answered that it has no copy (no use asking it again) or could
             # not be asked.
             absent = False
+            mates: list = []
             try:
                 if url_val:
                     result = fetcher.fetch_by_url(url_val)
@@ -32449,14 +32587,31 @@ class _ScholarTextWindow:
                     # The caption highlighted with the cite picks the case
                     # when more than one begins on the cited page.
                     result = fetcher.fetch_by_citation(cite, case_name=name)
+                    mates = _take_page_mates(fetcher)
                 absent = not result and fetcher.last_fetch_absent()
             except Exception as exc:
                 print(f"[scholar] link fetch failed: {exc}")
                 result = None
+            if mates:
+                # No caption came with it to pick the case: the reader does.
+                self._post(self._ask_page_mates, cite, pin, mates)
+                return
             self._post(self._on_link_ready, result, cite, pin, url_val, name,
                        absent)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _ask_page_mates(self, cite: str, pin: str, mates: list) -> None:
+        """Several cases begin at a citation clicked here with no caption to
+        say which: ask, as Spotlight does (see
+        CourtListenerGUI._ask_which_scholar_case)."""
+        self._status_var.set(f"{len(mates)} cases begin at {cite} — "
+                             "choose one.")
+        self._end_text_load(cite)       # the load ends in the question
+        app = self._app
+        client = app._get_client() if app._token_var.get().strip() else None
+        app._ask_which_scholar_case(self._live_parent(), cite, pin, mates,
+                                    app._get_scholar(), client)
 
     def _claim_text_load(self, cite: str) -> None:
         """Take up the load waiting on the text of *cite* — its scan could not
@@ -34851,8 +35006,11 @@ def _stat_cite_from_url(url: str) -> str:
 
 def _choose_case_law_page_opinion(
     parent: tk.Misc, opinions: list[_CaseLawPageOpinion], title: str,
+    bring_to_front=None,
 ) -> Optional[_CaseLawPageOpinion]:
-    """Ask which CAP case to open when several begin on one reporter page."""
+    """Ask which CAP case to open when several begin on one reporter page.
+    *bring_to_front* puts the dialog before whatever is in front — a
+    citation clicked in Chrome leaves the app behind the browser."""
     dlg = _ui_toplevel(parent)
     _ensure_modern_ttk_styles(dlg)
     dlg.title("Choose Case")
@@ -34905,6 +35063,8 @@ def _choose_case_law_page_opinion(
     dlg.update_idletasks()
     dlg.deiconify()
     dlg.lift()
+    if bring_to_front is not None:
+        bring_to_front(dlg)
     lb.focus_set()
     try:
         dlg.grab_set()
@@ -37792,6 +37952,25 @@ def _open_citation_in_browser(action: tuple[str, str], text: str = "") -> None:
         pass
 
 
+def _recap_opinion_is_cited(html: str, court: str, date: str) -> bool:
+    """Whether a Google Scholar opinion *html*, found by the case name of a
+    docket-only citation, is the one cited: decided by *court* (a
+    CourtListener id, "mdd") on *date* ("2001-06-25"), as its own header
+    says.  Neither stated by the header proves nothing, and is no match."""
+    try:
+        blocks = parse_opinion_blocks(html)
+    except Exception:
+        return False
+    from opinion_db import decision_date_from_blocks
+    header_court = _scholar_header_court(blocks)
+    if court and (not header_court or (
+            header_court != court
+            and _COURT_BLUEBOOK.get(court, "") != header_court)):
+        return False
+    decided = decision_date_from_blocks(blocks)
+    return bool(decided) and (not date or decided == date)
+
+
 def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
                          spec_json: str, status=lambda _s: None) -> None:
     """Open an unpublished opinion from CourtListener's RECAP (PACER)
@@ -37809,7 +37988,11 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
         return
     cite = spec.get("cite") or ""
     docket = spec.get("docket") or ""
-    name = spec.get("name") or ""
+    # A name read off a scan can carry its line-break marks ("Brax￾ton")
+    # and a comma for a space ("United,States").
+    name = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾­]", "",
+                  spec.get("name") or "")
+    name = re.sub(r"\bUnited,\s*States\b", "United States", name).strip()
     label = cite or (f"No. {docket}" if docket else name) or "unpublished opinion"
     title = f"{name} — {label}" if name and name != label else (name or label)
 
@@ -37863,6 +38046,15 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
                     name, (spec.get("date") or "")[:4] or None)
             except Exception as exc:
                 print(f"[recap] scholar name lookup failed for {label!r}: {exc}")
+            # A name and a year are no proof: "United States v. Braxton,
+            # 2001" brought up an opinion in another case altogether.  The
+            # court and day the citation gives must be the opinion's own.
+            if result and not _recap_opinion_is_cited(
+                    result[1], spec.get("court") or "",
+                    spec.get("date") or ""):
+                print(f"[recap] Scholar's {name!r} is another court's or "
+                      f"another day's opinion")
+                result = None
             if result:
                 def open_scholar(u=result[0], h=result[1]) -> None:
                     try:
@@ -37874,13 +38066,44 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
                 ok = True
         if ok:
             app._post_root(lambda: safe_status(f"Opened {label}."))
-        elif info and info.get("web_url"):
+            return
+        if info and info.get("web_url"):
             webbrowser.open(info["web_url"])
             app._post_root(lambda: safe_status(
                 f"{label}: PDF not in RECAP — opened the docket in your "
                 "browser."))
-        else:
-            app._post_root(lambda: safe_status(f"Not found: {label}"))
+            return
+        # Nothing filed that day is in RECAP — an order from before the
+        # courts filed electronically, say — but the docket may be: the
+        # case, at least, is something to show for the click.
+        found = None
+        if docket:
+            try:
+                found = cl_api.find_recap_docket(
+                    docket, spec.get("court"), name or None,
+                    session=(client._session if client is not None else None))
+            except Exception as exc:
+                print(f"[recap] docket lookup failed for {label!r}: {exc}")
+        if found and found.get("web_url"):
+            webbrowser.open(found["web_url"])
+            several = found.get("count", 1) > 1
+            filed = found.get("case_name") or ""
+            note = (f"{label}: the opinion isn't in RECAP — opened "
+                    + (f"CourtListener's {found['count']} dockets under "
+                       f"{found['docket_number']}" if several
+                       else f"its docket ({found['docket_number']})")
+                    + " in your browser"
+                    + (f", filed as {filed}." if filed and name
+                       and not _is_the_named_case(name, filed) else "."))
+            app._post_root(lambda: safe_status(note))
+            return
+        # Said where it can be seen: the status line alone made a click that
+        # found nothing look like one that did nothing.
+        miss = (f"Couldn't find {name + ', ' if name else ''}{label}: it "
+                "isn't in RECAP" + (", nor is its docket" if docket else "")
+                + ", and no other copy of it turned up.")
+        app._post_root(lambda: safe_status(f"Not found: {label}"))
+        app._post_root(app._notify_lookup_miss, miss, parent)
 
     threading.Thread(target=run, daemon=True).start()
 

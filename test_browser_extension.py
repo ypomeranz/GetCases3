@@ -1095,6 +1095,22 @@ class ManifestTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn(f"port: {browser_bridge.DEFAULT_PORT}", settings)
 
+    def test_the_pdf_viewer_may_run_its_image_decoders(self):
+        # pdf.js decodes a scan's JBIG2 and CCITT images (the Library of
+        # Congress's U.S. Reports, static.case.law's reports) with
+        # WebAssembly, which an extension page may not run unless its policy
+        # says so: the scans opened as blank pages over their OCR text.
+        manifest = json.loads((EXTENSION / "manifest.json").read_text(
+            encoding="utf-8"))
+        policy = manifest["content_security_policy"]["extension_pages"]
+        self.assertIn("'wasm-unsafe-eval'", policy)
+        self.assertIn("script-src 'self'", policy)
+        wasm = EXTENSION / "vendor" / "pdfjs" / "wasm"
+        for decoder in ("jbig2.wasm", "openjpeg.wasm", "qcms_bg.wasm"):
+            self.assertTrue((wasm / decoder).is_file(), decoder)
+        viewer = (EXTENSION / "pdf" / "viewer.js").read_text(encoding="utf-8")
+        self.assertIn('wasmUrl: VENDOR + "wasm/"', viewer)
+
 
 @unittest.skipUnless(NODE, "node not installed")
 class SitesLeftAloneTests(unittest.TestCase):

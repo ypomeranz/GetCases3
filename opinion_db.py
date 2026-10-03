@@ -478,7 +478,17 @@ def _caption_name(blocks: list) -> str:
         if re.match(
             r"(?:IN\s+RE|EX\s+PARTE|(?:IN\s+THE\s+)?MATTER\s+OF)\b", t, re.IGNORECASE
         ):
-            return cut_companion_cases(t).split(",")[0].strip()
+            head, _sep, tail = cut_companion_cases(t).partition(",")
+            # The party's own "Inc." after the comma is its name's (rule
+            # 10.2.1(h) keeps it where nothing else says it is a business):
+            # "In the Matter of LENRICK SALES, INC., a Pennsylvania …" is In
+            # re Lenrick Sales, Inc.
+            suffix = re.match(
+                r"\s*(Inc|LLC|L\.L\.C|Ltd|Corp|Co|L\.?P|N\.A)\.?(?![\w-])",
+                tail, re.IGNORECASE)
+            if suffix:
+                head += ", " + suffix.group(0).strip()
+            return head.strip()
     return ""
 
 

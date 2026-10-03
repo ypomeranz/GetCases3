@@ -1037,8 +1037,10 @@ class StoredCaptionTests(unittest.TestCase):
             ("In re Nexium Antitrust Litigation. AstraZeneca AB v. United "
              "Food & Commercial Workers Unions",
              "In re Nexium Antitrust Litig."),
+            # The companion goes, and the debtors' role with it (rule
+            # 10.2.1(a), (b)).
             ("In re Rhodium Encore LLC, Debtors. 345 Partners SPV2 LLC, "
-             "Plaintiffs, v. Nichols", "In re Rhodium Encore LLC, Debtors"),
+             "Plaintiffs, v. Nichols", "In re Rhodium Encore LLC"),
             ("In re MCP No. 165, Emergency Temporary Standard, 86 Fed. Reg. "
              "61402. Massachusetts Building Trades Council v. OSHA",
              "In re MCP No. 165, Emergency Temp. Standard, 86 Fed. Reg. "
@@ -1565,6 +1567,49 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
             abbreviate_case_name(name),
             "In re Imerys Talc Am., Inc.",
         )
+
+    def test_a_bankrupt_is_cited_without_what_follows_it(self):
+        # In re Lenrick Sales, Inc., 369 F.2d 439 (3d Cir. 1967), was cited
+        # with its description, its role and its creditors: "In re Lenrick
+        # Sales, Inc., a Pa. Corp., Bankrupt, James Talcott Shapiro Bros.
+        # Factors Corp. & Crompton-Richmond Co. Factors".  Rule 10.2.1(a),
+        # (b): the one party, and "Inc." kept (10.2.1(h)) — nothing else in
+        # "Lenrick Sales" says it is a business.
+        for caption in (
+            "In the Matter of Lenrick Sales, Inc., a Pennsylvania "
+            "Corporation, Bankrupt, James Talcott, Inc., Shapiro Bros. "
+            "Factors Corp. and Crompton-Richmond Co., Inc., Factors",
+            # CourtListener's form of it.
+            "In the Matter of Lenrick Sales, Inc., a Pennsylvania "
+            "Corporation, Bankrupt. James Talcott, Inc., Shapiro Bros. "
+            "Factors Corp. And Crompton-Richmond Co., Inc., Factors",
+        ):
+            with self.subTest(caption=caption[-30:]):
+                self.assertEqual(abbreviate_case_name(caption),
+                                 "In re Lenrick Sales, Inc.")
+        for caption, cited in (
+                ("In re Kelly, Alleged Bankrupt", "In re Kelly"),
+                ("In re Acme Co., Debtor-in-Possession", "In re Acme Co."),
+                ("In re T.W., a Minor", "In re T.W."),
+                ("In re Jones, a/k/a Smith", "In re Jones"),
+                ("In re Marriage of Smith", "In re Marriage of Smith")):
+            with self.subTest(caption=caption):
+                self.assertEqual(abbreviate_case_name(caption), cited)
+
+    def test_the_stored_name_keeps_the_party_s_inc(self):
+        from opinion_db import extract_record
+        page = ('<div id="gs_opinion"><center><b>369 F.2d 439 (1967)</b>'
+                '</center><center><h3 id="gsl_case_name">In the Matter of '
+                "LENRICK SALES, INC., a Pennsylvania Corporation, Bankrupt,"
+                "<br/> James Talcott, Inc., Factors, Appellants.</h3>"
+                "</center><center><p><b>United States Court of Appeals Third "
+                "Circuit.</b></p></center><center>Decided February 15, 1967."
+                "</center><p>Lenrick Sales, Inc. was adjudicated a bankrupt."
+                "</p></div>")
+        self.assertEqual(
+            extract_record("https://scholar.google.com/scholar_case?case=9",
+                           page)["name"],
+            "In re Lenrick Sales, Inc.")
 
     def test_quoted_in_rem_vessel_caption_drops_the_quotes(self):
         # The Scotland, 105 U.S. 24 (1882): the reporter prints the vessel's
