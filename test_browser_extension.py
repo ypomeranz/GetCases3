@@ -1095,6 +1095,25 @@ class ManifestTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn(f"port: {browser_bridge.DEFAULT_PORT}", settings)
 
+    def test_chrome_will_read_every_file_as_utf_8(self):
+        # Chrome refused the extension — "Could not load file
+        # 'src/citations.js' for content script. It isn't UTF-8 encoded." —
+        # over a U+FFFE and a U+FFFF written into its regular expressions as
+        # the characters themselves: valid UTF-8 to Python, but Unicode
+        # noncharacters, which Chrome's check turns away.  Written as escapes
+        # ("￾") they mean the same and pass.
+        nonchar = re.compile("[﷐-﷯￾￿]")
+        for path in sorted(EXTENSION.rglob("*")):
+            if (path.suffix not in (".js", ".mjs", ".json", ".html", ".css")
+                    or "vendor" in path.parts):
+                continue
+            with self.subTest(path=str(path.relative_to(EXTENSION))):
+                text = path.read_bytes().decode("utf-8")   # raises if not
+                found = nonchar.search(text)
+                self.assertIsNone(
+                    found, found and f"U+{ord(found.group()):04X} at line "
+                    f"{text.count(chr(10), 0, found.start()) + 1}")
+
     def test_the_pdf_viewer_may_run_its_image_decoders(self):
         # pdf.js decodes a scan's JBIG2 and CCITT images (the Library of
         # Congress's U.S. Reports, static.case.law's reports) with
