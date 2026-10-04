@@ -1359,6 +1359,13 @@ def collapse_personal_all_caps_run(text: str) -> str:
     first_kept = next((i for i, keep in enumerate(kept_flags) if keep), len(tokens))
     if any(not keep for keep in kept_flags[first_kept + 1:]):
         return text
+    # A firm keeps the given names and initials in its name (rule
+    # 10.2.1(g)): "S. H. KRESS & CO." is S.H. Kress & Co. (Adickes v. S.H.
+    # Kress & Co., 398 U.S. 144 (1970)), whose initials — capitals in any
+    # caption — had read as a person's given names set in ordinary case.
+    if any(token == "&" or _CAPS_ENTITY_SUFFIX_RE.fullmatch(token.rstrip(","))
+           for token in kept):
+        return text
     if (namey and len(kept) < len(tokens)
             and is_personal_all_caps_run(namey, dropped)):
         return " ".join(kept).strip(" ,;&")

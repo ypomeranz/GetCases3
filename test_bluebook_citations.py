@@ -5081,6 +5081,39 @@ class PeriodicalWordsInPartyNamesTests(unittest.TestCase):
                          "Smith-Jones v. Doe")
 
 
+class FirmInitialsCaptionTests(unittest.TestCase):
+    """A firm keeps the initials in its name (rule 10.2.1(g)).  In Scholar's
+    all-caps "S. H. KRESS & CO." the initials had read as a person's given
+    names, set in ordinary case before a capitalized surname, and Adickes v.
+    S.H. Kress & Co., 398 U.S. 144, was cited "Adickes v. Kress & Co."."""
+
+    def _cited(self, cite_line: str, caption: str) -> str:
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(cite_line, caption))
+        return abbreviate_case_name(_scholar_caption_name(blocks))
+
+    def test_a_firm_s_initials_stay(self):
+        self.assertEqual(
+            self._cited("398 U.S. 144 (1970)",
+                        "ADICKES<br/>v.<br/>S. H. KRESS &amp; CO."),
+            "Adickes v. S.H. Kress & Co.")
+        self.assertEqual(
+            self._cited("514 U.S. 779 (1995)",
+                        "U. S. TERM LIMITS, INC., ET AL. v. THORNTON ET AL."),
+            "U.S. Term Limits, Inc. v. Thornton")
+        for caption in ("S. H. KRESS & CO.", "J. C. PENNEY CO.",
+                        "F. W. WOOLWORTH CO., INC."):
+            with self.subTest(caption=caption):
+                self.assertEqual(collapse_personal_all_caps_run(caption),
+                                 caption)
+
+    def test_a_person_s_still_go(self):
+        self.assertEqual(
+            self._cited("1 F.4th 1 (2021)",
+                        "J. W. SMITH, Petitioner<br/>v.<br/>Brent BREWBAKER"),
+            "Smith v. Brewbaker")
+
+
 class SurnameAndOneWordPartyTests(unittest.TestCase):
     """A T6 word that is somebody's surname is not abbreviated, and neither
     is a party named by one word: "West v. Atkins" had been "W. v. Atkins",
