@@ -1590,10 +1590,13 @@ def _span_from_json(d: dict):
 
 
 def _block_from_json(d: dict):
-    from google_scholar import Block
+    from google_scholar import Block, bind_block_signs_to_numbers
 
-    return Block(kind=str(d.get("kind", "para")),
-                 spans=[_span_from_json(s) for s in d.get("spans", [])])
+    block = Block(kind=str(d.get("kind", "para")),
+                  spans=[_span_from_json(s) for s in d.get("spans", [])])
+    # A copy saved before the § and ¶ signs were bound to their numbers.
+    bind_block_signs_to_numbers(block)
+    return block
 
 
 def _blocks_from_json(raw) -> list:
@@ -6602,8 +6605,9 @@ def _assemble_case_parts(client, item: dict) -> tuple:
     """
     try:
         from google_scholar import (
-            Block, OpinionPart, Span, blocks_to_text,
-            link_footnotes_by_marker, parse_opinion_blocks, segment_blocks,
+            Block, OpinionPart, Span, bind_signs_to_numbers, blocks_to_text,
+            educate_quotes, finish_block_text, link_footnotes_by_marker,
+            parse_opinion_blocks, segment_blocks,
         )
     except ImportError:
         return [], [], "", {}
@@ -6759,6 +6763,8 @@ def _assemble_case_parts(client, item: dict) -> tuple:
                         for para in paras
                         if para.strip()
                     ]
+                    for block in plain_blocks:
+                        finish_block_text(block)
                     if len(plain_blocks) > len(cblocks):
                         cblocks = plain_blocks
             cparts = segment_blocks(cblocks)
@@ -6833,11 +6839,7 @@ def _assemble_case_parts(client, item: dict) -> tuple:
         else:
             plain = (op.get("plain_text") or "").strip()
             if plain:
-                try:
-                    from google_scholar import educate_quotes
-                    plain = educate_quotes(plain)
-                except ImportError:
-                    pass
+                plain = bind_signs_to_numbers(educate_quotes(plain))
                 op_blocks = [
                     Block(kind="para", spans=[Span(text=para.strip())])
                     for para in re.split(r"\n{2,}", plain) if para.strip()
@@ -17363,6 +17365,8 @@ def _rtf_escape(s: str) -> str:
             out.append("\\" + ch)
         elif ch == "\n":
             out.append("\\line ")
+        elif ch == "\u00a0":
+            out.append("\\~")   # a non-breaking space, as in "§ 1983"
         elif ord(ch) < 128:
             out.append(ch)
         else:
@@ -19184,6 +19188,20 @@ def _bind_find_keys(win: tk.Misc, open_cb, next_cb, prev_cb) -> None:
         win.bind("<Command-Shift-g>", wrap(prev_cb))
 
 
+def _find_pattern(needle: str) -> str:
+    """*needle* as a Tk (Tcl) regular expression that matches it literally,
+    save that each space matches an ordinary or a non-breaking one."""
+    out = []
+    for ch in needle:
+        if ch in " \u00a0":
+            out.append("[ \u00a0]")
+        elif ch in "\\.^$*+?()[]{}|":
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 class _TextFinder:
     """Ctrl-F find bar for a Text widget: highlights every match, steps
     through them with Enter / Shift+Enter (also F3 / Shift+F3), and
@@ -19293,9 +19311,14 @@ class _TextFinder:
         txt = self._txt
         idx = "1.0"
         n = tk.IntVar()
+        # A space typed finds a non-breaking one too, as the text binds a
+        # section or paragraph sign to its number with one: "§ 1983", "¶ 12".
+        spaced = " " in needle or "\u00a0" in needle
+        if spaced:
+            needle = _find_pattern(needle)
         while True:
             idx = txt.search(needle, idx, stopindex="end", nocase=True,
-                             count=n)
+                             count=n, regexp=spaced)
             if not idx or not n.get():
                 break
             end = f"{idx}+{n.get()}c"

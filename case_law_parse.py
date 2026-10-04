@@ -537,8 +537,9 @@ _BRACKET_CLOSE_RE = re.compile(r"([.,]?)\s*\]\s*$")
 
 
 def _finish(parts: list) -> None:
-    """Reclassify bare section markers as headings and curl the quotes —
-    the last two things every other opinion parser in the app does."""
+    """Reclassify bare section markers as headings, curl the quotes and
+    bind each § and ¶ to its number — the last things every other
+    opinion parser in the app does."""
     for part in parts:
         for block in part.blocks:
             if block.kind != "para":
@@ -548,12 +549,12 @@ def _finish(parts: list) -> None:
                          or _CAP_STARS_RE.match(text)):
                 block.kind = "heading"
     try:
-        from google_scholar import _educate_block_quotes
+        from google_scholar import finish_block_text
     except ImportError:
         return
     for part in parts:
         for block in list(part.blocks) + list(part.footnotes):
-            _educate_block_quotes(block)
+            finish_block_text(block)
 
 
 if __name__ == "__main__":
