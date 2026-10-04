@@ -8981,7 +8981,8 @@ class CourtListenerGUI:
         # download.  "Download PDF" remains on the button below.
         self._tree.bind("<Double-1>", lambda _e: self._fetch_scholar_text())
         self._tree.bind("<<TreeviewSelect>>", lambda _e: self._on_row_select(self._tree))
-        self._tree.bind("<Button-3>", lambda e: self._on_right_click(e, self._tree))
+        # No right-click here: a case's citing cases are its window's side
+        # panel's to show ("Citing cases").
 
         # Orders / short-opinion section
         orders_sep = ttk.Frame(left_frame)
@@ -9008,7 +9009,6 @@ class CourtListenerGUI:
         self._orders_tree.bind(
             "<<TreeviewSelect>>", lambda _e: self._on_row_select(self._orders_tree)
         )
-        self._orders_tree.bind("<Button-3>", lambda e: self._on_right_click(e, self._orders_tree))
 
         # -- Right pane: Google Scholar results --
         scholar_pane = ttk.Frame(paned)
@@ -13799,17 +13799,6 @@ class CourtListenerGUI:
                 return self._scholar_results[idx]
         return None
 
-    def _on_right_click(self, event: tk.Event, tree: ttk.Treeview) -> None:
-        """Right-click: open the 'Citing Opinions' window for the clicked row."""
-        iid = tree.identify_row(event.y)
-        if not iid:
-            return
-        tree.selection_set(iid)
-        idx = self._iid_to_idx(iid)
-        if 0 <= idx < len(self._results):
-            item = self._results[idx]
-            _CitingOpinionsWindow(self.root, self, item)
-
     def _get_client(self) -> Optional[CourtListenerClient]:
         token = self._token_var.get().strip()
         if not token:
@@ -16421,17 +16410,59 @@ _CITE_ONLY_LINE_RE = re.compile(
 _FN_BODY_MARK_RE = re.compile(r"^\s*(?:\[([^\]\s]{1,6})\]|(\*{1,3}|†|‡))(?=\s|$)")
 
 
+#: Judges' surnames whose capitals an all-caps byline hides and no rule can
+#: put back — "DEMOSS" could as well be Demoss — keyed by their letters.
+#: (The Supreme Court's need none: the rules below restore McReynolds,
+#: O'Connor and Van Devanter.)
+_MIXED_CASE_SURNAMES: dict[str, str] = {
+    re.sub(r"[^A-Z]", "", n.upper()): n for n in (
+        "DeMoss", "VanDyke", "DiClerico", "MacKinnon", "DuBose", "DeGuilio",
+    )
+}
+
+#: The short words of a name, which an all-caps byline prints in capitals:
+#: "ST. EVE" is St. Eve, "JR." Jr., "VAN DEVANTER" Van Devanter.
+_NAME_SHORT_WORDS = {
+    w.upper(): w for w in ("St", "Ste", "Jr", "Sr", "Mr", "Mrs", "Ms", "De",
+                           "Du", "Da", "Di", "La", "Le", "Van", "Von", "Del")
+}
+
+_ROMAN_NUMERAL_RE = re.compile(r"(?:I{1,3}|IV|VI{0,3}|IX|X)")
+
+
 def _fix_name_case(name: str) -> str:
     """Render an all-caps surname from an opinion header in normal case:
-    REHNQUIST → Rehnquist, O'CONNOR → O'Connor, McAULIFFE → McAuliffe."""
+    REHNQUIST → Rehnquist, O'CONNOR (or O’CONNOR) → O'Connor, McAULIFFE →
+    McAuliffe, DeMOSS → DeMoss, ST. EVE → St. Eve.  Words already in mixed
+    case, initials and Roman numerals pass through."""
+    def cap(run: "re.Match") -> str:
+        s = run.group(0)
+        return s[:1].upper() + s[1:].lower()
+
     def fix(wd: str) -> str:
-        alpha = [c for c in wd if c.isalpha()]
-        if len(alpha) <= 2 or sum(c.isupper() for c in alpha) <= len(alpha) // 2:
-            return wd  # already mixed case (Wood, St.)
-        out = "'".join(
-            p[:1].upper() + p[1:].lower() if p else p for p in wd.split("'")
-        )
-        if out.startswith("Mc") and len(out) > 2:
+        letters = "".join(c for c in wd if c.isalpha())
+        if len(letters) <= 1 or _ROMAN_NUMERAL_RE.fullmatch(letters):
+            return wd                       # an initial, or "III"
+        upper = sum(c.isupper() for c in letters)
+        # The source's own capitals opening a name — "McREYNOLDS",
+        # "DeMOSS", "MacKINNON", "VanDYKE" — say how it is written.
+        lead = re.match(r"([A-Z][a-z]{1,2})([A-Z]{2,}.*)$", wd)
+        if lead and upper > len(letters) // 2:
+            return lead.group(1) + re.sub(r"[A-Za-z]+", cap, lead.group(2))
+        if upper <= len(letters) // 2 or not letters.isupper():
+            return wd                       # already mixed case (Wood)
+        known = _MIXED_CASE_SURNAMES.get(letters)
+        if known and wd.upper().startswith(known.upper()):
+            return known + wd[len(known):]
+        short = _NAME_SHORT_WORDS.get(letters)
+        if short and wd.upper().startswith(short.upper()):
+            return short + wd[len(short):]
+        if len(letters) <= 2:
+            return wd                       # "IN", "OF": no name's
+        # Each run of letters between apostrophes (straight or curly) and
+        # hyphens: O’CONNOR → O’Connor, SMITH-JONES → Smith-Jones.
+        out = re.sub(r"[A-Za-z]+", cap, wd)
+        if out.startswith("Mc") and len(out) > 2 and out[2].isalpha():
             out = "Mc" + out[2].upper() + out[3:]
         return out
 
@@ -29198,10 +29229,20 @@ class _ScholarTextWindow:
         Empty for the header and signed majority opinions.
         """
         def block_text(b) -> str:
-            # The title-comma fix mirrors segmentation's classification view
-            # ("Justice, BREYER, concurring." — Alleyne's Scholar text).
-            t = fix_title_comma(re.sub(r"\s+", " ", b.text()).strip())
-            return re.sub(r"^(?:\*\d+\s+)+", "", t)  # leading page markers
+            # Read without the reporter's page markers, as segmentation reads
+            # the byline: a marker carrying a letter ("*55B", the page Perry
+            # Educ. Ass'n v. Perry Local Educators' Ass'n's dissent begins on)
+            # was read as part of the dissenter's name — "(*55B Justice
+            # Brennan, J., dissenting)".  The title-comma fix mirrors
+            # segmentation's classification view too ("Justice, BREYER,
+            # concurring." — Alleyne's Scholar text).
+            spans = getattr(b, "spans", None)
+            raw = ("".join(s.text for s in spans
+                           if not getattr(s, "pagenum", False))
+                   if spans is not None else b.text())
+            t = fix_title_comma(re.sub(r"\s+", " ", raw).strip())
+            # A marker left in the text itself (CourtListener's).
+            return re.sub(r"^(?:\*\d+[A-Za-z]{0,2}\s+)+", "", t)
 
         if part.kind == "majority":
             for b in part.blocks[:3]:

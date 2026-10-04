@@ -1285,7 +1285,8 @@ def _majority_disposition_before(blocks: list, first_sep: int) -> str:
     """The lead writing's short disposition immediately before a separate
     opinion, such as Scholar's standalone ``Affirmed.`` block."""
     for b in reversed(blocks[max(0, first_sep - 10):first_sep]):
-        t = re.sub(r"^(?:\*\d+\s+)+", "", _content_text(b)).strip()
+        t = re.sub(r"^(?:\*\d+[A-Za-z]{0,2}\s+)+", "",
+                   _content_text(b)).strip()
         m = _STANDALONE_DISPOSITION_RE.fullmatch(t)
         if m:
             return m.group(1).lower()
