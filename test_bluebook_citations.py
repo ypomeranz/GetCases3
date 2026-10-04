@@ -5000,6 +5000,54 @@ class TrialCourtParentheticalTests(unittest.TestCase):
                     _court_from_header(parse_opinion_blocks(page)), "")
 
 
+class PeriodicalWordsInPartyNamesTests(unittest.TestCase):
+    """Since the 21st edition, table T6 takes in the periodical-title
+    words of the old T13.2, and abbreviates a party's name with them too."""
+
+    def test_journal_and_review(self):
+        for name, cited in (
+                # The Bluebook's own example of the merged table at work.
+                ("Clark County School District v. Las Vegas Review-Journal",
+                 "Clark Cnty. Sch. Dist. v. Las Vegas Rev.-J."),
+                ("Milkovich v. Lorain Journal Co.",
+                 "Milkovich v. Lorain J. Co."),
+                ("Doe v. Wall Street Journal", "Doe v. Wall St. J."),
+                ("Smith v. Board of Review", "Smith v. Bd. of Rev.")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_the_other_periodical_words(self):
+        for name, cited in (
+                ("Chicago Tribune Co. v. Bridgestone/Firestone, Inc.",
+                 "Chi. Trib. Co. v. Bridgestone/Firestone, Inc."),
+                ("Reader's Digest Association, Inc. v. Conservative "
+                 "Digest, Inc.",
+                 "Reader's Dig. Ass'n v. Conservative Dig., Inc."),
+                ("Modern Woodmen of America v. Mixer",
+                 "Mod. Woodmen of Am. v. Mixer"),
+                ("Smith v. American Library Association",
+                 "Smith v. Am. Libr. Ass'n"),
+                ("Jones v. Publishers Weekly, Inc.",
+                 "Jones v. Publishers Wkly., Inc."),
+                ("Smith v. Business Week", "Smith v. Bus. Wk."),
+                ("Doe v. Friends of the Libraries",
+                 "Doe v. Friends of the Librs.")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_plurals_the_table_spells_out(self):
+        # "J." has no plural, and "Couns." is already one.
+        self.assertEqual(abbreviate_case_name("Doe v. Medical Journals, Inc."),
+                         "Doe v. Med. J., Inc.")
+        self.assertEqual(
+            abbreviate_case_name("Brown v. Counselors of Real Estate"),
+            "Brown v. Couns. of Real Est.")
+
+    def test_a_hyphenated_name_keeps_its_last_abbreviation_s_period(self):
+        self.assertEqual(abbreviate_case_name("Smith-Jones v. Doe."),
+                         "Smith-Jones v. Doe")
+
+
 class RelatorCaptionTests(unittest.TestCase):
     """A party with its relator (rule 10.2.1(b)): Kendall v. United States
     ex rel. Stokes, 37 U.S. (12 Pet.) 524 (1838), was cited "Kendall v.

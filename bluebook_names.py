@@ -97,6 +97,7 @@ _T6_SINGULAR: dict[str, str] = {
     "department": "Dep't",
     "detention": "Det.",
     "developer": "Dev.", "development": "Dev.",
+    "digest": "Dig.",
     "digital": "Digit.",
     "director": "Dir.",
     "discount": "Disc.",
@@ -156,11 +157,17 @@ _T6_SINGULAR: dict[str, str] = {
     "intelligence": "Intel.",
     "international": "Int'l",
     "investment": "Inv.", "investor": "Inv.",
+    # Since the 21st edition T6 takes in the periodical-title words too
+    # (the old T13.2), and they abbreviate a party's name as they do a
+    # journal's: Clark Cnty. Sch. Dist. v. Las Vegas Rev.-J., 429 P.3d 313
+    # (Nev. 2018); Milkovich v. Lorain J. Co., 497 U.S. 1 (1990).
+    "journal": "J.",
     "justice": "Just.",
     "juvenile": "Juv.",
     "labor": "Lab.",
     "laboratory": "Lab'y",
     "lawyer": "Law.",
+    "librarian": "Libr.", "library": "Libr.",
     "liability": "Liab.",
     "limited": "Ltd.",
     "litigation": "Litig.",
@@ -180,6 +187,7 @@ _T6_SINGULAR: dict[str, str] = {
     "metropolitan": "Metro.",
     "military": "Mil.",
     "mineral": "Min.",
+    "modern": "Mod.",
     "mortgage": "Mortg.",
     "municipal": "Mun.", "municipality": "Mun.",
     "mutual": "Mut.",
@@ -227,6 +235,7 @@ _T6_SINGULAR: dict[str, str] = {
     "responsibility": "Resp.",
     "restaurant": "Rest.",
     "retirement": "Ret.",
+    "review": "Rev.",  # from the old T13.2, as "journal" (see above)
     "road": "Rd.",
     "savings": "Sav.",
     "school": "Sch.",
@@ -260,6 +269,7 @@ _T6_SINGULAR: dict[str, str] = {
     "transcontinental": "Transcon.",
     "transnational": "Transnat'l",
     "transport": "Transp.", "transportation": "Transp.",
+    "tribunal": "Trib.", "tribune": "Trib.",
     "trustee": "Tr.",
     "turnpike": "Tpk.",
     "uniform": "Unif.",
@@ -267,6 +277,7 @@ _T6_SINGULAR: dict[str, str] = {
     "urban": "Urb.",
     "utility": "Util.",
     "village": "Vill.",
+    "week": "Wk.", "weekly": "Wkly.",
     "west": "W.", "western": "W.",
 }
 
@@ -276,9 +287,11 @@ _T6_PLURAL: dict[str, str] = {
     "brothers": "Bros.",
     "businesses": "Bus.",
     "casualties": "Cas.",
+    "counselors": "Couns.",
     "corrections": "Corr.",
     "industries": "Indus.",
     "resources": "Res.",
+    "journals": "J.",
     "rights": "Rts.",
     "securities": "Sec.",
     "steamships": "S.S.",
@@ -3086,6 +3099,9 @@ def _strip_trailing_period(name: str) -> str:
     if not name.endswith("."):
         return name
     tok = name.rsplit(None, 1)[-1]  # last whitespace-delimited token
+    # …or the last piece of a hyphenated one: "Las Vegas Rev.-J." ends in
+    # the abbreviation "J.".
+    tok = tok.rsplit("-", 1)[-1]
     stem = tok[:-1]
     if "." in stem or len(stem) == 1 or tok.lower() in _ABBR_PERIOD_TOKENS:
         return name  # initialism, single initial, or real abbreviation
