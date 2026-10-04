@@ -2816,6 +2816,19 @@ _WRIT_TAIL_RE = re.compile(
 _APPLICANT_RE = re.compile(
     r"^(?:the\s+)?(?:application|petition)\s+of\s+", re.IGNORECASE)
 
+# …and so is what a coordinated or consolidated proceeding's caption says of
+# the proceeding before naming the matter: "In re Coordinated Pretrial
+# Proceedings in Western Liquid Asphalt Cases" is In re W. Liquid Asphalt
+# Cases, 487 F.2d 191 (9th Cir. 1973), and "… in Antibiotic Antitrust
+# Actions" In re Antibiotic Antitrust Actions.  The proceedings must be
+# described as such — coordinated, consolidated, multidistrict or pretrial:
+# "In re Grand Jury Proceedings" is the matter's own name.
+_PROCEEDING_RE = re.compile(
+    r"^(?:the\s+)?(?:(?P<joined>coordinated|consolidated|multi-?district)\s+)?"
+    r"(?:(?P<pretrial>pre-?trial)\s+)?proceedings\s+"
+    r"(?:in|of|involving|concerning|re:?)\s+(?:the\s+)?(?=[A-Z0-9])",
+    re.IGNORECASE)
+
 # Where the one party a procedural caption is cited by ends (rule 10.2.1(a),
 # (b)): at an appositive describing it — "a Pennsylvania Corporation", "an
 # Infant" — or its role in the proceeding, "Bankrupt", "Debtor", after which a
@@ -2852,6 +2865,11 @@ def _format_procedural(party: str, *, recognize_initials: bool,
             _strip_party_designations(rest[applicant.end():]),
             relaxed=False) is not None:
         rest = rest[applicant.end():]
+    proceeding = _PROCEEDING_RE.match(rest)
+    if (proceeding and (proceeding.group("joined")
+                        or proceeding.group("pretrial"))
+            and rest[proceeding.end():].strip(" ,.")):
+        rest = rest[proceeding.end():]
     if not rest:
         return None
     prefix = _PROCEDURAL_CANON[re.sub(r"\s+", " ", m.group(1).lower())]

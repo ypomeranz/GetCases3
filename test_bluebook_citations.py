@@ -5182,6 +5182,35 @@ class LegislatorAndInterestCaptionTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(abbreviate_case_name(name), "In re J.W.")
 
+    def test_a_coordinated_proceeding_is_cited_by_its_matter(self):
+        # Like "the Application of", a description of the proceeding is
+        # what "In re" already says (rule 10.2.1(b)).
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "487 F.2d 191 (1973)",
+            "In re Coordinated Pretrial Proceedings In WESTERN LIQUID "
+            "ASPHALT CASES.<br/>STATE OF ALASKA et al., Plaintiffs-"
+            "Appellants,<br/>v.<br/>STANDARD OIL COMPANY OF CALIFORNIA et "
+            "al., Defendants-Appellees."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "In re W. Liquid Asphalt Cases")
+        for name, cited in (
+                ("In re Coordinated Pretrial Proceedings in Petroleum "
+                 "Products Antitrust Litigation",
+                 "In re Petroleum Prods. Antitrust Litig."),
+                ("In re Coordinated Pretrial Proceedings in Antibiotic "
+                 "Antitrust Actions", "In re Antibiotic Antitrust Actions"),
+                ("In re Pretrial Proceedings in the Airline Cases",
+                 "In re Airline Cases"),
+                # The matter's own name, or nothing after the description.
+                ("In re Grand Jury Proceedings", "In re Grand Jury Proc."),
+                ("In re Proceedings of the Board of Education",
+                 "In re Proc. of the Bd. of Educ."),
+                ("In re Coordinated Pretrial Proceedings",
+                 "In re Coordinated Pretrial Proc.")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
     def test_and_its_link_takes_in_the_name(self):
         import citations
         text = "So held. In the Interest of J.W., 645 S.W.3d 726 (Tex. 2022)."
