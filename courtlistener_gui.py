@@ -1205,6 +1205,7 @@ from bluebook_names import (
     caption_case_reference_tokens,
     collapse_personal_all_caps_run,
     cut_companion_cases,
+    in_re_caps_name,
     is_recognized_given_name,
     name_persons_by_surname,
     normal_case_caption,
@@ -17049,8 +17050,10 @@ def _scholar_caption_name(blocks) -> str:
         if not t or _HEADER_CITE_RE.match(t) or t.startswith(("No.", "Nos.")):
             continue
         # A docket, court or date line set ahead of the caption — "[Sac.
-        # No. 7096.", "CASE No. 1078.", "In Bank." — is not the case's name.
-        if (t.startswith("[") or t.endswith("]")
+        # No. 7096.", "CASE No. 1078.", "In Bank.", "Dec. 18, 1959.]" — is
+        # not the case's name.  (A caption's own footnote mark closes a
+        # bracket it opened: "IN RE NEAGLE, Petitioner.[1]".)
+        if (t.startswith("[") or (t.endswith("]") and "[" not in t)
                 or re.match(r"(?:case\s+|sac\.\s+|crim\.\s+|civ\.\s+|"
                             r"l\.\s*a\.\s+|s\.\s*f\.\s+)?nos?\.\s*\d",
                             t, re.IGNORECASE)
@@ -17067,6 +17070,11 @@ def _scholar_caption_name(blocks) -> str:
         # Defendants-Appellants, v. …" tail — the very " v. " that proves
         # a companion case follows.
         if re.match(r"(?:IN\s+RE|EX\s+PARTE|(?:IN\s+THE\s+)?MATTER\s+OF)\b", t, re.IGNORECASE):
+            # Scholar sets the matter's name in capitals, all else in
+            # ordinary case: the capitals are the name.
+            named = in_re_caps_name(t)
+            if named:
+                return refine(_titlecase_caps(named))
             t2 = _trim_procedural_caption(_cut_companion_cases(t))
             return refine(_titlecase_caps(t2.strip()))
         # Google Scholar renders the party separator in lowercase ("… v. …")

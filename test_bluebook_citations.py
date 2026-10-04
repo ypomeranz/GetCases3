@@ -5081,6 +5081,81 @@ class PeriodicalWordsInPartyNamesTests(unittest.TestCase):
                          "Smith-Jones v. Doe")
 
 
+class InReCapitalsCaptionTests(unittest.TestCase):
+    """Scholar sets an "In re" matter's name in capitals and the rest of the
+    caption in ordinary case; the capitals are the name.  "In re: AIMSTER
+    COPYRIGHT LITIGATION. Appeal of: John Deep" had been cited "In re
+    Aimster Copyright Litigation. Appeal of: John Deep"."""
+
+    def _cited(self, caption: str, cite_line: str = "1 F.3d 1 (2000)") -> str:
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(cite_line, caption))
+        return abbreviate_case_name(_scholar_caption_name(blocks))
+
+    def test_the_capitals_are_the_name(self):
+        for caption, cited in (
+                ("In re: AIMSTER COPYRIGHT LITIGATION. Appeal of: John Deep, "
+                 "Defendant.", "In re Aimster Copyright Litig."),
+                ("In re BEXTRA AND CELEBREX MARKETING SALES PRACTICES AND "
+                 "PRODUCT LIABILITY LITIGATION. This Order Relates to: all "
+                 "Cases.",
+                 "In re Bextra & Celebrex Mktg. Sales Pracs. & Prod. Liab. "
+                 "Litig."),
+                ("In re: COMBUSTION ENGINEERING, INC. First State Insurance "
+                 "Company; Hartford Accident and Indemnity Company, "
+                 "Appellants", "In re Combustion Eng'g, Inc."),
+                ("IN RE: MCP NO. 165, Occupational Safety and Health "
+                 "Administration, Interim Final Rule", "In re MCP No. 165"),
+                ("In re LETTER OF REQUEST FROM the CROWN PROSECUTION SERVICE "
+                 "OF the UNITED KINGDOM, Thomas J. Ward, Appellant.",
+                 "In re Letter of Request from the Crown Prosecution Serv. "
+                 "of the United Kingdom"),
+                ("In the Matter of NONHUMAN RIGHTS PROJECT, INC., on Behalf "
+                 "of TOMMY, Appellant, v. PATRICK C. LAVERY et al., "
+                 "Respondents.", "In re Nonhuman Rts. Project, Inc."),
+                ("In re TERRORIST ATTACKS ON SEPTEMBER 11, 2001 (Asat Trust "
+                 "Reg., et al.) John Patrick O'Neill, Jr., et al., "
+                 "Plaintiffs-Appellants, v. Asat Trust Reg.",
+                 "In re Terrorist Attacks on September 11, 2001"),
+                # A sentence's period ends the name; an abbreviation's
+                # doesn't.
+                ("In re GRAND JURY PROCEEDINGS. UNITED STATES of America, "
+                 "Plaintiff-Appellee, v. Allan Wolfe PRESSMAN",
+                 "In re Grand Jury Proc."),
+                # Given names go; the kind of matter stays.
+                ("In re Scott Jay GILL &amp; Jane Phyllis Gill, Debtors.",
+                 "In re Gill"),
+                ("IN RE: Felix M. PALACIOS, Petitioner.", "In re Palacios"),
+                ("In the matter of Adoption of T.R.M., an Indian Child.",
+                 "In re Adoption of T.R.M.")):
+            with self.subTest(caption=caption):
+                self.assertEqual(self._cited(caption), cited)
+
+    def test_a_caption_s_footnote_mark_is_no_docket_line(self):
+        # "…Petitioner.[1]" ends in a bracket as CAP's "Dec. 18, 1959.]"
+        # does, and In re Neagle, 135 U.S. 1, had gone without a name.
+        self.assertEqual(
+            self._cited('IN RE NEAGLE, Petitioner.<sup><a href="#[1]" '
+                        'name="r[1]">[1]</a></sup>', "135 U.S. 1 (1890)"),
+            "In re Neagle")
+        self.assertEqual(
+            self._cited("In re MARRIAGE CASES. [Six consolidated appeals.]"
+                        '<sup><a href="#[1]" name="r[1]">[1]</a></sup>'),
+            "In re Marriage Cases")
+
+    def test_where_the_rule_stands_aside(self):
+        from bluebook_names import in_re_caps_name
+        # All capitals: nothing tells the name from the rest.
+        self.assertIsNone(in_re_caps_name("IN RE SMITH, PETITIONER."))
+        # Words ahead of the capitals it can't account for.
+        self.assertIsNone(in_re_caps_name(
+            "In re Grand Jury Subpoena Issued to John DOE"))
+        # A firm keeps its initials: the old reading has it.
+        self.assertIsNone(in_re_caps_name("In re J. C. PENNEY CO., Debtor."))
+        self.assertEqual(self._cited("In re J. C. PENNEY CO., Debtor."),
+                         "In re J.C. Penney Co.")
+
+
 class FirmInitialsCaptionTests(unittest.TestCase):
     """A firm keeps the initials in its name (rule 10.2.1(g)).  In Scholar's
     all-caps "S. H. KRESS & CO." the initials had read as a person's given

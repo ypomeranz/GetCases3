@@ -1372,9 +1372,13 @@ def collapse_personal_all_caps_run(text: str) -> str:
     return text
 
 
+# Rule 8(a): articles, conjunctions and prepositions of four or fewer
+# letters stay in lowercase inside a name — "Letter of Request from the
+# Crown Prosecution Serv."
 _CAPTION_SMALL_WORDS = frozenset({
     "of", "the", "and", "v", "vs", "in", "re", "for", "on", "a", "an",
     "to", "by", "at", "as", "or", "ex", "rel", "et", "al", "de", "la",
+    "from", "with", "into", "onto", "upon",
 })
 _CAPTION_KEEP_CAPS = frozenset({
     "LLC", "LLP", "LLLP", "PLLC", "PLC", "LP", "PC", "PA", "N.A.",
@@ -2829,6 +2833,125 @@ _PROCEEDING_RE = re.compile(
     r"(?:in|of|involving|concerning|re:?)\s+(?:the\s+)?(?=[A-Z0-9])",
     re.IGNORECASE)
 
+# Scholar sets the name of an "In re" matter in capitals and the rest of its
+# caption in ordinary case — given names, a description of the proceeding,
+# a party's role, a companion case's parties, a note: "In re: AIMSTER
+# COPYRIGHT LITIGATION. Appeal of: John Deep, Defendant." is In re Aimster
+# Copyright Litig.; "In re Coordinated Pretrial Proceedings In WESTERN
+# LIQUID ASPHALT CASES." In re W. Liquid Asphalt Cases.
+_IN_RE_CAPS_PREFIX_RE = re.compile(
+    r"(in\s+re|ex\s+parte|in\s+the\s+matter\s+of|matter\s+of)\b[\s:,]*",
+    re.IGNORECASE)
+# The small words Scholar leaves in ordinary case inside a capitalized name:
+# "LETTER OF REQUEST FROM the CROWN PROSECUTION SERVICE OF the UNITED
+# KINGDOM".
+_CAPS_RUN_SMALL_WORDS = frozenset({
+    "a", "an", "and", "at", "by", "de", "del", "der", "di", "du", "for",
+    "from", "in", "la", "le", "of", "on", "the", "to", "van", "von",
+})
+# What may stand in ordinary case ahead of the name and stays: the kind of
+# matter a family or probate court names ("In re Adoption of T.R.M.", "In
+# re Estate and Guardianship of TRIESTINA DI CARLO").
+_IN_RE_KIND_RE = re.compile(
+    r"(?:the\s+)?((?:estate|marriage|adoption|guardianship|custody|welfare|"
+    r"parentage|paternity|conservatorship|dependency)"
+    r"(?:\s+(?:and|&)\s+(?:the\s+)?[A-Za-z]+)?\s+of)",
+    re.IGNORECASE)
+# …and what goes: what "In re" already says (rule 10.2.1(b)).
+_IN_RE_LEAD_DROPPED_RE = re.compile(
+    r"(?:the\s+)?(?:(?:application|petition)\s+of|(?:(?:coordinated|"
+    r"consolidated|multi-?district)\s+)?(?:pre-?trial\s+)?proceedings\s+"
+    r"(?:in|of|involving|concerning|re:?))(?:\s+the)?",
+    re.IGNORECASE)
+_CAPS_RUN_NUMBER_RE = re.compile(r"[#(]?\d[\d,.\-–/]*\)?[,;:]?")
+
+
+def _caps_run_word(token: str) -> bool:
+    """Whether *token* is a word of a capitalized name: "LITIGATION.",
+    "INC.,", "T.R.M.", "McCARDLE", "O'BRIEN"."""
+    core = token.strip("()[]\"'“”‘’,.;:")
+    if not re.search(r"[A-Za-z]", core):
+        return False
+    return core.upper() == core or bool(_MC_CAPS_SURNAME_RE.fullmatch(core))
+
+
+def _caps_run_sentence_end(token: str) -> bool:
+    """Whether the period *token* ends on closes a sentence — "CASES." —
+    rather than an abbreviation or an initial ("INC.", "NO.", "L.",
+    "U.S.")."""
+    tok = token.rstrip(",;:")
+    if not tok.endswith("."):
+        return False
+    core = tok.strip("()[]\"'“”‘’").rstrip(".")
+    if not re.search(r"[A-Za-z]", core):
+        return True    # "#156." — a number's sentence period
+    return not ("." in core or len(core) == 1
+                or core.lower() + "." in _ABBR_PERIOD_TOKENS
+                or core.lower() in _TABLE_ABBREVIATIONS)
+
+
+def in_re_caps_name(caption: str) -> str | None:
+    """The name of a mixed-case "In re" (or "Ex parte") caption whose matter
+    Scholar set in capitals — "In re WESTERN LIQUID ASPHALT CASES" — with
+    the capitals as the caption gives them, for the caller to case; or
+    None when the caption isn't one such."""
+    m = _IN_RE_CAPS_PREFIX_RE.match(caption or "")
+    if not m:
+        return None
+    prefix = _PROCEDURAL_CANON.get(re.sub(r"\s+", " ", m.group(1).lower()))
+    tokens = caption[m.end():].split()
+    # A lone initial opens no name: "Felix M. PALACIOS" is Palacios.
+    start = next((i for i, t in enumerate(tokens) if _caps_run_word(t)
+                  and len(re.sub(r"[^A-Za-z]", "", t)) >= 2), None)
+    if prefix is None or start is None:
+        return None
+    end = start
+    while end < len(tokens):
+        tok = tokens[end]
+        if (_caps_run_word(tok) or tok == "&"
+                or _CAPS_RUN_NUMBER_RE.fullmatch(tok)):
+            end += 1
+            if _caps_run_sentence_end(tok):
+                break
+        elif (tok.lower() in _CAPS_RUN_SMALL_WORDS
+              and end + 1 < len(tokens)
+              and (_caps_run_word(tokens[end + 1])
+                   or _CAPS_RUN_NUMBER_RE.fullmatch(tokens[end + 1]))):
+            end += 1
+        else:
+            break
+    while end > start and (tokens[end - 1] == "&"
+                           or tokens[end - 1].lower() in _CAPS_RUN_SMALL_WORDS):
+        end -= 1
+    run, lead = tokens[start:end], " ".join(tokens[:start])
+    after = " ".join(tokens[end:])
+    # A caption all in capitals can't say which of them is the name.
+    if not re.search(r"[a-z]", lead + " " + after):
+        return None
+    # A relator is the party's own (rule 10.2.1(b)), left to the reading
+    # that knows one; who a party acts on behalf of goes with the rest
+    # ("NONHUMAN RIGHTS PROJECT, INC., on Behalf of HAPPY").
+    if re.match(r"ex\s+rel\b", after, re.IGNORECASE):
+        return None
+    firm = any(t == "&" or _CAPS_ENTITY_SUFFIX_RE.fullmatch(t.rstrip(","))
+               for t in run)
+    kind = _IN_RE_KIND_RE.fullmatch(lead)
+    if kind:
+        lead = kind.group(1) + " "
+    elif (not lead or lead.lower() == "the"
+          or _IN_RE_LEAD_DROPPED_RE.fullmatch(lead)):
+        lead = ""
+    elif not firm and all(re.fullmatch(r"[A-Z][a-z'’-]+\.?|(?:[A-Z]\.)+|[A-Z]",
+                                       t) for t in lead.split()):
+        lead = ""       # a person's given names: the capitals are the surname
+    else:
+        return None     # words this can't account for: the old reading
+    name = " ".join(run).strip(" ,;:")
+    if _caps_run_sentence_end(run[-1]):
+        name = name[:-1].rstrip(" ,;:")
+    return f"{prefix} {lead}{name}" if name else None
+
+
 # Where the one party a procedural caption is cited by ends (rule 10.2.1(a),
 # (b)): at an appositive describing it — "a Pennsylvania Corporation", "an
 # Infant" — or its role in the proceeding, "Bankrupt", "Debtor", after which a
@@ -3247,6 +3370,7 @@ def _strip_trailing_period(name: str) -> str:
 
 _SMALL_MIDWORD = frozenset({
     "of", "the", "and", "in", "for", "at", "by", "to", "on", "or",
+    "from", "with", "into", "onto", "upon",
 })
 
 
