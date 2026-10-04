@@ -732,10 +732,11 @@ _DOCKET_AFTER_NAME_RE = re.compile(
     r",\s*(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+)?Nos?\.\s*"
     r"[\w:().-]{2,30}(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
 
-# "In re Winship", "Ex parte Young", "Matter of Doe" — a case name with no
-# "v." in it, anchored to the end of the window before the citation.
+# "In re Winship", "Ex parte Young", "Matter of Doe", "In the Interest of
+# J.W." — a case name with no "v." in it, anchored to the end of the window
+# before the citation.
 _NAME_NO_V_RE = re.compile(
-    r"(?:In\s+re|In\s+the\s+Matter\s+of|Ex\s+parte|Matter\s+of)\s+"
+    r"(?:In\s+re|In\s+the\s+(?:Matter|Interest)\s+of|Ex\s+parte|Matter\s+of)\s+"
     r"[A-Z][\w.,'’&()-]*(?:\s+[\w.,'’&()-]+){0,6}$"
 )
 

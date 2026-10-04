@@ -5035,17 +5035,126 @@ class PeriodicalWordsInPartyNamesTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(abbreviate_case_name(name), cited)
 
+    def test_the_rest_of_the_old_periodical_table(self):
+        for name, cited in (
+                ("Hustler Magazine, Inc. v. Falwell",
+                 "Hustler Mag., Inc. v. Falwell"),
+                ("Guaranty Trust Co. v. York", "Guar. Tr. Co. v. York"),
+                ("Thomas v. Review Board of the Indiana Employment Security "
+                 "Division", "Thomas v. Rev. Bd. of the Ind. Emp. Sec. Div."),
+                ("Reporters Committee for Freedom of the Press v. Doe",
+                 "Reps. Comm. for Freedom of the Press v. Doe"),
+                ("First English Evangelical Lutheran Church of Glendale v. "
+                 "County of Los Angeles",
+                 "First Eng. Evangelical Lutheran Church of Glendale v. "
+                 "County of Los Angeles"),
+                ("In re Grand Jury Proceedings", "In re Grand Jury Proc."),
+                ("Doe v. Historical Society", "Doe v. Hist. Soc'y"),
+                ("Doe v. Special School District", "Doe v. Spec. Sch. Dist."),
+                ("Doe v. Children's Hospital", "Doe v. Child.'s Hosp."),
+                ("Smith v. National Legislative Assembly",
+                 "Smith v. Nat'l Legis. Assemb.")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
     def test_plurals_the_table_spells_out(self):
-        # "J." has no plural, and "Couns." is already one.
+        # "J." has no plural, and "Couns." is already one, as "Sess." is.
         self.assertEqual(abbreviate_case_name("Doe v. Medical Journals, Inc."),
                          "Doe v. Med. J., Inc.")
         self.assertEqual(
             abbreviate_case_name("Brown v. Counselors of Real Estate"),
             "Brown v. Couns. of Real Est.")
+        self.assertEqual(
+            abbreviate_case_name("Doe v. Board of Sessions"),
+            "Doe v. Bd. of Sess.")
+        self.assertEqual(
+            abbreviate_case_name("Students Challenging Regulatory Agency "
+                                 "Procedures v. Doe"),
+            "Students Challenging Regul. Agency Procs. v. Doe")
+
+    def test_university_keeps_its_case_name_form(self):
+        self.assertEqual(abbreviate_case_name("Doe v. Harvard University"),
+                         "Doe v. Harvard Univ.")
 
     def test_a_hyphenated_name_keeps_its_last_abbreviation_s_period(self):
         self.assertEqual(abbreviate_case_name("Smith-Jones v. Doe."),
                          "Smith-Jones v. Doe")
+
+
+class SurnameAndOneWordPartyTests(unittest.TestCase):
+    """A T6 word that is somebody's surname is not abbreviated, and neither
+    is a party named by one word: "West v. Atkins" had been "W. v. Atkins",
+    and "Weeks v. United States" "Wks. v. United States"."""
+
+    def test_a_one_word_party_is_left_whole(self):
+        for name, cited in (
+                ("West v. Atkins", "West v. Atkins"),
+                ("Weeks v. United States", "Weeks v. United States"),
+                ("Street v. New York", "Street v. New York"),
+                ("English v. General Electric Co.",
+                 "English v. Gen. Elec. Co."),
+                ("Doe v. Board", "Doe v. Board"),
+                # …"The" dropped first.
+                ("Smith v. The Tribune", "Smith v. Tribune")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_but_the_commissioner_is_comm_r(self):
+        self.assertEqual(abbreviate_case_name("Commissioner v. Glenshaw "
+                                              "Glass Co."),
+                         "Comm'r v. Glenshaw Glass Co.")
+        self.assertEqual(abbreviate_case_name("Smith v. Commissioner"),
+                         "Smith v. Comm'r")
+
+    def test_a_surname_after_a_given_name(self):
+        for name, cited in (
+                ("Oliver North v. Doe", "North v. Doe"),
+                ("Adam West v. Doe", "West v. Doe"),
+                ("Della Street v. Doe", "Street v. Doe"),
+                ("Jim Justice v. Doe", "Justice v. Doe"),
+                ("John English v. Doe", "English v. Doe"),
+                ("Mae West, Warden v. Doe", "West v. Doe"),
+                ("Michael Eng v. Doe", "Eng v. Doe")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_but_not_without_one(self):
+        self.assertEqual(abbreviate_case_name("Wall Street v. Doe"),
+                         "Wall St. v. Doe")
+        self.assertEqual(abbreviate_case_name("Equal Justice v. Doe"),
+                         "Equal Just. v. Doe")
+
+    def test_a_firm_named_for_mr_weeks(self):
+        self.assertEqual(abbreviate_case_name("Weeks Marine, Inc. v. Doe"),
+                         "Weeks Marine, Inc. v. Doe")
+
+    def test_a_scholar_caption_s_capitals_mark_the_surname(self):
+        from bluebook_names import is_personal_all_caps_run
+        self.assertTrue(is_personal_all_caps_run(["NORTH"], ["Oliver"]))
+        self.assertFalse(is_personal_all_caps_run(["STREET", "CO."],
+                                                  ["Wall"]))
+
+
+class LegislatorAndInterestCaptionTests(unittest.TestCase):
+
+    def test_a_senator_s_office_is_no_part_of_the_name(self):
+        self.assertEqual(
+            abbreviate_case_name("McConnell, U.S. Senator v. FEC"),
+            "McConnell v. FEC")
+
+    def test_in_the_interest_of_is_in_re(self):
+        # Rule 10.2.1(b): In re J.W., 645 S.W.3d 726 (Tex. 2022).
+        for name in ("In the Interest of J.W.", "In re Interest of J.W.",
+                     "In re the Interest of J.W."):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), "In re J.W.")
+
+    def test_and_its_link_takes_in_the_name(self):
+        import citations
+        text = "So held. In the Interest of J.W., 645 S.W.3d 726 (Tex. 2022)."
+        spans = [text[s:e] for s, e, *_ in citations.detect_links(text)]
+        self.assertIn("In the Interest of J.W., 645 S.W.3d 726 (Tex. 2022)",
+                      spans)
 
 
 class RelatorCaptionTests(unittest.TestCase):
