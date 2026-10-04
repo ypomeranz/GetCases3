@@ -27,46 +27,72 @@ import re
 # the T6 plural rule: add "s" to the abbreviation, e.g. Cos., Ass'ns).
 # Entries whose plural the table spells out differently are listed
 # explicitly and suppress the derived form.
+#
+# Since the 21st edition T6 takes in the periodical-title words too (the old
+# T13.2: Journal, Review, Annual, Reporter, Trust…), and they abbreviate a
+# party's name as they do a journal's: Clark Cnty. Sch. Dist. v. Las Vegas
+# Rev.-J., 429 P.3d 313 (Nev. 2018); Milkovich v. Lorain J. Co., 497 U.S. 1
+# (1990).  "University" alone keeps its case-name form, "Univ." — "U." is
+# for journal titles only — and "Law" ("L." but where it opens the title)
+# and "Record" (a legislative or court document's) are left to periodicals.
 # ---------------------------------------------------------------------------
 
 _T6_SINGULAR: dict[str, str] = {
     "academic": "Acad.", "academy": "Acad.",
+    "account": "Acct.", "accountancy": "Acct.", "accountant": "Acct.",
+    "accounting": "Acct.",
     "administration": "Admin.", "administrative": "Admin.",
     "administrator": "Adm'r", "administratrix": "Adm'x",
+    "admiralty": "Adm.",
     "advertising": "Advert.",
     "advocacy": "Advoc.", "advocate": "Advoc.",
-    "african": "Afr.",
+    "affair": "Aff.",
+    "africa": "Afr.", "african": "Afr.",
     "agricultural": "Agric.", "agriculture": "Agric.",
     "alliance": "All.",
     "alternative": "Alt.",
     "america": "Am.", "american": "Am.",
+    "ancestry": "Anc.",
     "and": "&",
+    "annual": "Ann.",
+    "appellate": "App.",
     "arbitration": "Arb.", "arbitrator": "Arb.",
+    "assembly": "Assemb.", "assemblyman": "Assemb.",
+    "assemblymember": "Assemb.", "assemblywoman": "Assemb.",
     "associate": "Assoc.",
     "association": "Ass'n",
     "atlantic": "Atl.",
     "attorney": "Att'y",
+    "australia": "Austl.", "australian": "Austl.",
     "authority": "Auth.",
     "automobile": "Auto.", "automotive": "Auto.",
     "avenue": "Ave.",
     "bankruptcy": "Bankr.",
-    "behavioral": "Behav.",
+    "behavior": "Behav.", "behavioral": "Behav.",
+    "bioscience": "Biosci.",
+    "biotechnology": "Biotech.",
     "board": "Bd.",
     "boulevard": "Blvd.",
     "british": "Brit.",
     "broadcast": "Broad.", "broadcaster": "Broad.", "broadcasting": "Broad.",
     "brotherhood": "Bhd.",
     "building": "Bldg.",
+    "bulletin": "Bull.",
     "business": "Bus.",
+    "canadian": "Can.",
     "capital": "Cap.",
     "casualty": "Cas.",
     "catholic": "Cath.",
     "center": "Ctr.", "centre": "Ctr.",
     "central": "Cent.",
+    "chancery": "Ch.",
     "chemical": "Chem.",
+    "children": "Child.",
+    "chronicle": "Chron.",
     "civil": "Civ.",
     "coalition": "Coal.",
     "college": "Coll.",
+    "commentary": "Comment.",
     "commerce": "Com.", "commercial": "Com.",
     "commission": "Comm'n",
     "commissioner": "Comm'r",
@@ -74,6 +100,7 @@ _T6_SINGULAR: dict[str, str] = {
     "communication": "Commc'n",
     "community": "Cmty.",
     "company": "Co.",
+    "comparative": "Compar.",
     "compensation": "Comp.",
     "computer": "Comput.",
     "condominium": "Condo.",
@@ -84,6 +111,7 @@ _T6_SINGULAR: dict[str, str] = {
     "construction": "Constr.",
     "continental": "Cont'l",
     "contract": "Cont.",
+    "conveyance": "Conv.", "conveyancer": "Conv.",
     "cooperation": "Coop.", "cooperative": "Coop.",
     "corporate": "Corp.", "corporation": "Corp.",
     "correction": "Corr.", "correctional": "Corr.",
@@ -97,17 +125,21 @@ _T6_SINGULAR: dict[str, str] = {
     "department": "Dep't",
     "detention": "Det.",
     "developer": "Dev.", "development": "Dev.",
+    "digest": "Dig.",
     "digital": "Digit.",
     "director": "Dir.",
     "discount": "Disc.",
+    "diplomacy": "Dipl.",
     "dispute": "Disp.",
     "distributing": "Distrib.", "distribution": "Distrib.",
     "distributor": "Distrib.",
     "district": "Dist.",
     "division": "Div.",
+    "doctor": "Dr.",
     "east": "E.", "eastern": "E.",
     "economic": "Econ.", "economical": "Econ.", "economics": "Econ.",
     "economy": "Econ.",
+    "editor": "Ed.", "editorial": "Ed.",
     "education": "Educ.", "educational": "Educ.",
     "electric": "Elec.", "electrical": "Elec.", "electricity": "Elec.",
     "electronic": "Elec.",
@@ -115,13 +147,14 @@ _T6_SINGULAR: dict[str, str] = {
     "enforcement": "Enf't",
     "engineer": "Eng'r",
     "engineering": "Eng'g",
+    "english": "Eng.",
     "enterprise": "Enter.",
     "entertainment": "Ent.",
     "environment": "Env't", "environmental": "Env't",
     "equality": "Equal.",
     "equipment": "Equip.",
     "estate": "Est.",
-    "european": "Eur.",
+    "europe": "Eur.", "european": "Eur.",
     "examiner": "Exam'r",
     "exchange": "Exch.",
     "executive": "Exec.",
@@ -134,38 +167,51 @@ _T6_SINGULAR: dict[str, str] = {
     "federation": "Fed'n",
     "fidelity": "Fid.",
     "finance": "Fin.", "financial": "Fin.", "financing": "Fin.",
+    "fortnightly": "Fort.",
     "foundation": "Found.",
     "general": "Gen.",
     "global": "Glob.",
     "government": "Gov't",
     "group": "Grp.",
     "guarantor": "Guar.", "guaranty": "Guar.",
+    "historical": "Hist.", "history": "Hist.",
     "hospital": "Hosp.", "hospitality": "Hosp.",
     "housing": "Hous.",
     "human": "Hum.",
+    "humanities": "Human.", "humanity": "Human.",
     "immigration": "Immigr.",
     "import": "Imp.", "importation": "Imp.", "importer": "Imp.",
     "incorporated": "Inc.",
     "indemnity": "Indem.",
     "independence": "Indep.", "independent": "Indep.",
     "industrial": "Indus.", "industry": "Indus.",
+    "inequality": "Ineq.",
     "information": "Info.",
     "injury": "Inj.",
     "institute": "Inst.", "institution": "Inst.",
     "insurance": "Ins.",
+    "intellectual": "Intell.",
     "intelligence": "Intel.",
+    "interest": "Int.",
     "international": "Int'l",
     "investment": "Inv.", "investor": "Inv.",
+    "journal": "J.",
+    "juridical": "Jurid.",
+    "jurisprudence": "Juris.",
     "justice": "Just.",
     "juvenile": "Juv.",
     "labor": "Lab.",
     "laboratory": "Lab'y",
     "lawyer": "Law.",
+    "librarian": "Libr.", "library": "Libr.",
+    "legislation": "Legis.", "legislative": "Legis.",
+    "legislature": "Leg.",
     "liability": "Liab.",
     "limited": "Ltd.",
     "litigation": "Litig.",
     "local": "Loc.",
     "machine": "Mach.", "machinery": "Mach.",
+    "magazine": "Mag.", "magistrate": "Mag.",
     "maintenance": "Maint.",
     "management": "Mgmt.",
     "manufacturer": "Mfr.",
@@ -173,6 +219,7 @@ _T6_SINGULAR: dict[str, str] = {
     "maritime": "Mar.",
     "market": "Mkt.",
     "marketing": "Mktg.",
+    "matrimonial": "Matrim.",
     "mechanical": "Mech.",
     "medical": "Med.", "medicinal": "Med.", "medicine": "Med.",
     "memorial": "Mem'l",
@@ -180,11 +227,17 @@ _T6_SINGULAR: dict[str, str] = {
     "metropolitan": "Metro.",
     "military": "Mil.",
     "mineral": "Min.",
+    "miscellaneous": "Misc.",
+    "modern": "Mod.",
     "mortgage": "Mortg.",
     "municipal": "Mun.", "municipality": "Mun.",
     "mutual": "Mut.",
     "national": "Nat'l",
+    "nationality": "Nat'y",
     "natural": "Nat.",
+    "negligence": "Negl.",
+    "negotiation": "Negot.", "negotiator": "Negot.",
+    "newsletter": "Newsl.",
     "north": "N.", "northern": "N.",
     "northeast": "Ne.", "northeastern": "Ne.",
     "northwest": "Nw.", "northwestern": "Nw.",
@@ -197,12 +250,18 @@ _T6_SINGULAR: dict[str, str] = {
     "partnership": "P'ship",
     "patent": "Pat.",
     "personal": "Pers.", "personnel": "Pers.",
+    "perspective": "Persp.",
     "pharmaceutical": "Pharm.", "pharmaceutics": "Pharm.",
+    "philosophical": "Phil.", "philosophy": "Phil.",
     "planning": "Plan.",
+    "political": "Pol.", "politics": "Pol.",
     "policy": "Pol'y",
+    "practical": "Prac.", "practice": "Prac.", "practitioner": "Prac.",
     "preservation": "Pres.", "preserve": "Pres.",
     "privacy": "Priv.", "private": "Priv.",
     "probate": "Prob.", "probation": "Prob.",
+    "problems": "Probs.",
+    "procedure": "Proc.", "proceedings": "Proc.",
     "product": "Prod.", "production": "Prod.",
     "professional": "Pro.",
     "property": "Prop.",
@@ -216,9 +275,11 @@ _T6_SINGULAR: dict[str, str] = {
     "railway": "Ry.",
     "refining": "Refin.",
     "regional": "Reg'l",
+    "register": "Reg.",
     "regulation": "Regul.", "regulator": "Regul.", "regulatory": "Regul.",
     "rehabilitation": "Rehab.", "rehabilitative": "Rehab.",
     "relation": "Rel.",
+    "report": "Rep.", "reporter": "Rep.",
     "reproduction": "Reprod.", "reproductive": "Reprod.",
     "research": "Rsch.",
     "reservation": "Rsrv.", "reserve": "Rsrv.",
@@ -227,27 +288,36 @@ _T6_SINGULAR: dict[str, str] = {
     "responsibility": "Resp.",
     "restaurant": "Rest.",
     "retirement": "Ret.",
+    "review": "Rev.",
     "road": "Rd.",
     "savings": "Sav.",
     "school": "Sch.",
     "science": "Sci.", "scientific": "Sci.",
+    "scottish": "Scot.",
     "secretary": "Sec'y",
     "security": "Sec.",
+    "senator": "Sen.",
     "sentencing": "Sent'g",
     "service": "Serv.",
+    "session": "Sess.",
     "shareholder": "S'holder", "stockholder": "S'holder",
     "social": "Soc.",
     "society": "Soc'y",
+    "sociological": "Socio.", "sociology": "Socio.",
     "solicitor": "Solic.",
     "solution": "Sol.",
     "south": "S.", "southern": "S.",
     "southeast": "Se.", "southeastern": "Se.",
     "southwest": "Sw.", "southwestern": "Sw.",
+    "special": "Spec.",
     "statistical": "Stat.", "statistics": "Stat.",
     "steamship": "S.S.",
     "street": "St.",
+    "studies": "Stud.",
     "subcommittee": "Subcomm.",
     "surety": "Sur.",
+    "survey": "Surv.",
+    "symposium": "Symp.",
     "system": "Sys.",
     "taxation": "Tax'n",
     "teacher": "Tchr.",
@@ -260,14 +330,17 @@ _T6_SINGULAR: dict[str, str] = {
     "transcontinental": "Transcon.",
     "transnational": "Transnat'l",
     "transport": "Transp.", "transportation": "Transp.",
-    "trustee": "Tr.",
+    "tribunal": "Trib.", "tribune": "Trib.",
+    "trust": "Tr.", "trustee": "Tr.",
     "turnpike": "Tpk.",
     "uniform": "Unif.",
     "university": "Univ.",
     "urban": "Urb.",
     "utility": "Util.",
     "village": "Vill.",
+    "week": "Wk.", "weekly": "Wkly.",
     "west": "W.", "western": "W.",
+    "yearbook": "Y.B.",
 }
 
 # Plurals the table spells out itself (same abbreviation as the singular,
@@ -276,9 +349,11 @@ _T6_PLURAL: dict[str, str] = {
     "brothers": "Bros.",
     "businesses": "Bus.",
     "casualties": "Cas.",
+    "children's": "Child.'s",   # the table's one possessive
     "corrections": "Corr.",
     "industries": "Indus.",
     "resources": "Res.",
+    "journals": "J.",
     "rights": "Rts.",
     "securities": "Sec.",
     "steamships": "S.S.",
@@ -1175,12 +1250,16 @@ def is_personal_all_caps_run(
     explicitly rejecting entity initialisms in ``McDonald's USA``.
     """
     names: list[str] = []
-    for token in capitalized_tokens:
+    for k, token in enumerate(capitalized_tokens):
         display = token.replace("’", "'").strip(",.")
         key = re.sub(r"[^A-Za-z]", "", display).lower()
         if (display in _NONPERSON_CAPS
                 or key in _ORG_WORDS
-                or key in _T6_WORDS
+                # …a word that is a surname too, closing the run, is the
+                # surname: "Oliver NORTH".
+                or (key in _T6_WORDS and not (
+                    key in _SURNAME_T6_WORDS
+                    and k == len(capitalized_tokens) - 1))
                 # An abbreviation reads as all caps because its letters are
                 # capitals, not because a reporter set a surname in capitals:
                 # "R.R." is Railroad, "Ry." Railway, "Cent." Central.  The
@@ -1911,7 +1990,12 @@ def _plural(word: str, abbr: str) -> tuple[str, str] | None:
         pword = word + "es"
     else:
         pword = word + "s"
-    pabbr = abbr[:-1] + "s." if abbr.endswith(".") else abbr + "s"
+    if abbr.endswith("s."):
+        pabbr = abbr    # already a plural's: Couns., Sess., Indus.
+    elif abbr.endswith("."):
+        pabbr = abbr[:-1] + "s."
+    else:
+        pabbr = abbr + "s"
     return pword, pabbr
 
 
@@ -1924,10 +2008,27 @@ def _build_word_map() -> dict[str, str]:
     words.update(_T6_PLURAL)
     words.update(_T10_WORDS)
     words.update(_T10_CITY_WORDS)
+    # "Weeks" in a party's name is all but always a surname, never Week's
+    # plural: Weeks v. United States, 232 U.S. 383; Weeks Marine, Inc.
+    del words["weeks"]
     return words
 
 
 _WORD_MAP = _build_word_map()
+
+# T6 words that are also common surnames, read as the surname when they
+# close a person's name ("Oliver North", "Della Street", "Glenn English")
+# — given names and all, the name cites by that surname alone (rule
+# 10.2.1(g)), and a party named by one word is never abbreviated.
+_SURNAME_T6_WORDS = frozenset({
+    "english", "justice", "north", "street", "week", "weekly", "west",
+})
+
+# A party named by one word keeps it whole ("West v. Atkins", "Street v.
+# New York") — except the Commissioner of Internal Revenue, whom the
+# Bluebook itself cites "Comm'r" (Comm'r v. Glenshaw Glass Co., 348 U.S.
+# 426 (1955)).
+_ONE_WORD_PARTIES_ABBREVIATED = frozenset({"commissioner"})
 
 # T6 words signal an organization, blocking given-name dropping ("George
 # Washington University").  T10 place names are excluded from that signal:
@@ -2286,7 +2387,8 @@ def _strip_given_names(p: str, *, person: bool = False,
     # person all the same — the suffix proves it — and cites as the surname.
     if (suffixed and len(tokens) == 1 and not titled
             and re.fullmatch(r"[A-Z][A-Za-z'’-]+", tokens[0])
-            and tokens[0].lower() not in _T6_WORDS
+            and (tokens[0].lower() not in _T6_WORDS
+                 or tokens[0].lower() in _SURNAME_T6_WORDS)
             and tokens[0].lower() not in _ORG_WORDS):
         return tokens[0]
     if not 2 <= len(tokens) <= 4:
@@ -2297,9 +2399,12 @@ def _strip_given_names(p: str, *, person: bool = False,
     # initial ("W." or "F.A."), or a surname particle — and none may be an
     # organizational word ("George Washington University" abbreviates
     # instead) or a business-entity term ("Katherine Inc." is a firm, not
-    # a person).
-    for t, tl in zip(tokens, low):
-        if (tl in _T6_WORDS or tl in _ORG_WORDS
+    # a person) — unless it is a word that is a surname too, closing the
+    # name ("Oliver North"), where only the given-name list may read it.
+    t6_surname = low[-1] in _SURNAME_T6_WORDS
+    for k, (t, tl) in enumerate(zip(tokens, low)):
+        if ((tl in _T6_WORDS and not (t6_surname and k == len(tokens) - 1))
+                or tl in _ORG_WORDS
                 or re.sub(r"[^a-z]", "", tl) in _APPOSITIVE_ENTITY_TERMS
                 or not re.fullmatch(
                     r"(?:[A-Z]\.)+|[A-ZÀ-ÖØ-Þ](?:[A-Za-zÀ-ÖØ-öø-ÿ'’-]+|\.)?",
@@ -2328,9 +2433,10 @@ def _strip_given_names(p: str, *, person: bool = False,
     # Bank", whose middle token flunks this check).  A stripped honorific
     # already establishes a natural person, so under one any name-shaped
     # middle token passes ("Dr. Theresa Swain Emory" -> "Emory").
-    if ((low[0] in _GIVEN_NAMES or (
-            person_shaped
-            and re.fullmatch(r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+", tokens[0]))
+    if ((low[0] in _GIVEN_NAMES
+            or (t6_surname and low[0] in _census_names()[2])
+            or (person_shaped and re.fullmatch(
+                r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+", tokens[0]))
             # An office names a person even by initials: "W.M. Riddle,
             # Sup't" is Riddle.
             or (person and re.fullmatch(r"(?:[A-Z]\.)+", tokens[0])))
@@ -2339,6 +2445,8 @@ def _strip_given_names(p: str, *, person: bool = False,
                     or re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]\.?", t)
                     for t, tl in zip(tokens[1:i], low[1:i]))):
         return _surname_text(tokens, i)
+    if t6_surname:
+        return None     # "Wall Street", "Equal Justice": no given name
     i = _relaxed_surname_start(tokens, low, names) if relaxed else None
     return None if i is None else _surname_text(tokens, i)
 
@@ -2470,6 +2578,7 @@ _DESCRIPTIVE_WORDS = _OFFICE_WORDS | frozenset({
     "executrix", "exx", "receiver", "guardian", "conservator", "officer",
     "deputy", "chairman", "chairperson", "chair", "president", "member",
     "postmaster", "justice", "acting", "former", "inspector", "custodian",
+    "senator", "sen", "representative", "congressman", "congresswoman",
 })
 
 
@@ -2507,7 +2616,8 @@ def _lone_surname(head: str) -> str | None:
     if not re.fullmatch(r"[A-Z][A-Za-z'’\-]+", name):
         return None
     key = name.replace("’", "'").lower()
-    if (key in _T6_WORDS or key in _ORG_WORDS or key in _GEO_PARTIES
+    if ((key in _T6_WORDS and key not in _SURNAME_T6_WORDS)
+            or key in _ORG_WORDS or key in _GEO_PARTIES
             or _word_key(name) in _APPOSITIVE_ENTITY_TERMS):
         return None
     return name
@@ -2665,8 +2775,13 @@ def _format_anonymous_initials(party: str) -> str | None:
 # "In the Matter of" fold to "In re".  The party after the prefix is
 # abbreviated normally, so an anonymized party still reformats to initials
 # ("In re JW" -> "In re J.W.").
+# "In the Interest of", a child's case in many states' courts, is one of the
+# "similar expressions" rule 10.2.1(b) cites as "In re": "In the Interest of
+# J.W." is In re J.W., 645 S.W.3d 726 (Tex. 2022) — and so is Nebraska's "In
+# re Interest of Jordon B.".
 _PROCEDURAL_PREFIX_RE = re.compile(
-    r"^(in\s+re|ex\s+parte|in\s+the\s+matter\s+of|matter\s+of)\b[\s,:]*",
+    r"^(in\s+re(?:\s+(?:the\s+)?interest\s+of)?|ex\s+parte"
+    r"|in\s+the\s+(?:matter|interest)\s+of|matter\s+of)\b[\s,:]*",
     re.IGNORECASE,
 )
 _PROCEDURAL_CANON = {
@@ -2674,6 +2789,9 @@ _PROCEDURAL_CANON = {
     "ex parte": "Ex parte",
     "in the matter of": "In re",
     "matter of": "In re",
+    "in re interest of": "In re",
+    "in re the interest of": "In re",
+    "in the interest of": "In re",
 }
 
 
@@ -2963,6 +3081,13 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
         return _abbreviate_party(head, recognize_initials=recognize_initials,
                                  court_state=court_state, names=names)
 
+    # A party named by one word — "The" gone — is not abbreviated: it is
+    # most often a surname ("West v. Atkins", "Weeks v. United States").
+    word = p.strip(" ,")
+    if (re.fullmatch(r"\S+", word)
+            and _word_key(word) not in _ONE_WORD_PARTIES_ABBREVIATED):
+        return word
+
     p = _PHRASE_RE.sub(
         lambda m: _PHRASE_MAP[re.sub(r"\s+", " ", m.group(0).lower())], p
     )
@@ -3086,6 +3211,9 @@ def _strip_trailing_period(name: str) -> str:
     if not name.endswith("."):
         return name
     tok = name.rsplit(None, 1)[-1]  # last whitespace-delimited token
+    # …or the last piece of a hyphenated one: "Las Vegas Rev.-J." ends in
+    # the abbreviation "J.".
+    tok = tok.rsplit("-", 1)[-1]
     stem = tok[:-1]
     if "." in stem or len(stem) == 1 or tok.lower() in _ABBR_PERIOD_TOKENS:
         return name  # initialism, single initial, or real abbreviation
