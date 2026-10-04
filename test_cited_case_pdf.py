@@ -406,6 +406,12 @@ APP_NS = _load(
          or (PICKED[0](opinions) if PICKED else None)),
      "_case_law_opinion_name": lambda opinion: opinion.name,
      "_is_the_named_case": lambda name, other: name == other,
+     # The official forms, with no ambiguous reporter here to choose among
+     # by name; and no state court's scan to keep the Constitution from.
+     "_official_series_for": lambda cite, name="", year="": (
+         ["5 U.S. 137"] if "Cranch" in cite
+         else citations.state_nominative_cites(cite)),
+     "_state_court_cite": lambda cite: False,
      },
 )
 

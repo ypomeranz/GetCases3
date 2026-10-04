@@ -1428,10 +1428,13 @@ def normal_case_caption(text: str) -> str:
         # separator unless it continues a chain of initials — the article
         # "A" never prints a period, so the period is the initial's mark.
         if re.fullmatch(r"[A-Z]", stripped) and "." in word:
+            # A capital "V." where the caption already has its lowercase
+            # "v." is a middle initial too: "Beatrice V. Dittus v. Alan
+            # Cranston" (Dittus v. Cranston, 53 Cal. 2d 284).
             if stripped != "V" or (
                 i and re.fullmatch(
                     r"[A-Z]\.[,;]?", words[i - 1].replace("’", "'"))
-            ):
+            ) or any(w in ("v.", "vs.") for w in words):
                 out.append(word)
                 continue
         low = word.lower()

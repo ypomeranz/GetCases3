@@ -730,7 +730,7 @@ class ScanTitleTests(unittest.TestCase):
 
 PDFWIN_NAMES = ["_hand_to_viewer", "_viewer_closed", "_dialog_parent",
                 "_reveal", "_say", "_show", "_reporter_analysis",
-                "_end_watch"]
+                "_end_watch", "_is_state_case"]
 
 
 class _HandoffViewer:
@@ -762,6 +762,10 @@ def _pdfwin_ns(pages=(("some text",),)):
              lambda data, pages, italics: ({1: ["link"]}, set()),
          "slip_opinion": type("slip", (), {
              "detect_sections": staticmethod(lambda pages: ["section"])}),
+         # These scans are no state court's: their Constitution links stay.
+         "detect_brief_links": lambda text: [],
+         "_state_court_cite": lambda cite: False,
+         "_federal_constitution_only_pages": lambda links: links,
          },
     )
 
