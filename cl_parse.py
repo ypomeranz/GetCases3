@@ -347,11 +347,11 @@ def parse_cl_html(html: str, fn_prefix: str = ""):
                 block.kind = "heading"
 
     try:
-        from google_scholar import _educate_block_quotes
+        from google_scholar import finish_block_text
         for block in blocks:
-            _educate_block_quotes(block)
+            finish_block_text(block)
         for block in footnotes:
-            _educate_block_quotes(block)
+            finish_block_text(block)
     except ImportError:
         pass
     return blocks, footnotes

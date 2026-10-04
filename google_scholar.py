@@ -877,6 +877,43 @@ def _educate_block_quotes(block: "Block") -> None:
         pos = end
 
 
+NBSP = "\u00a0"
+# The spaces between a section or paragraph sign and the number it heads
+# ("§ 1983", "§§ 1981-1983", "¶ 12"): bound with non-breaking ones, a line
+# never ends on a bare "§" or "¶".
+_SIGN_SPACE_RE = re.compile(r"(?<=[§¶])[ \t]+(?=\d)")
+
+
+def bind_signs_to_numbers(text: str) -> str:
+    """*text* with the spaces after each section or paragraph sign and before
+    its number made non-breaking, one for one, so offsets into it still
+    hold."""
+    if "§" not in text and "¶" not in text:
+        return text
+    return _SIGN_SPACE_RE.sub(lambda m: NBSP * len(m.group(0)), text)
+
+
+def bind_block_signs_to_numbers(block: "Block") -> None:
+    """:func:`bind_signs_to_numbers` across a whole block, whose "§ " can close
+    one span and its number open the next (a citation's link)."""
+    full = "".join(s.text for s in block.spans)
+    fixed = bind_signs_to_numbers(full)
+    if fixed == full:
+        return
+    pos = 0
+    for s in block.spans:
+        end = pos + len(s.text)
+        s.text = fixed[pos:end]
+        pos = end
+
+
+def finish_block_text(block: "Block") -> None:
+    """The last touches every opinion parser gives a block's text: curled
+    quotes, and each section or paragraph sign bound to its number."""
+    _educate_block_quotes(block)
+    bind_block_signs_to_numbers(block)
+
+
 def _visible_block_text(block: "Block") -> str:
     return _WS_RE.sub(
         " ", "".join(s.text for s in block.spans if not s.pagenum)
@@ -1087,7 +1124,7 @@ def parse_opinion_blocks(html: str) -> list[Block]:
     blocks = [b for b in blocks if not _SAVE_TREES_RE.match(b.text().strip())]
     blocks = _drop_leading_control_marks(blocks)
     for block in blocks:
-        _educate_block_quotes(block)
+        finish_block_text(block)
     return blocks
 
 
