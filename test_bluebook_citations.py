@@ -5081,6 +5081,49 @@ class PeriodicalWordsInPartyNamesTests(unittest.TestCase):
                          "Smith-Jones v. Doe")
 
 
+class FirmPairAndSlashInitialsTests(unittest.TestCase):
+    """Novo Nordisk A/S v. Caraco Pharm. Lab'ys, Ltd., 688 F.3d 766 (Fed.
+    Cir. 2012), was cited "Novo Nordisk A/s & Novo Nordisk, Inc. v. …": both
+    plaintiffs, and the Danish firm's "A/S" title-cased like a word."""
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "688 F.3d 766 (2012)",
+            "NOVO NORDISK A/S and Novo Nordisk, Inc., Plaintiffs-Appellants,"
+            "<br/>v.<br/>CARACO PHARMACEUTICAL LABORATORIES, LTD., and Sun "
+            "Pharmaceutical Industries, Ltd., Defendants-Appellees."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Novo Nordisk A/S v. Caraco Pharm. Lab'ys, Ltd.")
+
+    def test_letters_and_slashes_are_initials(self):
+        for caps, cased in (("NOVO NORDISK A/S", "Novo Nordisk A/S"),
+                            ("BARBER LINES A/S v. M/V DONAU MARU",
+                             "Barber Lines A/S v. M/V Donau Maru"),
+                            # …but for the connectors written in lowercase.
+                            ("JOHN DOE D/B/A ACME", "John Doe d/b/a Acme"),
+                            ("C/O SMITH", "c/o Smith")):
+            with self.subTest(caps=caps):
+                self.assertEqual(normal_case_caption(caps), cased)
+
+    def test_each_firm_complete_is_a_party(self):
+        for name, cited in (
+                ("Novo Nordisk A/S and Novo Nordisk, Inc. v. Doe",
+                 "Novo Nordisk A/S v. Doe"),
+                ("Doe v. A.H. Robins Co. & Wyeth Inc.",
+                 "Doe v. A.H. Robins Co."),
+                # One firm, two names joined in its own.
+                ("Jones & Laughlin Steel Corp. v. Doe",
+                 "Jones & Laughlin Steel Corp. v. Doe"),
+                ("Doe v. S.H. Kress & Co.", "Doe v. S.H. Kress & Co."),
+                ("Doe v. Brown Bros. & Co.", "Doe v. Brown Bros. & Co."),
+                ("Chase Bank & Trust Co. v. Doe", "Chase Bank & Tr. Co. v. Doe"),
+                ("Merrill Lynch, Pierce, Fenner & Smith Inc. v. Doe",
+                 "Merrill Lynch, Pierce, Fenner & Smith Inc. v. Doe")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+
 class InReCapitalsCaptionTests(unittest.TestCase):
     """Scholar sets an "In re" matter's name in capitals and the rest of the
     caption in ordinary case; the capitals are the name.  "In re: AIMSTER
