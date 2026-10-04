@@ -29187,10 +29187,20 @@ class _ScholarTextWindow:
         Empty for the header and signed majority opinions.
         """
         def block_text(b) -> str:
-            # The title-comma fix mirrors segmentation's classification view
-            # ("Justice, BREYER, concurring." — Alleyne's Scholar text).
-            t = fix_title_comma(re.sub(r"\s+", " ", b.text()).strip())
-            return re.sub(r"^(?:\*\d+\s+)+", "", t)  # leading page markers
+            # Read without the reporter's page markers, as segmentation reads
+            # the byline: a marker carrying a letter ("*55B", the page Perry
+            # Educ. Ass'n v. Perry Local Educators' Ass'n's dissent begins on)
+            # was read as part of the dissenter's name — "(*55B Justice
+            # Brennan, J., dissenting)".  The title-comma fix mirrors
+            # segmentation's classification view too ("Justice, BREYER,
+            # concurring." — Alleyne's Scholar text).
+            spans = getattr(b, "spans", None)
+            raw = ("".join(s.text for s in spans
+                           if not getattr(s, "pagenum", False))
+                   if spans is not None else b.text())
+            t = fix_title_comma(re.sub(r"\s+", " ", raw).strip())
+            # A marker left in the text itself (CourtListener's).
+            return re.sub(r"^(?:\*\d+[A-Za-z]{0,2}\s+)+", "", t)
 
         if part.kind == "majority":
             for b in part.blocks[:3]:

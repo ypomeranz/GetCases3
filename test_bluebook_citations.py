@@ -4968,6 +4968,23 @@ class WriterParentheticalTests(unittest.TestCase):
             "Blackmun, J., dissenting",
         )
 
+    def test_a_page_marker_with_a_letter_is_no_part_of_the_name(self):
+        # Perry Educ. Ass'n v. Perry Local Educators' Ass'n, 460 U.S. 37
+        # (1983): Scholar opens Brennan's dissent with the marker "*55B",
+        # which was read into the name — "(*55B Justice Brennan, J.,
+        # dissenting)".
+        byline = ("JUSTICE BRENNAN, with whom JUSTICE MARSHALL, JUSTICE "
+                  "POWELL, and JUSTICE STEVENS join, dissenting.")
+        marked = OpinionPart(byline[:90], "dissent", [Block("para", [
+            Span("*55B", pagenum=True), Span(" " + byline)])])
+        self.assertEqual(self._win()._writer_parenthetical(marked),
+                         "Brennan, J., dissenting")
+        # And as text, the way a CourtListener opinion carries it.
+        self.assertEqual(
+            self._win()._writer_parenthetical(
+                self._part("dissent", "*55B " + byline)),
+            "Brennan, J., dissenting")
+
     def test_separate_opinion_of_heading_uses_resolved_role(self):
         part = self._part(
             "dissent", "Separate opinion of MR. JUSTICE McREYNOLDS."
