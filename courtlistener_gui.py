@@ -1210,6 +1210,7 @@ from bluebook_names import (
     normal_case_caption,
     refine_caption_case,
     simplify_historical_entity_caption,
+    split_relator,
     strip_related_case_note,
 )
 from citation_overrides import (
@@ -16621,6 +16622,16 @@ def _caption_party(s: str) -> str:
         p = re.sub(r"[:]+$", "", p).strip()
         return re.sub(r"\s+et\s+als?\.?$", "", p, flags=re.IGNORECASE).strip()
 
+    # A relator clause is the party's, not a co-party to cut away (rule
+    # 10.2.1(b)): "THE UNITED STATES, ON THE RELATION OF WILLIAM B. STOKES
+    # ET AL." is United States ex rel. Stokes — Kendall v. United States ex
+    # rel. Stokes, 37 U.S. (12 Pet.) 524, was cited without its relator.
+    relation = split_relator(s)
+    if relation is not None:
+        party, relator = (_caption_party(p) for p in relation)
+        if party and relator:
+            return f"{party} ex rel. {relator}"
+
     raw = [clean_seg(p) for p in re.split(r"[,;]", s)]
     segs = [p for p in raw if p]
     if segs:
@@ -17487,11 +17498,19 @@ def _scholar_item_from_blocks(blocks, fallback_name: str = "",
     # The decision's year, not a later event's the header also dates.
     from opinion_db import decision_year_from_blocks
     year = decision_year_from_blocks(blocks)
+    # Any court the header names, a federal trial court's included: a B.R. or
+    # F. Supp. citation says nothing of the court, so its parenthetical must
+    # (rule 10.4(a)) — "In re Gill, 93 B.R. 684 (Bankr. W.D. Mo. 1988)", not
+    # "(1988)".  An id where the abbreviation names one court; else the
+    # abbreviation itself, as the court's name.
+    court = _scholar_header_court(blocks)
+    is_id = bool(re.fullmatch(r"[a-z0-9]+", court or ""))
     return {
         "caseName": name,
         "citation": [cite] if cite else [],
         "dateFiled": f"{year}-01-01" if year else "",
-        "court_id": _scholar_court_id(blocks),
+        "court_id": court if is_id else "",
+        "court": "" if is_id else court,
     }
 
 
