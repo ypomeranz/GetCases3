@@ -1469,6 +1469,11 @@ def _capitalize_component(piece: str) -> str:
     return piece
 
 
+_SLASH_CONNECTORS = frozenset({
+    "a/k/a", "d/b/a", "f/k/a", "n/k/a", "c/o", "t/a", "w/o",
+})
+
+
 def normal_case_caption(text: str) -> str:
     """Normal-case the all-caps words in a case caption without damaging
     apostrophe or ``Mc`` surnames.
@@ -1505,6 +1510,11 @@ def normal_case_caption(text: str) -> str:
         pieces = stripped.split("-")
         if (stripped in _CAPTION_KEEP_CAPS
                 or "&" in stripped
+                # …and so is one of single letters and slashes — "Novo
+                # Nordisk A/S", "K/S", "S/A" — but for the connectors
+                # written in lowercase ("D/B/A", "A/K/A", "C/O").
+                or (re.fullmatch(r"[A-Z](?:/[A-Z])+", stripped)
+                    and stripped.lower() not in _SLASH_CONNECTORS)
                 or re.fullmatch(r"(?:[A-Z]\.)+[A-Z]?", stripped)
                 # A lone letter rides along with an acronym ("R-II").
                 or (any(_is_caps_acronym(p, dotted=dotted) for p in pieces)
@@ -1528,8 +1538,9 @@ def normal_case_caption(text: str) -> str:
                 out.append(word)
                 continue
         low = word.lower()
-        if i and low.strip(".,()'\"“”") in _CAPTION_SMALL_WORDS:
-            out.append(low)
+        if (i and low.strip(".,()'\"“”") in _CAPTION_SMALL_WORDS
+                or stripped.lower() in _SLASH_CONNECTORS):
+            out.append(low)     # "of", "the" — and "d/b/a", "c/o"
             continue
 
         # Capitalize each apostrophe/hyphen component independently so Python's
@@ -3071,6 +3082,27 @@ def _municipal_party(p: str) -> str | None:
     return None
 
 
+# A firm's legal form, as it closes the firm's name ("Inc.", "L.L.C.",
+# "A/S", "S.p.A."), keyed by its letters and slashes.
+_LEGAL_FORM_KEYS = frozenset({
+    "inc", "incorporated", "corp", "corporation", "co", "company", "llc",
+    "llp", "lllp", "lp", "pllc", "ltd", "limited", "plc", "pc", "na", "fsb",
+    "sa", "spa", "ag", "nv", "bv", "gmbh", "ab", "oy", "kk", "pty",
+    "a/s", "k/s", "s/a", "i/s",
+})
+
+
+def _complete_firm_name(segment: str) -> bool:
+    """Whether *segment* is a whole firm's name: a name, then its legal
+    form ("Novo Nordisk A/S", "Novo Nordisk, Inc.")."""
+    words = segment.strip(" ,;").split()
+    if len(words) < 2:
+        return False
+    key = re.sub(r"[^a-z/]", "", words[-1].lower())
+    return key in _LEGAL_FORM_KEYS and any(
+        re.search(r"[A-Za-z]", w) for w in words[:-1])
+
+
 def _abbreviate_party(party: str, *, recognize_initials: bool = True,
                       court_state: str = "",
                       names: _OpinionNames | None = None) -> str:
@@ -3209,6 +3241,14 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
         if (unit is not None and tail_word not in _APPOSITIVE_ENTITY_TERMS
                 and tail_word not in _FIRM_TAIL_WORDS):
             return unit
+        # Firms, each complete with its legal form, are as many parties:
+        # "Novo Nordisk A/S & Novo Nordisk, Inc." is Novo Nordisk A/S.  A
+        # firm that joins two names in its own ("Jones & Laughlin Steel
+        # Corp.", "S.H. Kress & Co.") has no legal form ahead of its "&".
+        if all(_complete_firm_name(s) for s in segs):
+            return _abbreviate_party(segs[0].strip(" ,;"),
+                                     recognize_initials=recognize_initials,
+                                     court_state=court_state, names=names)
         surnames = [_strip_given_names(s, names=names) for s in segs]
         if all(surnames):
             return surnames[0]
