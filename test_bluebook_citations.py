@@ -4942,6 +4942,41 @@ class PdfLocationAnalysisPipelineTests(unittest.TestCase):
         win._ensure_cached_location_maps.assert_called_once_with(key)
 
 
+class JudgeNameCaseTests(unittest.TestCase):
+    """A judge's name from an all-caps byline, in the case it is written."""
+
+    def test_names_with_capitals_inside(self):
+        from courtlistener_gui import _fix_name_case
+        for caps, name in (
+                ("O’CONNOR", "O’Connor"), ("O'CONNOR", "O'Connor"),
+                ("O'SCANNLAIN", "O'Scannlain"), ("D'AMATO", "D'Amato"),
+                ("McREYNOLDS", "McReynolds"), ("MCKENNA", "McKenna"),
+                ("SMITH-JONES", "Smith-Jones"),
+                # The source's own capitals say how the name is written.
+                ("DeMOSS", "DeMoss"), ("VanDYKE", "VanDyke"),
+                ("MacKINNON", "MacKinnon"),
+                # All capitals hide them; these judges are listed.
+                ("DEMOSS", "DeMoss"), ("VANDYKE", "VanDyke"),
+                ("MACKINNON", "MacKinnon"),
+                # A "Mac" that is no prefix, unlisted, stays plain.
+                ("MACK", "Mack"), ("MACON", "Macon"),
+                ("VAN DEVANTER", "Van Devanter"), ("ST. EVE", "St. Eve"),
+                ("BROWNING III", "Browning III"), ("R. NELSON", "R. Nelson"),
+                ("MR. JUSTICE HOLMES", "Mr. Justice Holmes"),
+                ("Wood", "Wood"), ("O'Connor", "O'Connor")):
+            with self.subTest(caps=caps):
+                self.assertEqual(_fix_name_case(caps), name)
+
+    def test_a_line_up_keeps_its_prose(self):
+        from courtlistener_gui import _fix_name_case
+        self.assertEqual(
+            _fix_name_case("O’CONNOR, J., delivered the opinion of the "
+                           "Court, in which BURGER, C. J., and WHITE, JJ., "
+                           "joined."),
+            "O’Connor, J., delivered the opinion of the Court, in which "
+            "Burger, C. J., and White, JJ., joined.")
+
+
 class WriterParentheticalTests(unittest.TestCase):
     @staticmethod
     def _win():
@@ -4967,6 +5002,17 @@ class WriterParentheticalTests(unittest.TestCase):
             self._win()._writer_parenthetical(part),
             "Blackmun, J., dissenting",
         )
+
+    def test_a_curly_apostrophe_keeps_the_capital_after_it(self):
+        # Kelo v. City of New London, 545 U.S. 469 (2005): Scholar prints
+        # "O’CONNOR" with a curly apostrophe, which the casing split at no
+        # apostrophe but the straight one — "(O’connor, J., dissenting)".
+        part = self._part(
+            "dissent",
+            "JUSTICE O’CONNOR, with whom THE CHIEF JUSTICE, JUSTICE SCALIA, "
+            "and JUSTICE THOMAS join, dissenting.")
+        self.assertEqual(self._win()._writer_parenthetical(part),
+                         "O’Connor, J., dissenting")
 
     def test_a_page_marker_with_a_letter_is_no_part_of_the_name(self):
         # Perry Educ. Ass'n v. Perry Local Educators' Ass'n, 460 U.S. 37

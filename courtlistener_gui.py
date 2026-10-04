@@ -16410,17 +16410,59 @@ _CITE_ONLY_LINE_RE = re.compile(
 _FN_BODY_MARK_RE = re.compile(r"^\s*(?:\[([^\]\s]{1,6})\]|(\*{1,3}|†|‡))(?=\s|$)")
 
 
+#: Judges' surnames whose capitals an all-caps byline hides and no rule can
+#: put back — "DEMOSS" could as well be Demoss — keyed by their letters.
+#: (The Supreme Court's need none: the rules below restore McReynolds,
+#: O'Connor and Van Devanter.)
+_MIXED_CASE_SURNAMES: dict[str, str] = {
+    re.sub(r"[^A-Z]", "", n.upper()): n for n in (
+        "DeMoss", "VanDyke", "DiClerico", "MacKinnon", "DuBose", "DeGuilio",
+    )
+}
+
+#: The short words of a name, which an all-caps byline prints in capitals:
+#: "ST. EVE" is St. Eve, "JR." Jr., "VAN DEVANTER" Van Devanter.
+_NAME_SHORT_WORDS = {
+    w.upper(): w for w in ("St", "Ste", "Jr", "Sr", "Mr", "Mrs", "Ms", "De",
+                           "Du", "Da", "Di", "La", "Le", "Van", "Von", "Del")
+}
+
+_ROMAN_NUMERAL_RE = re.compile(r"(?:I{1,3}|IV|VI{0,3}|IX|X)")
+
+
 def _fix_name_case(name: str) -> str:
     """Render an all-caps surname from an opinion header in normal case:
-    REHNQUIST → Rehnquist, O'CONNOR → O'Connor, McAULIFFE → McAuliffe."""
+    REHNQUIST → Rehnquist, O'CONNOR (or O’CONNOR) → O'Connor, McAULIFFE →
+    McAuliffe, DeMOSS → DeMoss, ST. EVE → St. Eve.  Words already in mixed
+    case, initials and Roman numerals pass through."""
+    def cap(run: "re.Match") -> str:
+        s = run.group(0)
+        return s[:1].upper() + s[1:].lower()
+
     def fix(wd: str) -> str:
-        alpha = [c for c in wd if c.isalpha()]
-        if len(alpha) <= 2 or sum(c.isupper() for c in alpha) <= len(alpha) // 2:
-            return wd  # already mixed case (Wood, St.)
-        out = "'".join(
-            p[:1].upper() + p[1:].lower() if p else p for p in wd.split("'")
-        )
-        if out.startswith("Mc") and len(out) > 2:
+        letters = "".join(c for c in wd if c.isalpha())
+        if len(letters) <= 1 or _ROMAN_NUMERAL_RE.fullmatch(letters):
+            return wd                       # an initial, or "III"
+        upper = sum(c.isupper() for c in letters)
+        # The source's own capitals opening a name — "McREYNOLDS",
+        # "DeMOSS", "MacKINNON", "VanDYKE" — say how it is written.
+        lead = re.match(r"([A-Z][a-z]{1,2})([A-Z]{2,}.*)$", wd)
+        if lead and upper > len(letters) // 2:
+            return lead.group(1) + re.sub(r"[A-Za-z]+", cap, lead.group(2))
+        if upper <= len(letters) // 2 or not letters.isupper():
+            return wd                       # already mixed case (Wood)
+        known = _MIXED_CASE_SURNAMES.get(letters)
+        if known and wd.upper().startswith(known.upper()):
+            return known + wd[len(known):]
+        short = _NAME_SHORT_WORDS.get(letters)
+        if short and wd.upper().startswith(short.upper()):
+            return short + wd[len(short):]
+        if len(letters) <= 2:
+            return wd                       # "IN", "OF": no name's
+        # Each run of letters between apostrophes (straight or curly) and
+        # hyphens: O’CONNOR → O’Connor, SMITH-JONES → Smith-Jones.
+        out = re.sub(r"[A-Za-z]+", cap, wd)
+        if out.startswith("Mc") and len(out) > 2 and out[2].isalpha():
             out = "Mc" + out[2].upper() + out[3:]
         return out
 
