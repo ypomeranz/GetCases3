@@ -1522,6 +1522,59 @@ def case_match_text(m: re.Match) -> str:
 _case_match_text = case_match_text  # older internal name
 
 
+#: The states' Bluebook abbreviations, squashed ("mass", "wva"), as a
+#: citation's jurisdiction parenthetical names them.
+_STATE_PAREN_KEYS = frozenset(
+    re.sub(r"[^a-z]", "", abbr.lower())
+    for abbr in court_catalog.STATE_BLUEBOOK.values())
+
+#: A Supreme Court reporter's name a state's reporter shared, read as the
+#: state's only where a parenthetical says so: Howard's Mississippi reports,
+#: "5 How. (Miss.) 100", are 2–8 Miss. — "5 How. 100" alone is 46 U.S. 100.
+_PAREN_ONLY_SERIES: dict[tuple[str, str], tuple[str, int, int]] = {
+    ("how", "miss"): ("Miss.", 1, 7),
+    ("howard", "miss"): ("Miss.", 1, 7),
+}
+
+
+def paren_official_cite(m: re.Match) -> str:
+    """The citation a case-cite match means, by its own jurisdiction
+    parenthetical, where its nominative reporter's name alone is ambiguous —
+    or "" to read it as usual.
+
+    "2 Met. (Mass.) 329" is Metcalf's Massachusetts reports, 43 Mass. 329,
+    not Metcalfe's Kentucky ones (59 Ky. 329), which "2 Met." also names:
+    dropped with the parenthetical (see :func:`case_match_text`), the state
+    was lost, and Commonwealth v. Dana opened a Kentucky case.  "5 How.
+    (Miss.) 100" is 6 Miss. 100, not the Supreme Court's Howard.  And a
+    parenthetical naming a state none of the reporter's series belong to —
+    "1 Rob. (La.) 50", Louisiana's Robinson, not Virginia's — keeps the
+    citation as written, parenthetical and all, so it is never read as
+    another state's."""
+    paren = re.search(r"\(([A-Za-z][A-Za-z.'’ ]{0,20})\)", m.group(0))
+    if not paren:
+        return ""
+    state = re.sub(r"[^a-z]", "", paren.group(1).lower())
+    if state not in _STATE_PAREN_KEYS:
+        return ""                   # "(U.S.)", "(C.C.)": no state's
+    vol, rep, page = m.group(1), re.sub(r"\s+", " ", m.group(2)).strip(), \
+        m.group(3)
+    special = _PAREN_ONLY_SERIES.get((_nominative_key(rep), state))
+    if special is not None:
+        series, offset, volumes = special
+        return (f"{int(vol) + offset} {series} {page}"
+                if 1 <= int(vol) <= volumes else "")
+    official = state_nominative_cites(case_match_text(m))
+    if not official:
+        return ""
+    picks = [c for c in official
+             if re.sub(r"[^a-z]", "", c.split(" ", 1)[1].rsplit(" ", 1)[0]
+                       .lower()) == state]
+    if not picks:
+        return f"{vol} {rep} ({paren.group(1).strip()}) {page}"
+    return picks[0] if len(official) > 1 and len(picks) == 1 else ""
+
+
 def _at_citation_start(text: str, pos: int) -> bool:
     """Whether *pos* is where a citation's volume stands: the start of the
     text, or just after the comma closing a case name — or a semicolon, an
@@ -1953,7 +2006,8 @@ def cite_target_from_text(
                 notes, _end = note_pin_after_page(text, cm.end())
                 return (f"{cm.group(1)} {rep} {first}",
                         join_note_pin(cm.group(3), notes))
-        base = _case_match_text(cm)
+        # "2 Met. (Mass.) 329": the parenthetical's state picks the series.
+        base = paren_official_cite(cm) or _case_match_text(cm)
         pin, _end = pin_after(text, cm.end())
         return base, pin
     short_matches = _iter_short_cites(text)
@@ -2904,6 +2958,9 @@ def detect_links(
     recent: list[tuple[tuple[str, str], int, int]] = []
     last_cite_end: int | None = None
     const_linked: set[str] = set()  # provisions of the Constitution linked
+    # Citations whose parenthetical picked their reporter series, as written
+    # -> as linked ("2 Met. 329" -> "43 Mass. 329"; see paren_official_cite).
+    paren_picked: dict[str, str] = {}
     for start, end, kind, m in matches:
         if start < pos:
             continue  # overlapping match — first/longest wins
@@ -2925,6 +2982,12 @@ def detect_links(
             # m is a regex match for reporter cites, a pre-normalized string
             # for the WL/LEXIS cites added by the RECAP pass.
             cite = m if isinstance(m, str) else _case_match_text(m)
+            # "2 Met. (Mass.) 329": the state the parenthetical names picks
+            # the reporter series — for its short forms too.
+            official = "" if isinstance(m, str) else paren_official_cite(m)
+            if official:
+                paren_picked[cite] = official
+                cite = official
             cite_base = cite
             pin, _pin_end = pin_after(text, end)
             if pin:
@@ -2961,8 +3024,10 @@ def detect_links(
                 const_linked.add(spec)
                 action = ("const", spec)
         elif kind == "shortcite":
-            action = ("cite", m)  # m is the pre-built "vol rep page@pin"
-            cite_base = m.split("@")[0]
+            # m is the pre-built "vol rep page@pin".
+            cite_base, at, pin_part = m.partition("@")
+            cite_base = paren_picked.get(cite_base, cite_base)
+            action = ("cite", cite_base + at + pin_part)
         elif kind == "idcite":
             # "Id." → the citation it refers back to, but conservatively:
             # in a brief an "Id." often points at a record document rather than

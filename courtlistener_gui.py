@@ -3325,14 +3325,49 @@ def _link_cite(text: str, short_cite_index) -> tuple[str, str]:
     return "", ""
 
 
-def _case_law_pdf_for_cite(cite: str) -> Optional[str]:
+def _case_law_pdf_for_cite(cite: str, name: str = "",
+                           year: str = "") -> Optional[str]:
     """A static.case.law PDF URL that actually exists (HEAD 200) for *cite* —
     canonicalizing reporter aliases (including Wn. → Wash.) and trying the
     modern U.S.-Reports form for an old nominative SCOTUS cite — or None when
-    case.law has neither."""
+    case.law has neither.  *name* and *year* pick the state an ambiguous
+    nominative means (see :func:`_official_series_for`)."""
     choices = _case_law_pdf_choices_for_cites(
-        [cite, *_official_series_cites(cite)])
+        [cite, *_official_series_for(cite, name, year)])
     return _settled_choice(choices).url if choices else None
+
+
+def _official_series_for(cite: str, name: str = "", year: str = "") -> list:
+    """:func:`_official_series_cites`, likeliest first.  A nominative
+    reporter's name can mean two states' series — "2 Met. 329" is 43 Mass.
+    329 (Metcalf) or 59 Ky. 329 (Metcalfe), "1 Sneed 5" Kentucky's or
+    Tennessee's — and where both hold a case beginning on the page, the one
+    whose case answers to *name*, or failing that was decided in *year*,
+    leads; a candidate naming another case is dropped once one answers to
+    the name.  Each candidate's case is read from static.case.law, and only
+    when the reporter is ambiguous."""
+    cites = _official_series_cites(cite)
+    name = (name or "").strip()
+    year = str(year or "")[:4]
+    if len(cites) < 2 or not (name or year):
+        return cites
+    rated = []
+    for index, official in enumerate(cites):
+        meta = _case_law_metadata(official) or {}
+        held = str(meta.get("name_abbreviation") or meta.get("name") or "")
+        named = bool(name and held) and max(
+            _match_tier(name, held), _match_tier(held, name)) >= 1
+        other = bool(name and held) and not named
+        dated = bool(year) and str(meta.get("decision_date") or "")[:4] == year
+        rated.append((named, dated, not other, -index, official))
+    rated.sort(reverse=True)
+    if any(r[0] for r in rated):
+        rated = [r for r in rated if r[2]]
+    ordered = [r[-1] for r in rated]
+    if ordered != cites:
+        print(f"[nominative] {cite!r} read as {ordered[0]!r} "
+              f"({name or year!r})")
+    return ordered
 
 
 def _take_page_mates(fetcher) -> list:
@@ -4120,7 +4155,8 @@ def _special_citation_ranges(
     return merged
 
 
-def _text_opinion_link_ranges(parts) -> dict[int, list]:
+def _text_opinion_link_ranges(parts, state_court: bool = False
+                              ) -> dict[int, list]:
     """Whole-opinion citation links mapped back to each rendered block.
 
     PDF opinions already run :func:`citations.detect_links` over the complete
@@ -4183,6 +4219,9 @@ def _text_opinion_link_ranges(parts) -> dict[int, list]:
         detected = detect_brief_links(text, italic=italic)
     except Exception:
         return {}  # retain the span-by-span legacy path on detector failure
+    if state_court:
+        # "Article I, § 7" in a state court's opinion: as likely its own.
+        detected = _federal_constitution_only(detected, text)
 
     out: dict[int, list] = {
         block_id: [] for block_id, _start, _end in block_offsets
@@ -4374,13 +4413,24 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
         top = max(s for s, _c in rated)
         tied = [c for s, c in rated if s == top]
         first = plain(tied[0])
+        # A name that answers to none of them says this is another case at
+        # the citation — or past it: asked for "2 Met. 329" (Commonwealth
+        # v. Dana, Massachusetts), CourtListener answered with Sanders v.
+        # Bank of Kentucky, 2 Met. 327, a Kentucky case running onto the
+        # page — and none is better than that.
+        if (name and len(_name_parties(name)) == 2
+                and max(_match_tier(name, first),
+                        _match_tier(first, name)) < 0):
+            print(f"[cl-cite] {cite!r}: CourtListener's {first!r} is not "
+                  f"{name!r}")
+            return None
         for other in tied[1:]:
-            name = plain(other)
-            if (_name_tokens(name) != _name_tokens(first)
-                    and _match_tier(first, name) < 3):
+            other_name = plain(other)
+            if (_name_tokens(other_name) != _name_tokens(first)
+                    and _match_tier(first, other_name) < 3):
                 print(f"[cl-cite] {cite!r} is borne by {len(candidates)} "
-                      f"records of different cases ({first!r}, {name!r}, …) "
-                      f"and nothing says which is meant")
+                      f"records of different cases ({first!r}, "
+                      f"{other_name!r}, …) and nothing says which is meant")
                 return None
         return max(tied, key=lambda c: len(cites_of(c)))
 
@@ -5114,6 +5164,44 @@ def _cite_state(cite: str) -> str:
     """The state whose reports *cite* is to ("2 Va. 319" → "virginia")."""
     m = _CITE_PARSE_RE.match((cite or "").strip())
     return _state_of_abbreviation(m.group(2)) if m else ""
+
+
+#: The regional reporters, which print only state courts' opinions.
+_REGIONAL_REPORTER_RE = re.compile(
+    r"^\s*\d{1,4}\s+(?:A|N\.\s?E|N\.\s?W|P|S\.\s?E|S\.\s?W|So)\.\s?"
+    r"(?:2d|3d|4th)?\s+\d{1,5}\b")
+
+
+def _state_court_cite(cite: str) -> bool:
+    """Whether *cite* is to a state court's reports — a state's own ("43
+    Mass. 329", "53 Cal. 2d 284") or a regional reporter ("543 P.3d 440")."""
+    return bool(_cite_state(cite) or _REGIONAL_REPORTER_RE.match(cite or ""))
+
+
+#: A Constitution citation that says it is the United States': "U.S. Const.
+#: art. I, § 8".  In a state court's opinion "Article I, Section 8" or
+#: "Amendment XIV, § 1" is as likely the state's own constitution.
+_NAMES_US_CONSTITUTION_RE = re.compile(
+    r"\bU\.?\s?S\.?\s+Const|\bUnited\s+States\b|\bFederal\s+Constitution",
+    re.IGNORECASE)
+
+
+def _federal_constitution_only(links: list, text: str) -> list:
+    """*links* ``(start, end, action)`` read from *text* — a state court's
+    opinion — without the Constitution citations that do not name the
+    United States: there they are as likely the state's."""
+    return [link for link in links
+            if link[2][0] != "const"
+            or _NAMES_US_CONSTITUTION_RE.search(text[link[0]:link[1]])]
+
+
+def _federal_constitution_only_pages(links: dict) -> dict:
+    """:func:`_federal_constitution_only` for a scan's links, kept by page as
+    ``(rect, action, snippet)``."""
+    return {page: [link for link in page_links
+                   if link[1][0] != "const"
+                   or _NAMES_US_CONSTITUTION_RE.search(link[2] or "")]
+            for page, page_links in (links or {}).items()}
 
 
 def _scholar_result_state(result) -> str:
@@ -7003,7 +7091,7 @@ def _case_law_text_source(
     for raw in list(cites) + [prefer]:
         for cite in (
             re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str(raw or ""))).strip(),
-            *_official_series_cites(str(raw or "")),
+            *_official_series_for(str(raw or ""), name, str(date or "")[:4]),
         ):
             key = re.sub(r"\s+", "", cite).lower()
             if not cite or key in seen:
@@ -11675,16 +11763,26 @@ class CourtListenerGUI:
         the parallel U.S. Reports cite the official scan is keyed on — else the
         citation and the case name alone."""
         item: dict = {}
+        official = _official_series_for(cite, name)
         if client is not None:
             _load_step(f"Looking {cite} up on CourtListener…")
-            try:
-                item = dict(_cl_item_for_citation(client, cite, name=name) or {})
-            except Exception as exc:
-                print(f"[cite-pdf] CourtListener lookup for {cite!r}: {exc}")
+            # The cite as printed, then — an old nominative it files under
+            # another — its official form: "2 Met. 329" is 43 Mass. 329.
+            for lookup in (cite, *official):
+                try:
+                    item = dict(_cl_item_for_citation(client, lookup,
+                                                      name=name) or {})
+                except Exception as exc:
+                    print(f"[cite-pdf] CourtListener lookup for "
+                          f"{lookup!r}: {exc}")
+                if item:
+                    break
         cites = [str(c) for c in (item.get("citation") or [])]
         # The cite as printed, and — for an old nominative cite — its modern
-        # U.S. or Mass. Reports form, which is what the scans are filed under.
-        for extra in (cite, *_official_series_cites(cite)):
+        # U.S. or Mass. Reports form, which is what the scans are filed under:
+        # where the reporter's name could mean two states', the one whose
+        # case the name names first (see _official_series_for).
+        for extra in (cite, *official):
             if extra and extra not in cites:
                 cites.append(extra)
         item["citation"] = cites
@@ -11849,7 +11947,8 @@ class CourtListenerGUI:
         self._jump_to_pin(named)
         status(f"Showing the PDF of {cite}"
                + (f" at {_pin_display(pin)}" if pin else "") + ".")
-        self._request_cited_pdf_analysis(window, data, url, named)
+        self._request_cited_pdf_analysis(window, data, url, named,
+                                         state_court=_state_court_cite(cite))
 
     def _scan_cite_for(self, named: dict) -> str:
         """The citation the scan in *named* is itself filed under — the pages
@@ -12385,7 +12484,8 @@ class CourtListenerGUI:
         _print_pdf_file(self.root, path, status)
 
     def _request_cited_pdf_analysis(self, window, data: bytes, url: str,
-                                    named: Optional[dict] = None):
+                                    named: Optional[dict] = None,
+                                    state_court: bool = False):
         """Give a cited case's viewer the same clickable citations and text
         search the opinion reader's PDFs get.
 
@@ -12406,6 +12506,9 @@ class CourtListenerGUI:
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
                         data, pages, italics)
+                    if state_court:
+                        # A state court's "Article I, § 7": its own.
+                        links = _federal_constitution_only_pages(links)
                 except Exception as exc:
                     print(f"[cite-pdf] citation scan failed: {exc}")
                 try:
@@ -12527,7 +12630,7 @@ class CourtListenerGUI:
             and CourtListener's record of it — what a hit found by its
             name alone must agree with."""
             target = cl_target() or {}
-            cites = [cite, *_official_series_cites(cite),
+            cites = [cite, *_official_series_for(cite, name, year),
                      *[str(c) for c in target.get("citation") or []]]
             case_year = year or str(target.get("dateFiled")
                                     or target.get("date_filed") or "")[:4]
@@ -12636,7 +12739,7 @@ class CourtListenerGUI:
                         return True
             except Exception as exc:
                 print(f"[citelist] courtlistener {cite!r}: {exc}")
-        pdf = _case_law_pdf_for_cite(cite) if cite else None
+        pdf = _case_law_pdf_for_cite(cite, name, year) if cite else None
         if pdf:
             self._post_case_law_pdf(
                 pdf, cite, pin, name, parent=target_parent,
@@ -16722,7 +16825,14 @@ def _caption_party(s: str) -> str:
     # Scholar signals surnames with all caps ("Corrine Morgan THOMAS"), but
     # entity initialisms ("McDonald's USA, LLC") must remain intact.
     s = collapse_personal_all_caps_run(s)
-    return _titlecase_caps(s).strip(" ,;&")
+    out = _titlecase_caps(s).strip(" ,;&")
+    # One side of a caption has no "v." of its own: a "V." in it is a middle
+    # initial, which title-casing takes for the separator — "BEATRICE V.
+    # DITTUS" became "Beatrice v. Dittus", and Dittus v. Cranston, 53 Cal. 2d
+    # 284, was cited "Beatrice v. Dittus v. Alan Cranston".
+    if re.search(r"(?<=\s)V\.(?=\s)", s):
+        out = re.sub(r"(?<=\s)v\.(?=\s)", "V.", out)
+    return out
 
 
 _CIRCUIT_ORDINALS = {
@@ -16927,10 +17037,23 @@ def _scholar_caption_name(blocks) -> str:
             r"\s+", " ",
             "".join(s.text for s in b.spans if not s.pagenum),
         ).strip()
+        # The reporter's annotation mark a caption can carry — "*Jones v.
+        # The Commonwealth." (72 Va. 582), its note below — is no part of
+        # the name.
+        t = re.sub(r"^[*†‡]+\s*", "", t)
         # An Alabama-style "(Re <underlying case>)" cross-reference carries
         # its own " v. " and would masquerade as this case's caption.
         t = strip_related_case_note(t)
         if not t or _HEADER_CITE_RE.match(t) or t.startswith(("No.", "Nos.")):
+            continue
+        # A docket, court or date line set ahead of the caption — "[Sac.
+        # No. 7096.", "CASE No. 1078.", "In Bank." — is not the case's name.
+        if (t.startswith("[") or t.endswith("]")
+                or re.match(r"(?:case\s+|sac\.\s+|crim\.\s+|civ\.\s+|"
+                            r"l\.\s*a\.\s+|s\.\s*f\.\s+)?nos?\.\s*\d",
+                            t, re.IGNORECASE)
+                or re.fullmatch(r"(?:in\s+bank|en\s+banc|(?:department|"
+                                r"division)\s+\w+)\.?", t, re.IGNORECASE)):
             continue
         # An in-re style caption owns no separator, so any "v." inside it
         # belongs to a companion case ("In re Nexium Antitrust Litigation.
@@ -27622,6 +27745,8 @@ class _ScholarTextWindow:
         except Exception:
             self._insert_plain_with_links(text, tags)
             return
+        if self._is_state_case():
+            ranges = _federal_constitution_only(ranges, text)
         pos = 0
         for start, end, action in ranges:
             if start < pos:
@@ -27885,7 +28010,27 @@ class _ScholarTextWindow:
         if block_ids == self._text_link_cache_key:
             return
         self._text_link_cache_key = block_ids
-        self._text_block_links = _text_opinion_link_ranges(parts)
+        self._text_block_links = _text_opinion_link_ranges(
+            parts, state_court=self._is_state_case())
+
+    def _is_state_case(self) -> bool:
+        """Whether this is a state court's opinion — where a Constitution
+        citation not naming the United States ("Article I, § 7") is as likely
+        the state's own, and is not linked (see _federal_constitution_only).
+        Read from the court, else the case's own citations."""
+        item = getattr(self, "_item", None) or {}
+        court_id = str(item.get("court_id") or "").strip().lower()
+        court_name = str(item.get("court") or "")
+        if not court_id and getattr(self, "_blocks", None):
+            try:
+                court_id = _scholar_court_id(self._blocks)
+            except Exception:
+                court_id = ""
+        if court_id or court_name:
+            return bool(_state_of_court(court_id, court_name))
+        cites = [str(c) for c in item.get("citation") or []]
+        cites += [str(c) for c in getattr(self, "_header_cites", None) or []]
+        return any(_state_court_cite(c) for c in cites)
 
     def _clear_part_region_marks(self) -> None:
         txt = getattr(self, "_text", None)
@@ -32845,7 +32990,7 @@ class _ScholarTextWindow:
                                name: str = "") -> bool:
         if not cite:
             return False
-        pdf = _case_law_pdf_for_cite(cite)
+        pdf = _case_law_pdf_for_cite(cite, name)
         if not pdf:
             return False
         self._post(self._open_cited_case_pdf, pdf, cite, pin, name)
@@ -32910,7 +33055,7 @@ class _ScholarTextWindow:
                 # (fuzzy) case name.
                 target = (_cl_item_for_citation(client, cite, name=name)
                           if cite else None)
-                for alt in (_official_series_cites(cite)
+                for alt in (_official_series_for(cite, name)
                             if target is None and cite else ()):
                     target = _cl_item_for_citation(client, alt, name=name)
                     if target is not None:
@@ -32922,7 +33067,7 @@ class _ScholarTextWindow:
                     # ranks by party name and can surface a different case:
                     # clicking "5 Johns. 37" (Kilburn v. Woodworth) must not
                     # open the unrelated "Kilbourn v. Thompson, 103 U.S. 168".
-                    pdf = _case_law_pdf_for_cite(cite)
+                    pdf = _case_law_pdf_for_cite(cite, name)
                     if pdf:
                         self._post(
                             self._open_cited_case_pdf, pdf, cite, pin, name)
@@ -33559,6 +33704,7 @@ class _ScholarTextWindow:
         self._pdf_analysis_running.add(key)
         sources = self._location_sources()
         pdf_cite = self._pdf_reporter_cite(url)
+        state_court = self._is_state_case()
 
         def run() -> None:
             pages: list = []
@@ -33576,6 +33722,9 @@ class _ScholarTextWindow:
                     links, quiet = _citation_links_from_visible_pdf_text(
                         data, pages, italics
                     )
+                    if state_court:
+                        # A state court's "Article I, § 7": its own.
+                        links = _federal_constitution_only_pages(links)
                 except Exception as exc:
                     print(f"[pdf-links] citation scan failed: {exc}")
                 try:
@@ -35794,11 +35943,28 @@ class _PdfWindow:
         except (AttributeError, tk.TclError):
             pass
 
+    def _is_state_case(self) -> bool:
+        """Whether the scan is of a state court's reports — read from the
+        citation the window is titled with ("Johnson v. X — 5 Mass. 100") —
+        where a Constitution citation not naming the United States is as
+        likely the state's (see _federal_constitution_only)."""
+        if not self._is_case:
+            return False
+        try:
+            cite = next((action[1].split("@")[0]
+                         for _s, _e, action in detect_brief_links(
+                             self._title or "")
+                         if action[0] == "cite"), "")
+        except Exception:
+            cite = ""
+        return bool(cite) and _state_court_cite(cite)
+
     def _reporter_analysis(self, viewer, data: bytes) -> None:
         """Read the scan's text layer once, for both sides: the viewer gets
         clickable citations, find and the section rail; this window keeps the
         pages the T button's opinion aligns itself against."""
         url = self._url
+        state_court = self._is_state_case()
 
         def run() -> None:
             pages: list = []
@@ -35814,6 +35980,9 @@ class _PdfWindow:
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
                         data, pages, italics)
+                    if state_court:
+                        # A state court's "Article I, § 7": its own.
+                        links = _federal_constitution_only_pages(links)
                 except Exception as exc:
                     print(f"[reporter] citation scan failed: {exc}")
                 try:
@@ -35892,6 +36061,8 @@ class _PdfWindow:
 
         # Background text-layer extraction: enables Ctrl-F search and mouse
         # text selection (Ctrl-C copies) when the PDF carries text.
+        state_court = self._is_state_case()
+
         def extract_text(d=data, p=pane) -> None:
             try:
                 pages, italics = _extract_pdf_text_and_style(d)
@@ -35907,6 +36078,9 @@ class _PdfWindow:
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
                         d, pages, italics)
+                    if state_court:
+                        # A state court's "Article I, § 7": its own.
+                        links = _federal_constitution_only_pages(links)
                 except Exception as exc:
                     print(f"[pdf-links] citation scan failed: {exc}")
                 try:

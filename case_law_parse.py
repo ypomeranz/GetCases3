@@ -333,6 +333,7 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
                     child_fmt = fmt
                     if "parties" in cls:
                         child_kind, child_fmt = "center", {**fmt, "bold": True}
+                        parties_at.append(len(blocks))
                     elif cls and cls[0] in _CAP_CENTERED:
                         child_kind = "center"
                     elif name == "center":
@@ -373,10 +374,12 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
 
     parts: list = []
     body: list = []
+    parties_at: list = []   # the caption's blocks, as parse_section finds them
 
     head = root.find("section", class_="head-matter")
     if head is not None:
         hblocks, hfootnotes, _byline = parse_section(head)
+        hblocks = _caption_first(hblocks, parties_at)
         if hblocks:
             parts.append(OpinionPart(
                 label="Header", kind="header", blocks=hblocks,
@@ -500,6 +503,37 @@ def _join_split_byline(blocks: list, author_at: int) -> None:
         return
     head.spans = head.spans + [Span(text=" ")] + tail.spans
     del blocks[author_at + 1]
+
+
+def _caption_first(blocks: list, parties_at: list) -> list:
+    """The head matter with its caption first, as Google Scholar and the
+    reports themselves set it.  CAP prints some reports' docket, court and
+    date ahead of the caption — California's in brackets, "[Sac. No. 7096. /
+    In Bank. / Dec. 18, 1959.]", South Carolina's "CASE No. 1078." — and the
+    case opened on them, the caption reader taking "[Sac. No. 7096." for
+    the case's name.  The centered lines before the caption follow it now,
+    out of their brackets; anything else stays where it is."""
+    if not parties_at or parties_at[0] <= 0:
+        return blocks
+    first = parties_at[0]
+    end = first
+    while end in parties_at:
+        end += 1
+    if not all(b.kind == "center" for b in blocks[:first]):
+        return blocks
+    moved = blocks[:first]
+    lead = next((s for s in moved[0].spans if s.text.strip()), None)
+    if lead is not None and lead.text.lstrip().startswith("["):
+        lead.text = lead.text.lstrip()[1:].lstrip()
+    tail = next((s for s in reversed(moved[-1].spans) if s.text.strip()),
+                None)
+    if tail is not None:
+        tail.text = _BRACKET_CLOSE_RE.sub(r"\1", tail.text)
+    return blocks[first:end] + moved + blocks[end:]
+
+
+# The bracket closing CAP's preamble: "Dec. 18, 1959.]" -> "Dec. 18, 1959."
+_BRACKET_CLOSE_RE = re.compile(r"([.,]?)\s*\]\s*$")
 
 
 def _finish(parts: list) -> None:
