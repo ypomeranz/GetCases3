@@ -372,10 +372,23 @@ _STATE_OF_RE = re.compile(
 # the cite reads "Indiana ex rel. Anderson", never "Ind. ex rel. Anderson".
 # Matched case-insensitively and re-emitted in canonical lowercase form.
 _EX_REL_RE = re.compile(
-    r"[\s,]+(?:ex\s+rel(?:\.|atione)?|on\s+(?:the\s+)?rel(?:ation|\.)\s+of)"
+    r"[\s,]+(?:ex\s+rel(?:\.|atione)?"
+    r"|(?:on|upon|at)\s+(?:the\s+)?rel(?:ation|\.)\s+of)"
     r"[\s,]+",
     re.IGNORECASE,
 )
+
+
+def split_relator(party: str) -> "tuple[str, str] | None":
+    """A party written with its relator — "THE UNITED STATES, ON THE
+    RELATION OF WILLIAM B. STOKES ET AL." — as ``(party, relator)``, or None
+    when there is no relator clause.  Rule 10.2.1(b) cites both: United
+    States ex rel. Stokes."""
+    m = _EX_REL_RE.search(party or "")
+    if not m:
+        return None
+    head, tail = party[:m.start()].strip(" ,"), party[m.end():].strip(" ,")
+    return (head, tail) if head and tail else None
 
 
 def _norm_geo(s: str) -> str:

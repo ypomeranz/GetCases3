@@ -53,7 +53,11 @@ from pathlib import Path
 from typing import Optional
 
 import citations
-from court_catalog import state_of_court
+from court_catalog import (
+    COURT_BLUEBOOK,
+    bluebook_federal_trial_court,
+    state_of_court,
+)
 from bluebook_names import (
     abbreviate_case_name,
     cut_companion_cases,
@@ -425,6 +429,33 @@ def _court_from_header(blocks: list) -> str:
         re.IGNORECASE,
     ):
         return "scotus"
+    # A federal trial court's header — "United States Bankruptcy Court, W.D.
+    # Missouri, C.D." — names the court a B.R. or F. Supp. citation leaves
+    # unsaid and its parenthetical must give (rule 10.4(a)): In re Gill, 93
+    # B.R. 684 (Bankr. W.D. Mo. 1988).  Kept by its id, where the
+    # abbreviation names just one court.  The first line naming a court is
+    # the one — not a caption naming one ("Nixon v. Sirica, United States
+    # District Judge…", a D.C. Circuit case), nor the court below; a court of
+    # appeals there means no trial court at all.
+    for b in blocks[:8]:
+        if getattr(b, "kind", None) != "center":
+            continue
+        t = re.sub(r"\s+", " ", b.text()).strip()
+        if (not re.search(r"\bcourt\b", t, re.IGNORECASE)
+                or re.search(r"\svs?\.\s", t, re.IGNORECASE)
+                # A caption: "In re Combustion Engineering, … Appellants" —
+                # a court's own line names no party.
+                or re.match(r"(?:in\s+re|ex\s+parte|(?:in\s+the\s+)?matter"
+                            r"\s+of)\b", t, re.IGNORECASE)
+                or re.search(r"\b(?:appellants?|appellees?|petitioners?|"
+                             r"respondents?|plaintiffs?|defendants?|"
+                             r"debtors?)\b", t, re.IGNORECASE)
+                or re.match(r"(?:on\s+)?(?:appeal|certiorari|petition|review)"
+                            r"\b", t, re.IGNORECASE)):
+            continue
+        abbr = bluebook_federal_trial_court(t)
+        ids = [cid for cid, bb in COURT_BLUEBOOK.items() if bb == abbr]
+        return ids[0] if abbr and len(ids) == 1 else ""
     return ""
 
 

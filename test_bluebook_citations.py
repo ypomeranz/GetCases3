@@ -4942,6 +4942,106 @@ class PdfLocationAnalysisPipelineTests(unittest.TestCase):
         win._ensure_cached_location_maps.assert_called_once_with(key)
 
 
+def _scholar_page(cite_line: str, caption: str, *court_lines: str) -> str:
+    centers = "".join(f"<center>{line}</center>" for line in court_lines)
+    return (f'<div id="gs_opinion"><center><b>{cite_line}</b></center>'
+            f'<center><h3 id="gsl_case_name">{caption}</h3></center>'
+            f"{centers}<p>Opinion.</p></div>")
+
+
+class TrialCourtParentheticalTests(unittest.TestCase):
+    """A B.R. or F. Supp. citation says nothing of the court, so the
+    parenthetical must (rule 10.4(a)) — In re Gill, 93 B.R. 684, was named
+    "(1988)" for its file and in the opinion database."""
+
+    GILL = _scholar_page(
+        "93 B.R. 684 (1988)",
+        "In re Scott Jay GILL &amp; Jane Phyllis Gill, Debtors.<br/>BECK "
+        "MOTORS, INC., Plaintiff,<br/>v.<br/>Scott Jay GILL &amp; Jane "
+        "Phyllis Gill, Defendants.",
+        "Bankruptcy No. 88-01939-C, Adv. No. 88-0584-C.",
+        "United States Bankruptcy Court, W.D. Missouri, C.D.",
+        "December 8, 1988.")
+
+    def test_the_file_name_gives_the_court(self):
+        from google_scholar import parse_opinion_blocks
+        item = _scholar_item_from_blocks(parse_opinion_blocks(self.GILL))
+        self.assertEqual(_bluebook_display_name(item),
+                         "In re Gill, 93 B.R. 684 (Bankr. W.D. Mo. 1988)")
+
+    def test_so_does_the_saved_record(self):
+        from opinion_db import extract_record
+        record = extract_record(
+            "https://scholar.google.com/scholar_case?case=11", self.GILL)
+        self.assertEqual(record["court"], "mowb")
+
+    def test_a_court_named_in_a_caption_is_not_the_court(self):
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import _court_from_header
+        # Nixon v. Sirica, 487 F.2d 700 (D.C. Cir. 1973), names the district
+        # judge in its caption; In re Combustion Engineering, 391 F.3d 190
+        # (3d Cir. 2004), the bankruptcy court.
+        for page in (
+                _scholar_page(
+                    "487 F.2d 700 (1973)",
+                    "Richard M. NIXON, Petitioner, v. The Honorable John J. "
+                    "SIRICA, United States District Judge for the District "
+                    "of Columbia, Respondent.",
+                    "United States Court of Appeals, District of Columbia "
+                    "Circuit."),
+                _scholar_page(
+                    "391 F.3d 190 (2004)",
+                    "In re: COMBUSTION ENGINEERING, INC. Certain Claimants, "
+                    "filed in the Bankruptcy Court for the District of "
+                    "Delaware, Appellants.",
+                    "United States Court of Appeals, Third Circuit.")):
+            with self.subTest(page=page[60:110]):
+                self.assertEqual(
+                    _court_from_header(parse_opinion_blocks(page)), "")
+
+
+class RelatorCaptionTests(unittest.TestCase):
+    """A party with its relator (rule 10.2.1(b)): Kendall v. United States
+    ex rel. Stokes, 37 U.S. (12 Pet.) 524 (1838), was cited "Kendall v.
+    United States" — the caption reader cut ", ON THE RELATION OF …" away as
+    a description."""
+
+    KENDALL = _scholar_page(
+        "37 U.S. 524 (1838)",
+        "AMOS KENDALL, POSTMASTER GENERAL OF THE UNITED STATES, PLAINTIFF IN "
+        "ERROR<br/>v.<br/>THE UNITED STATES, ON THE RELATION OF WILLIAM B. "
+        "STOKES ET AL.")
+
+    def test_the_relator_is_cited(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(self.KENDALL)
+        self.assertEqual(
+            abbreviate_case_name(_scholar_caption_name(blocks)),
+            "Kendall v. United States ex rel. Stokes")
+
+    def test_and_kept_in_the_saved_record(self):
+        from opinion_db import extract_record
+        self.assertEqual(extract_record(
+            "https://scholar.google.com/scholar_case?case=12",
+            self.KENDALL)["name"], "Kendall v. United States ex rel. Stokes")
+
+    def test_every_form_of_the_relation(self):
+        from google_scholar import parse_opinion_blocks
+        for caption, cited in (
+                ("UNITED STATES ex rel. John TURNER, Appellant, v. WILLIAMS",
+                 "United States ex rel. Turner v. Williams"),
+                ("STATE OF INDIANA, upon the relation of Jane ANDERSON, v. "
+                 "BRAND", "Indiana ex rel. Anderson v. Brand"),
+                ("PEOPLE, at the relation of John DOE, v. ROE",
+                 "People ex rel. Doe v. Roe")):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(_scholar_page("1 U.S. 1",
+                                                            caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    cited)
+
+
 class JudgeNameCaseTests(unittest.TestCase):
     """A judge's name from an all-caps byline, in the case it is written."""
 
