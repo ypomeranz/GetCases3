@@ -1206,6 +1206,8 @@ from bluebook_names import (
     collapse_personal_all_caps_run,
     cut_companion_cases,
     described_person_surname,
+    ejectment_case_names,
+    ejectment_party_caption,
     in_re_caps_name,
     is_recognized_given_name,
     name_persons_by_surname,
@@ -1227,6 +1229,7 @@ from case_law_parse import (
     parse_case_law_json as _parse_case_law_json,
 )
 from cl_parse import parse_cl_html as _parse_cl_html
+import case_name_usage
 import citing_cases
 import courtlistener as cl_api
 from courtlistener import CourtListenerClient, CourtListenerError
@@ -4702,6 +4705,30 @@ def _cited_opinion_ids(
                 f"[resolve] citing-opinion target cluster fetch failed: {exc}"
             )
     return ids
+
+
+def _ejectment_usage_form(client, cite: str, item: dict, names,
+                          case_name: str) -> Optional[str]:
+    """The form of an ejectment party (see ejectment_case_names) the
+    opinions citing the case use, or None to keep the caption's.  Asked of
+    CourtListener once per case; the answer is kept (case_name_usage).  A
+    case CourtListener cannot find, or a search that fails, is asked about
+    again next time."""
+    key = case_name_usage.cache_key(cite, names)
+    known = case_name_usage.remembered_form(key)
+    if known is not None:
+        return known or None
+    try:
+        ids = _cited_opinion_ids(client, item, case_name, cite)
+        if not ids:
+            return None
+        form, counts = case_name_usage.most_cited_form(client, names, ids)
+    except Exception as exc:
+        print(f"[name-usage] CourtListener lookup failed for {cite!r}: {exc}")
+        return None
+    print(f"[name-usage] {cite}: {counts} -> {form or names.default}")
+    case_name_usage.remember_form(key, form, counts)
+    return form
 
 
 def _target_name_near_citation(
@@ -16833,6 +16860,18 @@ def _caption_party(s: str) -> str:
         party, relator = (_caption_party(p) for p in relation)
         if party and relator:
             return f"{party} ex rel. {relator}"
+    # So is a demise, the old ejectment plaintiff's: "JOHN DEN, ex dem. JAMES
+    # B. MURRAY AND JOHN C. KAYSER" is Den suing on Murray's demise — cited
+    # "Murray's Lessee v. Hoboken Land & Improvement Co." — not John Den and
+    # a co-party; abbreviate_case_name reads it whole.
+    ejectment = ejectment_party_caption(s)
+    if ejectment:
+        # (A "V." in it is a lessor's middle initial — "ON THE DEMISE OF
+        # HARMAN V. HART" — which title-casing would take for "v.".)
+        out = _titlecase_caps(ejectment)
+        if re.search(r"(?<=\s)V\.(?=\s)", ejectment):
+            out = re.sub(r"(?<=\s)v\.(?=\s)", "V.", out)
+        return out
 
     raw = [clean_seg(p) for p in re.split(r"[,;]", s)]
     segs = [p for p in raw if p]
@@ -29475,11 +29514,23 @@ class _ScholarTextWindow:
         # Rule 10.2.1(f) needs the deciding court to finish a "People of the
         # State of …" party: its own state's courts cite it as "People v.
         # Zackowitz", everyone else's as "New York v. Zackowitz".
+        court_state = _state_of_court(court_id, str(item.get("court") or ""))
+        # An ejectment party ("John Den, ex dem. James B. Murray") is cited
+        # the way the opinions citing the case cite it — "Murray's Lessee",
+        # but "Doe" in Doe v. Considine.  An answer had before is used now;
+        # otherwise the caption's own form stands until _enrich_citation
+        # has asked.
+        ejectment = ejectment_case_names(
+            name, court_state=court_state, body_text=opinion_body)
         name = abbreviate_case_name(
-            name,
-            court_state=_state_of_court(court_id, str(item.get("court") or "")),
-            body_text=opinion_body,
+            name, court_state=court_state, body_text=opinion_body,
         )
+        if ejectment is not None and cite:
+            known = case_name_usage.remembered_form(
+                case_name_usage.cache_key(cite, ejectment))
+            if known is not None:
+                name = ejectment.names.get(known, name)
+                ejectment = None
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
@@ -29534,6 +29585,8 @@ class _ScholarTextWindow:
             "docket_cite": docket_cite, "docket_paren": docket_paren,
             "omit_parenthetical": omit_parenthetical, "pin_kind": pin_kind,
             "_caption_case_unresolved": unresolved_caption_case,
+            # The forms of an ejectment party still to be asked about.
+            "_ejectment": ejectment,
         }
 
     def _writer_parenthetical(self, part) -> str:
@@ -29840,6 +29893,11 @@ class _ScholarTextWindow:
         token lacks reliable casing evidence in the opinion.  In that one case,
         static.case.law may donate capitalization for the identical word; it
         can never replace the opinion's caption.
+
+        An ejectment party is the exception that does choose the name: which
+        of the caption's forms the citing opinions use — "Murray's Lessee",
+        "Den", "Den ex dem. Murray" — is asked of CourtListener (see
+        case_name_usage), the adverse party staying as the caption gives it.
         """
         bb = self._bb
         if not bb.get("cite"):
@@ -29854,7 +29912,12 @@ class _ScholarTextWindow:
             unresolved_case
             and not getattr(self, "_base_citation_override", "")
         )
-        if not (need_year or need_court or need_caption_case):
+        ejectment = bb.get("_ejectment")
+        need_usage = bool(
+            ejectment is not None
+            and not getattr(self, "_base_citation_override", "")
+        )
+        if not (need_year or need_court or need_caption_case or need_usage):
             return
 
         cite = bb["cite"]
@@ -29862,7 +29925,7 @@ class _ScholarTextWindow:
         item = dict(self._item)
         candidate_cites = [cite, *self._header_cites, *(item.get("citation") or [])]
         client = fetcher = None
-        if need_year or need_court:
+        if need_year or need_court or need_usage:
             try:
                 if self._app is not None and self._app._token_var.get().strip():
                     client = self._app._get_client()
@@ -29905,6 +29968,11 @@ class _ScholarTextWindow:
                 )
             new_year = year or bb.get("year", "")
             new_name = bb.get("name", "")
+            if need_usage and client is not None:
+                form = _ejectment_usage_form(
+                    client, cite, item, ejectment, case_name)
+                if form:
+                    new_name = ejectment.names.get(form, new_name)
             if reference_name:
                 new_name = apply_caption_case_reference(
                     new_name, reference_name, unresolved_case

@@ -1954,6 +1954,22 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
             "Johnson & Graham's Lessee v. M'intosh",
         )
 
+    def test_matters_heard_together_cite_the_first(self):
+        # Ex parte Bollman, 8 U.S. (4 Cranch) 75 (1807): Scholar heads it
+        # "EX PARTE BOLLMAN AND EX PARTE SWARTWOUT" (rule 10.2.1(a)).
+        for caption in ("EX PARTE BOLLMAN AND EX PARTE SWARTWOUT",
+                        "Ex parte Bollman & ex Parte Swartwout"):
+            with self.subTest(caption=caption):
+                self.assertEqual(
+                    abbreviate_case_name(normal_case_caption(caption)),
+                    "Ex parte Bollman")
+        self.assertEqual(abbreviate_case_name("In re Smith; In re Jones"),
+                         "In re Smith")
+        # One matter's own "and" is no second matter.
+        self.assertEqual(
+            abbreviate_case_name("In re Marriage of Smith and Jones"),
+            "In re Marriage of Smith & Jones")
+
     def test_zf_automotive_consolidated_caption(self):
         # ZF Automotive US, Inc. v. Luxshare, Ltd., 596 U.S. 619 (2022):
         # the consolidated AlixPartners case follows the first respondent's
