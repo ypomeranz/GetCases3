@@ -1209,6 +1209,7 @@ from bluebook_names import (
     is_recognized_given_name,
     name_persons_by_surname,
     normal_case_caption,
+    office_holder_surname,
     refine_caption_case,
     simplify_historical_entity_caption,
     split_relator,
@@ -16826,6 +16827,7 @@ def _caption_party(s: str) -> str:
 
     raw = [clean_seg(p) for p in re.split(r"[,;]", s)]
     segs = [p for p in raw if p]
+    description = ""
     if segs:
         # A charter-era bank's formal corporate style contains structural
         # commas that do not separate parties: "The President, Directors,
@@ -16871,6 +16873,9 @@ def _caption_party(s: str) -> str:
                 cut = i
                 break
         segs = segs[:cut]
+        # What follows the first party's comma, which an office there shows
+        # to be a person (below) before step 2 strips the office away.
+        description = ", ".join(segs[1:])
         # 2. Designations / offices / suffixes strip from the right.
         while len(segs) > 1 and _PARTY_DESIGNATION_RE.fullmatch(segs[-1]):
             segs.pop()
@@ -16892,6 +16897,8 @@ def _caption_party(s: str) -> str:
         ):
             rest = []
         s = ", ".join(kept + rest)
+        if len(kept + rest) > 1:
+            description = ""    # the segments were more of an entity's name
     else:
         s = ""
     s = s.strip().lstrip(".;").rstrip(";").strip()
@@ -16921,6 +16928,14 @@ def _caption_party(s: str) -> str:
     # 284, was cited "Beatrice v. Dittus v. Alan Cranston".
     if re.search(r"(?<=\s)V\.(?=\s)", s):
         out = re.sub(r"(?<=\s)v\.(?=\s)", "V.", out)
+    # An office only a person holds, after the party's comma, makes it a
+    # person whose given names drop, though no list knows them (rules
+    # 10.2.1(e), (g)): "MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF HOMELAND
+    # SECURITY, ET AL." is Mullin — Mullin v. Doe (2026) had been cited
+    # "Markwayne Mullin v. Doe".
+    if description:
+        out = office_holder_surname(
+            out, _titlecase_caps(description)) or out
     return out
 
 

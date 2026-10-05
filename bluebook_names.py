@@ -2731,6 +2731,40 @@ def _office_holder_surname(p: str, *,
             or _lone_surname(head))
 
 
+# Offices only a natural person holds, as a caption sets them after the
+# name.  A trustee, receiver or executor may be a bank, and a party "by and
+# through its" officers a firm, so those are no evidence of a person here.
+_PERSONAL_OFFICE_WORDS = _OFFICE_WORDS | frozenset({
+    "president", "vice", "senator", "sen", "representative", "congressman",
+    "congresswoman", "chairman", "chairwoman", "chairperson", "officer",
+    "deputy", "inspector", "justice", "acting",
+})
+# …and the capacities only a person is sued in: "individually", "in his
+# official capacity".
+_PERSONAL_CAPACITY_RE = re.compile(
+    r"(?:individually|personally|in\s+(?:his|her)\s+(?:[\w.'’-]+\s+){0,2}"
+    r"capacit(?:y|ies))\b",
+    re.IGNORECASE,
+)
+
+
+def office_holder_surname(name: str, description: str) -> str | None:
+    """The surname of the person *name* — a caption's party, ahead of its
+    comma — when *description*, what follows the comma, gives an office only
+    a person holds or a capacity only a person is sued in.  The office shows
+    the party to be a person even where the given-name lists don't know the
+    given name: "MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF HOMELAND
+    SECURITY" is Mullin (rules 10.2.1(e), (g)).  None otherwise, or when
+    *name* doesn't read as a person's name ("Acme Corp.", "Board of
+    Education")."""
+    first = description.split(",", 1)[0].strip()
+    words = [_word_key(w) for w in re.split(r"[\s/\-]+", first) if w][:3]
+    if not (any(w in _PERSONAL_OFFICE_WORDS for w in words)
+            or _PERSONAL_CAPACITY_RE.match(first)):
+        return None
+    return _strip_given_names(name, person=True)
+
+
 # Bluebook rule 10.2.1(c): the name of a widely recognized institution is
 # abbreviated to its initials.  Google Scholar prints the full name, so map
 # the formal long form back to the initials practitioners actually use.  Keyed

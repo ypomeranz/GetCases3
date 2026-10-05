@@ -19,6 +19,7 @@ from bluebook_names import (
     is_personal_all_caps_run,
     name_persons_by_surname,
     normal_case_caption,
+    office_holder_surname,
     refine_caption_case,
 )
 from citation_overrides import (
@@ -628,6 +629,53 @@ class CaptionCapitalizationTests(unittest.TestCase):
                 self.assertEqual(
                     abbreviate_case_name(_scholar_caption_name(blocks)),
                     cited)
+
+    def test_an_office_after_an_all_caps_name_makes_it_a_person(self):
+        # Mullin v. Doe (2026): the caption is all in capitals, so only the
+        # office after the comma shows "Markwayne Mullin" to be a person.
+        # It had been cited "Markwayne Mullin v. Doe".
+        from google_scholar import parse_opinion_blocks
+        for caption, cited in (
+                ("MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF HOMELAND "
+                 "SECURITY, ET AL., Petitioners,<br/>v.<br/>DAHLIA DOE, ET "
+                 "AL.", "Mullin v. Doe"),
+                ("DONALD J. TRUMP, PRESIDENT OF THE UNITED STATES, ET AL., "
+                 "Petitioners,<br/>v.<br/>JANE DOE", "Trump v. Doe"),
+                ("JANE DOE, Plaintiff,<br/>v.<br/>MARKWAYNE MULLIN, IN HIS "
+                 "OFFICIAL CAPACITY AS SECRETARY, Defendant.",
+                 "Doe v. Mullin"),
+                ("JANE DOE, Plaintiff,<br/>v.<br/>MARKWAYNE MULLIN, "
+                 "INDIVIDUALLY, Defendant.", "Doe v. Mullin"),
+                # A firm may be a trustee, or act through its officers.
+                ("WELLS FARGO, AS TRUSTEE, Plaintiff,<br/>v.<br/>JOHN DOE, "
+                 "Defendant.", "Wells Fargo v. Doe"),
+                ("PLANNED PARENTHOOD, BY AND THROUGH ITS DIRECTOR, "
+                 "Plaintiff,<br/>v.<br/>JOHN DOE, Defendant.",
+                 "Planned Parenthood v. Doe"),
+                ("ACME CORP., PRESIDENT, Appellant,<br/>v.<br/>JOHN DOE.",
+                 "Acme Corp. v. Doe")):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(
+                    _scholar_page("1 U.S. 1 (2026)", caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    cited)
+
+    def test_office_holder_surname(self):
+        self.assertEqual(office_holder_surname(
+            "Markwayne Mullin", "Secretary, Department of Homeland Security"),
+            "Mullin")
+        self.assertEqual(office_holder_surname(
+            "Markwayne Mullin", "Acting Secretary of Homeland Security"),
+            "Mullin")
+        for name, description in (
+                ("Markwayne Mullin", "Petitioner"),
+                ("Wells Fargo", "as Trustee"),
+                ("Planned Parenthood", "by and through its Director"),
+                ("Board of Education", "Superintendent"),
+                ("Acme Corp.", "President")):
+            with self.subTest(name=name, description=description):
+                self.assertIsNone(office_holder_surname(name, description))
 
     def test_possessive_s_is_not_a_surname_prefix(self):
         # The O'BRIEN → O'Brien rule must not capitalize a possessive:
