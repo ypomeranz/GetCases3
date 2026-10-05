@@ -1388,6 +1388,44 @@ def canonical_reporter(rep: str) -> str:
     return re.sub(r"\s+", " ", (rep or "").replace("’", "'")).strip()
 
 
+# The common reporters as a citation typed by hand may spell them — "486 us
+# 1306", "5 f4th 100", "108 s ct 1837" — known by their letters and digits
+# alone (see :func:`typed_reporter`).
+_TYPED_REPORTERS = (
+    "U.S.", "S. Ct.", "L. Ed.", "L. Ed. 2d", "F.", "F.2d", "F.3d", "F.4th",
+    "F. Supp.", "F. Supp. 2d", "F. Supp. 3d", "F. App'x", "B.R.",
+    "Fed. Cl.", "A.", "A.2d", "A.3d", "P.", "P.2d", "P.3d", "N.E.", "N.E.2d",
+    "N.E.3d", "N.W.", "N.W.2d", "S.E.", "S.E.2d", "S.W.", "S.W.2d",
+    "S.W.3d", "So.", "So. 2d", "So. 3d", "Cal. Rptr.", "Cal. Rptr. 2d",
+    "Cal. Rptr. 3d", "N.Y.S.", "N.Y.S.2d", "N.Y.S.3d",
+)
+_TYPED_REPORTER_KEYS = {
+    **{_loose_reporter_key(r): r for r in _TYPED_REPORTERS},
+    "fedappx": "F. App'x",
+}
+
+
+def typed_reporter(rep: str, *, loose: bool = False) -> str:
+    """The reporter a hand-typed abbreviation means, in its proper spelling
+    — "us", "US" and "u.s." are "U.S.", "f4th" "F.4th", "s ct" "S. Ct." — or
+    "" for one not known.  *loose* (the abbreviation typed in lowercase,
+    where an ordinary word could be meant) admits only a reporter no word is
+    spelled like: not a one-letter "a" or "p", nor a state's "or" or
+    "me"."""
+    key = _loose_reporter_key(rep)
+    if not key:
+        return ""
+    known = _TYPED_REPORTER_KEYS.get(key)
+    if known:
+        return "" if loose and len(key) < 2 else known
+    family = reporter_family(rep)
+    if family is None:
+        return ""
+    if loose and len(key) < 4 and not re.search(r"\d", key):
+        return ""
+    return family.canonical
+
+
 def canonical_norm_reporter(rep: str) -> str:
     """Punctuation-preserving canonical identity used by persistent data."""
     return norm_reporter(canonical_reporter(rep))

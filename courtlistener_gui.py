@@ -1261,6 +1261,7 @@ from citations import (
     SHORT_CITE_RE as _SHORT_CITE_RE,
     ID_CITE_RE as _ID_CITE_RE,
     HAND_TYPED_CITE_RE as _LINE_CITE_RE,
+    typed_reporter as _typed_reporter,
     join_note_pin as _join_note_pin,
     note_pin_after_page as _note_pin_after_page,
     pin_after as _pin_after,
@@ -35136,14 +35137,37 @@ def _spotlight_case_action(
     return cases[0] if len(cases) == 1 else None
 
 
+# A citation typed all in lowercase — "486 us 1306", "morison v us, 486 us
+# 1306" — read only where its reporter is one known by that spelling
+# (citations.typed_reporter, loose), so "100 days 5" stays a search.
+_LOOSE_LINE_CITE_RE = re.compile(
+    r"(\d{1,4})\s+([A-Za-z][A-Za-z0-9.'’ &]{0,24}?)\s+"
+    r"(\d{1,6})(?=[\s,;.)(]|$)")
+
+
+def _line_cite_match(line: str) -> "Optional[re.Match]":
+    """The citation in a line typed by hand: a capitalized reporter, or a
+    lowercase one known by that spelling."""
+    m = _LINE_CITE_RE.search(line or "")
+    if m:
+        return m
+    for m in _LOOSE_LINE_CITE_RE.finditer(line or ""):
+        if _typed_reporter(m.group(2), loose=True):
+            return m
+    return None
+
+
 def _parse_citation_line(line: str) -> Optional[tuple[str, str, str]]:
     """Parse "Name v. Name, 365 U.S. 167, 171 (1961)" into
-    (case name, citation, pin) — name and pin may be empty."""
-    m = _LINE_CITE_RE.search(line)
+    (case name, citation, pin) — name and pin may be empty.  A reporter
+    typed loosely is given its proper spelling: "486 us 1306" and "486 US
+    1306" are 486 U.S. 1306, the form every source is asked by."""
+    m = _line_cite_match(line)
     if not m:
         return None
+    reporter = _typed_reporter(m.group(2)) or m.group(2)
     cite = re.sub(r"\s+", " ",
-                  f"{m.group(1)} {m.group(2)} {m.group(3)}")
+                  f"{m.group(1)} {reporter} {m.group(3)}")
     cite = cite.replace("U. S.", "U.S.").replace("’", "'")
     cite = _respace_reporter_in_cite(cite)
     name = line[: m.start()].strip().rstrip(",;–—- ").strip()
@@ -35188,7 +35212,7 @@ def _citation_line_year(line: str) -> str:
     """The decision year in a typed citation's parenthetical — the "2025" of
     "NetChoice, LLC v. Fitch, 145 S. Ct. 2658 (2025)", or of "(5th Cir.
     2019)" — or "" when none follows the citation."""
-    m = _LINE_CITE_RE.search(line or "")
+    m = _line_cite_match(line or "")
     if not m:
         return ""
     year = re.search(r"\([^()]*?\b(1[6-9]\d\d|20\d\d)\s*\)", line[m.end():])
