@@ -16,10 +16,10 @@ from bluebook_names import (
     caption_case_reference_tokens,
     collapse_personal_all_caps_run,
     courtlistener_case_name,
+    described_person_surname,
     is_personal_all_caps_run,
     name_persons_by_surname,
     normal_case_caption,
-    office_holder_surname,
     refine_caption_case,
 )
 from citation_overrides import (
@@ -646,6 +646,13 @@ class CaptionCapitalizationTests(unittest.TestCase):
                  "Doe v. Mullin"),
                 ("JANE DOE, Plaintiff,<br/>v.<br/>MARKWAYNE MULLIN, "
                  "INDIVIDUALLY, Defendant.", "Doe v. Mullin"),
+                # …and so does a generational suffix.
+                ("UNITED STATES, Appellant,<br/>v.<br/>MARKWAYNE MULLIN, "
+                 "JR., Appellee.", "United States v. Mullin"),
+                ("UNITED STATES, Appellant,<br/>v.<br/>MARKWAYNE A. "
+                 "MULLIN, III, Appellee.", "United States v. Mullin"),
+                ("ACME FUND, II, Appellant,<br/>v.<br/>JOHN DOE.",
+                 "Acme Fund v. Doe"),
                 # A firm may be a trustee, or act through its officers.
                 ("WELLS FARGO, AS TRUSTEE, Plaintiff,<br/>v.<br/>JOHN DOE, "
                  "Defendant.", "Wells Fargo v. Doe"),
@@ -661,21 +668,27 @@ class CaptionCapitalizationTests(unittest.TestCase):
                     abbreviate_case_name(_scholar_caption_name(blocks)),
                     cited)
 
-    def test_office_holder_surname(self):
-        self.assertEqual(office_holder_surname(
-            "Markwayne Mullin", "Secretary, Department of Homeland Security"),
-            "Mullin")
-        self.assertEqual(office_holder_surname(
-            "Markwayne Mullin", "Acting Secretary of Homeland Security"),
-            "Mullin")
+    def test_described_person_surname(self):
+        for name, description in (
+                ("Markwayne Mullin", "Secretary, Department of Homeland "
+                                     "Security"),
+                ("Markwayne Mullin", "Acting Secretary of Homeland Security"),
+                ("Markwayne Mullin", "in his official capacity"),
+                ("Markwayne Mullin", "Jr."),
+                ("Markwayne Mullin", "III, Secretary of Homeland Security")):
+            with self.subTest(name=name, description=description):
+                self.assertEqual(described_person_surname(name, description),
+                                 "Mullin")
         for name, description in (
                 ("Markwayne Mullin", "Petitioner"),
+                ("Acme Fund", "II"),
+                ("Blackstone Capital Partners", "III"),
                 ("Wells Fargo", "as Trustee"),
                 ("Planned Parenthood", "by and through its Director"),
                 ("Board of Education", "Superintendent"),
                 ("Acme Corp.", "President")):
             with self.subTest(name=name, description=description):
-                self.assertIsNone(office_holder_surname(name, description))
+                self.assertIsNone(described_person_surname(name, description))
 
     def test_possessive_s_is_not_a_surname_prefix(self):
         # The O'BRIEN → O'Brien rule must not capitalize a possessive:

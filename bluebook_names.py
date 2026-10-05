@@ -2748,16 +2748,19 @@ _PERSONAL_CAPACITY_RE = re.compile(
 )
 
 
-def office_holder_surname(name: str, description: str) -> str | None:
+def described_person_surname(name: str, description: str) -> str | None:
     """The surname of the person *name* — a caption's party, ahead of its
-    comma — when *description*, what follows the comma, gives an office only
-    a person holds or a capacity only a person is sued in.  The office shows
-    the party to be a person even where the given-name lists don't know the
-    given name: "MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF HOMELAND
-    SECURITY" is Mullin (rules 10.2.1(e), (g)).  None otherwise, or when
-    *name* doesn't read as a person's name ("Acme Corp.", "Board of
-    Education")."""
+    comma — when *description*, what follows the comma, shows it to be a
+    person: a generational suffix ("Jr.", "III"), an office only a person
+    holds, or a capacity only a person is sued in.  That shows it even where
+    the given-name lists don't know the given name: "MARKWAYNE MULLIN,
+    SECRETARY, DEPARTMENT OF HOMELAND SECURITY" and "MARKWAYNE MULLIN, JR."
+    are Mullin (rules 10.2.1(e), (g)).  None otherwise, or when *name*
+    doesn't read as a person's name ("Acme Corp.", "Board of Education",
+    "Acme Fund, II")."""
     first = description.split(",", 1)[0].strip()
+    if _GENERATIONAL_SUFFIX_RE.fullmatch(first):
+        return _strip_given_names(f"{name} {first}")
     words = [_word_key(w) for w in re.split(r"[\s/\-]+", first) if w][:3]
     if not (any(w in _PERSONAL_OFFICE_WORDS for w in words)
             or _PERSONAL_CAPACITY_RE.match(first)):

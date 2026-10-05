@@ -1205,11 +1205,11 @@ from bluebook_names import (
     caption_case_reference_tokens,
     collapse_personal_all_caps_run,
     cut_companion_cases,
+    described_person_surname,
     in_re_caps_name,
     is_recognized_given_name,
     name_persons_by_surname,
     normal_case_caption,
-    office_holder_surname,
     refine_caption_case,
     simplify_historical_entity_caption,
     split_relator,
@@ -16928,13 +16928,13 @@ def _caption_party(s: str) -> str:
     # 284, was cited "Beatrice v. Dittus v. Alan Cranston".
     if re.search(r"(?<=\s)V\.(?=\s)", s):
         out = re.sub(r"(?<=\s)v\.(?=\s)", "V.", out)
-    # An office only a person holds, after the party's comma, makes it a
-    # person whose given names drop, though no list knows them (rules
-    # 10.2.1(e), (g)): "MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF HOMELAND
-    # SECURITY, ET AL." is Mullin — Mullin v. Doe (2026) had been cited
-    # "Markwayne Mullin v. Doe".
+    # A suffix or an office only a person holds, after the party's comma,
+    # makes it a person whose given names drop, though no list knows them
+    # (rules 10.2.1(e), (g)): "MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF
+    # HOMELAND SECURITY, ET AL." is Mullin — Mullin v. Doe (2026) had been
+    # cited "Markwayne Mullin v. Doe" — and so is "MARKWAYNE MULLIN, JR.".
     if description:
-        out = office_holder_surname(
+        out = described_person_surname(
             out, _titlecase_caps(description)) or out
     return out
 
