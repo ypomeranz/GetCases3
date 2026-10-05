@@ -21,6 +21,7 @@ from __future__ import annotations
 import gzip
 import os
 import re
+from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
 # Table T6 — case-name words (singular forms; plurals are derived below by
@@ -2200,6 +2201,12 @@ _FIRM_TAIL_WORDS = frozenset({
 })
 
 
+_JOINED_MATTER_RE = re.compile(
+    r"\s*(?:[;,]\s*(?:(?:and|&)\s+)?|\s+(?:and|&)\s+)"
+    r"(?=(?:ex\s+parte|in\s+re|(?:in\s+the\s+)?matter\s+of)\b)",
+    re.IGNORECASE)
+
+
 def cut_companion_cases(text: str) -> str:
     """Keep only the first-listed case of a consolidated caption (Bluebook
     rule 10.2.1(b)).
@@ -2217,7 +2224,17 @@ def cut_companion_cases(text: str) -> str:
     has a "v." to look ahead to or cut back from.  Any strategy can fire at
     a *later* boundary than the true one (Olmstead's "… v. SAME." line
     defeats one at the first boundary but not the second), so the earliest
-    cut wins."""
+    cut wins.
+
+    Before any of them, a matter heard with another of its kind ends where
+    the other's own "Ex parte" or "In re" begins, after an "and", "&" or a
+    semicolon: "EX PARTE BOLLMAN AND EX PARTE SWARTWOUT" is Ex parte
+    Bollman, 8 U.S. (4 Cranch) 75 (1807)."""
+    head = _PROCEDURAL_PREFIX_RE.match(text)
+    if head:
+        joined = _JOINED_MATTER_RE.search(text, head.end())
+        if joined:
+            text = text[:joined.start()]
     cuts: list[int] = []
     for cm in re.finditer(
         r"\.\s+(?=[^.]*?\s+vs?\.\s+|SAME\b|IN\s+RE\b|EX\s+PARTE\b"
@@ -3515,27 +3532,290 @@ def _lowercase_small_words(name: str) -> str:
     return " ".join(out)
 
 
-def abbreviate_case_name(name: str, *, court_state: str = "",
-                         body_text: str = "") -> str:
-    """Abbreviate a case name for use in a citation or filename per
-    Bluebook rule 10.2.2 (= Indigo Book R8.3), dropping given names of
-    individuals (rule 10.2.1(g)) and "State of" prefixes (10.2.1(f)).
-    Safe to call twice.
+# ---------------------------------------------------------------------------
+# Ejectment captions
+# ---------------------------------------------------------------------------
+# Until the fiction was abolished, ejectment was brought in the name of the
+# claimant's lessee, and the old reports caption the plaintiff in one of three
+# ways: a nominal plaintiff suing on the lessor's demise ("John Den, ex dem.
+# James B. Murray", "James Jackson, on the demise of Harman V. Hart", "John
+# Doe, lessee of Jacob Cheesman"), the lessee of the lessor ("The Lessee of
+# Edward Livingston"), or the lessor's lessee ("Hunter's Lessee", "John
+# Pollard et al., Lessee").  How a case so captioned is cited afterwards is
+# settled case by case, not by rule: "Murray's Lessee v. Hoboken Land &
+# Improvement Co." but "Doe v. Considine" and "Jackson v. Lamphire",
+# "Pollard's Lessee v. Hagan" but "Johnson v. M'Intosh".  So the caption
+# yields every form of the party (see :func:`ejectment_case_names`) for
+# case_name_usage to ask the citing opinions about; until it has, the party
+# is cited as the caption puts it, with given names dropped and only the
+# first lessor kept (rule 10.2.1(a), (g)).
 
-    *court_state* is the state whose own courts decided the case (any
-    spelling: "new york", "N.Y."), which rule 10.2.1(f) needs to finish the
-    job on a "State of"/"Commonwealth of"/"People of" party: cited to that
-    state's own courts the designation is what survives ("People v.
-    Zackowitz"), cited to anyone else's the state name is ("New York v.
-    Tanella").  Left empty — the court is unknown, or is a federal one —
-    the state name is kept, as it is for every court but that state's own.
-    See :func:`court_catalog.state_of_court`, which derives it from a court
-    id or a court name.
+_DEMISE_MARKER_RE = re.compile(
+    r"(?:,\s*|\s+)(?:ex\.?\s*-?\s*dem(?:ise|\.)?,?(?:\s+of)?"
+    r"|on\s+the\s+demise\s+of|(?P<lessee>lessees?)\s+of)\s+",
+    re.IGNORECASE)
+_LESSEE_OF_RE = re.compile(r"^(?:the\s+)?lessees?\s+of\s+", re.IGNORECASE)
+# "Leffee" is the long s ("Sims Leſſee") read as an f.
+_LESSEE_TAIL_RE = re.compile(r"\s+le[sf]{2}ees?\.?$", re.IGNORECASE)
+# What a corporate or public party names itself by — never the fiction's
+# nominal plaintiff, nor a lessor whose "and" joins two people: "New York
+# Central Railroad Company, Lessee" and "Pennsylvania Railroad Company, Lessee
+# of the Northern Central Railway Company" are a railroad's real leases.
+_EJECTMENT_ENTITY_RE = re.compile(
+    r"\b(?:company|companies|corporation|incorporated|co|corp|inc|ltd|"
+    r"railroad|railway|r\.\s?r|ry|bank|society|association|ass'n|church|"
+    r"college|university|trustees?|trs|treasurer|directors|dirs|president|"
+    r"mayor|aldermen|council|city|county|township|twp|people|state|"
+    r"commonwealth|united\s+states|board|commissioners?)\b\.?",
+    re.IGNORECASE)
+_EJECTMENT_SEPARATOR_RE = re.compile(r"\s+(?:against|versus)\s+",
+                                     re.IGNORECASE)
+_LESSOR_SUFFIX_RE = re.compile(
+    r",?\s+(?:jun(?:ior)?|sen(?:ior)?|jr|sr|the\s+(?:younger|elder))\.?$",
+    re.IGNORECASE)
+# What the old reports say of the tenant in possession after its name — the
+# capacity it holds in ("Martin, Heir at law and devisee of Fairfax", "Lucius
+# B. Otis Administrator") or the Latin "& al." — describes the party already
+# named and is omitted (rule 10.2.1(a)); "Fairfax's Devisee" is the party.
+_ADVERSE_DESCRIPTION_RE = re.compile(
+    r",\s*(?:heirs?\s+at\s+law|devisees?\s+of|executors?\s+of|assignees?\s+of"
+    r"|administrat(?:or|rix)|adm'r|tenants?|guardians?|by\s+(?:his|her|their)"
+    r")\b.*$"
+    r"|(?<=[a-z])\s+(?:administrat(?:or|rix)|adm'r)\b.*$"
+    r"|,?\s+(?:&|and)\s+al\b\.?.*$"
+    r"|,?\s+the\s+(?:younger|elder)\b.*$",
+    re.IGNORECASE)
 
-    *body_text* is the opinion's own text, when the caller has it.  Its
-    prose settles a personal name the given-name lists don't know — the
-    party it calls "Iqbal" is Javaid Iqbal's surname (rule 10.2.1(g)).
-    Without it, those names fall back to the Census name files."""
+
+@dataclass(frozen=True)
+class EjectmentNames:
+    """The ways a case with an ejectment party may be cited.
+
+    *parties* maps each form to the ejectment party as that form cites it —
+    ``"demise"`` "Den ex dem. Murray", ``"nominal"`` "Den", ``"lessor"``
+    "Murray", ``"lessee"`` "Murray's Lessee", ``"lessee_of"`` "Lessee of
+    Livingston" — for the forms the caption allows; *names* maps them to the
+    whole case name.  *default* is the caption's own form.  *other* is the
+    adverse party, abbreviated as usual; *side* is 0 when the ejectment party
+    is named first."""
+
+    side: int
+    default: str
+    other: str
+    parties: dict = field(default_factory=dict)
+    names: dict = field(default_factory=dict)
+
+    def anchor(self) -> str:
+        """The adverse party's word beside the "v." — what a citing
+        opinion's phrase for any form shares with every other's.  A person
+        the caption still names in full ("Joseph Addison Braden") is cited
+        by surname, so that is the word beside it."""
+        other = self.other
+        people = re.split(r"\s+(?:&|and)\s+", other)
+        if (self.side == 0 and len(people[0].split()) > 1
+                and all(_person_like(p) for p in people)):
+            other = _strip_given_names(people[0], person=True) or people[0]
+        words = other.split()
+        if not words:
+            return ""
+        return (words[0] if self.side == 0 else words[-1]).strip(",;")
+
+
+def _person_like(text: str) -> bool:
+    """Whether *text* reads as a person's name — the fiction's nominal
+    plaintiff ("John Den", "Doe", "Old Grant") — rather than a body's."""
+    tokens = text.split()
+    return (1 <= len(tokens) <= 4
+            and not _EJECTMENT_ENTITY_RE.search(text)
+            and all(re.fullmatch(r"[A-Z][\w'’.-]*", t) for t in tokens)
+            and not any(t.lower().strip(".") in _ORG_WORDS for t in tokens))
+
+
+def _ejectment_surname(person: str, court_state: str,
+                       names: _OpinionNames | None) -> str:
+    """*person* as a party is cited: a surname ("Harman V. Hart" -> "Hart",
+    "Lot Clark" -> "Clark"), or a body's abbreviated name.  The fiction
+    itself is the evidence that a lessor or nominal plaintiff named like a
+    person is one, so a given name no list knows still drops."""
+    person = _LESSOR_SUFFIX_RE.sub(
+        "", _strip_trailing_period(person.strip(" ,;")))
+    cited = _abbreviate_party(person, court_state=court_state, names=names)
+    if len(cited.split()) > 1 and _person_like(person):
+        surname = _strip_given_names(cited, person=True)
+        if surname:
+            return surname
+    return cited
+
+
+def _first_lessor(lessors: str) -> str:
+    """The first lessor a demise names (rule 10.2.1(a)): "James B. Murray
+    and John C. Kayser, Plaintiffs" -> "James B. Murray", "William Pollard's
+    heirs, &c." -> "William Pollard", "Hallett & Walker, Executors of Joshua
+    Kennedy" -> "Hallett".  A body's name is kept whole, commas and all
+    ("the President, Directors and Company of the Bank of the United
+    States")."""
+    t = _strip_party_designations(lessors.strip(" ,;"))
+    t = t.split(";", 1)[0]
+    if not _EJECTMENT_ENTITY_RE.search(t):
+        t = re.split(r",|\s+(?:and|&)\s+|\s+et\.?\s+als?\b", t, maxsplit=1,
+                     flags=re.IGNORECASE)[0]
+    t = re.sub(r"['’]s\s+heirs\b.*$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^heirs\s+of\s+", "", t, flags=re.IGNORECASE)
+    return _strip_trailing_period(t.strip(" ,"))
+
+
+def _possessive(name: str, apostrophe: str = "") -> str:
+    """*name*'s possessive: as the caption spelled it, when it did
+    ("Simms's", "Edwards'"), else "'s" — or a bare apostrophe after s."""
+    if apostrophe:
+        return name + apostrophe
+    return name + ("'" if name.endswith("s") else "'s")
+
+
+def _ejectment_party(side: str, court_state: str,
+                     names: _OpinionNames | None):
+    """``(default form, {form: party})`` for one side of a caption that
+    names an ejectment party, or None for any other party."""
+    side = _strip_party_designations(side.strip(" ,;"))
+    # A nominal plaintiff on the lessor's demise: "John Den, ex dem. James B.
+    # Murray", "Doe, Lessee of Poor".
+    m = _DEMISE_MARKER_RE.search(side)
+    if m and side[:m.start()].strip(" ,") and not _LESSEE_OF_RE.match(side):
+        nominal = side[:m.start()].strip(" ,")
+        lessor = _first_lessor(side[m.end():])
+        # A railroad's lease of another's line is a real one.  So is a
+        # person's lease from a body — the fiction's lessors are claimants
+        # ("ex dem. the People of the State of New-York" is the fiction).
+        if (not _person_like(nominal) or not lessor
+                or (m.group("lessee") and not _person_like(lessor))):
+            return None
+        n = _ejectment_surname(nominal, court_state, names)
+        lsr = _ejectment_surname(lessor, court_state, names)
+        return "demise", {
+            "demise": f"{n} ex dem. {lsr}", "nominal": n, "lessor": lsr,
+            "lessee": _possessive(lsr) + " Lessee",
+        }
+    # The lessee of the lessor: "The Lessee of Edward Livingston".
+    m = _LESSEE_OF_RE.match(side)
+    if m:
+        lessor = _first_lessor(side[m.end():])
+        if not lessor:
+            return None
+        lsr = _ejectment_surname(lessor, court_state, names)
+        return "lessee_of", {
+            "lessee_of": f"Lessee of {lsr}", "lessor": lsr,
+            "lessee": _possessive(lsr) + " Lessee",
+        }
+    # The lessor's lessee: "Hunter's Lessee", "Johnson and Graham's Lessee",
+    # "John Pollard et al., Lessee", the OCR's "Joshua Barney s Lessee".
+    m = _LESSEE_TAIL_RE.search(side)
+    if not m:
+        return None
+    who = side[:m.start()].strip(" ,")
+    apostrophe = ""
+    pm = re.search(r"['’]s$|['’]$", who)
+    if pm:
+        apostrophe = pm.group(0).replace("’", "'")
+        who = who[:pm.start()]
+    elif re.search(r"\s+s$", who):
+        apostrophe, who = "'s", who[:-2]
+    else:
+        em = re.search(r",?\s+et\.?\s+als?\.?$", who, re.IGNORECASE)
+        if em:
+            who = who[:em.start()]
+        elif not re.fullmatch(r"[A-Z][a-z]+s", who):   # "Sims Leffee"
+            return None
+    who = who.strip(" ,")
+    if not who or _EJECTMENT_ENTITY_RE.search(who):
+        return None
+    lsr = _ejectment_surname(_first_lessor(who), court_state, names)
+    if re.search(r"\s(?:and|&)\s", who):
+        holder = _abbreviate_party(who, court_state=court_state, names=names)
+    else:
+        holder = _ejectment_surname(who, court_state, names)
+    return "lessee", {
+        "lessee": _possessive(holder, apostrophe) + " Lessee", "lessor": lsr,
+    }
+
+
+def _ejectment_names(name: str, court_state: str,
+                     body_text: str) -> EjectmentNames | None:
+    """Every form of a cleaned caption's ejectment party, with the adverse
+    party abbreviated as usual (see :class:`EjectmentNames`); None when the
+    caption names no ejectment party."""
+    if (not re.search(r"(?i)\bdem(?:ise)?\b|\ble[sf]{2}ees?\b", name)
+            or _PROCEDURAL_PREFIX_RE.match(name)):
+        return None
+    sides = _V_SPLIT_RE.split(name, maxsplit=1)
+    if len(sides) != 2:
+        sides = _EJECTMENT_SEPARATOR_RE.split(name, maxsplit=1)
+    if len(sides) != 2:
+        return None
+    sides[1] = cut_companion_cases(sides[1])
+    names = _OpinionNames(body_text) if body_text else None
+    for k in (0, 1):
+        found = _ejectment_party(sides[k], court_state, names)
+        if found is None:
+            continue
+        default, parties = found
+        adverse = _ADVERSE_DESCRIPTION_RE.sub(
+            "", _strip_party_designations(sides[1 - k].strip(" ,;")))
+        adverse = _first_listed_party(adverse) or adverse
+        other = _drop_redundant_entity(
+            _abbreviate_party(adverse, court_state=court_state, names=names))
+        if not other:
+            return None
+        whole = {
+            form: _finish_case_name(
+                f"{party} v. {other}" if k == 0 else f"{other} v. {party}")
+            for form, party in parties.items()
+        }
+        # The finishing pass may recase the party itself; keep what it made.
+        cited = {form: _V_SPLIT_RE.split(n, maxsplit=1)[k]
+                 for form, n in whole.items()}
+        other = _V_SPLIT_RE.split(whole[default], maxsplit=1)[1 - k]
+        return EjectmentNames(k, default, other, cited, whole)
+    return None
+
+
+def ejectment_party_caption(side: str) -> str:
+    """One side of a caption, its role designations off, when it names an
+    ejectment party ("JOHN DEN, ex dem. JAMES B. MURRAY AND JOHN C. KAYSER,
+    PLAINTIFFS" -> "JOHN DEN, ex dem. JAMES B. MURRAY AND JOHN C. KAYSER");
+    "" for any other party.  For a caption reader that would otherwise cut
+    the demise away at its comma as a co-party: the side is one party, which
+    :func:`abbreviate_case_name` reads whole."""
+    side = _strip_party_designations(re.sub(r"\s+", " ", side).strip(" ,;"))
+    return side if _ejectment_party(side, "", None) is not None else ""
+
+
+def ejectment_case_names(name: str, *, court_state: str = "",
+                         body_text: str = "") -> EjectmentNames | None:
+    """The forms a caption's ejectment party may be cited in, for a caller
+    that will ask which the courts use (see case_name_usage), or None when
+    *name* names no ejectment party.  :func:`abbreviate_case_name` gives
+    the caption's own form, ``names[default]``; the arguments are its."""
+    name = _clean_caption(name)
+    return _ejectment_names(name, court_state, body_text) if name else None
+
+
+def _finish_case_name(joined: str) -> str:
+    """The last pass over a case name whose parties are each abbreviated:
+    casing slips a title-casing pass left, a sentence period, initials."""
+    # A stray capital after a possessive apostrophe ("Sailor'S") is a
+    # title-casing artifact, never a name; all-caps runs (MCDONALD'S USA,
+    # kept caps by design) are left whole.
+    joined = re.sub(r"(?<=[a-z])(['’])S(?=\W|$)", r"\1s", joined)
+    # (Restored again once a sentence period is off the end: "v. Aclu.")
+    return _restore_acronym_case(_close_up_initials(_capitalize_compounds(
+        _strip_trailing_period(_lowercase_small_words(joined)))))
+
+
+def _clean_caption(name: str) -> str:
+    """*name* stripped of what is never part of a cited case name — the
+    reporter's typography, footnote markers, cross-references, descriptive
+    parentheticals, "et ux."-style words, spouses and aliases — before
+    its parties are read."""
     # OCR renders the early reports' turned-comma apostrophe as U+2018
     # ("M‘Intosh"); normalize so name patterns and casing rules see it.
     name = re.sub(r"\s+", " ", (name or "").replace("‘", "'")).strip()
@@ -3591,8 +3871,39 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
         r"formerly\s+known\s+as)|,\s*aka)\s+"
         r".*?(?=\s+vs?\.\s+|$)",
         "", name, flags=re.IGNORECASE)
+    return name
+
+
+def abbreviate_case_name(name: str, *, court_state: str = "",
+                         body_text: str = "") -> str:
+    """Abbreviate a case name for use in a citation or filename per
+    Bluebook rule 10.2.2 (= Indigo Book R8.3), dropping given names of
+    individuals (rule 10.2.1(g)) and "State of" prefixes (10.2.1(f)).
+    Safe to call twice.
+
+    *court_state* is the state whose own courts decided the case (any
+    spelling: "new york", "N.Y."), which rule 10.2.1(f) needs to finish the
+    job on a "State of"/"Commonwealth of"/"People of" party: cited to that
+    state's own courts the designation is what survives ("People v.
+    Zackowitz"), cited to anyone else's the state name is ("New York v.
+    Tanella").  Left empty — the court is unknown, or is a federal one —
+    the state name is kept, as it is for every court but that state's own.
+    See :func:`court_catalog.state_of_court`, which derives it from a court
+    id or a court name.
+
+    *body_text* is the opinion's own text, when the caller has it.  Its
+    prose settles a personal name the given-name lists don't know — the
+    party it calls "Iqbal" is Javaid Iqbal's surname (rule 10.2.1(g)).
+    Without it, those names fall back to the Census name files."""
+    name = _clean_caption(name)
     if not name:
         return name
+    # An ejectment party is cited as the caption puts it — "Den ex dem.
+    # Murray", "Lessee of Livingston", "Hunter's Lessee" — until the citing
+    # opinions say otherwise (see ejectment_case_names).
+    eject = _ejectment_names(name, court_state, body_text)
+    if eject is not None:
+        return eject.names[eject.default]
     # Only the first-listed case of a consolidated caption is cited (rule
     # 10.2.1(b)).  The caption readers cut the others off, but a name that
     # comes another way — a stored record, a CourtListener caseName — can
@@ -3650,13 +3961,7 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
             _abbreviate_party(p, court_state=court_state, names=names))
         for p in parts
     )
-    # A stray capital after a possessive apostrophe ("Sailor'S") is a
-    # title-casing artifact, never a name; all-caps runs (MCDONALD'S USA,
-    # kept caps by design) are left whole.
-    joined = re.sub(r"(?<=[a-z])(['’])S(?=\W|$)", r"\1s", joined)
-    # (Restored again once a sentence period is off the end: "v. Aclu.")
-    return _restore_acronym_case(_close_up_initials(_capitalize_compounds(
-        _strip_trailing_period(_lowercase_small_words(joined)))))
+    return _finish_case_name(joined)
 
 
 def _close_up_initials(name: str) -> str:
