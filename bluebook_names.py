@@ -1241,6 +1241,24 @@ _NONPERSON_CAPS = frozenset({
 })
 
 
+_INITIAL_RE = re.compile(r"[A-Z]\.")
+
+
+def _given_name_shaped(token: str) -> bool:
+    """Whether *token* reads as a given name set in ordinary case — known or
+    not ("Markwayne", "DeShawn", "D'Andre", "Mary-Kate").  Two capitals
+    together ("NBCUniversal") or a possessive ("McDonald's") is a brand's
+    spelling, and a business or place word ("Tribune", "National",
+    "American") opens a firm's name unless it is a given name as well."""
+    return bool(
+        re.fullmatch(r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]*[a-zà-öø-ÿ]", token)
+        and not re.search(r"[A-ZÀ-ÖØ-Þ]{2}|['’]s$", token)
+        and (_is_known_given_name(token) or not (
+            _word_key(token) in _ORG_WORDS
+            or _word_key(token) in _T6_WORDS
+            or _word_key(token) in _CAPTION_ORDINARY_ENTITY_WORDS)))
+
+
 def is_personal_all_caps_run(
     capitalized_tokens: list[str], dropped_tokens: list[str]
 ) -> bool:
@@ -1248,33 +1266,8 @@ def is_personal_all_caps_run(
 
     This supports mixed Scholar captions such as ``Brent BREWBAKER`` while
     explicitly rejecting entity initialisms in ``McDonald's USA``.
+    *dropped_tokens* are the words ahead of the run.
     """
-    names: list[str] = []
-    for k, token in enumerate(capitalized_tokens):
-        display = token.replace("’", "'").strip(",.")
-        key = re.sub(r"[^A-Za-z]", "", display).lower()
-        if (display in _NONPERSON_CAPS
-                or key in _ORG_WORDS
-                # …a word that is a surname too, closing the run, is the
-                # surname: "Oliver NORTH".
-                or (key in _T6_WORDS and not (
-                    key in _SURNAME_T6_WORDS
-                    and k == len(capitalized_tokens) - 1))
-                # An abbreviation reads as all caps because its letters are
-                # capitals, not because a reporter set a surname in capitals:
-                # "R.R." is Railroad, "Ry." Railway, "Cent." Central.  The
-                # word sets above hold only spelled-out forms, so without
-                # this the abbreviation becomes the "surname" and the words
-                # ahead of it are discarded as given names — "Long Island
-                # R.R. Co." would cite as "R.R. Co.".
-                or key in _TABLE_ABBREVIATIONS
-                # A dotted initialism ("L.I.", "B.&O.") is the same kind of
-                # evidence even when no table lists it; a surname never
-                # carries an internal period.
-                or "." in display):
-            return False
-        names.append(token)
-
     # Do not gate this on the given-name dictionary: no static list can cover
     # every litigant.  Instead require a capitalized, name-shaped prefix and
     # prove that every retained caps token is surname-like rather than an
@@ -1284,8 +1277,55 @@ def is_personal_all_caps_run(
         "the", "honorable"
     ]:
         dropped = dropped[2:]
-    if any(token.rstrip(".").lower() in {"a", "an", "the"} for token in dropped):
+    # "A." is an initial ("Markwayne A. MULLIN"); only a bare "A" is the
+    # article.
+    if any(token.rstrip(".").lower() in {"a", "an", "the"}
+           and not _INITIAL_RE.fullmatch(token) for token in dropped):
         return False
+
+    # Scholar sets a person's surname in capitals and the given names in
+    # ordinary case ("Markwayne MULLIN"), but an entity's whole name in
+    # capitals ("GRACE CHURCH").  So a party of two or three words whose last
+    # alone is set so — after a given name, known or not, and perhaps a
+    # middle name or initial — is a person even where the word lists doubt
+    # it: a business noun that is a recorded surname as well is the surname
+    # ("Markwayne A. CHURCH", "Dequarius LAW").  A word no one bears as a
+    # surname ("CORPORATION", "SAVINGS") still names a firm.
+    lone_surname = (
+        len(capitalized_tokens) == 1
+        and "." not in capitalized_tokens[0]
+        and _word_key(capitalized_tokens[0]) in _census_names()[1]
+        and 1 <= len(dropped) <= 2
+        and all(_INITIAL_RE.fullmatch(t) or _given_name_shaped(t)
+                for t in dropped)
+        and any(_given_name_shaped(t) for t in dropped))
+
+    names: list[str] = []
+    for k, token in enumerate(capitalized_tokens):
+        display = token.replace("’", "'").strip(",.")
+        key = re.sub(r"[^A-Za-z]", "", display).lower()
+        if (display in _NONPERSON_CAPS
+                or (key in _ORG_WORDS and not lone_surname)
+                # …a word that is a surname too, closing the run, is the
+                # surname: "Oliver NORTH".
+                or (key in _T6_WORDS and not lone_surname and not (
+                    key in _SURNAME_T6_WORDS
+                    and k == len(capitalized_tokens) - 1))
+                # An abbreviation reads as all caps because its letters are
+                # capitals, not because a reporter set a surname in capitals:
+                # "R.R." is Railroad, "Ry." Railway, "Cent." Central.  The
+                # word sets above hold only spelled-out forms, so without
+                # this the abbreviation becomes the "surname" and the words
+                # ahead of it are discarded as given names — "Long Island
+                # R.R. Co." would cite as "R.R. Co.".
+                or (key in _TABLE_ABBREVIATIONS and not lone_surname)
+                # A dotted initialism ("L.I.", "B.&O.") is the same kind of
+                # evidence even when no table lists it; a surname never
+                # carries an internal period.
+                or "." in display):
+            return False
+        names.append(token)
+
     return bool(names) and bool(dropped) and all(
         bool(re.fullmatch(
             r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]*|[A-Z]\."
@@ -2689,6 +2729,43 @@ def _office_holder_surname(p: str, *,
     return (_strip_given_names(head, names=names)
             or _strip_given_names(head, person=True)
             or _lone_surname(head))
+
+
+# Offices only a natural person holds, as a caption sets them after the
+# name.  A trustee, receiver or executor may be a bank, and a party "by and
+# through its" officers a firm, so those are no evidence of a person here.
+_PERSONAL_OFFICE_WORDS = _OFFICE_WORDS | frozenset({
+    "president", "vice", "senator", "sen", "representative", "congressman",
+    "congresswoman", "chairman", "chairwoman", "chairperson", "officer",
+    "deputy", "inspector", "justice", "acting",
+})
+# …and the capacities only a person is sued in: "individually", "in his
+# official capacity".
+_PERSONAL_CAPACITY_RE = re.compile(
+    r"(?:individually|personally|in\s+(?:his|her)\s+(?:[\w.'’-]+\s+){0,2}"
+    r"capacit(?:y|ies))\b",
+    re.IGNORECASE,
+)
+
+
+def described_person_surname(name: str, description: str) -> str | None:
+    """The surname of the person *name* — a caption's party, ahead of its
+    comma — when *description*, what follows the comma, shows it to be a
+    person: a generational suffix ("Jr.", "III"), an office only a person
+    holds, or a capacity only a person is sued in.  That shows it even where
+    the given-name lists don't know the given name: "MARKWAYNE MULLIN,
+    SECRETARY, DEPARTMENT OF HOMELAND SECURITY" and "MARKWAYNE MULLIN, JR."
+    are Mullin (rules 10.2.1(e), (g)).  None otherwise, or when *name*
+    doesn't read as a person's name ("Acme Corp.", "Board of Education",
+    "Acme Fund, II")."""
+    first = description.split(",", 1)[0].strip()
+    if _GENERATIONAL_SUFFIX_RE.fullmatch(first):
+        return _strip_given_names(f"{name} {first}")
+    words = [_word_key(w) for w in re.split(r"[\s/\-]+", first) if w][:3]
+    if not (any(w in _PERSONAL_OFFICE_WORDS for w in words)
+            or _PERSONAL_CAPACITY_RE.match(first)):
+        return None
+    return _strip_given_names(name, person=True)
 
 
 # Bluebook rule 10.2.1(c): the name of a widely recognized institution is

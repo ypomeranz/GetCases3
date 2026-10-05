@@ -16,6 +16,7 @@ from bluebook_names import (
     caption_case_reference_tokens,
     collapse_personal_all_caps_run,
     courtlistener_case_name,
+    described_person_surname,
     is_personal_all_caps_run,
     name_persons_by_surname,
     normal_case_caption,
@@ -580,6 +581,114 @@ class CaptionCapitalizationTests(unittest.TestCase):
             collapse_personal_all_caps_run("The PRESIDENT"),
             "The PRESIDENT",
         )
+
+    def test_a_lone_capitalized_last_word_is_a_surname(self):
+        # Scholar sets only a person's surname in capitals, an entity's
+        # whole name: two or three words with the last alone in capitals
+        # name a person, whatever the given name ("Markwayne") and even
+        # where the surname is also a business noun ("Church", "Law").
+        for caption, surname in (
+                ("Markwayne MULLIN", "MULLIN"),
+                ("Markwayne A. MULLIN", "MULLIN"),
+                ("Markwayne CHURCH", "CHURCH"),
+                ("Markwayne A. CHURCH", "CHURCH"),
+                ("M. Wayne STEEL", "STEEL"),
+                ("Dequarius LAW", "LAW"),
+                ("DeShawn BANK", "BANK"),
+                ("Shaun A. FIELDS", "FIELDS")):
+            with self.subTest(caption=caption):
+                self.assertEqual(collapse_personal_all_caps_run(caption),
+                                 surname)
+
+    def test_but_not_a_word_no_one_bears_or_a_firm_s_opening(self):
+        for caption in (
+                # No one's surname.
+                "Markwayne CORPORATION", "Markwayne SAVINGS",
+                # A business word or a brand's spelling ahead of it.
+                "Tribune MEDIA", "NBCUniversal MEDIA", "American STEEL",
+                "First BANK",
+                # Initials alone may be a firm's (rule 10.2.1(g)).
+                "J. W. CHURCH",
+                # More than three words.
+                "Dequarius Lamont Tyrese CHURCH"):
+            with self.subTest(caption=caption):
+                self.assertEqual(collapse_personal_all_caps_run(caption),
+                                 caption)
+
+    def test_a_lone_capitalized_surname_in_a_scholar_caption(self):
+        from google_scholar import parse_opinion_blocks
+        for caption, cited in (
+                ("UNITED STATES, Appellee,<br/>v.<br/>Markwayne A. CHURCH, "
+                 "Appellant.", "United States v. Church"),
+                ("Jane DOE, Plaintiff,<br/>v.<br/>Markwayne MULLIN, "
+                 "Secretary of Homeland Security, et al., Defendants.",
+                 "Doe v. Mullin")):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(
+                    _scholar_page("1 F.4th 1 (2021)", caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    cited)
+
+    def test_an_office_after_an_all_caps_name_makes_it_a_person(self):
+        # Mullin v. Doe (2026): the caption is all in capitals, so only the
+        # office after the comma shows "Markwayne Mullin" to be a person.
+        # It had been cited "Markwayne Mullin v. Doe".
+        from google_scholar import parse_opinion_blocks
+        for caption, cited in (
+                ("MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF HOMELAND "
+                 "SECURITY, ET AL., Petitioners,<br/>v.<br/>DAHLIA DOE, ET "
+                 "AL.", "Mullin v. Doe"),
+                ("DONALD J. TRUMP, PRESIDENT OF THE UNITED STATES, ET AL., "
+                 "Petitioners,<br/>v.<br/>JANE DOE", "Trump v. Doe"),
+                ("JANE DOE, Plaintiff,<br/>v.<br/>MARKWAYNE MULLIN, IN HIS "
+                 "OFFICIAL CAPACITY AS SECRETARY, Defendant.",
+                 "Doe v. Mullin"),
+                ("JANE DOE, Plaintiff,<br/>v.<br/>MARKWAYNE MULLIN, "
+                 "INDIVIDUALLY, Defendant.", "Doe v. Mullin"),
+                # …and so does a generational suffix.
+                ("UNITED STATES, Appellant,<br/>v.<br/>MARKWAYNE MULLIN, "
+                 "JR., Appellee.", "United States v. Mullin"),
+                ("UNITED STATES, Appellant,<br/>v.<br/>MARKWAYNE A. "
+                 "MULLIN, III, Appellee.", "United States v. Mullin"),
+                ("ACME FUND, II, Appellant,<br/>v.<br/>JOHN DOE.",
+                 "Acme Fund v. Doe"),
+                # A firm may be a trustee, or act through its officers.
+                ("WELLS FARGO, AS TRUSTEE, Plaintiff,<br/>v.<br/>JOHN DOE, "
+                 "Defendant.", "Wells Fargo v. Doe"),
+                ("PLANNED PARENTHOOD, BY AND THROUGH ITS DIRECTOR, "
+                 "Plaintiff,<br/>v.<br/>JOHN DOE, Defendant.",
+                 "Planned Parenthood v. Doe"),
+                ("ACME CORP., PRESIDENT, Appellant,<br/>v.<br/>JOHN DOE.",
+                 "Acme Corp. v. Doe")):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(
+                    _scholar_page("1 U.S. 1 (2026)", caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    cited)
+
+    def test_described_person_surname(self):
+        for name, description in (
+                ("Markwayne Mullin", "Secretary, Department of Homeland "
+                                     "Security"),
+                ("Markwayne Mullin", "Acting Secretary of Homeland Security"),
+                ("Markwayne Mullin", "in his official capacity"),
+                ("Markwayne Mullin", "Jr."),
+                ("Markwayne Mullin", "III, Secretary of Homeland Security")):
+            with self.subTest(name=name, description=description):
+                self.assertEqual(described_person_surname(name, description),
+                                 "Mullin")
+        for name, description in (
+                ("Markwayne Mullin", "Petitioner"),
+                ("Acme Fund", "II"),
+                ("Blackstone Capital Partners", "III"),
+                ("Wells Fargo", "as Trustee"),
+                ("Planned Parenthood", "by and through its Director"),
+                ("Board of Education", "Superintendent"),
+                ("Acme Corp.", "President")):
+            with self.subTest(name=name, description=description):
+                self.assertIsNone(described_person_surname(name, description))
 
     def test_possessive_s_is_not_a_surname_prefix(self):
         # The O'BRIEN → O'Brien rule must not capitalize a possessive:
