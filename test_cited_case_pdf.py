@@ -405,6 +405,7 @@ APP_NS = _load(
          ASKED.append((title, [o.name for o in opinions]))
          or (PICKED[0](opinions) if PICKED else None)),
      "_case_law_opinion_name": lambda opinion: opinion.name,
+     "_CaseLawPdfChoice": lambda **kw: SimpleNamespace(**kw),
      "_is_the_named_case": lambda name, other: name == other,
      # The official forms, with no ambiguous reporter here to choose among
      # by name; and no state court's scan to keep the Constitution from.
@@ -1084,6 +1085,41 @@ class OrdersPageTests(unittest.TestCase):
             [("fail", "11 cases begin at 498 U.S. 807 — can't tell which, "
                       "so nothing opened")])
         self.assertEqual(self.app.toasts, [])
+
+    def test_a_page_whose_cases_are_known_asks_which(self):
+        # 71 U.S. 2: Brobst v. Brobst and Ex parte Milligan both begin there
+        # — no page of orders, and nothing to say which: the reader picks,
+        # where nothing used to open.
+        brobst = SimpleNamespace(
+            url="https://static.case.law/us/71/case-pdfs/0002-01.pdf",
+            name="Brobst v. Brobst")
+        milligan = SimpleNamespace(
+            url="https://static.case.law/us/71/case-pdfs/0002-02.pdf",
+            name="Ex parte Milligan")
+        app = self.app
+        app._bring_to_front = lambda win: None
+
+        def resolve(client, item):
+            app.resolved_items.append(dict(item))
+            item["_page_mates"] = 2
+            item["_page_mate_opinions"] = [brobst, milligan]
+            return None
+
+        app._resolve_pdf_url = resolve
+        FETCHED[milligan.url] = (b"%PDF-milligan", milligan.url)
+        ASKED.clear()
+        PICKED.clear()
+        PICKED.append(lambda opinions: opinions[1])
+        try:
+            self.assertTrue(self._click())
+        finally:
+            PICKED.clear()
+        self.assertEqual(ASKED, [("498 U.S. 807",
+                                  ["Brobst v. Brobst", "Ex parte Milligan"])])
+        (viewer,) = _FakeViewer.opened
+        self.assertEqual(viewer.data, b"%PDF-milligan")
+        self.assertIn("Ex parte Milligan", viewer.title)
+        self.assertNotIn("fail", [k for k, _m in app.watches[-1].told])
 
     def test_the_case_read_in_is_offered_when_the_link_names_none(self):
         self._click(context_name="California v. Acevedo")

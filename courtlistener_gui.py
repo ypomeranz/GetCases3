@@ -4337,6 +4337,38 @@ def _cases_bearing_citation(client, cite: str) -> list[dict]:
     return sorted(cases, key=lambda case: case["year"] or "9999")
 
 
+def _cases_beginning_at(client, cite: str) -> list[dict]:
+    """The different cases that begin at *cite*, for the reader to choose
+    among where nothing said which and nothing opened: CourtListener's (see
+    :func:`_cases_bearing_citation`) and the ones static.case.law's volume
+    lists on the page, each case once — ``{"name", "year"}``, with ``url``,
+    its scan, where static.case.law has it."""
+    cite = (cite or "").split("@", 1)[0].strip()
+    cases = (list(_cases_bearing_citation(client, cite))
+             if client is not None and cite else [])
+    page: list = []
+    for form in ([cite, *_official_series_for(cite)] if cite else []):
+        try:
+            page = _case_law_page_cases(_normalized_us_cite(form) or form)
+        except Exception as exc:
+            print(f"[case.law] listing the cases at {form!r} failed: {exc}")
+            page = []
+        if page:
+            break
+    for opinion in page:
+        name = _case_law_opinion_name(opinion) or opinion.name
+        if not name:
+            continue
+        known = next((case for case in cases
+                      if _is_the_named_case(name, case["name"])
+                      or _is_the_named_case(case["name"], name)), None)
+        if known is not None:
+            known.setdefault("url", opinion.url)
+        else:
+            cases.append({"name": name, "year": "", "url": opinion.url})
+    return cases
+
+
 def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     """Resolve a reporter citation to the CourtListener cluster that actually
     bears it, as a search-result-shaped item (or ``None``).
@@ -10074,13 +10106,13 @@ class CourtListenerGUI:
         def run() -> None:
             # The popup is already gone; a citation that resolves nowhere
             # would otherwise end in silence, which reads as the app having
-            # hung.
+            # hung.  (Asked here, not there, the case picked opens as a
+            # typed citation does: its scan first.)
             if self._try_open_citation(
-                name, cite, pin, fetcher, client, year=year,
+                name, cite, pin, fetcher, client, year=year, choose=False,
             ):
                 return
-            cases = (_cases_bearing_citation(client, cite)
-                     if choose and client is not None else [])
+            cases = _cases_beginning_at(client, cite) if choose else []
             if len(cases) > 1:
                 self._post_root(self._ask_which_cited_case, query, cite,
                                 pin, cases, fetcher, client)
@@ -10108,6 +10140,16 @@ class CourtListenerGUI:
         # HEALTH v. AM PUBLIC HEALTH ASSN").
         cases = [{"name": normal_case_caption(r.title) or r.title,
                   "year": _scholar_source_year(r.source)} for r in mates]
+        self._ask_which_case_at(parent, cite, pin, cases, fetcher, client,
+                                prefetch_pdf)
+
+    def _ask_which_case_at(self, parent, cite: str, pin: str, cases: list,
+                           fetcher, client, prefetch_pdf: bool = True) -> None:
+        """Ask which of *cases* — the cases beginning at *cite*, ``{"name",
+        "year"[, "url"]}`` — is meant, as an E.R. page's are asked, and open
+        that one by its name and year; failing that, its static.case.law scan
+        (``url``) where one came with it.  Asked once: a case picked that
+        cannot be opened either is a miss, said so."""
         try:
             host = parent if parent.winfo_exists() else self.root
         except (AttributeError, tk.TclError):
@@ -10118,13 +10160,19 @@ class CourtListenerGUI:
             return
 
         def run() -> None:
-            if not self._try_open_citation(
+            if self._try_open_citation(
                     chosen["name"], cite, pin, fetcher, client,
                     prefetch_pdf=prefetch_pdf, view_parent=parent,
-                    year=chosen.get("year", "")):
-                self._post_root(
-                    self._notify_lookup_miss,
-                    f"Couldn't open {chosen['name']}, {cite}.", parent)
+                    year=chosen.get("year", ""), choose=False):
+                return
+            if chosen.get("url"):
+                self._post_case_law_pdf(chosen["url"], cite, pin,
+                                        chosen["name"], parent=parent,
+                                        expected_name=chosen["name"])
+                return
+            self._post_root(
+                self._notify_lookup_miss,
+                f"Couldn't open {chosen['name']}, {cite}.", parent)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -11550,6 +11598,15 @@ class CourtListenerGUI:
                 print(f"[cite-pdf] resolving {cite!r} failed: {exc}")
             if watch.cancelled:
                 return
+            # Several cases begin on the U.S. Reports page, none an order the
+            # name picks out: the reader picks, as on any other shared page —
+            # nothing opened before.
+            opinions = list(item.get("_page_mate_opinions") or [])
+            if not url and len(opinions) > 1:
+                mates = [_CaseLawPdfChoice(cite=cite, url=o.url, pick=True,
+                                           opinion=o) for o in opinions]
+                self._post_root(lambda: ask(mates, item))
+                return
             if not url and item.get("_page_mates"):
                 message = (f"{item['_page_mates']} cases begin at {cite} — "
                            "can't tell which, so nothing opened")
@@ -12574,7 +12631,7 @@ class CourtListenerGUI:
     def _try_open_citation(self, name: str, cite: str, pin: str,
                            fetcher, client, prefetch_pdf: bool = True,
                            view_parent: "Optional[tk.Misc]" = None,
-                           year: str = "") -> bool:
+                           year: str = "", choose: bool = True) -> bool:
         """Resolve one case citation and open its window (call from a
         worker thread).  Google Scholar by citation first — retrying as a
         name+citation search — with a pin-cite jump; then static.case.law's
@@ -12588,7 +12645,12 @@ class CourtListenerGUI:
 
         ``prefetch_pdf=False`` opens the text without warming the official PDF
         in the background — used by the PDF brief viewer, where a second PDF
-        load alongside the open brief can hang the app."""
+        load alongside the open brief can hang the app.
+
+        Where nothing opens and several cases begin at the citation, the
+        reader is asked which (*choose*), as for an E.R. page, and the one
+        picked opens by its name — True then too: the lookup ended in the
+        question, not in nothing."""
         target_parent = self.root if view_parent is None else view_parent
         # Federal Appendix cases are scans Google Scholar rarely has — open the
         # static.case.law PDF built straight from the citation.
@@ -12757,6 +12819,15 @@ class CourtListenerGUI:
                 target_parent, ("cite", f"{cite}@{pin}" if pin else cite),
                 name, self._safe_root_status, name=name))
             return True
+        # Nothing opened, and several cases begin at the citation — nothing
+        # said which, or what did answers to none the sources could open:
+        # the reader picks, rather than hearing that nothing was found.
+        if choose and cite:
+            cases = _cases_beginning_at(client, cite)
+            if len(cases) > 1:
+                self._post_root(self._ask_which_case_at, target_parent, cite,
+                                pin, cases, fetcher, client, prefetch_pdf)
+                return True
         return False
 
     def _show_citation_list_dialog(self) -> None:
@@ -14551,6 +14622,8 @@ class CourtListenerGUI:
                     item["_orders_page"] = True
                     return page_cases[0].url
                 item["_page_mates"] = len(page_cases)
+                # …for the reader to choose among (see open_cited_case_pdf).
+                item["_page_mate_opinions"] = page_cases
                 print(f"[resolve] {len(page_cases)} cases begin at "
                       f"{known_us}, and nothing says which")
                 return None
@@ -32849,6 +32922,18 @@ class _ScholarTextWindow:
         app._ask_which_scholar_case(self._live_parent(), cite, pin, mates,
                                     app._get_scholar(), client)
 
+    def _ask_cases_at(self, cite: str, pin: str, cases: list) -> None:
+        """Several cases begin at a citation clicked here, and none of the
+        sources could say which was meant: ask (see
+        CourtListenerGUI._ask_which_case_at)."""
+        self._status_var.set(f"{len(cases)} cases begin at {cite} — "
+                             "choose one.")
+        self._end_text_load(cite)       # the load ends in the question
+        app = self._app
+        client = app._get_client() if app._token_var.get().strip() else None
+        app._ask_which_case_at(self._live_parent(), cite, pin, cases,
+                               app._get_scholar(), client)
+
     def _claim_text_load(self, cite: str) -> None:
         """Take up the load waiting on the text of *cite* — its scan could not
         be found — so that the lookup starting now can tell it how it ends
@@ -33105,6 +33190,14 @@ class _ScholarTextWindow:
                         return
                 if target is None and name:
                     target = _cl_item_for_name(client, name)
+                if not target and cite:
+                    # Several cases begin at the cite and nothing here said
+                    # which: the reader picks, rather than hearing that
+                    # nothing was found.
+                    cases = _cases_beginning_at(client, cite)
+                    if len(cases) > 1:
+                        self._post(self._ask_cases_at, cite, pin, cases)
+                        return
                 if not target:
                     # Nothing keyed to the cite and no name match — keep
                     # retrying Google Scholar and open it if it comes through,
