@@ -10125,9 +10125,11 @@ class CourtListenerGUI:
             threading.Thread(target=run, daemon=True).start()
 
         action = ("cite", f"{cite}@{pin}" if pin else cite)
+        # A page of orders typed with no name to pick the order: the reader
+        # picks it (ask_orders), not the page shown named for no case.
         if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
                 self.root, action, query, self._status_var.set,
-                fallback=as_text, name=name):
+                fallback=as_text, name=name, ask_orders=True):
             as_text()
 
     def _ask_which_scholar_case(self, parent, cite: str, pin: str,
@@ -11506,7 +11508,8 @@ class CourtListenerGUI:
     def open_cited_case_pdf(self, parent: tk.Misc, action: tuple,
                             snippet: str = "",
                             status=lambda _s: None, fallback=None,
-                            name: str = "", context_name: str = "") -> bool:
+                            name: str = "", context_name: str = "",
+                            ask_orders: bool = False) -> bool:
         """Follow a citation clicked *inside a PDF* to the cited case's own
         PDF, in a viewer window of its own.
 
@@ -11536,8 +11539,10 @@ class CourtListenerGUI:
         in) may — "We granted certiorari, 498 U. S. 807", in California v.
         Acevedo, is Acevedo's own grant, one of eleven on that page.  It is
         used for nothing else.  With neither, the page itself opens named for
-        no case, since any text behind it would be one order's; and a page
-        that is not all orders opens nothing at all, and says why.
+        no case, since any text behind it would be one order's — unless
+        *ask_orders*: a citation typed into Spotlight on its own has no case
+        it was read in to say which, and the reader picks the order instead.
+        A page that is not all orders asks which of its cases is meant.
         """
         kind, value = action if isinstance(action, tuple) else ("", "")
         if kind != "cite":
@@ -11593,6 +11598,8 @@ class CourtListenerGUI:
                 item = self._cited_case_pdf_item(client, cite, name)
                 if context_name and not name:
                     item["_context_name"] = context_name
+                if ask_orders:
+                    item["_ask_orders"] = True
                 url = self._resolve_pdf_url(client, item) or ""
             except Exception as exc:
                 print(f"[cite-pdf] resolving {cite!r} failed: {exc}")
@@ -14614,9 +14621,14 @@ class CourtListenerGUI:
                           f"{chosen.name!r}'s is {chosen.url}")
                     item["_order_name"] = chosen.name
                     return chosen.url
-                if _orders_only(page_cases) and _head_ok(
-                        page_cases[0].url, "static.case.law page of orders",
-                        pdf_only=True):
+                # (A citation typed on its own, with no case read in to
+                # pick the order, asks which instead — see
+                # open_cited_case_pdf's ask_orders.)
+                if (_orders_only(page_cases)
+                        and not item.get("_ask_orders")
+                        and _head_ok(page_cases[0].url,
+                                     "static.case.law page of orders",
+                                     pdf_only=True)):
                     print(f"[resolve] {known_us} is a page of orders in "
                           f"{len(page_cases)} cases; showing the page itself")
                     item["_orders_page"] = True

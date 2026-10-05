@@ -1121,6 +1121,15 @@ class OrdersPageTests(unittest.TestCase):
         self.assertIn("Ex parte Milligan", viewer.title)
         self.assertNotIn("fail", [k for k, _m in app.watches[-1].told])
 
+    def test_a_citation_typed_on_its_own_asks_for_the_order(self):
+        # Spotlight passes ask_orders; a link in a case does not.
+        self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", "498 U.S. 807"), "", self.status.append,
+            fallback=lambda: None, ask_orders=True)
+        self.assertTrue(self.app.resolved_items[-1].get("_ask_orders"))
+        self._click()
+        self.assertNotIn("_ask_orders", self.app.resolved_items[-1])
+
     def test_the_case_read_in_is_offered_when_the_link_names_none(self):
         self._click(context_name="California v. Acevedo")
         self.assertEqual(self.app.resolved_items[-1]["_context_name"],
