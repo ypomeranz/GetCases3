@@ -573,6 +573,25 @@ class ResolverIntegrationTests(unittest.TestCase):
         self.assertTrue(item["_orders_page"])
         self.assertNotIn("_order_name", item)    # named for no case
 
+    def test_typed_on_its_own_the_page_of_orders_is_asked_about(self):
+        # "498 U.S. 807" typed into Spotlight: no case it was read in, no
+        # name — the reader picks the order rather than seeing the page
+        # named for none.
+        item = {"citation": ["498 U.S. 807"], "_ask_orders": True}
+        self.assertIsNone(self._resolve_order(item))
+        self.assertNotIn("_orders_page", item)
+        self.assertEqual(item["_page_mates"], 4)
+        self.assertEqual(
+            [o.name for o in item["_page_mate_opinions"]],
+            ["Hoffman v. Native Village of Noatak", "California v. Hodari D.",
+             "California v. Acevedo", "Carnival Cruise Lines, Inc. v. Shute"])
+        # A name typed with it still picks its own order.
+        named = {"citation": ["498 U.S. 807"], "_ask_orders": True,
+                 "caseName": "California v. Acevedo"}
+        self.assertEqual(
+            self._resolve_order(named),
+            "https://static.case.law/us/498/case-pdfs/0807-03.pdf")
+
     def test_a_page_two_opinions_begin_on_is_not_guessed_at(self):
         # Not orders: the second case runs forty pages.  Its file is its own
         # pages, not the one they share, so neither is opened.

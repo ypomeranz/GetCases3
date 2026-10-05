@@ -314,10 +314,120 @@ class ScholarPageMatesTests(unittest.TestCase):
         self.assertEqual([c["year"] for c in cases], ["2025", "2025"])
         self.assertEqual(cases[0]["name"],
                          "Nat Inst of Health v. Am Public Health Assn")
+        # …and not asked about again (choose=False).
         app._try_open_citation.assert_called_once_with(
             cases[1]["name"], "145 S. Ct. 2658", "2660", "fetcher", "client",
-            prefetch_pdf=True, view_parent=parent, year="2025")
+            prefetch_pdf=True, view_parent=parent, year="2025", choose=False)
         app._notify_lookup_miss.assert_not_called()
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class CasesAtAPageTests(unittest.TestCase):
+    """Where nothing opens and several cases begin at the citation — Google
+    Scholar without a copy, static.case.law without the volume, and
+    CourtListener with more than one case there — the reader picks, as for an
+    E.R. page.  "No case found" came of it before."""
+
+    CASES = [{"name": "Stuart v. Laird", "year": "1803"},
+             {"name": "Wiggins v. Wiggins", "year": "1806"}]
+
+    def test_the_cases_are_courtlistener_s_and_static_case_law_s(self):
+        page = [SimpleNamespace(url="u-stuart", name="Stuart v. Laird"),
+                SimpleNamespace(url="u-other", name="Marbury v. Madison")]
+        with mock.patch.object(gui, "_cases_bearing_citation",
+                               return_value=[dict(c) for c in self.CASES]), \
+                mock.patch.object(gui, "_official_series_for",
+                                  return_value=[]), \
+                mock.patch.object(gui, "_case_law_page_cases",
+                                  return_value=page), \
+                mock.patch.object(gui, "_case_law_opinion_name",
+                                  side_effect=lambda op: op.name):
+            cases = gui._cases_beginning_at("client", "1 Cranch 299")
+        self.assertEqual(
+            [(c["name"], c["year"], c.get("url")) for c in cases],
+            [("Stuart v. Laird", "1803", "u-stuart"),
+             ("Wiggins v. Wiggins", "1806", None),
+             ("Marbury v. Madison", "", "u-other")])
+
+    def _app(self):
+        app = object.__new__(gui.CourtListenerGUI)
+        app.root = object()
+        app._post_root = mock.Mock()
+        app._status_var = mock.Mock()
+        return app
+
+    def _nothing_opens(self):
+        return (mock.patch.object(gui, "_case_law_text_source",
+                                  return_value=None),
+                mock.patch.object(gui, "_cl_item_for_citation",
+                                  return_value=None),
+                mock.patch.object(gui, "_case_law_pdf_for_cite",
+                                  return_value=None),
+                mock.patch.object(gui, "_case_law_page_cases",
+                                  return_value=[]),
+                mock.patch.object(gui, "_cases_beginning_at",
+                                  return_value=self.CASES))
+
+    def test_where_nothing_opens_the_reader_is_asked(self):
+        app = self._app()
+        patches = self._nothing_opens()
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertTrue(app._try_open_citation(
+                "", "1 Cranch 299", "301", None, "client"))
+            app._post_root.assert_called_once_with(
+                app._ask_which_case_at, app.root, "1 Cranch 299", "301",
+                self.CASES, None, "client", True)
+            # The case picked is never asked about again.
+            app._post_root.reset_mock()
+            self.assertFalse(app._try_open_citation(
+                "Stuart v. Laird", "1 Cranch 299", "301", None, "client",
+                choose=False))
+            app._post_root.assert_not_called()
+
+    def test_the_case_picked_opens_by_its_scan_if_nothing_else(self):
+        app = self._app()
+        app._bring_to_front = lambda win: None
+        app._try_open_citation = mock.Mock(return_value=False)
+        app._post_case_law_pdf = mock.Mock()
+        app._notify_lookup_miss = mock.Mock()
+        cases = [{"name": "Stuart v. Laird", "year": "1803",
+                  "url": "u-stuart"},
+                 {"name": "Wiggins v. Wiggins", "year": "1806"}]
+        for pick, scan in ((0, True), (1, False)):
+            app._post_case_law_pdf.reset_mock()
+            app._post_root.reset_mock()
+            with mock.patch.object(
+                    gui, "_choose_cited_case",
+                    side_effect=lambda host, cite, cs, **kw: cs[pick]), \
+                    mock.patch.object(gui.threading, "Thread", _NowThread):
+                app._ask_which_case_at("parent", "1 Cranch 299", "", cases,
+                                       None, "client")
+            if scan:
+                app._post_case_law_pdf.assert_called_once_with(
+                    "u-stuart", "1 Cranch 299", "", "Stuart v. Laird",
+                    parent="parent", expected_name="Stuart v. Laird")
+            else:
+                app._post_case_law_pdf.assert_not_called()
+                app._post_root.assert_called_once_with(
+                    app._notify_lookup_miss,
+                    "Couldn't open Wiggins v. Wiggins, 1 Cranch 299.",
+                    "parent")
+
+    def test_a_link_clicked_in_a_case_asks_too(self):
+        win = object.__new__(gui._ScholarTextWindow)
+        win._app = mock.Mock()
+        win._app._get_client.return_value = "client"
+        win._status_var = mock.Mock()
+        win._post = mock.Mock()
+        patches = self._nothing_opens()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                mock.patch.object(gui, "_official_series_for",
+                                  return_value=[]), \
+                mock.patch.object(gui.threading, "Thread", _NowThread):
+            win._follow_cite_via_cl("1 Cranch 299", "301",
+                                    scholar_absent=True)
+        win._post.assert_called_once_with(win._ask_cases_at, "1 Cranch 299",
+                                          "301", self.CASES)
 
 
 if __name__ == "__main__":
