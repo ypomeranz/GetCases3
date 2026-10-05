@@ -23,9 +23,11 @@ with :data:`pdfium_lock.PDFIUM_LOCK` held, never while waiting on the web.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,16 +122,42 @@ def _keep(key: str, data: bytes) -> None:
         print(f"[leghist] cache write failed: {exc}")
 
 
-def _get_pdf(url: str, *, max_bytes: int = 150_000_000) -> tuple[bytes, str]:
+#: A file that keeps coming is fetched however large: GovInfo serves a
+#: report as one PDF, and some run past 400 MB — cut off at a size, the
+#: reader was sent to the Internet Archive for a copy the next minute would
+#: have finished.  What ends a download is its stalling — less than
+#: STALL_BYTES in any STALL_SECONDS (a server going quiet altogether is the
+#: read TIMEOUT's) — or its passing MAX_BYTES, which no report comes near.
+STALL_SECONDS = 30
+STALL_BYTES = 1 << 20
+MAX_BYTES = 2_000_000_000
+
+#: Asked as a file comes in, when set: whether the reader has given up on
+#: the load it is for — a long download stops there rather than run on
+#: for nothing.
+stopped = None
+
+
+def _stopped() -> bool:
+    try:
+        return bool(stopped is not None and stopped())
+    except Exception:
+        return False
+
+
+def _get_pdf(url: str, *, max_bytes: int = MAX_BYTES) -> tuple[bytes, str]:
     """The PDF at *url* (following the link service's redirect), and the
-    URL it came from — ``#page=N`` and all."""
-    cached = _cached("whole:" + url)
+    URL it came from — ``#page=N`` and all.  Written to the cache as it
+    comes, so a file of hundreds of megabytes is held in memory once."""
+    key = "whole:" + url
+    cached = _cached(key)
     if cached is not None:
-        meta = _cached_meta("whole:" + url)
+        meta = _cached_meta(key)
         return cached, meta.get("final", url)
     host = urllib.parse.urlparse(url).hostname or "the source"
     _tell(on_step, f"Downloading from {host.removeprefix('www.')}…")
     r = _session().get(url, timeout=TIMEOUT, stream=True)
+    part = _cache_path(key).with_suffix(".part")
     try:
         if r.status_code != 200:
             raise Unavailable(f"HTTP {r.status_code}")
@@ -138,20 +166,51 @@ def _get_pdf(url: str, *, max_bytes: int = 150_000_000) -> tuple[bytes, str]:
             size = int(r.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
             size = 0
-        chunks, total = [], 0
-        for chunk in r.iter_content(1 << 16):
-            chunks.append(chunk)
-            total += len(chunk)
-            _tell(on_bytes, total, size)
-            if total > max_bytes:
-                raise Unavailable("the file is too large to fetch whole")
-        data = b"".join(chunks)
+        if size > max_bytes:
+            raise Unavailable("the file is too large to fetch whole")
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            out = open(part, "wb")
+        except OSError as exc:
+            print(f"[leghist] cache write failed: {exc}")
+            out = io.BytesIO()          # held in memory, then, and not kept
+        total = 0
+        window_start, window_bytes = time.monotonic(), 0
+        with out:
+            for chunk in r.iter_content(1 << 16):
+                out.write(chunk)
+                total += len(chunk)
+                window_bytes += len(chunk)
+                _tell(on_bytes, total, size)
+                if _stopped():
+                    raise Unavailable("the download was stopped")
+                if total > max_bytes:
+                    raise Unavailable("the file is too large to fetch whole")
+                now = time.monotonic()
+                if now - window_start >= STALL_SECONDS:
+                    if window_bytes < STALL_BYTES:
+                        raise Unavailable("the download stalled")
+                    window_start, window_bytes = now, 0
+            in_memory = isinstance(out, io.BytesIO)
+            data = out.getvalue() if in_memory else b""
+        if not in_memory:
+            part.replace(_cache_path(key))
+            data = _cache_path(key).read_bytes()
+        if not data.startswith(b"%PDF"):
+            try:
+                _cache_path(key).unlink()
+            except OSError:
+                pass
+            raise Unavailable("the source did not return a PDF")
+    except Exception:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
     finally:
         r.close()
-    if not data.startswith(b"%PDF"):
-        raise Unavailable("the source did not return a PDF")
-    _keep("whole:" + url, data)
-    _keep_meta("whole:" + url, {"final": final})
+    _keep_meta(key, {"final": final})
     return data, final
 
 
@@ -522,7 +581,10 @@ def _paper(s: dict) -> Pages:
             tried.append(url)
             try:
                 data, final = _get_pdf(url)
-            except Exception:
+            except Exception as exc:
+                print(f"[leghist] {url}: {exc}")
+                if _stopped():
+                    raise       # given up on: no other copy is wanted
                 continue
             return _at_pin(data, spec, "GovInfo", final.split("#")[0])
     _tell(on_step, "Searching the Internet Archive…")

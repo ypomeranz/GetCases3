@@ -23328,6 +23328,16 @@ us_reports_pdf.on_step = leghist_fetch.on_step = _load_step
 us_reports_pdf.on_bytes = leghist_fetch.on_bytes = _load_bytes
 
 
+def _load_given_up() -> bool:
+    """Whether the reader has given up on the load running on this thread —
+    what stops a long download running on for nothing."""
+    watch = getattr(_LOAD_WATCH, "watch", None)
+    return bool(watch is not None and getattr(watch, "cancelled", False))
+
+
+leghist_fetch.stopped = _load_given_up
+
+
 class _watching:
     """``with _watching(watch):`` — what runs inside reports to *watch*."""
 
