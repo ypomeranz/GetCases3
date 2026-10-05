@@ -48,7 +48,7 @@ import threading
 import time
 import urllib.parse
 import zlib
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -401,6 +401,66 @@ def decision_year_from_blocks(blocks: list, guess: bool = True) -> str:
         return years[0]
     years = re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", header)
     return years[-1] if years else ""
+
+
+#: How long after its decision Google Scholar's copy of an opinion is still
+#: expected to change — a reporter's star pages arriving, the reported text
+#: replacing the slip opinion's.
+PROVISIONAL_DAYS = 365
+
+# A star page's number: "*2440", "*1".
+_STAR_PAGE_RE = re.compile(r"\d+")
+
+# Text short enough to sit on the one reporter page its citation names.
+_ONE_PAGE_CHARS = 5000
+
+
+def awaiting_reporter_pages(html: str, *,
+                            today: Optional[date] = None) -> bool:
+    """Whether Google Scholar's copy of an opinion is one Scholar is still
+    expected to revise: decided within the last :data:`PROVISIONAL_DAYS`,
+    and without star pages from any reporter — none at all, or only pages
+    no reporter citation in its header accounts for, which track the slip
+    opinion ("*1", "*2" under a "146 S. Ct. 2438" heading).  A short order
+    the reporter prints on the one page its header cites ("145 S. Ct.
+    2658") needs no star page and gets none, so it is final.  An opinion
+    whose front matter gives no decision date or year is not."""
+    today = today or date.today()
+    since = today - timedelta(days=PROVISIONAL_DAYS)
+    # Most stored opinions are old, which the years atop the page show
+    # without parsing all of it.
+    head_years = re.findall(r"\b(?:1[6-9]|20)\d{2}\b", (html or "")[:8000])
+    if head_years and max(map(int, head_years)) < since.year:
+        return False
+    blocks = _blocks(html)
+    if not blocks:
+        return False
+    decided = decision_date_from_blocks(blocks)
+    try:
+        if decided:
+            if date.fromisoformat(decided) < since:
+                return False
+        else:
+            # Only a year: the opinion may be as late as its last day.
+            year = decision_year_from_blocks(blocks, guess=False)
+            if not year or int(year) < since.year:
+                return False
+    except ValueError:
+        return False
+    pages = [
+        int(m.group(0))
+        for b in blocks for s in getattr(b, "spans", ())
+        if getattr(s, "pagenum", False)
+        for m in [_STAR_PAGE_RE.search(s.text)] if m
+    ]
+    first_pages = [key[2] for key in map(_cite_key, _header_cites(blocks))
+                   if key is not None]
+    if not pages:
+        return not (first_pages
+                    and len(_blocks_text(blocks)) <= _ONE_PAGE_CHARS)
+    # A reporter's pages run on from the page its citation opens on.
+    return not any(first <= min(pages) <= first + 1000
+                   for first in first_pages)
 
 
 def _date_lead_in(text: str, at: int) -> str:
@@ -1293,6 +1353,31 @@ class OpinionDB:
         if not sid:
             return False
         return self._rewrite_jsonl(str(sid).strip(), record)
+
+    def update_opinion(self, url: str, html: str) -> Optional[dict]:
+        """Store a newer Google Scholar version of an opinion in place of
+        the copy held under its Scholar id (adding it when none is held),
+        keeping what the page itself can't give: a name, court or date the
+        stored record has and the page lacks, the parallel citations
+        recovered for it, and the reporter pagination aligned from a scan
+        (which the viewer discards once the text no longer matches it).
+        Returns the record stored, or None when nothing was."""
+        rec = extract_record(url, html)
+        if rec is None:
+            return None
+        with self._lock:
+            old = self.stored_record(rec["scholar_id"])
+            if old is None:
+                return rec if self.add_opinion(url, html) else None
+            for k in ("name", "court", "year", "date_filed", "source"):
+                if not rec.get(k) and old.get(k):
+                    rec[k] = old[k]
+            rec["cites"] = _dedupe_cites([
+                *(rec.get("cites") or []), *(old.get("cites") or []),
+            ])
+            if old.get(_PAGINATION_FIELD) is not None:
+                rec[_PAGINATION_FIELD] = old[_PAGINATION_FIELD]
+            return rec if self.replace(rec) else None
 
     # -- parallel citations ------------------------------------------------
 

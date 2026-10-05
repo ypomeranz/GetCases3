@@ -1134,6 +1134,14 @@ def blocks_to_text(blocks: list[Block]) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _opinion_substance(html: str) -> str:
+    """What a reader sees of an opinion page — its words and its star
+    pages, the spacing evened out — so two copies of a page compare equal
+    unless Scholar changed one of those, not merely its markup."""
+    return re.sub(r"\s+", " ",
+                  blocks_to_text(parse_opinion_blocks(html or ""))).strip()
+
+
 def text_similarity(a: str, b: str, n: int = 4) -> float:
     """
     Word n-gram shingle containment between two texts, in [0, 1].
@@ -2009,7 +2017,8 @@ class GoogleScholarFetcher:
         self._last_request: float = 0.0
         # Optional opinion_db.OpinionDB: the durable, searchable store.  When
         # set, every fetched opinion is recorded there, and an opinion already
-        # present is served from there instead of being re-fetched.
+        # present is served from there instead of being re-fetched — unless
+        # Scholar may since have revised it (see current).
         self._opinion_db = db
         self._name_scorer = name_scorer
         self._name_min = name_min
@@ -2107,6 +2116,15 @@ class GoogleScholarFetcher:
         # "How cited" page headings already read, by Scholar's about= id (see
         # how_cited_heading).
         self._how_cited: dict[str, str] = {}
+
+        # The stored opinions already checked against Scholar this session
+        # for a newer version (see current), by Scholar id — each is asked
+        # after once — with the newer version found, if one was.
+        self._checked_current: dict[str, Optional[tuple[str, str]]] = {}
+        self._checked_current_lock = threading.Lock()
+        # Opinion-database rewrites under way on their own threads (see
+        # current), the latest last.
+        self._db_updates: list[threading.Thread] = []
 
         # The most recent results-page URL, sent as the Referer when a case
         # page is fetched — the way a browser navigates from a search.
@@ -2221,17 +2239,19 @@ class GoogleScholarFetcher:
         # is the page-mate, and is passed over.
         cached, verdict = self._cached_cited(citation, case_name)
         if cached and verdict == _NAME_MATCH:
+            cached = self.current(cached)
             self._store_opinion(*cached)  # back the cached opinion up in the DB
             return cached
         fallback = cached if verdict == _NAME_DOUBT else None
 
         # Search the database before Google Scholar: an opinion bearing this
         # citation is served from there, no network — when it is the only one
-        # there, or the name picks it out from the others.  (Otherwise the
-        # lookup falls through so Scholar can disambiguate.)
+        # there, or the name picks it out from the others — unless Scholar
+        # may since have revised it (see current).  (Otherwise the lookup
+        # falls through so Scholar can disambiguate.)
         db_one, verdict = self._db_cited(citation, case_name, year)
         if db_one and verdict == _NAME_MATCH:
-            return db_one
+            return self.current(db_one)
         if fallback is None and verdict == _NAME_DOUBT:
             fallback = db_one
 
@@ -2292,6 +2312,7 @@ class GoogleScholarFetcher:
         # have this exact opinion (skip re-downloading the case page).
         db_hit = self._db_by_url(case_url)
         if db_hit:
+            db_hit = self.current(db_hit)
             self._cache_put_keys(keys, *db_hit)
             return db_hit
 
@@ -2391,14 +2412,16 @@ class GoogleScholarFetcher:
         cached = self._cache_get(key)
         if cached:
             print(f"[scholar] cache hit for {key!r}")
+            cached = self.current(cached)
             self._store_opinion(*cached)  # back the cached opinion up in the DB
             return cached
 
         # Search the database before Google Scholar (by party name): a unique
-        # match is served from there without a network call.
+        # match is served from there without a network call (unless Scholar
+        # may since have revised it: see current).
         db_one = self._db_single(case_name)
         if db_one:
-            return db_one
+            return self.current(db_one)
 
         search_url = f"{SCHOLAR_BASE}/scholar?q={quote_plus(q)}&as_sdt=4"
         print(f"[scholar] searching {search_url}")
@@ -2420,6 +2443,7 @@ class GoogleScholarFetcher:
 
         db_hit = self._db_by_url(case_url)
         if db_hit:
+            db_hit = self.current(db_hit)
             self._cache_put(key, *db_hit)
             return db_hit
 
@@ -2768,8 +2792,11 @@ class GoogleScholarFetcher:
         return out
 
     def get_cached(self, key: str) -> Optional[tuple[str, str]]:
-        """Look up an arbitrary cache key; returns (url, opinion_html) or None."""
-        return self._cache_get(key)
+        """Look up an arbitrary cache key; returns (url, opinion_html) or None.
+        A copy Scholar may since have revised is checked first (see
+        :meth:`current`)."""
+        cached = self._cache_get(key)
+        return self.current(cached) if cached else None
 
     def put_cached(self, key: str, url: str, html: str) -> None:
         """Store (url, opinion_html) under an arbitrary cache key."""
@@ -2790,12 +2817,13 @@ class GoogleScholarFetcher:
             return None
         db_hit = self._db_by_url(url)
         if db_hit:
-            return db_hit
+            return self.current(db_hit)
 
         key = f"url:{url}"
         cached = self._cache_get(key)
         if cached:
             print(f"[scholar] cache hit for {key!r}")
+            cached = self.current(cached)
             self._store_opinion(*cached)  # back the cached opinion up in the DB
             return cached
 
@@ -2811,6 +2839,66 @@ class GoogleScholarFetcher:
     # ------------------------------------------------------------------
     # Opinion database (durable, searchable store; optional)
     # ------------------------------------------------------------------
+
+    def current(self, stored: tuple[str, str]) -> tuple[str, str]:
+        """*stored* — an opinion about to be served from the opinion
+        database or the query cache — or, when that copy is one Scholar is
+        still expected to revise (decided within the year and without a
+        reporter's star pages: see :func:`opinion_db.awaiting_reporter_pages`),
+        Scholar's current version of it, which then replaces the stored copy
+        in both.  The stored copy is served as it is when Scholar is cooling
+        down after a block, or when the one request made for the page fails.
+        Each opinion is asked after once a session, and a newer version
+        found is served for the rest of it."""
+        url, html = stored
+        try:
+            from opinion_db import awaiting_reporter_pages, scholar_id_from_url
+            sid = scholar_id_from_url(url or "")
+            if not sid:
+                return stored
+            with self._checked_current_lock:
+                if sid in self._checked_current:
+                    return self._checked_current[sid] or stored
+                self._checked_current[sid] = None
+            if not awaiting_reporter_pages(html):
+                return stored
+        except Exception as exc:
+            print(f"[scholar] checking the stored opinion failed: {exc}")
+            return stored
+        print(f"[scholar] stored opinion {sid} may have been revised — "
+              "asking Scholar for its current version")
+        absent = self.last_fetch_absent()
+        fresh = self._fetch_case_page(url, once=True)
+        self._note_absent(absent)   # a stored copy is no absent opinion
+        if not fresh:
+            print("[scholar] Scholar didn't answer — serving the stored copy")
+            return stored
+        new_html = fresh[1]
+        if _opinion_substance(new_html) == _opinion_substance(html):
+            print("[scholar] Scholar's version is unchanged")
+            return stored
+        with self._checked_current_lock:
+            self._checked_current[sid] = (url, new_html)
+        for key in self._cached_keys_for_opinion(url):
+            self._cache_put(key, url, new_html)
+        if self._opinion_db is not None:
+            # Rewriting the database file takes seconds; the reader needn't
+            # wait for it.
+            update = threading.Thread(
+                target=self._update_stored, args=(sid, url, new_html),
+                daemon=True)
+            self._db_updates.append(update)
+            update.start()
+        return (url, new_html)
+
+    def _update_stored(self, sid: str, url: str, html: str) -> None:
+        """Replace the opinion database's copy of *sid* with *html*."""
+        try:
+            if self._opinion_db.update_opinion(url, html):
+                print(f"[scholar] updated stored opinion {sid} to "
+                      "Scholar's current version")
+        except Exception as exc:
+            print(f"[scholar] opinion-DB update failed: {exc}")
 
     def _db_by_url(self, url: str) -> Optional[tuple[str, str]]:
         """(url, html) for this case from the opinion DB (matched on the Scholar
@@ -3051,7 +3139,7 @@ class GoogleScholarFetcher:
             print(f"[scholar] real-Firefox fetch failed: {exc}")
             return None
 
-    def _get(self, url: str, referer: str = ""):
+    def _get(self, url: str, referer: str = "", once: bool = False):
         """GET a Scholar page, in order of increasing weight:
 
           1. the curl_cffi persona session (rotating fingerprints on a
@@ -3063,14 +3151,25 @@ class GoogleScholarFetcher:
 
         Once the browser becomes the working channel (curl_cffi blocked, or a
         cooldown is in effect), it is used *first* so a blocked run doesn't pay
-        the slow persona rotation on every fetch."""
+        the slow persona rotation on every fetch.
+
+        *once* — for a page there is a stored copy of to fall back on — makes
+        one attempt, on the channel now working, and raises if it fails:
+        nothing is sent during a cooldown, and a challenge or a hiccup is
+        neither retried nor escalated (a challenged fingerprint is still
+        rotated out for the next fetch)."""
         now = time.monotonic()
+        if once and now < self._blocked_until:
+            raise ScholarError(
+                f"blocked (cooling down {int(self._blocked_until - now)}s)")
         browser_preferred = self._browser_first or now < self._blocked_until
         if browser_preferred:
             resp = self._browser_get(url)
             if resp is not None:
                 self._mark_browser_working()
                 return resp
+            if once:
+                raise ScholarError("the real Firefox didn't return the page")
             if now < self._blocked_until:
                 # Still cooling down and the browser can't help — fail fast.
                 raise ScholarError(
@@ -3080,7 +3179,7 @@ class GoogleScholarFetcher:
         self._warm_up()
         headers = {"Referer": referer or (SCHOLAR_BASE + "/")}
         last_status = "challenge"
-        for _ in range(len(self._personas)):
+        for _ in range(1 if once else len(self._personas)):
             self._throttle()
             resp = self._session.get(url, headers=headers, timeout=20,
                                      allow_redirects=True)
@@ -3091,11 +3190,16 @@ class GoogleScholarFetcher:
                 self._rotate_persona()
                 continue
             if resp.status_code in _RETRY_STATUSES:
+                if once:
+                    raise ScholarError(f"HTTP {resp.status_code}")
                 time.sleep(2.0)
                 continue  # transient Google hiccup — same persona, one retry
             resp.raise_for_status()
             self._save_state()
             return resp
+
+        if once:
+            raise ScholarError(f"{last_status} (one attempt)")
 
         # Every fingerprint challenged — the real browser is the way through.
         resp = self._browser_get(url)
@@ -3295,14 +3399,18 @@ class GoogleScholarFetcher:
                 return r.url
         return None
 
-    def _fetch_case_page(self, url: str) -> Optional[tuple[str, str]]:
-        """Fetch a scholar_case page and extract the opinion HTML."""
+    def _fetch_case_page(self, url: str,
+                         once: bool = False) -> Optional[tuple[str, str]]:
+        """Fetch a scholar_case page and extract the opinion HTML.  *once*:
+        one attempt, the page not stored (see :meth:`_get`, :meth:`current`)."""
         print(f"[scholar] fetching case page {url}")
         self._note_absent(False)
         try:
             # A browser reaches a case page from a results page — send that
             # Referer when we have one.
-            resp = self._get(url, referer=self._last_search_url)
+            resp = (self._get(url, referer=self._last_search_url, once=True)
+                    if once else
+                    self._get(url, referer=self._last_search_url))
         except Exception as exc:
             print(f"[scholar] case page request failed: {exc}")
             # A page Scholar says is not there is an answer; a block or a
@@ -3326,7 +3434,8 @@ class GoogleScholarFetcher:
 
         html = str(opinion_div)
         print(f"[scholar] extracted {len(html):,} chars of opinion HTML")
-        self._store_opinion(url, html)
+        if not once:
+            self._store_opinion(url, html)
         return (url, html)
 
     # ------------------------------------------------------------------
@@ -3372,6 +3481,12 @@ class GoogleScholarFetcher:
             new_url, html = result
             for key in self._cached_keys_for_opinion(url):
                 self._cache_put(key, new_url, html)
+            from opinion_db import scholar_id_from_url
+            sid = scholar_id_from_url(url or "")
+            if sid:
+                # What current serves for the rest of the session.
+                with self._checked_current_lock:
+                    self._checked_current[sid] = result
         return result
 
     def _cache_get(self, key: str) -> Optional[tuple[str, str]]:

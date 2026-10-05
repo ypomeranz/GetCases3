@@ -13204,7 +13204,10 @@ class CourtListenerGUI:
     # ------------------------------------------------------------------
 
     def _open_db_record(self, scholar_id: str) -> None:
-        """Open an opinion stored in the database, by its Scholar id."""
+        """Open an opinion stored in the database, by its Scholar id — or,
+        for one Google Scholar is still expected to revise, Scholar's current
+        version of it, which then replaces the stored copy (see
+        :meth:`GoogleScholarFetcher.current`)."""
         db = self._get_opinion_db()
         if db is None:
             return
@@ -13215,9 +13218,27 @@ class CourtListenerGUI:
                 "That opinion is no longer in the database.",
             )
             return
-        self._open_scholar_window(
-            rec.get("url", ""), rec["html"], None, None, "from database", True,
-        )
+        stored = (rec.get("url", ""), rec["html"])
+        fetcher = self._get_scholar() if _SCHOLAR_AVAILABLE else None
+        if fetcher is None or not hasattr(fetcher, "current"):
+            self._open_scholar_window(*stored, None, None, "from database",
+                                      True)
+            return
+        self._status_var.set("Opening the stored opinion…")
+
+        def run() -> None:
+            try:
+                opened = fetcher.current(stored)
+            except Exception as exc:
+                print(f"[db] checking Scholar for a newer version failed: "
+                      f"{exc}")
+                opened = stored
+            note = ("from database" if opened is stored
+                    else "from Google Scholar (newer than the database's)")
+            self._post_root(self._open_scholar_window, *opened, None, None,
+                            note, True)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _show_db_find(self) -> None:
         """Search the local opinion database by party name, reporter citation,
@@ -16509,29 +16530,17 @@ class _DbMatchDialog:
             msg = ""
             new_summary: Optional[dict] = None
             try:
-                import opinion_db as _odb
                 result = fetcher.refetch_by_url(rec["url"])
                 if not result:
                     msg = ("Google Scholar didn't return the opinion "
                            "(blocked or unavailable) — kept the stored copy.")
                 else:
                     new_url, html = result
-                    new_rec = _odb.extract_record(new_url, html)
+                    # Keeps the enrichments the page itself can't provide.
+                    new_rec = db.update_opinion(new_url, html)
                     if new_rec is None:
                         msg = "The fetched page carries no Scholar id — kept the stored copy."
                     else:
-                        # Keep enrichments the page itself can't provide.
-                        for k in ("name", "court", "year", "date_filed", "source"):
-                            if not new_rec.get(k) and rec.get(k):
-                                new_rec[k] = rec[k]
-                        # Citation recovery can add a U.S. Reports parallel
-                        # that Scholar's opinion page still omits.  Refreshing
-                        # the HTML must not discard that durable enrichment.
-                        new_rec["cites"] = _odb._dedupe_cites([
-                            *(new_rec.get("cites") or []),
-                            *(rec.get("cites") or []),
-                        ])
-                        db.replace(new_rec)
                         changed = len(html) - len(rec.get("html") or "")
                         msg = (f"Updated {name} to the latest Google Scholar "
                                f"version ({changed:+,} characters).")
