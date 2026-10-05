@@ -581,6 +581,54 @@ class CaptionCapitalizationTests(unittest.TestCase):
             "The PRESIDENT",
         )
 
+    def test_a_lone_capitalized_last_word_is_a_surname(self):
+        # Scholar sets only a person's surname in capitals, an entity's
+        # whole name: two or three words with the last alone in capitals
+        # name a person, whatever the given name ("Markwayne") and even
+        # where the surname is also a business noun ("Church", "Law").
+        for caption, surname in (
+                ("Markwayne MULLIN", "MULLIN"),
+                ("Markwayne A. MULLIN", "MULLIN"),
+                ("Markwayne CHURCH", "CHURCH"),
+                ("Markwayne A. CHURCH", "CHURCH"),
+                ("M. Wayne STEEL", "STEEL"),
+                ("Dequarius LAW", "LAW"),
+                ("DeShawn BANK", "BANK"),
+                ("Shaun A. FIELDS", "FIELDS")):
+            with self.subTest(caption=caption):
+                self.assertEqual(collapse_personal_all_caps_run(caption),
+                                 surname)
+
+    def test_but_not_a_word_no_one_bears_or_a_firm_s_opening(self):
+        for caption in (
+                # No one's surname.
+                "Markwayne CORPORATION", "Markwayne SAVINGS",
+                # A business word or a brand's spelling ahead of it.
+                "Tribune MEDIA", "NBCUniversal MEDIA", "American STEEL",
+                "First BANK",
+                # Initials alone may be a firm's (rule 10.2.1(g)).
+                "J. W. CHURCH",
+                # More than three words.
+                "Dequarius Lamont Tyrese CHURCH"):
+            with self.subTest(caption=caption):
+                self.assertEqual(collapse_personal_all_caps_run(caption),
+                                 caption)
+
+    def test_a_lone_capitalized_surname_in_a_scholar_caption(self):
+        from google_scholar import parse_opinion_blocks
+        for caption, cited in (
+                ("UNITED STATES, Appellee,<br/>v.<br/>Markwayne A. CHURCH, "
+                 "Appellant.", "United States v. Church"),
+                ("Jane DOE, Plaintiff,<br/>v.<br/>Markwayne MULLIN, "
+                 "Secretary of Homeland Security, et al., Defendants.",
+                 "Doe v. Mullin")):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(
+                    _scholar_page("1 F.4th 1 (2021)", caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    cited)
+
     def test_possessive_s_is_not_a_surname_prefix(self):
         # The O'BRIEN → O'Brien rule must not capitalize a possessive:
         # Wasserman's Inc. v. Township of Middletown, 137 N.J. 238 (1994).
