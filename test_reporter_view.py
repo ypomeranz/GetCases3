@@ -179,7 +179,10 @@ APP_NAMES = ["reporter_open_case", "_safe_root_status"]
 
 APP_NS = _load(
     "CourtListenerGUI", APP_NAMES,
-    {"_pick_citation": lambda cites: (cites[0] if cites else "")},
+    {"_pick_citation": lambda cites: (cites[0] if cites else ""),
+     "_case_name_and_year": lambda item, name="": (
+         name or (item or {}).get("caseName", ""),
+         str((item or {}).get("dateFiled") or "")[:4])},
 )
 
 
@@ -193,9 +196,11 @@ class _App:
             setattr(self, name, APP_NS[name].__get__(self))
 
     def open_cited_case_pdf(self, parent, action, snippet="",
-                            status=lambda _s: None, fallback=None, name=""):
+                            status=lambda _s: None, fallback=None, name="",
+                            **race):
         self.asked.append((parent, action, snippet, fallback))
         self.names = getattr(self, "names", []) + [name]
+        self.races = getattr(self, "races", []) + [race]
         return self.opens
 
 
@@ -247,6 +252,23 @@ class ReporterOpenCaseTests(unittest.TestCase):
     def test_a_lookup_that_cannot_start_leaves_the_caller_to_it(self):
         app = _App(opens=False)
         self.assertFalse(app.reporter_open_case(app.root, cite="1 U.S. 1"))
+
+    def test_a_result_is_raced_with_what_its_row_knows(self):
+        # The scan and the text are looked for at once (_CaseOpenRace), and
+        # the click hands over what it has: the cluster, the year, and a
+        # Scholar result's own page.
+        app = _App()
+        item = {"citation": ["410 U.S. 113"], "caseName": "Roe v. Wade",
+                "dateFiled": "1973-01-22", "cluster_id": 108713}
+        app.reporter_open_case(app.root, item)
+        race = app.races[0]
+        self.assertTrue(race["race"])
+        self.assertEqual(race["year"], "1973")
+        self.assertIs(race["known_item"], item)
+        app.reporter_open_case(app.root, cite="365 U.S. 167", name="Monroe",
+                               scholar_url="https://scholar.test/case=1")
+        self.assertEqual(app.races[1]["scholar_url"],
+                         "https://scholar.test/case=1")
 
 
 class WhereItIsAskedTests(unittest.TestCase):

@@ -172,36 +172,51 @@ def load_section(title: str, section: str) -> CfrSection:
     candidates = [section]
     if "-" in section:
         candidates.append(section.split("-", 1)[0])
+
+    def human_url(cand: str) -> str:
+        return f"https://www.ecfr.gov/current/title-{title}/section-{cand}"
+
+    def site_page(cand: str) -> dict:
+        """The section's page on ecfr.gov, fetched on a thread of its own
+        beside the API's XML (the two used to be asked one after the other):
+        its ``paras``/``styles``, or the ``error`` asking it raised."""
+        box: dict = {"paras": [], "styles": [], "error": None}
+
+        def run() -> None:
+            try:
+                site_resp = requests.get(
+                    human_url(cand), headers=_HTML_HEADERS, timeout=30,
+                )
+                if site_resp.status_code != 404:
+                    site_resp.raise_for_status()
+                    box["paras"], box["styles"] = parse_section_html(
+                        site_resp.text, cand,
+                    )
+            except Exception as exc:
+                box["error"] = exc
+
+        box["thread"] = threading.Thread(target=run, daemon=True)
+        box["thread"].start()
+        return box
+
+    # The page needs no issue date, so it is sent for while the date is.
+    first_page = site_page(candidates[0])
     date = _issue_date(title)
     last_err = "section not found"
     unreachable = False   # a failure that says nothing about the section
-    for cand in candidates:
+    for index, cand in enumerate(candidates):
         part = cand.split(".", 1)[0]
-        human_url = (
-            f"https://www.ecfr.gov/current/title-{title}/section-{cand}"
-        )
-        site_paras: list[tuple[str, int, str]] = []
-        site_styles: list[list[tuple[int, int, str]]] = []
-        try:
-            site_resp = requests.get(
-                human_url, headers=_HTML_HEADERS, timeout=30,
-            )
-            if site_resp.status_code != 404:
-                site_resp.raise_for_status()
-                site_paras, site_styles = parse_section_html(
-                    site_resp.text, cand,
-                )
-        except Exception as exc:
-            last_err = str(exc)
-            unreachable = True
+        page = first_page if index == 0 else site_page(cand)
 
         api_url = (f"{_API}/full/{date}/title-{title}.xml"
                    f"?part={part}&section={cand}")
         xml_paras: list[tuple[str, int, str]] = []
+        xml_missing = False
+        xml_error: "Exception | None" = None
         try:
             resp = requests.get(api_url, headers=_HEADERS, timeout=30)
             if resp.status_code == 404:
-                last_err = f"no such section {title} C.F.R. § {cand}"
+                xml_missing = True
             else:
                 resp.raise_for_status()
                 # The API omits the charset in its Content-Type; the XML
@@ -210,9 +225,20 @@ def load_section(title: str, section: str) -> CfrSection:
                     resp.content.decode("utf-8", "replace")
                 )
         except Exception as exc:
+            xml_error = exc
+
+        page["thread"].join(65)
+        site_paras: list[tuple[str, int, str]] = page["paras"]
+        site_styles: list[list[tuple[int, int, str]]] = page["styles"]
+        if page["error"] is not None:
+            last_err = str(page["error"])
+            unreachable = True
+        if xml_missing:
+            last_err = f"no such section {title} C.F.R. § {cand}"
+        if xml_error is not None:
             if not site_paras:
-                raise RuntimeError(f"ecfr.gov: {exc}") from exc
-            last_err = str(exc)
+                raise RuntimeError(f"ecfr.gov: {xml_error}") from xml_error
+            last_err = str(xml_error)
             unreachable = True
 
         if site_paras:
@@ -230,7 +256,7 @@ def load_section(title: str, section: str) -> CfrSection:
         if paras:
             doc = CfrSection(
                 title=title, section=cand, date=date,
-                url=human_url,
+                url=human_url(cand),
                 paras=paras,
                 para_styles=para_styles,
                 site_formatting=bool(site_paras),

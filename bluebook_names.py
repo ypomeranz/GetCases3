@@ -467,6 +467,20 @@ def split_relator(party: str) -> "tuple[str, str] | None":
     return (head, tail) if head and tail else None
 
 
+def _state_named_first(party: str) -> str:
+    """A state named ahead of its designation — "Washington State", "New York
+    State", "Wash. State" — as "State of …", which rule 10.2.1(f) then omits:
+    the Ninth Circuit's "WASHINGTON State" is Washington v. Chimei Innolux
+    Corp., 659 F.3d 842.  Only a party that is the state and nothing more (a
+    relator tail aside); "Washington State Grange" passes through."""
+    rel = _EX_REL_RE.search(party)
+    head = (party[:rel.start()] if rel else party).strip(" ,")
+    m = re.fullmatch(r"(.+?)\s+state", head, re.IGNORECASE)
+    if not m or not _is_state(_place_words(m.group(1))):
+        return party
+    return f"State of {m.group(1)}" + (party[rel.start():] if rel else "")
+
+
 def _norm_geo(s: str) -> str:
     """Comparison key for a geographic abbreviation: letters only, uppercased
     ("N.C." / "N. C." -> "NC", "Ind." -> "IND")."""
@@ -595,7 +609,7 @@ _MID_GEO_UNIT_RE = re.compile(
 # York City" name a unit whose words together are the place's proper name, so
 # the whole party stays unabbreviated ("Soldal v. Cook County", never "Cook
 # Cnty.").  The '$' anchor limits the rule to a trailing unit word: when an
-# institution follows ("Cook County Bd. of Review") the larger party
+# institution follows ("Cook County Bd. of Rev.") the larger party
 # abbreviates normally.
 _GEO_SUFFIX_RE = re.compile(
     r"^(.+?)\s+(City|Town|Township|Twp\.|Village|Vill\.|Borough|County|"
@@ -3161,7 +3175,7 @@ def _municipal_party(p: str) -> str | None:
     "Atlantic City") is identified by its trailing unit word, so the words
     ahead are always the place's proper name — a T6 word among them
     ("Atlantic", "Central") belongs to that name, not to an institution.  A
-    larger entity puts the unit word mid-name ("Cook County Bd. of Review"),
+    larger entity puts the unit word mid-name ("Cook County Bd. of Rev."),
     where the '$' anchor no longer matches, and an institution can end in one
     ("Sch. Dist. of Abington Twp."), which the bare-place test turns away."""
     p = p.strip()
@@ -3220,6 +3234,7 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     p = re.sub(r"^the\s+", "", p, flags=re.IGNORECASE)  # rule 10.2.1(d)
     p = re.sub(r"\bUnited States of America\b", "United States", p,
                flags=re.IGNORECASE)
+    p = _state_named_first(p)
     # Rule 10.2.1(f): "State of Washington" -> "Washington" — unless the
     # citation is to a decision of that state's own courts, where the
     # designation alone survives and the state name drops instead ("People
@@ -4180,7 +4195,7 @@ if __name__ == "__main__":
         ("Atlantic City Board of Education v. Doe",
          "Atl. City Bd. of Educ. v. Doe"),
         ("Cook County Board of Review v. Smith",
-         "Cook Cnty. Bd. of Review v. Smith"),
+         "Cook Cnty. Bd. of Rev. v. Smith"),
         ("Doe v. Cook County Department of Corrections",
          "Doe v. Cook Cnty. Dep't of Corr."),
         # Relator constructions (rule 10.2.1(b)): the named party ahead of

@@ -1857,6 +1857,7 @@ _anon_session.headers.update({
 #                 bound-volume / preliminary-print PDF, downloaded from
 #                 supremecourt.gov into the "US Reports" folder on first use
 #                 and reused from there after
+# The two are asked at once (see _resolve_pdf_url); the preference decides.
 _LOC_CUTOFF = 542
 # At/below this volume the LOC (Library of Congress) scan is preferred over
 # GPO's GovInfo edition; GovInfo is used only when LOC hasn't the volume/page.
@@ -3040,23 +3041,43 @@ def _case_law_pdf_choices_for_cites(
     """
     choices: list[_CaseLawPdfChoice] = []
     seen_urls: set[str] = set()
-    for raw in cites:
-        cite = re.sub(r"<[^>]+>", "", str(raw or "")).strip()
-        if (not cite or _NOISE_CITE_RE.search(cite)
-                or _NONSTANDARD_CITE_RE.search(cite)):
-            continue
+
+    def probe(cite: str) -> tuple:
+        """``(url, status)`` for *cite*'s file — status None when there is
+        no file to ask about, or the asking failed."""
         url = _static_case_law_url(cite)
         if url:
             url = _case_law_listed_url(cite, url)
-        if not url or url in seen_urls:
-            continue
+        if not url:
+            return None, None
+        if _shared_pdf_answer(url):     # downloaded already (_CaseOpenRace)
+            return url, 200
         print(f"[case.law] checking static.case.law: {url}")
         try:
             head = _anon_session.head(url, timeout=10, allow_redirects=True)
         except Exception as exc:
             print(f"[case.law] HEAD check failed for {url}: {exc}")
+            return url, None
+        return url, head.status_code
+
+    wanted = []
+    for raw in cites:
+        cite = re.sub(r"<[^>]+>", "", str(raw or "")).strip()
+        if (not cite or _NOISE_CITE_RE.search(cite)
+                or _NONSTANDARD_CITE_RE.search(cite)):
             continue
-        if head.status_code == 200:
+        wanted.append(cite)
+    # Every reporter's file asked after at once; the answers read in order.
+    probes = _in_parallel(*(lambda c=c: probe(c) for c in wanted))
+    for cite, future in zip(wanted, probes):
+        try:
+            url, status = future.result()
+        except Exception as exc:
+            print(f"[case.law] checking {cite!r} failed: {exc}")
+            continue
+        if not url or url in seen_urls or status is None:
+            continue
+        if status == 200:
             seen_urls.add(url)
             chosen_url = url
             page_opinions = _case_law_page_opinions(url)
@@ -3101,7 +3122,7 @@ def _case_law_pdf_choices_for_cites(
                     continue
             choices.append(_CaseLawPdfChoice(cite=cite, url=chosen_url))
         else:
-            print(f"[case.law] static.case.law {head.status_code} for {cite!r}")
+            print(f"[case.law] static.case.law {status} for {cite!r}")
     return choices
 
 
@@ -3388,6 +3409,29 @@ def _take_page_mates(fetcher) -> list:
     except Exception:
         return []
     return mates if isinstance(mates, list) and len(mates) > 1 else []
+
+
+def _scholar_named_hit(fetcher, name: str, lookup_cite: str, year: str,
+                       case_facts) -> "Optional[tuple[str, str]]":
+    """Google Scholar's copy of a case its citation alone did not find, by a
+    search for its name and citation together: ``(url, html)``, or None.
+
+    A hit is accepted only when the *result* itself is this case — bearing an
+    equivalent cite in its title/byline (and, of several cases beginning on
+    that page, the one answering to the name), or else matching the case name
+    and bearing another of its citations, or its year and state — never
+    merely because another opinion quotes the query, nor because it is the
+    other case printed on the same page, nor because it shares the name.
+    ``case_facts()`` gives the case's citations, year and state, asked for
+    only when a hit sharing the name has to be checked against them."""
+    hits = fetcher.search_cases(f"{name} {lookup_cite}", limit=3)
+    hit = fetcher.pick_cited_result(hits, lookup_cite, name, year)
+    if hit is None:
+        named = [h for h in hits if _is_the_named_case(name, h.title or "")]
+        facts = case_facts() if named else ()
+        hit = next((h for h in named
+                    if _named_hit_is_the_case(h, name, *facts)), None)
+    return fetcher.fetch_by_url(hit.url) if hit is not None else None
 
 
 def _settled_choice(choices: list) -> "_CaseLawPdfChoice":
@@ -4164,8 +4208,57 @@ def _special_citation_ranges(
     return merged
 
 
-def _text_opinion_link_ranges(parts, state_court: bool = False
-                              ) -> dict[int, list]:
+#: The whole-opinion citation scans done lately, by the text scanned (see
+#: _detected_text_links) — a second of work on a long opinion, worth not
+#: doing twice for the same text.
+_TEXT_LINK_SCANS: dict = {}
+_TEXT_LINK_SCANS_LOCK = threading.Lock()
+_TEXT_LINK_SCANS_KEPT = 6
+
+
+#: A text longer than this not yet scanned is shown before its citations
+#: are read (see _ScholarTextWindow._prepare_text_link_ranges): reading them
+#: takes the better part of a second on a long opinion.
+_LINKS_LATER_CHARS = 30_000
+
+
+def _detected_text_links(text: str, italic: list,
+                         cached_only: bool = False) -> "Optional[list]":
+    """:func:`detect_brief_links` over a whole opinion's text, remembered for
+    the next asking: the T view of a scan, the window it opens into, a part
+    shown on its own all scan the same text.  A copy of the list, each time,
+    so a caller's filtering leaves the kept one be.  ``cached_only``: None
+    rather than a scan not already done."""
+    key = (len(text), hash(text), hash(bytes(bytearray(map(bool, italic)))))
+    with _TEXT_LINK_SCANS_LOCK:
+        kept = _TEXT_LINK_SCANS.get(key)
+    if kept is not None:
+        return list(kept)
+    if cached_only:
+        return None
+    detected = detect_brief_links(text, italic=italic)
+    with _TEXT_LINK_SCANS_LOCK:
+        _TEXT_LINK_SCANS[key] = list(detected)
+        while len(_TEXT_LINK_SCANS) > _TEXT_LINK_SCANS_KEPT:
+            _TEXT_LINK_SCANS.pop(next(iter(_TEXT_LINK_SCANS)))
+    return list(detected)
+
+
+def _scan_opinion_links_ahead(html: str) -> None:
+    """Scan a Google Scholar opinion's citations now, on a worker, so the
+    window that shows it — the T view of its scan, opened later — finds the
+    scan done (see _detected_text_links).  After any window going up: the
+    T view is not wanted yet, and the scan's window is (see _ui_first)."""
+    _yield_to_ui()
+    try:
+        _text_opinion_link_ranges(segment_blocks(parse_opinion_blocks(html)))
+    except Exception as exc:
+        print(f"[links] scanning the opinion ahead failed: {exc}")
+
+
+def _text_opinion_link_ranges(parts, state_court: bool = False,
+                              defer_long: bool = False
+                              ) -> "Optional[dict[int, list]]":
     """Whole-opinion citation links mapped back to each rendered block.
 
     PDF opinions already run :func:`citations.detect_links` over the complete
@@ -4184,6 +4277,9 @@ def _text_opinion_link_ranges(parts, state_court: bool = False
     break, not the opinion's words, and one falling inside a citation —
     "California v. Carney, 471 *583 U. S. 386" — would otherwise be read as
     its volume, linking 583 U.S. 386 and leaving the 471 behind.
+
+    ``defer_long``: None for a text longer than _LINKS_LATER_CHARS whose scan
+    has not been done — the caller shows it first and scans it on a worker.
     """
     chunks: list[str] = []
     italic: list[bool] = []
@@ -4225,7 +4321,12 @@ def _text_opinion_link_ranges(parts, state_court: bool = False
         return {}
     text = "".join(chunks)
     try:
-        detected = detect_brief_links(text, italic=italic)
+        if defer_long and len(text) > _LINKS_LATER_CHARS:
+            detected = _detected_text_links(text, italic, cached_only=True)
+            if detected is None:
+                return None
+        else:
+            detected = _detected_text_links(text, italic)
     except Exception:
         return {}  # retain the span-by-span legacy path on detector failure
     if state_court:
@@ -7474,6 +7575,715 @@ def _case_pdf_text_source(
     return _case_law_source_from_record(record)
 
 
+def _warm_spotlight_indexes() -> None:
+    """Load the indexes a citation typed into Spotlight is read against,
+    so the first one typed need not wait on them (worker thread; the loaders
+    are idempotent and locked)."""
+    try:
+        eng_rep.iter_nominate_cites("1 Ex. 1")
+    except Exception as exc:
+        print(f"[spotlight] warming the English Reports index failed: {exc}")
+
+
+#: How long Google Scholar's text is waited for before a lesser text —
+#: static.case.law's report, CourtListener's transcription — opens in its
+#: place, when no scan has come either (see _CaseOpenRace).
+_SCHOLAR_GRACE_S = 10.0
+#: …and for a case decided before 1900 that Scholar has failed before: one
+#: try, and this long.
+_SCHOLAR_QUICK_GRACE_S = 3.0
+#: How long before Scholar's head start runs out the lesser texts are sent
+#: for.  Not at once: they are wanted only when Scholar fails or is slow, and
+#: reading them is work enough to slow the scan and the window opening.
+_LESSER_TEXT_LEAD_S = 4.0
+
+
+def _scan_urls_for_cite(cite: str, name: str = "",
+                        year: str = "") -> list:
+    """The scans *cite* names on its face, the one that would be taken
+    first: the Library of Congress's copy of a U.S. Reports page through
+    _LOC_PREFERRED_MAX and GovInfo's after (its stable link, then the file
+    itself), and for any other reporter static.case.law's.  May ask
+    static.case.law which file a citation is (worker thread)."""
+    us = next((u for u in map(_normalized_us_cite,
+                              (cite, *_official_series_for(cite, name, year)))
+               if u), "")
+    if us:
+        m = _US_CITE_RE.search(us)
+        loc = (_us_reports_loc_url(us)
+               if m and int(m.group(1)) <= _LOC_PREFERRED_MAX else None)
+        return [loc] if loc else list(_us_reports_govinfo_url(us) or ())
+    url = _static_case_law_url(cite)
+    return [_case_law_listed_url(cite, url)] if url else []
+
+
+def _download_scan_ahead(cite: str, name: str = "", year: str = "",
+                         client=None, stop=None) -> str:
+    """Download the scan *cite* names (see _scan_urls_for_cite) before
+    anyone asks for it — shared, and kept (see _shared_pdf_bytes) — and say
+    which it was ("" when none).  *stop()* says to give up between tries
+    (worker thread)."""
+    try:
+        urls = _scan_urls_for_cite(cite, name, year)
+    except Exception as exc:
+        print(f"[scan-ahead] which scan {cite!r} names: {exc}")
+        return ""
+    for url in urls:
+        if stop is not None and stop():
+            return ""
+        try:
+            if url and _shared_pdf_bytes(url, client=client, probe=True):
+                return url
+        except Exception as exc:
+            print(f"[scan-ahead] downloading {url} failed: {exc}")
+    return ""
+
+
+def _decided_before_1900(year: str, cites=()) -> bool:
+    """Whether a case was decided before 1900: by its *year* where that is
+    known, else by a U.S. Reports volume among *cites* (175 U.S. reaches into
+    January 1900, so it and every later volume are no proof)."""
+    year = str(year or "").strip()[:4]
+    if year.isdigit():
+        return int(year) < 1900
+    for cite in cites or ():
+        m = _US_CITE_RE.search(_normalized_us_cite(str(cite or "")) or "")
+        if m and int(m.group(1)) < 175:
+            return True
+    return False
+
+
+class _CaseOpenRace:
+    """Every source of one case asked at once, and the first good answer
+    opened — how a case opens from Spotlight (a typed citation, a result
+    clicked) and from the main window's results.
+
+    Four lanes set out together the moment the case is asked for:
+
+      * ``scan``    — the printed report: open_cited_case_pdf's own lookup,
+        reporting here (official U.S. Reports, static.case.law, CourtListener's
+        stored copy);
+      * ``scholar`` — Google Scholar's text;
+      * ``caselaw`` — static.case.law's text of the printed report;
+      * ``cl``      — CourtListener's text.
+
+    The scan and Scholar's text are equals: whichever arrives first is what
+    the case opens on, and the other is handed to that window when it comes —
+    the text behind a scan's T, the pages behind a text's P.  The lesser texts
+    are usually worse than Scholar's, so one opens only once Scholar has come
+    back empty or had its head start (``GRACE_S``), and no scan has come
+    either: static.case.law's before CourtListener's.  They are sent for only
+    then, or ``LESSER_LEAD_S`` before the head start runs out — reading them
+    would only slow the rest.  A case decided before 1900 that Scholar has
+    missed before gets one try and a short head start (``QUICK_GRACE_S``).
+    When nothing comes of any of it, ``on_nothing`` runs — the caller's own
+    further tries, which end in a question or a "not found".
+
+    ``prefer_scan``: a citation followed out of a document — read as printed,
+    so its scan is what opens wherever there is one, and a text only once the
+    scan lookup has come to nothing.  The text lanes still set out at the
+    click, so the text behind T is ready sooner, and a case with no scan
+    opens on its text without waiting for the scan lookup and then for the
+    text in turn.
+
+    CourtListener's record of the case is looked up once, for every lane that
+    wants it (``cl_item``); a citation that names its U.S. Reports volume and
+    comes with the case's name finds its official scan without waiting for it
+    (``official_scan``).  Lanes run on worker threads and report here; every
+    decision is made on the Tk thread, so no two can cross."""
+
+    LANES = ("scan", "scholar", "caselaw", "cl")
+    GRACE_S = _SCHOLAR_GRACE_S
+    QUICK_GRACE_S = _SCHOLAR_QUICK_GRACE_S
+    LESSER_LEAD_S = _LESSER_TEXT_LEAD_S
+
+    def __init__(self, app, parent, *, cite: str, name: str = "",
+                 pin: str = "", year: str = "", client=None, fetcher=None,
+                 watch=None, status=None, action=("cite", ""),
+                 snippet: str = "", scholar_url: str = "",
+                 item: "Optional[dict]" = None, on_nothing=None,
+                 prefer_scan: bool = False) -> None:
+        self.app = app
+        self.prefer_scan = prefer_scan
+        self.parent = parent
+        self.cite = cite
+        self.name = name
+        self.pin = pin
+        self.year = str(year or "").strip()[:4]
+        self.client = client
+        self.fetcher = fetcher
+        self.watch = watch
+        self.status = status or (lambda _text: None)
+        self.action = action
+        self.snippet = snippet
+        self.scholar_url = scholar_url
+        self.known_item = dict(item) if item else None
+        self.on_nothing = on_nothing
+        self.t0 = time.monotonic()
+        self._lock = threading.Lock()
+        self._state = {lane: "pending" for lane in self.LANES}
+        self._value: dict = {lane: None for lane in self.LANES}
+        self._settled = {lane: threading.Event() for lane in self.LANES}
+        # What the case opened on, once it has: a lane's name; or "asked"
+        # (the reader is choosing among a page's cases), "refused",
+        # "nothing", "cancelled".
+        self.view: Optional[str] = None
+        # The text window, when a text opened first; what of the other lanes
+        # has been handed to it.
+        self.reader = None
+        self._scan_handed = False
+        self._scholar_handed = False
+        # An old case Scholar has missed before (see _run_scholar).
+        self.quick = False
+        # The scan lookup's word that several cases begin at the citation and
+        # nothing says which: nothing lesser opens in its place.
+        self.refusal = ""
+        self.scholar_mates: list = []
+        self.scholar_retry_url = ""
+        self._cl_lock = threading.Lock()
+        self._cl_started = False
+        self._cl_ready = threading.Event()
+        self._cl_value: Optional[dict] = None
+        self._lesser_started = False
+        # What Scholar's lane leaves for the record of its misses (see
+        # _remember_miss): the citations asked by, whether it had missed them
+        # before, and whether it answered it has no copy.
+        self._scholar_asked: list = []
+        self._missed_before: Optional[str] = None
+        self._scholar_absent = False
+
+    # --- starting -------------------------------------------------------------
+
+    def start(self) -> None:
+        """Set Scholar's lane going beside the scan lookup the caller runs,
+        and the scan the citation names downloading; the lesser texts follow
+        when they may be wanted (Tk thread)."""
+        self._log("asked for " + ", ".join(p for p in (self.name, self.cite)
+                                           if p))
+        threading.Thread(target=self._speculate, daemon=True).start()
+        threading.Thread(target=self._lane,
+                         args=("scholar", self._run_scholar),
+                         daemon=True).start()
+        try:
+            root = self.app.root
+            root.after(int(max(0.0, self.GRACE_S - self.LESSER_LEAD_S)
+                           * 1000), self._lesser_due)
+            for seconds in (self.QUICK_GRACE_S, self.GRACE_S):
+                root.after(int(seconds * 1000) + 20, self._decide)
+        except (AttributeError, RuntimeError, tk.TclError):
+            pass
+
+    def _lesser_due(self) -> None:
+        """Scholar's head start is nearly over: send for the lesser texts,
+        if there is still a case to open (Tk thread)."""
+        with self._lock:
+            waiting = self._state["scholar"] == "pending"
+        if waiting and self.view is None:
+            self._start_lesser()
+
+    def _start_lesser(self) -> None:
+        """Send for static.case.law's text and CourtListener's — once."""
+        with self._lock:
+            if self._lesser_started:
+                return
+            self._lesser_started = True
+        self._log("sending for the lesser texts")
+        for lane, run in (("caselaw", self._run_caselaw),
+                          ("cl", self._run_cl)):
+            threading.Thread(target=self._lane, args=(lane, run),
+                             daemon=True).start()
+
+    def _log(self, text: str) -> None:
+        print(f"[race] {time.monotonic() - self.t0:5.2f}s {self.cite}: {text}")
+
+    def _us_cite(self) -> str:
+        """The case's U.S. Reports cite, read off the citation itself — an
+        early reporter's by its U.S. volume ("1 Cranch 137" is 5 U.S. 137)."""
+        for cite in (self.cite,
+                     *_official_series_for(self.cite, self.name, self.year)):
+            us = _normalized_us_cite(cite)
+            if us:
+                return us
+        return ""
+
+    def _speculate(self) -> None:
+        """Download the scan the citation itself names, ahead of the lookup
+        that will ask for it (see _shared_pdf_bytes): the lookup's check that
+        the file is there, and its download of it, then wait on this one
+        instead of starting their own.  Only the source that would be chosen
+        — the Library of Congress's copy through _LOC_PREFERRED_MAX, GovInfo's
+        after — and, for any other reporter, static.case.law's."""
+        with _watching(self.watch):
+            url = _download_scan_ahead(
+                self.cite, self.name, self.year, client=self.client,
+                stop=lambda: (self.watch is not None
+                              and self.watch.cancelled))
+            if url:
+                self._log(f"downloaded ahead: {url}")
+
+    # --- lanes ------------------------------------------------------------------
+
+    def _lane(self, lane: str, run) -> None:
+        with _watching(self.watch):
+            try:
+                ok, value = run()
+            except Exception as exc:
+                print(f"[race] the {lane} lane failed: {exc}")
+                ok, value = False, None
+            if lane == "scholar" and not ok:
+                self._start_lesser()        # wanted now, if anything is
+            self._settle(lane, ok, value)
+            if lane == "scholar":
+                self._remember_miss(ok)
+
+    def _settle(self, lane: str, ok: bool, value=None) -> None:
+        with self._lock:
+            if self._state[lane] != "pending":
+                return
+            self._state[lane] = "ok" if ok else "failed"
+            self._value[lane] = value if ok else None
+        self._settled[lane].set()
+        self._log(f"{lane} {'arrived' if ok else 'came to nothing'}")
+        try:
+            self.app._post_root(self._decide)
+        except (AttributeError, RuntimeError, tk.TclError):
+            pass
+
+    def wait(self, lane: str, timeout: "Optional[float]" = None):
+        """What *lane* brought, once it has answered — None if nothing
+        (any worker thread; never the Tk thread)."""
+        self._settled[lane].wait(timeout)
+        with self._lock:
+            return self._value[lane] if self._state[lane] == "ok" else None
+
+    def cl_item(self) -> dict:
+        """CourtListener's record of the case — looked up once, by whichever
+        lane asks first, and waited for by the rest (any worker thread).  A
+        search result already in hand is used as it is."""
+        with self._cl_lock:
+            mine = not self._cl_started
+            self._cl_started = True
+        if mine:
+            try:
+                item = self.app._cited_case_pdf_item(
+                    self.client, self.cite, self.name, known=self.known_item)
+            except Exception as exc:
+                print(f"[race] looking the case up on CourtListener "
+                      f"failed: {exc}")
+                item = {"citation": [self.cite], "caseName": self.name}
+            self._cl_value = item
+            self._cl_ready.set()
+        else:
+            self._cl_ready.wait(60)
+        return self._copy(self._cl_value)
+
+    def _cl_item_now(self) -> "Optional[dict]":
+        """CourtListener's record if it has come, without waiting."""
+        return self._copy(self._cl_value) if self._cl_ready.is_set() else None
+
+    @staticmethod
+    def _copy(item: "Optional[dict]") -> dict:
+        item = dict(item or {})
+        item["citation"] = list(item.get("citation") or [])
+        return item
+
+    def official_scan(self) -> "Optional[tuple[dict, str]]":
+        """The official scan, found by the U.S. Reports cite in hand before
+        CourtListener has been asked anything: ``(item, url)``, or None.
+        Only for a citation that came with the case's name, which is what
+        picks the opinion when two begin on the page (scan lane)."""
+        us = self._us_cite()
+        if not (us and self.name):
+            return None
+        item = {"citation": list(dict.fromkeys([self.cite, us])),
+                "caseName": self.name, "court_id": _SCOTUS_COURT_ID,
+                "_us_reports_cite": us, "_official_only": True}
+        url = self.app._resolve_pdf_url(self.client, item)
+        item.pop("_official_only", None)
+        if not url:
+            return None
+        self._log(f"the official scan, CourtListener unasked: {url}")
+        return item, url
+
+    def case_law_scan(self) -> "Optional[tuple[dict, str]]":
+        """static.case.law's scan of the reporter the citation names, found
+        before CourtListener has been asked anything — its record and the
+        case's parallel citations took one to three seconds, and the scan of
+        the very pages cited needs neither: ``(item, url)``, or None.
+
+        A state or federal reporter's only (the Supreme Court's are the
+        official reports, see official_scan), only with the case's name, and
+        only a scan that settles which case it is: several beginning on the
+        page go the long way, which knows whether to ask.  The case's other
+        reporters' scans are not looked for here; a text window shown first
+        fills its PDF menu with them afterwards (receive_race_scan)."""
+        m = _CITE_PARSE_RE.match(self.cite or "")
+        if (not self.name or not m or self._us_cite()
+                or m.group(2).strip() in _SCOTUS_REPORTERS
+                or _FED_APPX_RE.search(self.cite)):
+            return None
+        cites = list(dict.fromkeys(
+            [self.cite, *_official_series_for(self.cite, self.name,
+                                              self.year)]))
+        choices = _case_law_pdf_choices_for_cites(cites,
+                                                  expected_name=self.name)
+        if not choices:
+            return None
+        choice = _settled_choice(choices)
+        if choice.pick:
+            return None
+        self._log(f"static.case.law's scan, CourtListener unasked: "
+                  f"{choice.url}")
+        return ({"citation": cites, "caseName": self.name,
+                 "_case_law_pdf_choices": choices,
+                 "_other_reporters_unasked": True}, choice.url)
+
+    def use_us_cite(self, item: dict) -> None:
+        """Have the scan lookup try the U.S. Reports cite it already holds
+        before gathering more from CourtListener (see _resolve_pdf_url)."""
+        us = self._us_cite() or next(
+            (u for u in map(_normalized_us_cite,
+                            map(str, item.get("citation") or ())) if u), "")
+        if us:
+            item.setdefault("_us_reports_cite", us)
+
+    def _scholar_cites(self) -> list:
+        """The forms of the citation Scholar is asked by — none for a volume
+        or a docket number, and none for the Federal Cases, which Scholar
+        hardly ever finds by citation (as _warm_case_text)."""
+        paged = bool(re.match(r"\d+\s+\D.*?\s\d+\s*$", self.cite or ""))
+        if not paged or _FED_CAS_CITE_RE.search(self.cite or ""):
+            return []
+        return list(_citation_search_variants(self.cite))
+
+    def _case_facts(self) -> tuple:
+        """The case's citations, year and state — what a Scholar hit found by
+        its name alone must agree with (see _scholar_named_hit)."""
+        target = self.cl_item()
+        cites = [self.cite, *_official_series_for(self.cite, self.name,
+                                                  self.year),
+                 *[str(c) for c in target.get("citation") or []]]
+        year = self.year or str(target.get("dateFiled")
+                                or target.get("date_filed") or "")[:4]
+        state = next((s for s in map(_cite_state, cites) if s), "")
+        return cites, year, state
+
+    def _known_year(self) -> str:
+        """The year the case was decided, from whatever has said so."""
+        if self.year:
+            return self.year
+        _name, year = _case_name_and_year(self.cl_item(), "")
+        if year:
+            return year
+        source = self.wait("caselaw", timeout=10)
+        filed = str(((source.item if source is not None else None) or {})
+                    .get("dateFiled") or "")
+        return filed[:4] if filed[:4].isdigit() else ""
+
+    def _run_scholar(self) -> tuple:
+        fetcher = self.fetcher
+        if fetcher is None:
+            return False, None
+        cites = self._scholar_cites()
+        missed = None
+        if cites and hasattr(fetcher, "missed_before"):
+            missed = fetcher.missed_before(cites)
+        self._scholar_asked = cites
+        self._missed_before = missed
+        if missed is not None and _decided_before_1900(
+                self.year or missed,
+                [*cites, *_official_series_for(self.cite, self.name,
+                                               self.year)]):
+            self.quick = True
+            self._log(f"decided before 1900 and missed by Scholar before: "
+                      f"one try, {self.QUICK_GRACE_S:g}s")
+            self._start_lesser()
+        # The opinion page may follow the search that finds it after a
+        # second, not the usual three or more — once (see grant_quick_hop).
+        grant = getattr(fetcher, "grant_quick_hop", None)
+        if callable(grant):
+            grant()
+        result = None
+        absent = False
+        if self.scholar_url:
+            result = fetcher.fetch_by_url(self.scholar_url)
+            absent = not result and fetcher.last_fetch_absent()
+        elif cites:
+            name, year = self.name, self.year
+            if not name:
+                # Several cases can begin on a page; with no name typed,
+                # CourtListener's record says which one is meant.
+                name, year = _case_name_and_year(self.cl_item(), "")
+                year = self.year or year
+            lookups = cites[:1] if self.quick else cites
+            for lookup in lookups:
+                result = fetcher.fetch_by_citation(
+                    lookup, case_name=name, year=year)
+                self.scholar_mates = _take_page_mates(fetcher)
+                if result or self.scholar_mates:
+                    break
+                absent = absent or fetcher.last_fetch_absent()
+            if not (result or self.scholar_mates):
+                try:
+                    self.scholar_retry_url = (
+                        fetcher.take_post_search_failure() or "")
+                except Exception:
+                    self.scholar_retry_url = ""
+            if (not (result or self.scholar_mates or self.scholar_retry_url
+                     or self.quick) and self.name):
+                # The search by name and citation together that a typed
+                # citation with no scan anywhere has always gone on to — two
+                # more requests, so only once the scan has come to nothing.
+                # The lesser texts may be wanted by then.
+                self._start_lesser()
+                self._settled["scan"].wait(self.GRACE_S * 3)
+                with self._lock:
+                    no_scan = self._state["scan"] == "failed"
+                for lookup in lookups if no_scan else ():
+                    result = _scholar_named_hit(
+                        fetcher, self.name, lookup, self.year,
+                        self._case_facts)
+                    if result:
+                        break
+        self._scholar_absent = absent and not result
+        return bool(result), result
+
+    def _remember_miss(self, found: bool) -> None:
+        """Keep Scholar's record of the cases it has no copy of up to date
+        (see GoogleScholarFetcher.note_miss) — after the lane has reported,
+        as the year the miss is kept with may take a moment to learn."""
+        fetcher, cites = self.fetcher, self._scholar_asked
+        if fetcher is None or not cites:
+            return
+        try:
+            if found and self._missed_before is not None:
+                fetcher.forget_miss(cites)
+            elif not found and self._scholar_absent:
+                fetcher.note_miss(cites, self._known_year())
+        except Exception as exc:
+            print(f"[race] keeping Scholar's misses failed: {exc}")
+
+    def _run_caselaw(self) -> tuple:
+        if not self.cite or _FED_APPX_RE.search(self.cite):
+            return False, None
+        source = _case_law_text_source([self.cite], self.name, self.year,
+                                       prefer=self.cite)
+        return source is not None, source
+
+    def _run_cl(self) -> tuple:
+        if self.client is None:
+            return False, None
+        item = self.cl_item()
+        if not (item.get("cluster_id") or item.get("id")):
+            return False, None
+        source = _courtlistener_text_source(self.client, [], self.name,
+                                            item=item)
+        return source is not None, source
+
+    def case_law_for_scan(self, scan_url: str) -> "Optional[_CasePdfTextSource]":
+        """static.case.law's text as its lane read it, if that is the text of
+        the very file the scan on screen is — so it is not read twice; None
+        otherwise (see _case_law_text_for_scan).  Waits for the lane, when it
+        is under way and the scan is static.case.law's own (worker thread)."""
+        json_url = _case_law_json_for_pdf_url(scan_url or "")
+        if json_url and self._lesser_started:
+            self._settled["caselaw"].wait(15)
+        with self._lock:
+            source = (self._value["caselaw"]
+                      if self._state["caselaw"] == "ok" else None)
+        if json_url and source is not None and source.source_url == json_url:
+            return source
+        return None
+
+    # --- the scan lookup's reports ---------------------------------------------
+
+    def scan_found(self, data: bytes, url: str, meta, item: dict,
+                   shown_name: str) -> None:
+        """The scan is in hand (scan lane)."""
+        self._settle("scan", True, (data, url, meta, item, shown_name))
+
+    def scan_missing(self, reason: str = "") -> None:
+        """No scan could be found (any thread)."""
+        if reason:
+            self._log(f"no scan: {reason}")
+        self._settle("scan", False)
+
+    def scan_refused(self, message: str) -> None:
+        """Several cases begin at the citation and nothing says which: the
+        scan lookup will not guess, and no lesser text may either (Tk)."""
+        self.refusal = message
+        self._settle("scan", False)
+
+    def may_ask(self) -> bool:
+        """Whether the scan lookup may ask the reader which of a page's cases
+        is meant — only while nothing has opened; the case is then theirs to
+        choose, and nothing else opens (Tk thread)."""
+        if self.view is not None:
+            return False
+        self.view = "asked"
+        self._log("the reader is asked which of the page's cases")
+        return True
+
+    # --- deciding, on the Tk thread --------------------------------------------
+
+    def _decide(self) -> None:
+        """Open what there is to open, now that a lane has answered or a head
+        start has run out — or hand it to what has opened already."""
+        if self.view is not None:
+            if self.view in ("scholar", "caselaw", "cl"):
+                self._hand_over()
+            return
+        if self.watch is not None and self.watch.cancelled:
+            self.view = "cancelled"
+            return
+        with self._lock:
+            state = dict(self._state)
+        if state["scan"] == "ok":
+            self._open_scan()
+            return
+        if self.prefer_scan and state["scan"] == "pending":
+            return                  # the scan, wherever there is one
+        if state["scholar"] == "ok":
+            self._open_text("scholar")
+            return
+        if self.refusal:
+            if state["scholar"] == "failed":
+                self._refuse()
+            return
+        grace = self.QUICK_GRACE_S if self.quick else self.GRACE_S
+        late = time.monotonic() - self.t0 >= grace
+        if not ((late or state["scholar"] == "failed")
+                and (late or state["scan"] == "failed")):
+            return
+        for lane in ("caselaw", "cl"):
+            if state[lane] == "ok":
+                self._open_text(lane)
+                return
+            if state[lane] == "pending":
+                return
+        if "pending" in (state["scan"], state["scholar"]):
+            return
+        self._open_nothing()
+
+    def _open_scan(self) -> None:
+        self.view = "scan"
+        data, url, meta, item, shown_name = self._value["scan"]
+        self._log("opens on the scan")
+        self.app._show_cited_case_pdf(
+            self.parent, data, url, self.cite, self.pin, shown_name,
+            self.action, self.snippet, self.status, cl_item=item,
+            watch=self.watch, page_meta=meta, race=self)
+
+    def _open_text(self, lane: str) -> None:
+        """Open the case on *lane*'s text, in the window the load's status
+        window stood in (see _LoadWatch.to_text) — the scan, if it is still
+        coming, to follow behind its P."""
+        self.view = lane
+        value = self._value[lane]
+        with self._lock:
+            scan_pending = self._state["scan"] == "pending"
+        if self.watch is not None:
+            self.watch.to_text("Opening the text…")
+        win = None
+        try:
+            if lane == "scholar":
+                url, html = value
+                item = self._cl_item_now()
+                win = _ScholarTextWindow(
+                    self.parent, self.app, url, html,
+                    item=item if item and (item.get("cluster_id")
+                                           or item.get("id")) else None,
+                    scan_pending=scan_pending)
+            else:
+                win = _ScholarTextWindow(
+                    self.parent, self.app, "", "", item=dict(value.item),
+                    cl_text=value.text, cl_parts=list(value.parts),
+                    cl_blocks=list(value.blocks),
+                    primary_source_label=value.source_label,
+                    primary_source_url=value.source_url,
+                    primary_source_kind=value.kind,
+                    scan_pending=scan_pending)
+        except tk.TclError:
+            win = None
+        finally:
+            if self.watch is not None:
+                self.watch.finish()
+        self.reader = win
+        # A scan lookup over before the window opened left it to look for
+        # the pages itself, as a text window always has.
+        self._scan_handed = not scan_pending
+        self._log(f"opens on the {lane} text")
+        if win is None:
+            return
+        if self.pin:
+            try:
+                win.jump_to_cite_page(self.cite, self.pin)
+            except tk.TclError:
+                pass
+        self._hand_over()
+
+    def _hand_over(self) -> None:
+        """Give the text window what has come since it opened: the scan (or
+        word that there is none), and Scholar's text behind a lesser one."""
+        win = self.reader
+        if win is None:
+            return
+        with self._lock:
+            state = dict(self._state)
+        try:
+            if not self._scan_handed and state["scan"] != "pending":
+                self._scan_handed = True
+                if state["scan"] == "ok":
+                    data, url, meta, item, _shown = self._value["scan"]
+                    win.receive_race_scan(data, url, meta, item)
+                else:
+                    win.race_scan_missing()
+            if (self.view != "scholar" and not self._scholar_handed
+                    and state["scholar"] != "pending"):
+                self._scholar_handed = True
+                if state["scholar"] == "ok":
+                    url, html = self._value["scholar"]
+                    win._attach_scholar_version(
+                        url, html, "Google Scholar's text has come")
+                elif self.scholar_retry_url:
+                    win._retry_scholar_link(self.cite, self.pin,
+                                            self.scholar_retry_url)
+        except tk.TclError:
+            pass
+
+    def _refuse(self) -> None:
+        self.view = "refused"
+        self.status(self.refusal)
+        if self.watch is not None:
+            self.watch.fail(self.refusal)
+
+    def _open_nothing(self) -> None:
+        """No lane found anything: Scholar's question which case is meant,
+        or the caller's own further tries."""
+        self.view = "nothing"
+        self._log("nothing from any source")
+        watch = self.watch
+        if self.scholar_mates and self.fetcher is not None:
+            if watch is not None:
+                watch.finish()
+            self.app._ask_which_scholar_case(
+                self.parent, self.cite, self.pin, self.scholar_mates,
+                self.fetcher, self.client)
+            return
+        if self.on_nothing is None:
+            if watch is not None:
+                watch.fail("No scan or text of it could be found.")
+            return
+        if watch is not None:
+            watch.to_text("Nothing found yet — looking further…")
+        try:
+            self.on_nothing()
+        except tk.TclError:
+            pass
+        if watch is not None and not watch.claimed:
+            watch.finish()
+
+
 try:
     from pynput import keyboard as _pynput_keyboard
 
@@ -7711,6 +8521,11 @@ class CourtListenerGUI:
         # first lookup, so a search never arrives while the index is still
         # being built.  Deferred briefly so the window paints first.
         self.root.after(200, self._start_opinion_db_load)
+        # Read the English Reports' nominate index now, off the Tk thread:
+        # every citation typed into Spotlight is checked against it, and the
+        # first would otherwise wait the better part of a second for it.
+        self.root.after(1500, lambda: threading.Thread(
+            target=_warm_spotlight_indexes, daemon=True).start())
         # No CourtListener token yet?  Offer to enter one.  Deferred past
         # main()'s withdraw() so the dialog can tell whether the root window is
         # actually on screen.
@@ -8516,7 +9331,7 @@ class CourtListenerGUI:
             data = _bookmark_pdf_read(url)
             if data is None:
                 try:
-                    fetched = _fetch_pdf_bytes(url, timeout=30)
+                    fetched = _shared_pdf_bytes(url, timeout=30)
                 except Exception as exc:
                     print(f"[bookmark] fetching {url} again failed: {exc}")
                     fetched = None
@@ -9834,6 +10649,61 @@ class CourtListenerGUI:
         except Exception:
             pass
 
+    #: How long a Spotlight row is rested on before its scan is downloaded.
+    _SCAN_AHEAD_DWELL_MS = 350
+
+    #: Sites a lookup reaches: their connections opened while Spotlight is
+    #: being typed into, so the lookup does not wait on the handshakes.
+    _WARM_HOSTS = ("https://tile.loc.gov/", "https://www.govinfo.gov/",
+                   "https://static.case.law/",
+                   "https://www.courtlistener.com/")
+    _WARM_EVERY_S = 60.0     # connections left idle longer are closed
+
+    def _warm_for_lookup(self) -> None:
+        """Spotlight has opened, so a lookup is coming: open the connections
+        it will use, and make Google Scholar's once-a-session homepage visit
+        now, while the reader types, rather than in front of the first search
+        — which would then wait three seconds or more behind it.  In the
+        background; at most once a minute."""
+        now = time.monotonic()
+        if now - getattr(self, "_warmed_at", float("-inf")) < self._WARM_EVERY_S:
+            return
+        self._warmed_at = now
+        # CourtListener's API is asked through a session of its own (made
+        # here: the token lives in a Tk variable).
+        try:
+            client = (self._get_client()
+                      if self._token_var.get().strip() else None)
+        except Exception:
+            client = None
+        api = getattr(client, "_session", None)
+
+        def head(session, url: str) -> None:
+            try:
+                session.head(url, timeout=5, allow_redirects=False)
+            except Exception:
+                pass                # only a connection lost
+
+        def run() -> None:
+            hosts = [(_anon_session, u) for u in self._WARM_HOSTS]
+            if api is not None:
+                hosts.append((api, "https://www.courtlistener.com/api/rest/v4/"))
+            _in_parallel(*(lambda s=s, u=u: head(s, u) for s, u in hosts))
+            # Made here, not on the Tk thread: the first time, the fetcher
+            # reads Firefox's cookies, and the popup is going up.
+            try:
+                fetcher = self._get_scholar() if _SCHOLAR_AVAILABLE else None
+            except Exception:
+                fetcher = None
+            warm = getattr(fetcher, "warm", None)
+            if callable(warm):
+                try:
+                    warm()
+                except Exception as exc:
+                    print(f"[scholar] warming up failed: {exc}")
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _toggle_quick_search_popup(
             self, pressed_at: "Optional[float]" = None,
             query: str = "") -> None:
@@ -9854,6 +10724,7 @@ class CourtListenerGUI:
 
         popup = tk.Toplevel(self.root)
         self._quick_popup = popup
+        self._warm_for_lookup()
         # Reset the consecutive-empty-Return counter and dropdown generation
         # each time a fresh popup opens.
         self._spotlight_empty_returns = 0
@@ -10132,13 +11003,13 @@ class CourtListenerGUI:
         319" — the reader is asked which (*choose*), and the one picked is
         opened the same way, by its name and year."""
 
-        def run() -> None:
+        def run(scholar=fetcher) -> None:
             # The popup is already gone; a citation that resolves nowhere
             # would otherwise end in silence, which reads as the app having
             # hung.  (Asked here, not there, the case picked opens as a
             # typed citation does: its scan first.)
             if self._try_open_citation(
-                name, cite, pin, fetcher, client, year=year, choose=False,
+                name, cite, pin, scholar, client, year=year, choose=False,
             ):
                 return
             cases = _cases_beginning_at(client, cite) if choose else []
@@ -10153,12 +11024,20 @@ class CourtListenerGUI:
         def as_text() -> None:
             threading.Thread(target=run, daemon=True).start()
 
+        def after_the_race() -> None:
+            # Every source came back empty at once (see _CaseOpenRace): the
+            # rest of the text path's tries — a scan by the citation alone, a
+            # page of orders, which of several cases — with Google Scholar,
+            # asked already, left out.
+            threading.Thread(target=run, args=(None,), daemon=True).start()
+
         action = ("cite", f"{cite}@{pin}" if pin else cite)
         # A page of orders typed with no name to pick the order: the reader
         # picks it (ask_orders), not the page shown named for no case.
         if _FED_APPX_RE.search(cite) or not self.open_cited_case_pdf(
                 self.root, action, query, self._status_var.set,
-                fallback=as_text, name=name, ask_orders=True):
+                fallback=as_text, name=name, ask_orders=True,
+                race=True, year=year, race_fallback=after_the_race):
             as_text()
 
     def _ask_which_scholar_case(self, parent, cite: str, pin: str,
@@ -10766,6 +11645,7 @@ class CourtListenerGUI:
             _bind_wheel(r["row"])
             r["open_fn"] = open_fn
             r["bucket"] = bucket
+            r["case"] = (cite, name, year)
             result_rows.append(r)
             shown.append({"sig": sig, "bucket": bucket, "row": r})
             if bucket:
@@ -10839,6 +11719,40 @@ class CourtListenerGUI:
         def _highlight(idx: int) -> None:
             for i, r in enumerate(result_rows):
                 self._spot_highlight_row(r, i == idx)
+            _scan_ahead_soon(idx)
+
+        # A row the pointer or the arrow keys rest on is likely the one to be
+        # opened: its scan is downloaded while the reader decides, so the
+        # click finds it in hand.  Only after a moment's rest (a pointer
+        # passing over rows downloads nothing), once per row, and never the
+        # text — Google Scholar is asked only when a case is opened.
+        scan_ahead = {"after": None, "done": set()}
+
+        def _scan_ahead_soon(idx: int) -> None:
+            if scan_ahead["after"] is not None:
+                try:
+                    self.root.after_cancel(scan_ahead["after"])
+                except (tk.TclError, ValueError):
+                    pass
+            try:
+                scan_ahead["after"] = self.root.after(
+                    self._SCAN_AHEAD_DWELL_MS, lambda: _scan_ahead(idx))
+            except tk.TclError:
+                scan_ahead["after"] = None
+
+        def _scan_ahead(idx: int) -> None:
+            scan_ahead["after"] = None
+            if (my_gen != self._spotlight_generation
+                    or not 0 <= idx < len(result_rows)
+                    or selected_idx[0] != idx):
+                return
+            cite, name, year = result_rows[idx].get("case") or ("", "", "")
+            if not cite or cite in scan_ahead["done"]:
+                return
+            scan_ahead["done"].add(cite)
+            threading.Thread(
+                target=_download_scan_ahead, args=(cite, name, year),
+                daemon=True).start()
 
         # Keyboard-selection guard: Return opens the highlighted row only
         # while the entry still shows the text these results answered — or
@@ -11338,11 +12252,16 @@ class CourtListenerGUI:
                                     target=run, daemon=True,
                                 ).start()
 
-                            # The reporter interface prefers the scan even for
-                            # an opinion we already hold the text of.
+                            # Raced like any other result (see
+                            # _CaseOpenRace): the saved text is at hand at
+                            # once, by its own Scholar page.
                             if not self.reporter_open_case(
                                 self.root, cite=cite_str, name=nm,
                                 fallback=ordinary,
+                                scholar_url=(
+                                    f"https://scholar.google.com/"
+                                    f"scholar_case?case={scholar_id}"
+                                    if scholar_id else ""),
                             ):
                                 ordinary()
                         return open_it
@@ -11538,7 +12457,12 @@ class CourtListenerGUI:
                             snippet: str = "",
                             status=lambda _s: None, fallback=None,
                             name: str = "", context_name: str = "",
-                            ask_orders: bool = False) -> bool:
+                            ask_orders: bool = False, *,
+                            race: bool = False, year: str = "",
+                            scholar_url: str = "",
+                            known_item: "Optional[dict]" = None,
+                            race_fallback=None,
+                            prefer_scan: bool = False) -> bool:
         """Follow a citation clicked *inside a PDF* to the cited case's own
         PDF, in a viewer window of its own.
 
@@ -11572,6 +12496,17 @@ class CourtListenerGUI:
         *ask_orders*: a citation typed into Spotlight on its own has no case
         it was read in to say which, and the reader picks the order instead.
         A page that is not all orders asks which of its cases is meant.
+
+        ``race``: the way Spotlight and the search results open a case — the
+        scan and every text looked for at once, and whichever of the scan and
+        Google Scholar's text arrives first opened (see _CaseOpenRace).  The
+        lookup below is then its scan lane.  ``year`` (from the citation's
+        parenthetical), ``scholar_url`` (a Scholar result's own page) and
+        ``known_item`` (a CourtListener result's cluster) are what the click
+        already knows; ``race_fallback``, when given, runs instead of
+        ``fallback`` if nothing anywhere has the case.  ``prefer_scan``: the
+        scan opens wherever there is one, the text only when there is none
+        (a citation followed out of a document; see _CaseOpenRace).
         """
         kind, value = action if isinstance(action, tuple) else ("", "")
         if kind != "cite":
@@ -11599,8 +12534,24 @@ class CourtListenerGUI:
         watch = self.watch_load(
             parent, f"{name}, {cite}" if name and cite not in name
             else label, cite=cite)
+        # The race this lookup is the scan lane of, if any — let go of when
+        # the reader is asked which case is meant, whose pick opens as a scan
+        # always has.
+        lanes = {"race": None}
+        if race:
+            lanes["race"] = _CaseOpenRace(
+                self, parent, cite=cite, name=name, pin=pin, year=year,
+                client=client,
+                fetcher=self._get_scholar() if _SCHOLAR_AVAILABLE else None,
+                watch=watch, status=safe_status, action=action,
+                snippet=snippet, scholar_url=scholar_url, item=known_item,
+                on_nothing=race_fallback or fallback,
+                prefer_scan=prefer_scan)
 
         def give_up(reason: str) -> None:
+            if lanes["race"] is not None:
+                lanes["race"].scan_missing(reason)
+                return
             safe_status(reason)
             if watch.cancelled:
                 return          # the reader stopped waiting for it
@@ -11618,18 +12569,31 @@ class CourtListenerGUI:
                 # has nothing more it can tell.
                 watch.finish()
 
-        safe_status(f"Looking for a PDF of {label}…")
+        safe_status(f"Opening {label}…" if race
+                    else f"Looking for a PDF of {label}…")
 
         def find() -> None:
             url = ""
             item: dict = {}
+            racing = lanes["race"]
             try:
-                item = self._cited_case_pdf_item(client, cite, name)
-                if context_name and not name:
-                    item["_context_name"] = context_name
-                if ask_orders:
-                    item["_ask_orders"] = True
-                url = self._resolve_pdf_url(client, item) or ""
+                # Racing, a U.S. cite that came with its case's name has its
+                # official scan looked for before CourtListener answers; the
+                # record CourtListener does give is shared with the text lanes.
+                found = (racing.official_scan() or racing.case_law_scan()
+                         if racing is not None else None)
+                if found is not None:
+                    item, url = found
+                else:
+                    item = (racing.cl_item() if racing is not None
+                            else self._cited_case_pdf_item(client, cite, name))
+                    if racing is not None:
+                        racing.use_us_cite(item)
+                    if context_name and not name:
+                        item["_context_name"] = context_name
+                    if ask_orders:
+                        item["_ask_orders"] = True
+                    url = self._resolve_pdf_url(client, item) or ""
             except Exception as exc:
                 print(f"[cite-pdf] resolving {cite!r} failed: {exc}")
             if watch.cancelled:
@@ -11648,6 +12612,9 @@ class CourtListenerGUI:
                            "can't tell which, so nothing opened")
 
                 def refuse() -> None:
+                    if lanes["race"] is not None:
+                        lanes["race"].scan_refused(message)
+                        return
                     # The load's window says it, or the reader is told
                     # (see _LoadWatch.fail).
                     safe_status(message)
@@ -11666,10 +12633,14 @@ class CourtListenerGUI:
             open_scan(url, item)
 
         def open_scan(url: str, item: dict, picked: str = "") -> None:
+            racing = lanes["race"]
             fetched = None
             if url:
                 try:
-                    fetched = _fetch_pdf_bytes(url, client=client, timeout=30)
+                    # The download sent ahead may be this very one, and a
+                    # scan opened before may be kept on disk.
+                    fetched = _shared_pdf_bytes(url, client=client,
+                                                timeout=30)
                 except Exception as exc:
                     print(f"[cite-pdf] fetching {url} failed: {exc}")
             if watch.cancelled:
@@ -11690,6 +12661,9 @@ class CourtListenerGUI:
             shown_name = picked or (
                 "" if item.get("_orders_page")
                 else name or str(item.get("_order_name") or ""))
+            if racing is not None:
+                racing.scan_found(data, final_url, meta, item, shown_name)
+                return
             # The cluster this scan was found through is worth keeping: it is
             # what the T button falls back to when Google Scholar has no copy
             # of the case, and it saves looking the citation up a second time.
@@ -11706,6 +12680,13 @@ class CourtListenerGUI:
             picked is fetched and opened as a found scan would be."""
             if watch.cancelled:
                 return
+            racing = lanes["race"]
+            if racing is not None:
+                if not racing.may_ask():
+                    # A text has opened already: its P finds the pages.
+                    racing.scan_missing("several cases begin there")
+                    return
+                lanes["race"] = None
             try:
                 host = parent if parent.winfo_exists() else self.root
             except (AttributeError, tk.TclError):
@@ -11749,31 +12730,44 @@ class CourtListenerGUI:
                 except Exception as exc:     # never leave a window waiting
                     print(f"[cite-pdf] looking for {cite!r} failed: {exc}")
                     problem = str(exc) or type(exc).__name__
+                    if lanes["race"] is not None:
+                        lanes["race"].scan_missing(problem)
+                        return
                     self._post_root(lambda: (
                         safe_status(f"Could not open {label}: {problem}"),
                         watch.fail(f"Something went wrong: {problem}")))
 
         threading.Thread(target=run, daemon=True).start()
+        if lanes["race"] is not None:
+            lanes["race"].start()
         return True
 
     def reporter_open_case(self, parent, item: Optional[dict] = None,
                            cite: str = "", name: str = "",
-                           fallback=None) -> bool:
-        """Open a case as its scan when the reporter interface is on.
+                           fallback=None, scholar_url: str = "") -> bool:
+        """Open a case clicked in a list of search results: its scan and its
+        text looked for at once, and whichever of the scan and Google
+        Scholar's text comes first opened (see _CaseOpenRace).
 
         The one place search results — the main window's and Spotlight's —
-        ask, so all of them mean the same thing by Reporter View.  Returns
-        whether the scan lookup took the click; False leaves the caller to
+        ask, so all of them mean the same thing by Reporter View.  What the
+        row already knows goes along: a CourtListener result's cluster
+        (*item*), a Google Scholar result's own page (*scholar_url*).
+        Returns whether the lookup took the click; False leaves the caller to
         open the case however it normally would."""
+        year = ""
         if item is not None:
             cite = cite or _pick_citation(item.get("citation") or [])
             name = name or str(
                 item.get("caseName") or item.get("case_name") or "")
+            name = re.sub(r"<[^>]+>", "", name).strip()
+            _name, year = _case_name_and_year(item, name)
         if not str(cite or "").strip():
             return False
         return self.open_cited_case_pdf(
             parent if parent is not None else self.root, ("cite", cite),
-            name, self._safe_root_status, fallback=fallback, name=name)
+            name, self._safe_root_status, fallback=fallback, name=name,
+            race=True, year=year, scholar_url=scholar_url, known_item=item)
 
     def _safe_root_status(self, text: str) -> None:
         try:
@@ -11852,15 +12846,19 @@ class CourtListenerGUI:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _cited_case_pdf_item(self, client, cite: str, name: str) -> dict:
+    def _cited_case_pdf_item(self, client, cite: str, name: str,
+                             known: "Optional[dict]" = None) -> dict:
         """A search-result-shaped record for a cited case, good enough for the
         PDF resolver.  CourtListener's own cluster at this citation when it has
         one — it carries the court, the decision date, the docket number and
         the parallel U.S. Reports cite the official scan is keyed on — else the
-        citation and the case name alone."""
+        citation and the case name alone.  ``known``: the cluster already in
+        hand (a CourtListener search result clicked), not looked up again."""
         item: dict = {}
         official = _official_series_for(cite, name)
-        if client is not None:
+        if known and (known.get("cluster_id") or known.get("id")):
+            item = dict(known)
+        elif client is not None:
             _load_step(f"Looking {cite} up on CourtListener…")
             # The cite as printed, then — an old nominative it files under
             # another — its official form: "2 Met. 329" is 43 Mass. 329.
@@ -11894,7 +12892,8 @@ class CourtListenerGUI:
                              writing: str = "merits",
                              start_page: "Optional[int]" = None,
                              watch: "Optional[_LoadWatch]" = None,
-                             page_meta: "Optional[list]" = None) -> None:
+                             page_meta: "Optional[list]" = None,
+                             race: "Optional[_CaseOpenRace]" = None) -> None:
         """Put a cited case's scan on screen, with its text warming behind it.
 
         ``cl_item`` is the CourtListener cluster the scan was found through,
@@ -11907,7 +12906,9 @@ class CourtListenerGUI:
         the scan (see _LoadWatch): a case the reader stopped waiting for is
         let go, and one slow enough to have had a status window opens in its
         place.  ``page_meta``, the pages' measurements taken on the worker
-        thread (see _measure_pdf_pages)."""
+        thread (see _measure_pdf_pages).  ``race``: the opening the scan won
+        (see _CaseOpenRace), whose text lanes are already under way — the
+        text behind T is theirs, not fetched a second time."""
         if watch is not None and watch.cancelled:
             return
         geometry = (watch.hand_off() if watch is not None else None) or ""
@@ -11994,7 +12995,8 @@ class CourtListenerGUI:
                       or named.get("name") or "")
             if not self.open_cited_case_pdf(onward(), act, snip, status,
                                             fallback=as_text,
-                                            context_name=own):
+                                            context_name=own, race=True,
+                                            prefer_scan=True):
                 as_text()
 
         # The text is fetched now rather than when the reader asks for it, so
@@ -12009,7 +13011,9 @@ class CourtListenerGUI:
                                  cl_item=cl_item, scan_url=url,
                                  decided=decided, writing=writing,
                                  own_text=lambda: _slip_text_source(
-                                     data, url, cl_item))
+                                     data, url, cl_item),
+                                 **({"race": race} if race is not None
+                                    else {}))
         try:
             window = _FloatingPdfWindow(
                 self.root, data, url, title, margin=margin, app=self,
@@ -12231,11 +13235,14 @@ class CourtListenerGUI:
                         on_page=None, on_text_source=None,
                         cl_item: "Optional[dict]" = None,
                         scan_url: str = "", decided: str = "",
-                        writing: str = "merits", own_text=None) -> None:
+                        writing: str = "merits", own_text=None,
+                        race: "Optional[_CaseOpenRace]" = None) -> None:
         """Fetch the cited opinion's text in the background, so the case name
         on the viewer's strip opens a page that is already in hand.  Uses the
         ordinary Google Scholar path, whose result is cached and saved to the
         opinion database — which is exactly what the click then reads.
+        ``race``: the case's opening, whose lanes are fetching this text
+        already (see _CaseOpenRace) — waited on here instead.
 
         ``on_record`` receives what that page says about the case — its
         caption, its parallel citations, its court and its decision date — the
@@ -12297,6 +13304,9 @@ class CourtListenerGUI:
                 except Exception as exc:
                     print(f"[cite-pdf] keeping the opinion page "
                           f"failed: {exc}")
+                # T renders it later, on the Tk thread: its citations are
+                # read now, here, so pressing T does not wait on them.
+                _scan_opinion_links_ahead(fetched[1])
             if on_record is not None:
                 # A page that prints no year ("71 U.S. 2 (____)") gets one
                 # from where the page was found, or failing that elsewhere.
@@ -12312,6 +13322,11 @@ class CourtListenerGUI:
 
         def scholar() -> bool:
             """Whether Google Scholar answered with a copy of the case."""
+            if race is not None:
+                fetched = race.wait("scholar")
+                if fetched:
+                    keep(fetched)
+                return bool(fetched)
             if fetcher is None:
                 return False
             try:
@@ -12370,11 +13385,15 @@ class CourtListenerGUI:
                 parallel = re.sub(r"<[^>]+>", "", str(parallel or "")).strip()
                 if parallel and parallel not in cites:
                     cites.append(parallel)
-            source = _case_law_text_for_scan(
+            source = (
+                race.case_law_for_scan(scan_url) if race is not None else None
+            ) or _case_law_text_for_scan(
                 scan_url, cites, name,
                 str((cl_item or {}).get("dateFiled") or ""),
             )
-            if source is None and client is not None:
+            if source is None and race is not None:
+                source = race.wait("cl")    # the very record, already read
+            elif source is None and client is not None:
                 item = cl_item
                 if not (item and (item.get("cluster_id") or item.get("id"))):
                     item = decided_cluster() or cl_item
@@ -12594,11 +13613,15 @@ class CourtListenerGUI:
             links: dict = {}
             quiet: set = set()
             sections: list = []
+            # The window comes first: its pages are being drawn just now.
+            _yield_to_ui()
             try:
-                pages, italics = _extract_pdf_text_and_style(data)
+                pages, italics = _extract_pdf_text_and_style(
+                    data, between_pages=_yield_to_ui)
             except Exception as exc:
                 print(f"[cite-pdf] text extraction failed: {exc}")
             if any(pages or []):
+                _yield_to_ui()
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
                         data, pages, italics)
@@ -12751,31 +13774,8 @@ class CourtListenerGUI:
                     if mates:
                         break
                     if not result and name:
-                        # Accept a name+cite search hit only when the *result*
-                        # itself is this case — bearing an equivalent cite in
-                        # its title/byline (and, of several cases beginning on
-                        # that page, the one answering to the name), or else
-                        # matching the case name and bearing another of its
-                        # citations, or its year and state — never merely
-                        # because another opinion quotes the query, nor
-                        # because it is the other case printed on the same
-                        # page, nor because it shares the name.
-                        hits = fetcher.search_cases(
-                            f"{name} {lookup_cite}", limit=3,
-                        )
-                        hit = fetcher.pick_cited_result(
-                            hits, lookup_cite, name, year)
-                        if hit is None:
-                            named = [h for h in hits
-                                     if _is_the_named_case(name, h.title or "")]
-                            facts = case_facts() if named else ()
-                            hit = next(
-                                (h for h in named
-                                 if _named_hit_is_the_case(h, name, *facts)),
-                                None,
-                            )
-                        if hit is not None:
-                            result = fetcher.fetch_by_url(hit.url)
+                        result = _scholar_named_hit(
+                            fetcher, name, lookup_cite, year, case_facts)
                     if result:
                         break
             except Exception as exc:
@@ -14411,10 +15411,12 @@ class CourtListenerGUI:
         Strategy (local_path always preferred over download_url):
         0. US Reports citation → LOC CDN preferred for vols 1-501 (GovInfo
            backup), GovInfo preferred for vols 502-583 (LOC CDN backup through
-           vol 542), then an opinion carved from the Court's own volume PDF
-           (vols 584+; fetched from supremecourt.gov once and kept in the
-           "US Reports" folder).  Volumes on none of those fall through to
-           local_path.
+           vol 542) — the two asked at once — then an opinion carved from the
+           Court's own volume PDF (vols 584+; fetched from supremecourt.gov
+           once and kept in the "US Reports" folder).  Volumes on none of
+           those fall through to local_path.  ``_official_only`` on the item
+           stops there: the official scan of the U.S. cite it carries, or
+           nothing.
         0.5. Non-SCOTUS cases: try static.case.law (Harvard CAP) first.
              Only falls through if the URL returns a non-200 response.
         1. local_path from the search result (if already present).
@@ -14474,6 +15476,11 @@ class CourtListenerGUI:
             taken for the scan, that page stood between the reader and the
             Library of Congress copy behind it."""
             _load_step(_resolve_step_text(label, url))
+            # A download of it already under way — sent ahead by the case's
+            # opening (see _CaseOpenRace) — answers sooner than a HEAD would.
+            if not _is_courtlistener_url(url) and _shared_pdf_answer(url):
+                print(f"[resolve] {label} is already downloaded: {url}")
+                return True
             try:
                 session = (
                     client._session if _is_courtlistener_url(url)
@@ -14516,37 +15523,78 @@ class CourtListenerGUI:
                 item["_case_law_pdf_choices"] = choices
             return chosen
 
-        def _try_govinfo(cite: str) -> Optional[str]:
+        def _probe_govinfo(cite: str) -> Optional[tuple]:
+            """Whether GovInfo has the scan: ``(link url, the direct PDF's
+            url)`` by its stable link, ``("", direct url)`` by the file
+            alone, or None."""
             gov = _us_reports_govinfo_url(cite)
             if not gov:
                 return None
             link_url, direct_url = gov
             if _head_ok(link_url, "GovInfo link", pdf_only=True):
-                print(f"[resolve] using GovInfo link URL: {link_url}")
-                # The stable link redirects to the first opinion on the page;
-                # where a second one begins there too, the scans themselves
-                # are what have to be chosen between.
-                chosen = _which_opinion(cite, direct_url)
-                return link_url if chosen == direct_url else chosen
+                return link_url, direct_url
             if _head_ok(direct_url, "GovInfo direct PDF", pdf_only=True):
-                print(f"[resolve] using GovInfo direct PDF URL: {direct_url}")
-                return _which_opinion(cite, direct_url)
+                return "", direct_url
             return None
 
-        def _try_loc(cite: str) -> Optional[str]:
+        def _take_govinfo(cite: str, found: tuple) -> str:
+            link_url, direct_url = found
+            if not link_url:
+                print(f"[resolve] using GovInfo direct PDF URL: {direct_url}")
+                return _which_opinion(cite, direct_url)
+            print(f"[resolve] using GovInfo link URL: {link_url}")
+            # The stable link redirects to the first opinion on the page;
+            # where a second one begins there too, the scans themselves are
+            # what have to be chosen between.
+            chosen = _which_opinion(cite, direct_url)
+            return link_url if chosen == direct_url else chosen
+
+        def _probe_loc(cite: str, preferred: bool = False) -> Optional[str]:
             loc_url = _us_reports_loc_url(cite)
-            if loc_url and _head_ok(loc_url, "LOC US Reports", pdf_only=True):
-                print(f"[resolve] using LOC US Reports PDF: {loc_url}")
-                return _which_opinion(cite, loc_url)
+            if not loc_url:
+                return None
+            if preferred:
+                # Where its copy is the one wanted, the Library is asked for
+                # the file itself: its HEAD took one to three seconds, the
+                # file a fraction of one — and the download is kept for the
+                # window to show (see _shared_pdf_bytes).  A download that
+                # fails outright leaves it to the HEAD.
+                _load_step(_resolve_step_text("LOC US Reports", loc_url))
+                try:
+                    if _shared_pdf_bytes(loc_url, client=client, probe=True):
+                        return loc_url
+                    return None
+                except Exception as exc:
+                    print(f"[resolve] LOC download check failed ({exc}): "
+                          f"{loc_url}")
+            if _head_ok(loc_url, "LOC US Reports", pdf_only=True):
+                return loc_url
             return None
+
+        def _take_loc(cite: str, loc_url: str) -> str:
+            print(f"[resolve] using LOC US Reports PDF: {loc_url}")
+            return _which_opinion(cite, loc_url)
 
         def _try_official_us_reports(cite: str) -> Optional[str]:
             """Try every official-report source for one U.S. citation."""
             m = _US_CITE_RE.search(cite)
             loc_preferred = bool(m) and int(m.group(1)) <= _LOC_PREFERRED_MAX
+            # Both are asked at once, and both answers waited for; the
+            # preferred one that has the scan is taken.  (Which of a page's
+            # opinions to open is settled after, for the source taken alone —
+            # what it finds goes on the item.)
+            loc, gov = _in_parallel(lambda: _probe_loc(cite, loc_preferred),
+                                    lambda: _probe_govinfo(cite))
+            answers = {}
+            for name, future in (("loc", loc), ("gov", gov)):
+                try:
+                    answers[name] = future.result()
+                except Exception as exc:
+                    print(f"[resolve] {name} check failed for {cite!r}: {exc}")
+                    answers[name] = None
             sources = (
-                (_try_loc, _try_govinfo) if loc_preferred
-                else (_try_govinfo, _try_loc)
+                (("loc", _take_loc), ("gov", _take_govinfo)) if loc_preferred
+                else (("gov", _take_govinfo), ("loc", _take_loc))
             )
             # Every path below keys on a U.S. Reports cite, so whichever one
             # succeeds names the pages the reader is about to see.  Record it:
@@ -14554,9 +15602,9 @@ class CourtListenerGUI:
             # no U.S. cite of its own, and the saved file should still be named
             # for the reporter it was carved out of (see
             # _build_default_filename).
-            for source in sources:
-                url = source(cite)
-                if url is not None:
+            for name, take in sources:
+                if answers[name]:
+                    url = take(cite, answers[name])
                     _remember_us_reports_cite(cite)
                     return url
             if m and (us_reports_pdf.has_volume(int(m.group(1)))
@@ -14582,6 +15630,10 @@ class CourtListenerGUI:
             url = _try_official_us_reports(given_us_cite)
             if url is not None:
                 return url
+        # Asked for the official scan alone — before CourtListener has said
+        # anything about the case (see _CaseOpenRace.official_scan).
+        if item.get("_official_only"):
+            return None
 
         # ``_pdf_item`` normally folds these in before starting the worker.
         # Repeat the lightweight read here so an opinion-database load that
@@ -15164,10 +16216,11 @@ class CourtListenerGUI:
         page on a worker and show the text, or fall back to CourtListener when
         Google will not serve the page."""
         def open_it() -> None:
-            # The reporter interface answers a search with the report itself.
+            # The scan and the result's own page, raced (see _CaseOpenRace).
             if self.reporter_open_case(self.root, cite=cite,
                                        name=getattr(result, "title", ""),
-                                       fallback=as_text):
+                                       fallback=as_text,
+                                       scholar_url=getattr(result, "url", "")):
                 return
             as_text()
 
@@ -16855,7 +17908,10 @@ def _caption_party(s: str) -> str:
     # 10.2.1(b)): "THE UNITED STATES, ON THE RELATION OF WILLIAM B. STOKES
     # ET AL." is United States ex rel. Stokes — Kendall v. United States ex
     # rel. Stokes, 37 U.S. (12 Pet.) 524, was cited without its relator.
-    relation = split_relator(s)
+    # One past a semicolon is a co-party's, though: "WASHINGTON State; The
+    # People of the State of California, ex rel. Kamala D. Harris, …" is
+    # Washington alone (rule 10.2.1(a)).
+    relation = split_relator(s.split(";", 1)[0])
     if relation is not None:
         party, relator = (_caption_party(p) for p in relation)
         if party and relator:
@@ -19536,6 +20592,36 @@ class _TextFinder:
 _PDFIUM_LOCK = pdfium_lock.PDFIUM_LOCK
 _PDF_HEADER_RE = re.compile(br"%PDF-\d")
 
+# A window going up comes before the background reading of a PDF.  Reading a
+# scan's text is work enough — the PDFium lock a page at a time, and the GIL
+# all the while — that a window built meanwhile took seconds to appear: every
+# Tk call waits its turn for the GIL behind it.  So a window being built (and
+# drawing its first pages just after) closes the gate below for a moment, and
+# the readers wait at their next page.  A deadline rather than a count: it
+# can never be left shut.
+_UI_FIRST = {"until": 0.0}
+_UI_FIRST_MAX_S = 3.0      # longest a reader is ever held back at once
+
+
+def _ui_first(seconds: float) -> None:
+    """Hold background PDF reading back for *seconds* from now (Tk thread):
+    called as a window starts to be built, and again — shorter, which opens
+    the gate sooner — once it is up, to cover its first pages' drawing."""
+    _UI_FIRST["until"] = time.monotonic() + seconds
+
+
+def _yield_to_ui() -> None:
+    """Wait while a window is going up (see _ui_first) — never on the Tk
+    thread itself, and never for more than _UI_FIRST_MAX_S."""
+    if threading.current_thread() is threading.main_thread():
+        return
+    give_up = time.monotonic() + _UI_FIRST_MAX_S
+    while True:
+        now = time.monotonic()
+        if now >= _UI_FIRST["until"] or now >= give_up:
+            return
+        time.sleep(min(0.05, _UI_FIRST["until"] - now))
+
 # Bit 7 of a PDF font descriptor's flags (PDF 1.7 §9.8.2, Table 123): the face
 # is italic.  Case names are set in italic and the prose around them is not.
 _FONT_FLAG_ITALIC = 1 << 6
@@ -19682,15 +20768,27 @@ def _source_name(url: str) -> str:
     return host.removeprefix("www.") or "the source"
 
 
+class _ProvisionalMeta(list):
+    """Page measurements of which only the first ``measured`` pages' crop
+    was read; the rest are a guess the pane replaces once it has read them
+    (see _PdfPane.measure_pdf)."""
+
+    def __init__(self, items, measured: int) -> None:
+        super().__init__(items)
+        self.measured = measured
+
+
 def _measure_pdf_pages(data: bytes) -> "Optional[list]":
     """The pages' measurements a PDF pane takes as it opens (see
     _PdfPane.measure_pdf), taken on the calling worker thread instead, so
     the Tk thread — every window's — is not held while a long scan is
-    measured.  None when they could not be taken; the pane then takes them
-    itself."""
+    measured.  Only the first pages' crop is read now (the rest follow once
+    the window is up); a window going up meanwhile comes first.  None when
+    they could not be taken; the pane then takes them itself."""
     try:
         _load_step("Preparing the pages…")
-        return _PdfPane.measure_pdf(data)
+        _yield_to_ui()
+        return _PdfPane.measure_pdf(data, first=_PdfPane._MEASURE_FIRST)
     except Exception as exc:
         print(f"[pdf] measuring the pages failed: {exc}")
         return None
@@ -19770,6 +20868,236 @@ def _fetch_pdf_bytes(
             if nxt not in seen and nxt not in queue:
                 queue.append(nxt)
     return None
+
+
+class _SharedFetches:
+    """Network answers more than one lookup asks for at once — a case's scan,
+    wanted by the check that it is there and by the download that shows it —
+    fetched once, and handed to everyone who asks while it is coming.
+
+    A kept answer lasts ``TTL`` seconds (``MAX`` of them at most, the oldest
+    going first): long enough for the lookups of one case's opening to share
+    it, too short to serve anyone a stale copy.  A failure, or an empty
+    answer, is never kept — only waited on by whoever asked meanwhile — so
+    asking again asks again."""
+
+    TTL = 90.0
+    MAX = 6
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict = {}     # key -> (when, Future)
+
+    def get(self, key, fetch, *, keep: bool = True):
+        """``fetch()``'s answer for *key*: one already had, one on its way,
+        or else a new one, fetched on this thread.  ``keep=False`` shares an
+        answer only while it is coming."""
+        from concurrent.futures import Future
+        with self._lock:
+            self._expire()
+            entry = self._entries.get(key)
+            if entry is None:
+                future: Future = Future()
+                self._entries[key] = (time.monotonic(), future)
+            else:
+                future = entry[1]
+        if entry is not None:
+            return future.result()
+        try:
+            value = fetch()
+        except BaseException as exc:
+            self._drop(key, future)
+            future.set_exception(exc)
+            raise
+        if value is None or not keep:
+            self._drop(key, future)
+        future.set_result(value)
+        return value
+
+    def pending(self, key):
+        """The answer for *key* had or on its way, as a future; None when
+        nobody has asked."""
+        with self._lock:
+            self._expire()
+            entry = self._entries.get(key)
+        return entry[1] if entry is not None else None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def _drop(self, key, future) -> None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry[1] is future:
+                del self._entries[key]
+
+    def _expire(self) -> None:
+        now = time.monotonic()
+        done = sorted((when, key) for key, (when, future)
+                      in self._entries.items() if future.done())
+        stale = [key for when, key in done if now - when > self.TTL]
+        stale += [key for _when, key in done[:max(0, len(done) - self.MAX)]]
+        for key in stale:
+            self._entries.pop(key, None)
+
+
+_SHARED_NET = _SharedFetches()
+
+#: Where the scans of the official reports and static.case.law's are kept
+#: between runs: files that never change, so a case opened again has its
+#: pages at once.  None keeps nothing.  The oldest go first past
+#: _SCAN_CACHE_MAX_BYTES.
+_SCAN_CACHE_DIR: "Optional[Path]" = Path.home() / ".cache" / "getcases_scans"
+_SCAN_CACHE_MAX_BYTES = 500 * 1024 * 1024
+_SCAN_CACHE_HOSTS = frozenset((
+    "tile.loc.gov", "cdn.loc.gov", "www.govinfo.gov", "govinfo.gov",
+    "static.case.law"))
+
+
+def _scan_cache_path(url: str) -> "Optional[Path]":
+    """Where the scan at *url* is kept, or None for one not kept: anything
+    but the Library of Congress's, GovInfo's and static.case.law's."""
+    if _SCAN_CACHE_DIR is None or not url:
+        return None
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if host not in _SCAN_CACHE_HOSTS:
+        return None
+    import hashlib
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return Path(_SCAN_CACHE_DIR) / f"{name}.pdf"
+
+
+def _scan_cache_read(url: str) -> "Optional[tuple[bytes, str]]":
+    """The kept scan of *url* — ``(bytes, the address it came from)`` — or
+    None."""
+    path = _scan_cache_path(url)
+    if path is None:
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not _PDF_HEADER_RE.search(data[:1024]):
+        return None
+    try:
+        final_url = path.with_suffix(".url").read_text(
+            encoding="utf-8").strip() or url
+    except OSError:
+        final_url = url
+    try:
+        os.utime(path)          # the most recently used goes last
+    except OSError:
+        pass
+    return data, final_url
+
+
+def _scan_cache_write(url: str, fetched) -> None:
+    """Keep the scan just fetched from *url*, and let the oldest go past the
+    limit.  Best-effort: a scan not kept is fetched again next time."""
+    path = _scan_cache_path(url)
+    if path is None or not fetched:
+        return
+    data, final_url = fetched
+    if not data or not _PDF_HEADER_RE.search(data[:1024]):
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.with_suffix(".url").write_text(final_url or url,
+                                            encoding="utf-8")
+        tmp = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.part")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[scan-cache] keeping {url} failed: {exc}")
+        return
+    _scan_cache_trim()
+
+
+def _scan_cache_trim() -> None:
+    try:
+        kept = sorted(Path(_SCAN_CACHE_DIR).glob("*.pdf"),
+                      key=lambda p: p.stat().st_mtime)
+        total = sum(p.stat().st_size for p in kept)
+    except (OSError, TypeError):
+        return
+    for path in kept:
+        if total <= _SCAN_CACHE_MAX_BYTES:
+            break
+        try:
+            total -= path.stat().st_size
+            path.unlink()
+            path.with_suffix(".url").unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _shared_pdf_bytes(url: str, *, client=None, timeout: int = 30,
+                      probe: bool = False) -> "Optional[tuple[bytes, str]]":
+    """:func:`_fetch_pdf_bytes`, shared (see _SharedFetches): the scan one of
+    a case's lookups is downloading is the one another is about to ask for.
+    A scan of the official reports or static.case.law's is kept on disk
+    (see _scan_cache_read), and read from there the next time.
+
+    ``probe`` asks for the file itself or nothing — no following a web page
+    to the PDF it links — which is how a download sent ahead of the lookup
+    finds out whether a scan is there at all: GovInfo answers a file it lacks
+    with a 200 web page.  Only a public file is shared; CourtListener's own
+    copies, and a volume read off disk, are fetched as they always were."""
+    if (not url or url.startswith("file:")
+            or _is_courtlistener_url(url)):
+        return _fetch_pdf_bytes(url, client=client, timeout=timeout)
+    kept = _scan_cache_read(url)
+    if kept is not None:
+        return kept
+
+    def fetch():
+        fetched = _fetch_pdf_bytes(url, client=client, timeout=timeout,
+                                   max_hops=1 if probe else 3)
+        _scan_cache_write(url, fetched)
+        return fetched
+
+    return _SHARED_NET.get(("pdf", url), fetch)
+
+
+def _shared_pdf_answer(url: str) -> bool:
+    """Whether a shared download of *url* (see _shared_pdf_bytes), done or
+    under way — waited for — brought a PDF, or the scan is kept on disk.
+    False also when nobody is downloading it, or the download came to
+    nothing: a HEAD must ask."""
+    path = _scan_cache_path(url)
+    if path is not None and path.is_file():
+        return True
+    future = _SHARED_NET.pending(("pdf", url))
+    if future is None:
+        return False
+    try:
+        return bool(future.result(timeout=45))
+    except Exception:
+        return False
+
+
+def _in_parallel(*calls) -> list:
+    """Start each of *calls* (callables taking nothing) on a thread of its
+    own, and hand back their futures in the same order.  Each reports to the
+    load this thread reports to (see _watching), so its steps show where the
+    load's do."""
+    from concurrent.futures import Future
+    watch = getattr(_LOAD_WATCH, "watch", None)
+    futures = []
+    for call in calls:
+        future: Future = Future()
+
+        def run(call=call, future=future) -> None:
+            with _watching(watch):
+                try:
+                    future.set_result(call())
+                except BaseException as exc:
+                    future.set_exception(exc)
+
+        threading.Thread(target=run, daemon=True).start()
+        futures.append(future)
+    return futures
 
 
 # The Reporter of Decisions stamps every page of a preliminary print with a
@@ -20837,7 +22165,9 @@ class _PageSlants(list):
         self.superscripts = frozenset(superscripts)
 
 
-def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
+def _extract_pdf_text_and_style(
+    pdf_bytes: bytes, between_pages=None,
+) -> "tuple[list, list]":
     """Extract a PDF's text layer, as ``(pages, italics)``.
 
     ``pages`` is ``[[(char, box_or_None), …], …]`` — one list per page, each a
@@ -20861,7 +22191,9 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
     pane's), touches no tk objects, and returns plain data.  Every PDFium call is
     taken under :data:`_PDFIUM_LOCK`, per page, so it interleaves safely with the
     main thread's page rendering instead of racing it.  Shared by the citation
-    linker and the find bar so the text is extracted only once."""
+    linker and the find bar so the text is extracted only once.
+    ``between_pages`` is called before each page — :func:`_yield_to_ui`, by a
+    reader that should give way to a window going up."""
     import pypdfium2 as pdfium
 
     with _PDFIUM_LOCK:
@@ -20883,6 +22215,8 @@ def _extract_pdf_text_and_style(pdf_bytes: bytes) -> "tuple[list, list]":
         name_buf = ctypes.create_string_buffer(4)
         font_flags = ctypes.c_int(0)
         for pi in range(n_pages):
+            if between_pages is not None:
+                between_pages()
             chars: list = []
             slants: list = []
             marks: set = set()
@@ -21648,6 +22982,7 @@ class _PdfPane(ttk.Frame):
     # (see turn_page) — the rounding a fractional scroll leaves behind.
     _PAGE_TOP_SLOP = 3
     _BBOX_SCALE = 0.6   # low-res render scale used to detect the content box
+    _MEASURE_FIRST = 6  # pages whose crop is read before a scan is shown
     _INK_THRESH = 185   # grayscale < this counts as "ink" (ignores scan bg)
     _PROFILE_MIN = 2    # min avg ink (0-255) for a row/col to count as content
     _PAD_FRAC = 0.006   # tiny expansion of the detected box so glyphs aren't clipped
@@ -21779,10 +23114,16 @@ class _PdfPane(ttk.Frame):
         # hands the answer over; only one that did not is measured here.
         with _PDFIUM_LOCK:
             count = len(self._doc)
+        # How many pages' crop the measurements read for real; the rest are
+        # provisional, read in the background once the pane is up.
+        measured = count
         if meta is not None and len(meta) == count:
             self._meta: list[tuple] = [tuple(m) for m in meta]
+            measured = getattr(meta, "measured", count)
         else:
             self._meta = self._measure(self._doc)
+        # As measured, before any shared crop is applied over it.
+        self._raw_meta: list[tuple] = list(self._meta)
         if uniform_crop:
             self._apply_uniform_crop()
 
@@ -21790,6 +23131,8 @@ class _PdfPane(ttk.Frame):
         self._slots: list[tuple] = []  # (y, slot_h, frac_box, render_scale)
         self._content_h = self._PAD
         self._layout()
+        if measured < count:
+            self._finish_measuring(measured, uniform_crop)
 
         canvas.bind("<Configure>", lambda _e: self._on_configure())
         canvas.bind("<MouseWheel>", self._on_wheel)            # Windows / macOS
@@ -22070,16 +23413,33 @@ class _PdfPane(ttk.Frame):
         self.fit_to_view()
 
     @classmethod
-    def _measure(cls, doc) -> list:
-        """(width pt, height pt, content box) for every page of *doc*, from a
-        quick low-resolution render.  PDFium's lock is taken a page at a time
-        — the renders on other threads go on between them — and the ink
-        profile is read outside it."""
+    def _measure(cls, doc, first: Optional[int] = None, start: int = 0,
+                 between_pages=None) -> list:
+        """(width pt, height pt, content box) for every page of *doc* from
+        *start* on, from a quick low-resolution render.  PDFium's lock is
+        taken a page at a time — the renders on other threads go on between
+        them — and the ink profile is read outside it.
+
+        ``first``: render only that many pages; the rest are sized, and their
+        box left None, for :meth:`measure_pdf` to fill in provisionally.
+        ``between_pages`` is called before each page (see _yield_to_ui)."""
         full = (0.0, 0.0, 1.0, 1.0)
         meta: list[tuple] = []
         with _PDFIUM_LOCK:
             count = len(doc)
-        for i in range(count):
+        for i in range(start, count):
+            if between_pages is not None:
+                between_pages()
+            if first is not None and i >= first:
+                # A page's size is read without decoding its image.
+                with _PDFIUM_LOCK:
+                    page = doc[i]
+                    try:
+                        w_pt, h_pt = page.get_size()
+                    finally:
+                        page.close()
+                meta.append((w_pt, h_pt, None))
+                continue
             lo = None
             with _PDFIUM_LOCK:
                 page = doc[i]
@@ -22099,19 +23459,124 @@ class _PdfPane(ttk.Frame):
         return meta
 
     @classmethod
-    def measure_pdf(cls, pdf_bytes: bytes) -> list:
+    def measure_pdf(cls, pdf_bytes: bytes,
+                    first: Optional[int] = None) -> list:
         """The measurements a pane takes of *pdf_bytes* as it opens (see
         _measure), taken on whatever thread calls this — a worker's, so the
-        pane that shows the pages need not take them on the Tk thread."""
+        pane that shows the pages need not take them on the Tk thread.
+
+        ``first``: read only the first so many pages' crop — every page of a
+        long scan has its image decoded to find it, three seconds' worth on
+        a ninety-page Library of Congress scan, all before the window opens.
+        The rest are given a provisional crop (:meth:`_provisional`) and the
+        answer says so (:class:`_ProvisionalMeta`); the pane showing them
+        reads them for real in the background (see _finish_measuring)."""
         import pypdfium2 as pdfium
 
         with _PDFIUM_LOCK:
             doc = pdfium.PdfDocument(pdf_bytes)
         try:
-            return cls._measure(doc)
+            meta = cls._measure(doc, first=first)
         finally:
             with _PDFIUM_LOCK:
                 doc.close()
+        if first is None or all(m[2] is not None for m in meta):
+            return meta
+        return _ProvisionalMeta(cls._provisional(meta), measured=first)
+
+    @staticmethod
+    def _provisional(meta: list) -> list:
+        """*meta* with every page not yet read given the box the pages read
+        so far share — the box _apply_uniform_crop would make of them, which
+        on the same-template pages of one opinion is what the rest will come
+        to — or, where the pages differ in size or none was read with
+        confidence, the whole page."""
+        full = (0.0, 0.0, 1.0, 1.0)
+        widths = [m[0] for m in meta]
+        heights = [m[1] for m in meta]
+        boxes = [m[2] for m in meta if m[2] is not None and m[2] != full]
+        guess = full
+        if (boxes and max(widths) > 0 and max(heights) > 0
+                and (max(widths) - min(widths)) / max(widths) <= 0.03
+                and (max(heights) - min(heights)) / max(heights) <= 0.03):
+            guess = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                     max(b[2] for b in boxes), max(b[3] for b in boxes))
+        return [(w, h, frac if frac is not None else guess)
+                for w, h, frac in meta]
+
+    def _finish_measuring(self, start: int, uniform_crop: bool) -> None:
+        """Read, in the background, the crop of the pages measure_pdf left
+        provisional — page *start* on — and lay the pages out again if that
+        changes anything, the reader kept where they were."""
+        data = self._pdf_bytes
+
+        def run() -> None:
+            import pypdfium2 as pdfium
+            _yield_to_ui()
+            try:
+                with _PDFIUM_LOCK:
+                    doc = pdfium.PdfDocument(data)
+                try:
+                    rest = type(self)._measure(doc, start=start,
+                                               between_pages=_yield_to_ui)
+                finally:
+                    with _PDFIUM_LOCK:
+                        doc.close()
+            except Exception as exc:
+                print(f"[pdf] measuring the rest of the pages failed: {exc}")
+                return
+            try:
+                self.after(0, self._take_measured, start, rest, uniform_crop)
+            except (RuntimeError, tk.TclError):
+                pass        # the pane has gone
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _take_measured(self, start: int, rest: list,
+                       uniform_crop: bool) -> None:
+        """The pages from *start* on, measured: their crop replaces the
+        provisional one, and the pages are laid out again only if that moved
+        anything."""
+        if self._disposed or start + len(rest) != len(self._meta):
+            return
+        self._raw_meta = list(self._raw_meta[:start]) + list(rest)
+        was = list(self._meta)
+        self._meta = list(self._raw_meta)
+        if uniform_crop:
+            self._apply_uniform_crop()
+        if self._meta == was:
+            return
+        anchor = self._view_anchor()
+        try:
+            self._layout()
+            self._restore_anchor(anchor)
+        except tk.TclError:
+            return
+        self._render_visible()
+
+    def _view_anchor(self) -> "Optional[tuple[int, float]]":
+        """The page at the top of the view, and how far into it the view
+        begins (a fraction of the page) — what keeps the reader's place
+        across a new layout."""
+        try:
+            view_top = self._canvas.canvasy(0)
+        except tk.TclError:
+            return None
+        for i, slot in enumerate(self._slots):
+            y, slot_h = slot[0], slot[1]
+            if view_top < y + slot_h + self._PAD:
+                return i, (view_top - y) / max(1, slot_h)
+        return None
+
+    def _restore_anchor(self, anchor) -> None:
+        if anchor is None or self._content_h <= 0:
+            return
+        i, into = anchor
+        if not 0 <= i < len(self._slots):
+            return
+        y, slot_h = self._slots[i][0], self._slots[i][1]
+        self._canvas.yview_moveto(
+            max(0.0, (y + into * slot_h) / self._content_h))
 
     @classmethod
     def _content_frac(cls, img) -> tuple:
@@ -23461,7 +24926,10 @@ class _LoadWatch:
     _load_bytes); everything else belongs to the Tk thread.
     """
 
-    SLOW_MS = 7500          # how long a load may take before its window shows
+    # How long a load may take before its window shows: past what most cases
+    # take to open (a second or two), so it does not flash up in front of
+    # them, but soon enough that a slow one does not seem to have done nothing.
+    SLOW_MS = 4000
     TEXT_PATIENCE_S = 90    # how long the text is waited for before saying so
     _SHOWN_STEPS = 6        # how many of the steps already taken are listed
     _BYTES_EVERY = 0.2      # seconds between updates of the byte count
@@ -23887,6 +25355,8 @@ class _FloatingPdfWindow:
                  anchor: "Optional[tk.Misc]" = None,
                  on_citation_edited=None, geometry: str = "",
                  page_meta: "Optional[list]" = None) -> None:
+        # Background reading of PDFs waits while this goes up (_ui_first).
+        _ui_first(_UI_FIRST_MAX_S)
         self._app = app
         # Whoever names this window, told when the reader edits the case's
         # citation beside the pages (see citation_edited).
@@ -24003,6 +25473,8 @@ class _FloatingPdfWindow:
         except Exception:
             self.close()
             raise
+        # Up: a moment more for its first pages to be drawn.
+        _ui_first(0.5)
 
     # ------------------------------------------------------------------
     # Geometry and the top strip
@@ -25917,7 +27389,13 @@ class _ScholarTextWindow:
         initial_text_target=None,
         initial_pdf_analysis: "Optional[dict]" = None,
         chromeless: bool = False,
+        scan_pending: bool = False,
     ) -> None:
+        # Background reading of PDFs waits while this goes up (_ui_first).
+        _ui_first(_UI_FIRST_MAX_S)
+        # ``scan_pending``: the case's opening is still looking for its scan
+        # (see _CaseOpenRace) and hands it over when it comes — receive_race_
+        # scan, or race_scan_missing — so this window does not look as well.
         # ``chromeless``: this reader is built inside another window's body —
         # the floating PDF viewer's — whose own strip carries the controls, so
         # the button bar is left unpacked and the opinion runs to the window's
@@ -26012,6 +27490,9 @@ class _ScholarTextWindow:
             self._pdf_url = self._history_pdf_url
             self._pdf_located = True
         self._prefetch_ok = prefetch_pdf
+        if scan_pending and initial_pdf is None:
+            self._pdf_locate_started = True
+            self._pdf_prefetch_started = True
         # PDF text extraction and opinion-to-PDF alignment are shared.  A
         # prefetched PDF is analysed once in the background, then the same
         # result powers PDF selection/search, location-preserving switches, and
@@ -26178,6 +27659,8 @@ class _ScholarTextWindow:
             self._active_pdf_analysis_key = self._request_pdf_analysis(
                 *self._pdf_prefetch
             )
+        # Up: a moment more for its first screen to be drawn.
+        _ui_first(0.5)
         # Fill in whatever the opinion text can't give us for a proper Bluebook
         # citation — chiefly the federal-district / lower-court parenthetical and
         # a missing year — from CourtListener in the background, then refresh the
@@ -28029,6 +29512,17 @@ class _ScholarTextWindow:
         # mapped back to this block.  Besides overriding Scholar links where
         # our destination is better, this preserves cross-paragraph short/Id.
         # context and gives every pin page its own link.
+        if id(block) in getattr(self, "_links_waiting", ()):
+            # Its citations are being read (see _prepare_text_link_ranges):
+            # unlinked for now, footnote marks apart, and linked in place.
+            for span in block.spans:
+                if span.link and not (span.pagenum or span.fnref
+                                      or span.fndef):
+                    span = _dc_replace(span, link="")
+                self._insert_span(span, block_tags, neutral=neutral,
+                                  detect_plain=False)
+            self._text.insert("end", "\n\n", block_tags)
+            return
         scanned = id(block) in self._text_block_links
         link_ranges = self._text_block_links.get(id(block), [])
         if not scanned:
@@ -28200,8 +29694,189 @@ class _ScholarTextWindow:
         if block_ids == self._text_link_cache_key:
             return
         self._text_link_cache_key = block_ids
-        self._text_block_links = _text_opinion_link_ranges(
-            parts, state_court=self._is_state_case())
+        self._links_waiting = set()
+        state_court = self._is_state_case()
+        links = _text_opinion_link_ranges(parts, state_court=state_court,
+                                          defer_long=True)
+        if links is not None:
+            self._text_block_links = links
+            return
+        # A long opinion not read for citations yet: shown now, unlinked —
+        # Google Scholar's own links too, our reading being what decides
+        # them — its citations read on a worker once the window is up, and
+        # linked where they lie when that is done (_link_text_in_place).  The
+        # text is not drawn again.
+        self._text_block_links = {block_id: [] for block_id in block_ids}
+        self._links_waiting = set(block_ids)
+        blocks = {
+            id(block): block
+            for part in parts or []
+            for group in (getattr(part, "blocks", None) or [],
+                          getattr(part, "footnotes", None) or [])
+            for block in group
+        }
+
+        def run() -> None:
+            _yield_to_ui()          # the text first: it is being drawn
+            try:
+                found = _text_opinion_link_ranges(parts,
+                                                  state_court=state_court)
+            except Exception as exc:
+                print(f"[links] reading the opinion's citations failed: {exc}")
+                found = {}
+            self._post(self._link_text_in_place, block_ids, blocks, found)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _link_text_in_place(self, block_ids: tuple, blocks: dict,
+                            links: dict) -> None:
+        """The citations of the opinion on screen, read on a worker (see
+        _prepare_text_link_ranges): linked where they lie — with Google
+        Scholar's links where our reading found nothing — exactly as
+        _insert_block would have linked them, and nothing drawn again.
+        Dropped if the window has since shown other text: that render read
+        them for itself."""
+        if block_ids != self._text_link_cache_key:
+            return
+        try:
+            if not self._text.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._text_block_links = links
+        waiting, self._links_waiting = self._links_waiting, set()
+        txt = self._text
+        try:
+            for block_id in waiting:
+                mark = self._location_block_marks.get(block_id)
+                block = blocks.get(block_id)
+                if mark and block is not None:
+                    self._link_block_in_place(txt, mark, block,
+                                              links.get(block_id) or [])
+        except tk.TclError:
+            return
+
+    def _justify_padding(self, txt, mark: str, upto: int) -> list:
+        """The justification's padding in the block beginning at *mark*, as
+        far as the block's own *upto*-th character: ``(where it stands,
+        counted in the block's own characters; how long; spaces alone?)``
+        for each run of it — what lies between the block's characters and
+        where they now are on screen (see _justify_display_lines)."""
+        pads: list = []
+        shift = 0
+        cur = mark
+        while True:
+            hit = txt.tag_nextrange(self._JUSTIFY_PAD_TAG, cur)
+            if not hit:
+                break
+            p0, p1 = str(hit[0]), str(hit[1])
+            stands = int(txt.tk.call(txt._w, "count", "-chars", mark, p0)) - shift
+            if stands > upto:
+                break
+            length = int(txt.tk.call(txt._w, "count", "-chars", p0, p1))
+            pads.append((stands, length, not txt.get(p0, p1).strip(" ")))
+            shift += length
+            cur = p1
+        return pads
+
+    def _link_block_in_place(self, txt, mark: str, block,
+                             ranges: list) -> None:
+        """Tag one block's links where its text lies, by the rules of
+        _insert_spans_with_links: a citation run takes over any Google
+        Scholar link it overlaps, the whole of it; a Scholar link no run
+        touches is one link of its own; page and footnote marks stay as they
+        are.  Counted past the justification's padding, a hyphenated word's
+        visible copy linked with the rest of it, its spaces not."""
+        anchors = _scholar_anchors(block.spans)
+        linked = [span for span in block.spans
+                  if span.link and not (span.pagenum or span.fnref
+                                        or span.fndef)]
+        if not ranges and not linked:
+            return                  # nothing in it to link
+        # The padding matters only as far as the last thing linked.
+        upto = max([re_ for _rs, re_, _a in ranges]
+                   + [a1 for _a0, a1, _h, _t in anchors]
+                   + [sum(len(span.text or "") for span in block.spans)
+                      if linked else 0])
+        pads = self._justify_padding(txt, mark, upto)
+
+        def at(offset: int) -> str:
+            return (f"{mark} + "
+                    f"{offset + sum(n for p, n, _sp in pads if p < offset)}"
+                    f" chars")
+
+        def tag(lo: int, hi: int, name: str) -> None:
+            if lo >= hi:
+                return
+            start, end = at(lo), at(hi)
+            txt.tag_add("citelink", start, end)
+            txt.tag_add(name, start, end)
+            before = 0
+            for stands, length, spaces in pads:
+                if spaces and lo <= stands < hi:
+                    p0 = f"{mark} + {stands + before} chars"
+                    p1 = f"{mark} + {stands + before + length} chars"
+                    txt.tag_remove("citelink", p0, p1)
+                    txt.tag_remove(name, p0, p1)
+                before += length
+
+        taken = [k for k, (a0, a1, _h, _t) in enumerate(anchors)
+                 if any(rs < a1 and a0 < re_ for rs, re_, _a in ranges)]
+        run_tags: list = [None] * len(ranges)
+        anchor_tags: dict = {}
+
+        def run_tag(ri: int) -> str:
+            if run_tags[ri] is None:
+                run_tags[ri] = self._new_link(ranges[ri][2])
+            return run_tags[ri]
+
+        def anchor_tag(k: int) -> str:
+            if k not in anchor_tags:
+                _a0, _a1, href, full_text = anchors[k]
+                anchor_tags[k] = self._new_link(
+                    self._scholar_link_action(full_text, href))
+            return anchor_tags[k]
+
+        def anchor_at(cur: int) -> "Optional[int]":
+            return next((k for k, (a0, a1, _h, _t) in enumerate(anchors)
+                         if a0 <= cur < a1), None)
+
+        def leftover_run(k: int, cur: int) -> int:
+            a0, a1 = anchors[k][0], anchors[k][1]
+            inside = [i for i, (rs, re_, _a) in enumerate(ranges)
+                      if rs < a1 and a0 < re_]
+            before = [i for i in inside if ranges[i][0] <= cur]
+            return (max(before, key=lambda i: ranges[i][0]) if before
+                    else min(inside, key=lambda i: ranges[i][0]))
+
+        pos = 0
+        for span in block.spans:
+            s_start, s_end = pos, pos + len(span.text or "")
+            pos = s_end
+            if span.pagenum or span.fnref or span.fndef or not span.text:
+                continue
+            cur = s_start
+            while cur < s_end:
+                ri = next((i for i, (rs, re_, _a) in enumerate(ranges)
+                           if rs <= cur < re_), None)
+                if ri is not None:
+                    seg_end = min(s_end, ranges[ri][1])
+                    tag(cur, seg_end, run_tag(ri))
+                    cur = seg_end
+                    continue
+                nxt = min([s_end] + [rs for rs, _e, _a in ranges if rs > cur])
+                if span.link:
+                    k = anchor_at(cur)
+                    if k is None:
+                        # A Scholar link in no gathered reference: its own.
+                        seg = span.text[cur - s_start: nxt - s_start]
+                        tag(cur, nxt, self._new_link(
+                            self._scholar_link_action(seg, span.link)))
+                    elif k in taken:
+                        tag(cur, nxt, run_tag(leftover_run(k, cur)))
+                    else:
+                        tag(cur, nxt, anchor_tag(k))
+                cur = nxt
 
     def _is_state_case(self) -> bool:
         """Whether this is a state court's opinion — where a Constitution
@@ -28741,8 +30416,11 @@ class _ScholarTextWindow:
 
         def run() -> None:
             self._gutter_redraw_pending = False
-            self._draw_page_column()
-            self._draw_part_map()
+            try:
+                self._draw_page_column()
+                self._draw_part_map()
+            except tk.TclError:
+                pass                # the window closed before it settled
 
         try:
             self._win.after_idle(run)
@@ -32941,6 +34619,11 @@ class _ScholarTextWindow:
                     self._following_as_text = False
 
             try:
+                # The scan first, its text sought at once beside it (see
+                # _CaseOpenRace) — by the Scholar page the link names, where
+                # it names one.
+                scholar_page = (url_val if "scholar_case?case=" in url_val
+                                else "")
                 if self._app.open_cited_case_pdf(
                     self._live_parent(),
                     ("cite", f"{cite}@{pin}" if pin else cite),
@@ -32948,6 +34631,7 @@ class _ScholarTextWindow:
                     name=name,
                     context_name=(getattr(self, "_bb", None) or {}).get(
                         "name", ""),
+                    race=True, prefer_scan=True, scholar_url=scholar_page,
                 ):
                     return
             except Exception as exc:
@@ -33951,12 +35635,16 @@ class _ScholarTextWindow:
             links: dict = {}
             quiet: set = set()
             sections: list = []
+            # A window going up comes first (see _ui_first).
+            _yield_to_ui()
             try:
-                pages, italics = _extract_pdf_text_and_style(data)
+                pages, italics = _extract_pdf_text_and_style(
+                    data, between_pages=_yield_to_ui)
             except Exception as exc:
                 print(f"[pdf-text] extraction failed: {exc}")
             cite = pdf_cite
             if any(pages or []):
+                _yield_to_ui()
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
                         data, pages, italics
@@ -33981,6 +35669,7 @@ class _ScholarTextWindow:
                         print(f"[pdf-location] printed cite scan failed: {exc}")
                     if cite:
                         print(f"[pdf-location] the PDF cites itself as {cite}")
+            _yield_to_ui()
             maps = self._align_location_sources(sources, pages, cite)
             result = {
                 "pages": pages,
@@ -34559,7 +36248,8 @@ class _ScholarTextWindow:
 
         def run() -> None:
             try:
-                fetched = _fetch_pdf_bytes(choice.url, client=client, timeout=30)
+                fetched = _shared_pdf_bytes(choice.url, client=client,
+                                            timeout=30)
                 if fetched is None:
                     self._post(
                         self._on_pdf_error,
@@ -34704,7 +36394,8 @@ class _ScholarTextWindow:
                 try:
                     import pypdfium2  # noqa: F401
                     from PIL import ImageTk  # noqa: F401
-                    fetched = _fetch_pdf_bytes(url, client=client, timeout=30)
+                    fetched = _shared_pdf_bytes(url, client=client,
+                                                timeout=30)
                     if fetched is not None:
                         data, final_url = fetched
                         if self._standalone_embed:
@@ -34723,6 +36414,69 @@ class _ScholarTextWindow:
             self._post(self._on_pdf_located, True)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def receive_race_scan(self, data: bytes, url: str, page_meta=None,
+                          item: "Optional[dict]" = None) -> None:
+        """The scan the case's opening was also looking for (see
+        _CaseOpenRace) has come, after this text opened: kept for P — in a
+        reporter window, put straight into it — as one found by
+        :meth:`_locate_pdf` would be.  *item* is what the lookup learned on
+        the way (the reporters' scans on offer, the U.S. Reports cite)."""
+        try:
+            if not self._win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if item:
+            self._remember_resolved_pdf_info(item)
+        self._pdf_url = url
+        self._pdf_prefetch = (data, url)
+        if self._standalone_embed:
+            self._pdf_prefetch_meta = (data, page_meta)
+        self._on_pdf_located(True)
+        if item and item.get("_other_reporters_unasked"):
+            self._fill_pdf_choices()
+
+    def _fill_pdf_choices(self) -> None:
+        """The scan came from the cited reporter alone (see _CaseOpenRace.
+        case_law_scan): find the case's other reporters' scans in the
+        background, for the PDF menu.  The scan on offer stays."""
+        try:
+            client = (self._app._get_client()
+                      if self._app._token_var.get().strip() else None)
+        except Exception:
+            client = None
+        item = self._pdf_item()
+
+        def run() -> None:
+            try:
+                self._app._resolve_pdf_url(client, item)
+            except Exception as exc:
+                print(f"[pdf] finding the other reporters' scans "
+                      f"failed: {exc}")
+                return
+            choices = list(item.get("_case_law_pdf_choices") or [])
+            if len(choices) > len(self._case_law_pdf_choices or []):
+                self._post(self._take_pdf_choices, choices)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _take_pdf_choices(self, choices: list) -> None:
+        self._case_law_pdf_choices = choices
+        self._refresh_pdf_button()
+
+    def race_scan_missing(self) -> None:
+        """The case's opening found no scan from the citation: look as a text
+        window always has, by what the opinion now open says of itself — its
+        parallel citations, its court, its date."""
+        try:
+            if not self._win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._pdf_locate_started = False
+        self._pdf_prefetch_started = False
+        self._locate_pdf()
 
     def _on_pdf_located(self, found: bool) -> None:
         self._pdf_located = found
@@ -34808,7 +36562,7 @@ class _ScholarTextWindow:
                 self._remember_resolved_pdf_info(item)
                 if not url:
                     return
-                fetched = _fetch_pdf_bytes(url, client=client, timeout=30)
+                fetched = _shared_pdf_bytes(url, client=client, timeout=30)
                 if fetched is not None:
                     data, final_url = fetched
                     self._pdf_prefetch = (data, final_url)
@@ -34871,7 +36625,7 @@ class _ScholarTextWindow:
                                "No PDF is available for this opinion.")
                     return
                 self._pdf_url = url  # so a fetch failure can offer the browser
-                fetched = _fetch_pdf_bytes(url, client=client, timeout=30)
+                fetched = _shared_pdf_bytes(url, client=client, timeout=30)
                 if fetched is None:
                     self._post(self._on_pdf_error,
                                "The source returned something that isn't a PDF.")
@@ -35138,6 +36892,7 @@ class _ScholarTextWindow:
                 self._app, parent, action, self._safe_status, snippet=snippet),
             context_name=(getattr(self, "_bb", None) or {}).get(
                 "name", ""),
+            race=True, prefer_scan=True,
         )
         if not opened:      # not a case citation — a statute, a rule, a docket
             _follow_brief_action(self._app, parent, action,

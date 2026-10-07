@@ -319,6 +319,55 @@ CITED_SCAN_BOOKMARK = _load_dataclass("_CitedScanBookmark", {
     "_bookmark_pdf_delete": lambda url: BOOKMARKED_SCANS.pop(url, None),
 })
 
+class _ScanOnlyRace:
+    """Stands in for _CaseOpenRace here, where workers run inline: the scan
+    lookup reports to it, and it opens what that lookup finds as the lookup
+    always has — the race between the scan and the text, which needs real
+    threads, is test_case_open_race's to check."""
+
+    def __init__(self, app, parent, *, cite, name="", pin="", year="",
+                 client=None, fetcher=None, watch=None, status=None,
+                 action=("cite", ""), snippet="", scholar_url="", item=None,
+                 on_nothing=None, prefer_scan=False):
+        self.app, self.parent, self.cite, self.name = app, parent, cite, name
+        self.pin, self.client, self.watch = pin, client, watch
+        self.status, self.action, self.snippet = status, action, snippet
+        self.on_nothing = on_nothing
+
+    def start(self):
+        pass
+
+    def official_scan(self):
+        return None
+
+    def case_law_scan(self):
+        return None
+
+    def cl_item(self):
+        return self.app._cited_case_pdf_item(self.client, self.cite,
+                                             self.name)
+
+    def use_us_cite(self, item):
+        pass
+
+    def may_ask(self):
+        return True
+
+    def scan_found(self, data, url, meta, item, shown_name):
+        self.app._show_cited_case_pdf(
+            self.parent, data, url, self.cite, self.pin, shown_name,
+            self.action, self.snippet, self.status, cl_item=item,
+            watch=self.watch, page_meta=meta)
+
+    def scan_missing(self, reason=""):
+        if self.on_nothing is not None:
+            self.watch.to_text(reason)
+            self.on_nothing()
+
+    def scan_refused(self, message):
+        self.watch.fail(message)
+
+
 APP_NS = _load(
     "CourtListenerGUI",
     ["open_cited_case_pdf", "_cited_case_pdf_item", "_show_cited_case_pdf",
@@ -339,6 +388,9 @@ APP_NS = _load(
      "find_override": find_override,
      "_cl_item_for_citation": _cl_item_for_citation,
      "_fetch_pdf_bytes": _fetch_pdf_bytes,
+     "_shared_pdf_bytes": _fetch_pdf_bytes,
+     "_CaseOpenRace": _ScanOnlyRace,
+     "_scan_opinion_links_ahead": lambda html: None,
      "_us_reports_cite": lambda cite: (
          "5 U.S. 137" if "Cranch" in cite else ""),
      # The official-series form: the same stand-in for the early Supreme
@@ -369,7 +421,9 @@ APP_NS = _load(
      "_cl_text_record": CL_TEXT_RECORD,
      "_ScholarTextWindow": _FakeReader,
      "_bluebook_display_name": _bluebook_display_name,
-     "_extract_pdf_text_and_style": lambda data: ([[("c", (0, 0, 1, 1))]], []),
+     "_extract_pdf_text_and_style": lambda data, **_kw: (
+         [[("c", (0, 0, 1, 1))]], []),
+     "_yield_to_ui": lambda: None,
      "_citation_links_from_visible_pdf_text": lambda d, p, i: ({0: ["x"]}, set()),
      "slip_opinion": mock.Mock(detect_sections=lambda pages: []),
      "_normalized_us_cite": _NORMALIZED_US_CITE,
