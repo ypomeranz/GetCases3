@@ -24923,10 +24923,10 @@ class _LoadWatch:
     _load_bytes); everything else belongs to the Tk thread.
     """
 
-    # How long a load may take before its window shows: soon enough that a
-    # click never seems to have done nothing (most cases open in two or three
-    # seconds now, and the case takes this window's place when it comes).
-    SLOW_MS = 1500
+    # How long a load may take before its window shows: past what most cases
+    # take to open (a second or two), so it does not flash up in front of
+    # them, but soon enough that a slow one does not seem to have done nothing.
+    SLOW_MS = 4000
     TEXT_PATIENCE_S = 90    # how long the text is waited for before saying so
     _SHOWN_STEPS = 6        # how many of the steps already taken are listed
     _BYTES_EVERY = 0.2      # seconds between updates of the byte count
