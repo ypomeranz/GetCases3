@@ -116,17 +116,23 @@ Spotlight shows Google Scholar's results for them as a phrase search instead.
 
 ## Reading a case
 
-### The scan first, the text a keystroke away
+### The scan and the text, a keystroke apart
 
-A case opens as the **scan of the printed report**, in a compact viewer beside the
-window you came from. The title bar shows the case's Bluebook citation, cited to
-the reporter those pages actually print.
+A case opens in a compact viewer beside the window you came from, on the **scan
+of the printed report** or on **Google Scholar's text**: GetCases asks for both
+at once, and the case opens on whichever arrives first. The title bar shows the
+case's Bluebook citation, cited to the reporter those pages actually print.
 
 - **T** (on the viewer's toolbar) switches to the opinion's **text**; **P**
-  switches back to the scan. Each switch lands on the passage you were reading.
+  switches to the scan. Each switch lands on the passage you were reading. The
+  one that arrived second is behind its key as soon as it comes.
+- A citation followed out of a scan or an opinion opens on the cited case's
+  scan wherever there is one, its text fetched alongside it.
 - If no scan exists anywhere, the case opens on its text in the same kind of
   window. GetCases keeps looking for a scan in the background, and **P** lights up
   if it finds one.
+- A long opinion is on screen before its citations have been read; they become
+  links a moment later, where they stand.
 - Separate writings (concurrences, dissents) are marked on a slim colored rail
   beside the scrollbar: blue for the Court's opinion, green for a concurrence, red
   for a dissent. Point at the scrollbar to see who wrote each part, and click a
@@ -141,7 +147,9 @@ for any reporter, and last CourtListener's stored copy.
 **Where the text comes from,** in this order: Google Scholar; then the Caselaw
 Access Project's text of the very pages on screen; then CourtListener, which is
 the main source for anything decided after 2018, when the Caselaw Access
-Project's coverage ends.
+Project's coverage ends. The last two open only when Google Scholar has no copy
+or has not answered within ten seconds (three, for a case decided before 1900
+that Scholar has lacked before), and no scan has come either.
 
 ### Following citations
 

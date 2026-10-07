@@ -195,6 +195,8 @@ class UscSection:
     # where the text was read: "olrc", or "lii" for Cornell's copy, read
     # while the OLRC's site was down
     source: str = "olrc"
+    # Cornell's copy taken because the OLRC was slow to answer, not down
+    olrc_slow: bool = False
     # Cornell's page names the sections before and after it outright
     adjacent: tuple = (None, None)
 
@@ -269,8 +271,9 @@ class UscSection:
     @property
     def source_note(self) -> str:
         if self.source == "lii":
-            return ("Cornell LII's copy of the OLRC text "
-                    "(uscode.house.gov was not answering)")
+            why = ("was slow to answer" if self.olrc_slow
+                   else "was not answering")
+            return f"Cornell LII's copy of the OLRC text (uscode.house.gov {why})"
         return "OLRC preliminary edition (current law)"
 
     def bluebook_cite(self, subs: tuple = ()) -> str:
@@ -335,7 +338,7 @@ def load_section(title: str, section: str) -> UscSection:
         down = "was not answering a few minutes ago"
     else:
         try:
-            doc = _olrc_section(title, section)
+            doc = _olrc_or_quicker(title, section)
         except _OlrcUnavailable as exc:
             down = str(exc)
         else:
@@ -355,6 +358,49 @@ def load_section(title: str, section: str) -> UscSection:
     with _cache_lock:
         _cache[key] = doc
     return doc
+
+
+#: How long the OLRC is given before Cornell's copy is asked for as well.
+_OLRC_HEDGE_S = 1.5
+
+
+def _olrc_or_quicker(title: str, section: str) -> UscSection:
+    """The OLRC's copy of a section, as :func:`_olrc_section` — unless the
+    OLRC is slow: past ``_OLRC_HEDGE_S`` Cornell's copy is asked for too, and
+    the first to arrive is taken (the OLRC's whenever it is first).  The
+    OLRC's word that there is no such section stands, Cornell's copy being
+    able to trail it; its failing to answer is raised as before, and
+    load_section falls back to Cornell."""
+    from concurrent.futures import (FIRST_COMPLETED, Future,
+                                    TimeoutError as FutureTimeout, wait)
+
+    def start(fetch) -> Future:
+        future: Future = Future()
+
+        def run() -> None:
+            try:
+                future.set_result(fetch())
+            except BaseException as exc:
+                future.set_exception(exc)
+
+        threading.Thread(target=run, daemon=True).start()
+        return future
+
+    olrc = start(lambda: _olrc_section(title, section))
+    try:
+        return olrc.result(timeout=_OLRC_HEDGE_S)
+    except FutureTimeout:
+        pass
+    print(f"[usc] uscode.house.gov is slow; asking Cornell for "
+          f"{title} U.S.C. § {section} as well")
+    lii = start(lambda: _lii_section(title, section))
+    wait([olrc, lii], return_when=FIRST_COMPLETED, timeout=65)
+    if not olrc.done() and lii.done() and lii.exception() is None:
+        doc = lii.result()
+        doc.olrc_slow = True
+        return doc
+    # The OLRC's own answer, whatever it is, once Cornell has none to give.
+    return olrc.result(timeout=65)
 
 
 def _olrc_section(title: str, section: str) -> UscSection:

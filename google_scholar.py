@@ -338,6 +338,10 @@ def _browser_google_cookies() -> dict:
 
 
 _DEFAULT_DELAY = 3.0  # base seconds between outbound requests (jittered)
+# The one exception to that pacing (see grant_quick_hop): an opinion page asked
+# for this long after the search that found it answered, once per case opened.
+_QUICK_HOP_DELAY = 1.0
+_QUICK_HOP_OFF_TTL = 24 * 3600.0  # how long a challenge after one turns them off
 _BLOCK_COOLDOWN = 180.0  # seconds to fail fast after every persona is challenged
 _BROWSER_FIRST_TTL = 6 * 3600.0  # how long to prefer the real browser after a block
 _RETRY_STATUSES = {500, 502, 503}  # transient Google hiccups, retried once
@@ -2015,6 +2019,15 @@ class GoogleScholarFetcher:
     ) -> None:
         self._delay = delay
         self._last_request: float = 0.0
+        # When the last answer from Google came in — what a quick hop is
+        # measured from (see _throttle) — and the lock that keeps two threads
+        # from both reading the clock as free and asking at the same moment.
+        self._last_response: float = 0.0
+        self._throttle_lock = threading.Lock()
+        # Quick hops granted to a thread (see grant_quick_hop), and whether
+        # they are still on: a challenge right after one turns them off.
+        self._hop = threading.local()
+        self._quick_hop_off_wall = 0.0
         # Optional opinion_db.OpinionDB: the durable, searchable store.  When
         # set, every fetched opinion is recorded there, and an opinion already
         # present is served from there instead of being re-fetched — unless
@@ -2068,6 +2081,11 @@ class GoogleScholarFetcher:
             self._browser_first = True
             print("[scholar] curl_cffi recently blocked — using real Firefox "
                   "first this session")
+        try:
+            self._quick_hop_off_wall = float(
+                state.get("quick_hop_off_until_wall", 0))
+        except (TypeError, ValueError):
+            self._quick_hop_off_wall = 0.0
         self._session = self._build_session()
         print(f"[scholar] browser persona: "
               f"{self._personas[self._persona_ix].target or 'plain requests'}")
@@ -2088,6 +2106,17 @@ class GoogleScholarFetcher:
             self._db.execute("ALTER TABLE opinions ADD COLUMN html TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Citations Scholar has answered it has no copy of (see note_miss),
+        # with the case's year where it was known.
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS misses (
+                citation  TEXT PRIMARY KEY,
+                year      TEXT,
+                missed_at REAL
+            )
+            """
+        )
         self._db.commit()
 
         # Per-session memory cache for search-results pages (not persisted:
@@ -2255,6 +2284,20 @@ class GoogleScholarFetcher:
         if fallback is None and verdict == _NAME_DOUBT:
             fallback = db_one
 
+        # A search made already this session — Spotlight's list, as the case
+        # was being typed — may have listed the case itself: its page is then
+        # fetched straight off that list, with no second search.  Only where
+        # the name the citation came with is the result's own: a search by
+        # words can list one of a page's cases and not the other.
+        seen = self._seen_bearing(citation) if case_name else []
+        pick = self._pick_cited(seen, case_name, year) if seen else None
+        if pick is not None and self._verdict(self._name_closeness(
+                case_name, pick.title or "")) == _NAME_MATCH:
+            print(f"[scholar] {citation!r} was listed by an earlier search: "
+                  f"{pick.url} ({pick.title!r})")
+            return self._open_cited_pick(pick, seen, case_name, key,
+                                         named_key)
+
         # Wrap the citation in double quotes so Scholar treats it as an exact
         # phrase. (repr() here produced *single* quotes, which Scholar does not
         # treat as a phrase operator -- that returned arbitrary cases from the
@@ -2299,9 +2342,30 @@ class GoogleScholarFetcher:
             # answer; a page that is no results page at all is not.
             self._note_absent(bool(_RESULTS_PAGE_RE.search(resp.text)))
             return fallback
-        case_url = pick.url
-        print(f"[scholar] found case url: {case_url} ({pick.title!r})")
+        print(f"[scholar] found case url: {pick.url} ({pick.title!r})")
+        return self._open_cited_pick(pick, bearing, case_name, key, named_key)
 
+    def _seen_bearing(self, citation: str) -> list["ScholarResult"]:
+        """The results already listed this session that bear *citation* (see
+        bears_citation) — by the citation's own search, or by any search by
+        words, Spotlight's as a case is typed."""
+        seen: dict[str, ScholarResult] = {}
+        lists = [self._cited_search_cache.get(citation) or [],
+                 *list(self._search_cache.values())]
+        for results in lists:
+            for result in results:
+                if (result.url and result.url not in seen
+                        and bears_citation(result, citation)):
+                    seen[result.url] = result
+        return list(seen.values())
+
+    def _open_cited_pick(self, pick: "ScholarResult",
+                         bearing: list["ScholarResult"], case_name: str,
+                         key: str, named_key: str) -> Optional[tuple[str, str]]:
+        """The opinion page of *pick*, the result that is the cited case of
+        those *bearing* the citation — from the database where it is there,
+        else from Scholar — cached under the citation."""
+        case_url = pick.url
         # A pick the name had to make among cases sharing the page is cached
         # under that name: the citation alone is no key to it.
         keys = [named_key] if named_key else []
@@ -2487,6 +2551,63 @@ class GoogleScholarFetcher:
         mates = getattr(self._miss, "page_mates", None) or []
         self._miss.page_mates = []
         return list(mates)
+
+    @staticmethod
+    def _miss_key(citation: str) -> str:
+        return re.sub(r"\s+", "", str(citation or "")).lower()
+
+    def note_miss(self, citations, year: str = "") -> None:
+        """Remember that Google Scholar answered it has no copy of the case at
+        *citations* — a results page with nothing bearing them, a "How cited"
+        page where the opinion would be — with its decision *year* where that
+        is known.  Kept across runs, so a case Scholar has failed before can
+        be given less of a head start the next time it is opened (see
+        missed_before).  Only an answer is worth remembering: a block or a
+        network failure says nothing about the case."""
+        year = str(year or "").strip()[:4]
+        rows = [(k, year, time.time())
+                for k in dict.fromkeys(map(self._miss_key, citations or ()))
+                if k]
+        if not rows:
+            return
+        try:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO misses (citation, year, missed_at) "
+                "VALUES (?, ?, ?)", rows)
+            self._db.commit()
+        except sqlite3.Error as exc:
+            print(f"[scholar] remembering a miss failed: {exc}")
+
+    def missed_before(self, citations) -> Optional[str]:
+        """The year remembered with Scholar's last miss at any of *citations*
+        ("" when none was known), or None when it has not missed them."""
+        keys = [k for k in dict.fromkeys(map(self._miss_key, citations or ()))
+                if k]
+        if not keys:
+            return None
+        try:
+            rows = self._db.execute(
+                "SELECT year FROM misses WHERE citation IN (%s)"
+                % ",".join("?" * len(keys)), keys).fetchall()
+        except sqlite3.Error:
+            return None
+        if not rows:
+            return None
+        return next((r[0] for r in rows if r[0]), "")
+
+    def forget_miss(self, citations) -> None:
+        """Scholar has the case after all: forget any miss at *citations*."""
+        keys = [k for k in dict.fromkeys(map(self._miss_key, citations or ()))
+                if k]
+        if not keys:
+            return
+        try:
+            self._db.execute(
+                "DELETE FROM misses WHERE citation IN (%s)"
+                % ",".join("?" * len(keys)), keys)
+            self._db.commit()
+        except sqlite3.Error:
+            pass
 
     def how_cited_heading(self, url: str) -> str:
         """The heading of a "How cited" page (see :func:`is_how_cited_url`):
@@ -3047,6 +3168,7 @@ class GoogleScholarFetcher:
                         time.time() + remaining if remaining > 0 else 0
                     ),
                     "browser_first_until_wall": self._browser_first_wall,
+                    "quick_hop_off_until_wall": self._quick_hop_off_wall,
                 }, fh)
         except Exception:
             pass  # persistence is best-effort
@@ -3080,14 +3202,67 @@ class GoogleScholarFetcher:
             final_url = ""
         return "/sorry/" in final_url or resp.status_code in (403, 429)
 
-    def _throttle(self) -> None:
+    def _throttle(self) -> bool:
         """Human-ish pacing: the base delay plus jitter, so requests don't
-        tick metronomically."""
-        wait = self._delay * random.uniform(1.0, 1.5)
-        elapsed = time.monotonic() - self._last_request
-        if elapsed < wait:
-            time.sleep(wait - elapsed)
-        self._last_request = time.monotonic()
+        tick metronomically.  The slot is taken under a lock, so requests from
+        several threads are spaced from one another, not just from their own.
+
+        The one exception is a quick hop (see :meth:`grant_quick_hop`): an
+        opinion page fetched on a thread holding the grant goes a second after
+        Google last answered — the search that found it — and spends the
+        grant.  Returns whether this request was one."""
+        quick = self._take_quick_hop()
+        with self._throttle_lock:
+            now = time.monotonic()
+            if quick:
+                at = max(self._last_request, self._last_response) + (
+                    _QUICK_HOP_DELAY * random.uniform(1.0, 1.2))
+            else:
+                at = self._last_request + self._delay * random.uniform(1.0, 1.5)
+            at = max(at, now)
+            self._last_request = at
+        if at > now:
+            time.sleep(at - now)
+        if quick:
+            print(f"[scholar] quick hop: opinion page "
+                  f"{at - self._last_response:.1f}s after the last answer")
+        return quick
+
+    def grant_quick_hop(self) -> None:
+        """Let the next opinion page this thread fetches go one second after
+        Google last answered, rather than the usual three to four and a half.
+
+        For opening a case: its search and then its opinion page, back to
+        back.  Granted once per case opened, and spent by the first opinion
+        page fetched, so everything else — a second search, a retry, another
+        variant of the citation — keeps the usual pacing.  A challenge right
+        after a quick hop turns them off for a day (see _get)."""
+        self._hop.granted = True
+
+    def _take_quick_hop(self) -> bool:
+        """Spend this thread's quick hop, if it holds one and is fetching an
+        opinion page now (see _fetch_case_page)."""
+        if not (getattr(self._hop, "granted", False)
+                and getattr(self._hop, "page", False)):
+            return False
+        self._hop.granted = False
+        return time.time() >= self._quick_hop_off_wall
+
+    def _note_response(self) -> None:
+        """Google has answered (or failed to): a quick hop counts from here."""
+        with self._throttle_lock:
+            self._last_response = max(self._last_response, time.monotonic())
+
+    def warm(self) -> None:
+        """Make the session's one homepage visit (see _warm_up) now, ahead of
+        a search the caller expects — the reader has just opened Spotlight —
+        so the search itself is not paced behind it.  Not when Google has
+        been refusing this session's own requests: the real Firefox is what
+        will be asked then."""
+        if (self._warmed or self._browser_first
+                or time.monotonic() < self._blocked_until):
+            return
+        self._warm_up()
 
     def _warm_up(self) -> None:
         """Visit the Scholar homepage once per session before the first
@@ -3102,6 +3277,8 @@ class GoogleScholarFetcher:
                               allow_redirects=True)
         except Exception:
             pass  # best-effort; the search itself will tell the real story
+        finally:
+            self._note_response()
 
     def _browser_get(self, url: str):
         """Fetch *url* through the user's real Firefox (:mod:`scholar_browser`)
@@ -3180,13 +3357,22 @@ class GoogleScholarFetcher:
         headers = {"Referer": referer or (SCHOLAR_BASE + "/")}
         last_status = "challenge"
         for _ in range(1 if once else len(self._personas)):
-            self._throttle()
-            resp = self._session.get(url, headers=headers, timeout=20,
-                                     allow_redirects=True)
+            quick = self._throttle()
+            try:
+                resp = self._session.get(url, headers=headers, timeout=20,
+                                         allow_redirects=True)
+            finally:
+                self._note_response()
             if self._looks_blocked(resp):
                 last_status = f"HTTP {resp.status_code}"
                 print(f"[scholar] {self._persona().target or 'plain requests'}"
                       f" challenged ({last_status})")
+                if quick:
+                    # Google minded the short gap: the usual pacing for a day.
+                    self._quick_hop_off_wall = time.time() + _QUICK_HOP_OFF_TTL
+                    print("[scholar] challenged right after a quick hop — "
+                          "back to the usual pacing for opinion pages")
+                    self._save_state()
                 self._rotate_persona()
                 continue
             if resp.status_code in _RETRY_STATUSES:
@@ -3405,6 +3591,9 @@ class GoogleScholarFetcher:
         one attempt, the page not stored (see :meth:`_get`, :meth:`current`)."""
         print(f"[scholar] fetching case page {url}")
         self._note_absent(False)
+        # An opinion page: what a quick hop granted this thread may be spent
+        # on (see grant_quick_hop).
+        self._hop.page = True
         try:
             # A browser reaches a case page from a results page — send that
             # Referer when we have one.
@@ -3417,6 +3606,8 @@ class GoogleScholarFetcher:
             # timeout is not.
             self._note_absent(_http_status(exc) == 404)
             return None
+        finally:
+            self._hop.page = False
 
         soup = BeautifulSoup(resp.text, "html.parser")
         # Primary location Google uses for the opinion body

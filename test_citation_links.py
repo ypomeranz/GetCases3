@@ -485,7 +485,9 @@ def _load_text_opinion_link_ranges():
         if isinstance(n, ast.FunctionDef)
         and n.name == "_text_opinion_link_ranges"
     )
-    ns = {"detect_brief_links": detect_links}
+    ns = {"detect_brief_links": detect_links,
+          "_detected_text_links":
+              lambda text, italic: detect_links(text, italic=italic)}
     exec(ast.get_source_segment(src, node), ns)
     return ns["_text_opinion_link_ranges"]
 
