@@ -467,6 +467,20 @@ def split_relator(party: str) -> "tuple[str, str] | None":
     return (head, tail) if head and tail else None
 
 
+def _state_named_first(party: str) -> str:
+    """A state named ahead of its designation — "Washington State", "New York
+    State", "Wash. State" — as "State of …", which rule 10.2.1(f) then omits:
+    the Ninth Circuit's "WASHINGTON State" is Washington v. Chimei Innolux
+    Corp., 659 F.3d 842.  Only a party that is the state and nothing more (a
+    relator tail aside); "Washington State Grange" passes through."""
+    rel = _EX_REL_RE.search(party)
+    head = (party[:rel.start()] if rel else party).strip(" ,")
+    m = re.fullmatch(r"(.+?)\s+state", head, re.IGNORECASE)
+    if not m or not _is_state(_place_words(m.group(1))):
+        return party
+    return f"State of {m.group(1)}" + (party[rel.start():] if rel else "")
+
+
 def _norm_geo(s: str) -> str:
     """Comparison key for a geographic abbreviation: letters only, uppercased
     ("N.C." / "N. C." -> "NC", "Ind." -> "IND")."""
@@ -3220,6 +3234,7 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     p = re.sub(r"^the\s+", "", p, flags=re.IGNORECASE)  # rule 10.2.1(d)
     p = re.sub(r"\bUnited States of America\b", "United States", p,
                flags=re.IGNORECASE)
+    p = _state_named_first(p)
     # Rule 10.2.1(f): "State of Washington" -> "Washington" — unless the
     # citation is to a decision of that state's own courts, where the
     # designation alone survives and the state name drops instead ("People

@@ -5503,6 +5503,50 @@ class RelatorCaptionTests(unittest.TestCase):
                     abbreviate_case_name(_scholar_caption_name(blocks)),
                     cited)
 
+    # Washington v. Chimei Innolux Corp., 659 F.3d 842 (9th Cir. 2011), was
+    # cited "Wash. State ex rel. Harris v. …": California's relator, past the
+    # semicolon, was hung on Washington, and "WASHINGTON State" read as a
+    # name rather than the state.
+    CHIMEI = _scholar_page(
+        "659 F.3d 842 (2011)",
+        "WASHINGTON State; The People of the State of California, ex rel. "
+        "Kamala D. Harris, Attorney General of the State of California, as "
+        "parens patriae on behalf of natural persons residing in the state; "
+        "The State of California; Alameda County, Plaintiffs-Appellees,<br/>"
+        "v.<br/>CHIMEI INNOLUX CORP.; Chi Mei Optoelectronics USA, Inc., "
+        "Defendants-Appellants.",
+        "No. 11-16862.",
+        "United States Court of Appeals, Ninth Circuit.",
+        "Filed October 3, 2011.")
+
+    def test_a_co_partys_relator_is_not_the_first_partys(self):
+        from google_scholar import parse_opinion_blocks
+        item = _scholar_item_from_blocks(parse_opinion_blocks(self.CHIMEI))
+        self.assertEqual(
+            _bluebook_display_name(item),
+            "Washington v. Chimei Innolux Corp., 659 F.3d 842 "
+            "(9th Cir. 2011)")
+
+    def test_nor_in_the_saved_record(self):
+        from opinion_db import extract_record
+        self.assertEqual(extract_record(
+            "https://scholar.google.com/scholar_case?case=13",
+            self.CHIMEI)["name"], "Washington v. Chimei Innolux Corp.")
+
+    def test_a_state_named_before_its_designation(self):
+        for raw, court_state, cited in (
+                ("Wash. State v. Chimei Innolux Corp.", "",
+                 "Washington v. Chimei Innolux Corp."),
+                ("New York State ex rel. Smith v. Jones", "",
+                 "New York ex rel. Smith v. Jones"),
+                ("Washington State v. Smith", "washington", "State v. Smith"),
+                ("Washington State Grange v. Washington State Republican "
+                 "Party", "",
+                 "Wash. State Grange v. Wash. State Republican Party")):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    abbreviate_case_name(raw, court_state=court_state), cited)
+
 
 class JudgeNameCaseTests(unittest.TestCase):
     """A judge's name from an all-caps byline, in the case it is written."""

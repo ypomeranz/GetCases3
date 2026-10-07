@@ -17908,7 +17908,10 @@ def _caption_party(s: str) -> str:
     # 10.2.1(b)): "THE UNITED STATES, ON THE RELATION OF WILLIAM B. STOKES
     # ET AL." is United States ex rel. Stokes — Kendall v. United States ex
     # rel. Stokes, 37 U.S. (12 Pet.) 524, was cited without its relator.
-    relation = split_relator(s)
+    # One past a semicolon is a co-party's, though: "WASHINGTON State; The
+    # People of the State of California, ex rel. Kamala D. Harris, …" is
+    # Washington alone (rule 10.2.1(a)).
+    relation = split_relator(s.split(";", 1)[0])
     if relation is not None:
         party, relator = (_caption_party(p) for p in relation)
         if party and relator:
