@@ -609,7 +609,7 @@ _MID_GEO_UNIT_RE = re.compile(
 # York City" name a unit whose words together are the place's proper name, so
 # the whole party stays unabbreviated ("Soldal v. Cook County", never "Cook
 # Cnty.").  The '$' anchor limits the rule to a trailing unit word: when an
-# institution follows ("Cook County Bd. of Review") the larger party
+# institution follows ("Cook County Bd. of Rev.") the larger party
 # abbreviates normally.
 _GEO_SUFFIX_RE = re.compile(
     r"^(.+?)\s+(City|Town|Township|Twp\.|Village|Vill\.|Borough|County|"
@@ -3175,7 +3175,7 @@ def _municipal_party(p: str) -> str | None:
     "Atlantic City") is identified by its trailing unit word, so the words
     ahead are always the place's proper name — a T6 word among them
     ("Atlantic", "Central") belongs to that name, not to an institution.  A
-    larger entity puts the unit word mid-name ("Cook County Bd. of Review"),
+    larger entity puts the unit word mid-name ("Cook County Bd. of Rev."),
     where the '$' anchor no longer matches, and an institution can end in one
     ("Sch. Dist. of Abington Twp."), which the bare-place test turns away."""
     p = p.strip()
@@ -4195,7 +4195,7 @@ if __name__ == "__main__":
         ("Atlantic City Board of Education v. Doe",
          "Atl. City Bd. of Educ. v. Doe"),
         ("Cook County Board of Review v. Smith",
-         "Cook Cnty. Bd. of Review v. Smith"),
+         "Cook Cnty. Bd. of Rev. v. Smith"),
         ("Doe v. Cook County Department of Corrections",
          "Doe v. Cook Cnty. Dep't of Corr."),
         # Relator constructions (rule 10.2.1(b)): the named party ahead of
