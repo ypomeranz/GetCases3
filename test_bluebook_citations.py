@@ -22,6 +22,11 @@ from bluebook_names import (
     normal_case_caption,
     refine_caption_case,
 )
+from bluebook_parentheticals import (
+    join_parentheticals,
+    order_parentheticals,
+    split_trailing_parentheticals,
+)
 from citation_overrides import (
     add_pin_to_base,
     citation_identity_keys,
@@ -2288,6 +2293,123 @@ class CitationOverrideTests(unittest.TestCase):
             "(Smith, J., dissenting).",
         )
 
+    def test_added_parentheticals_go_before_subsequent_history(self):
+        # Rule 1.5(b): (en banc), then the writer, then the omission, and the
+        # history after every parenthetical — not tacked on after it.
+        plain, name = format_edited_citation(
+            "Smith v. Jones, 1 F.3d 1 (9th Cir. 1990) (en banc), "
+            "aff'd, 2 U.S. 3 (1991)",
+            "5",
+            ("Brown, J., dissenting", "footnote omitted"),
+        )
+        self.assertEqual(name, "Smith v. Jones")
+        self.assertEqual(
+            plain,
+            "Smith v. Jones, 1 F.3d 1, 5 (9th Cir. 1990) (en banc) "
+            "(Brown, J., dissenting) (footnote omitted), "
+            "aff'd, 2 U.S. 3 (1991).",
+        )
+
+    def test_added_parentheticals_go_before_an_explanatory_one(self):
+        plain, _name = format_edited_citation(
+            "Smith v. Jones, 1 F.3d 1 (9th Cir. 1990) "
+            "(holding that the rule (as amended) applies) "
+            "[hereinafter Smith II]",
+            None,
+            ("footnote omitted", "per curiam"),
+        )
+        self.assertEqual(
+            plain,
+            "Smith v. Jones, 1 F.3d 1 (9th Cir. 1990) [hereinafter Smith II] "
+            "(per curiam) (footnote omitted) "
+            "(holding that the rule (as amended) applies).",
+        )
+
+    def test_a_parenthetical_the_base_already_has_is_not_repeated(self):
+        plain, _name = format_edited_citation(
+            "Clark v. Sweeney, No. 25-52 (U.S. Nov. 24, 2025) (per curiam)",
+            None,
+            ("per curiam",),
+        )
+        self.assertEqual(
+            plain, "Clark v. Sweeney, No. 25-52 (U.S. Nov. 24, 2025) (per curiam).",
+        )
+
+
+class ParentheticalOrderTests(unittest.TestCase):
+    """Bluebook rule 1.5(b)'s order for the parentheticals after the date."""
+
+    def test_the_rules_order(self):
+        given = [
+            "holding that the rule applies",
+            "citing Roe v. Wade, 410 U.S. 113 (1973)",
+            "quoting Roe v. Wade, 410 U.S. 113, 153 (1973)",
+            "citations omitted",
+            "footnote omitted",
+            "emphasis added",
+            "alteration in original",
+            "per curiam",
+            "plurality opinion",
+            "Scalia, J., dissenting",
+            "en banc",
+            "[hereinafter Smith II]",
+        ]
+        self.assertEqual(order_parentheticals(given), list(reversed(given)))
+
+    def test_writer_forms_rank_as_the_writer(self):
+        for writer in (
+            "Roberts, C.J., concurring in the judgment",
+            "O’Connor, J., concurring in part and dissenting in part",
+            "Wood, Chief Judge, concurring",
+            "R. Nelson, J., dissenting",
+            "statement of Sotomayor, J., respecting the denial of certiorari",
+            "opinion of Rehnquist, J.",
+            "separate opinion",
+            "per curiam, concurring",
+        ):
+            with self.subTest(writer=writer):
+                self.assertEqual(
+                    order_parentheticals(["footnote omitted", writer]),
+                    [writer, "footnote omitted"],
+                )
+
+    def test_an_explanatory_parenthetical_naming_a_judge_stays_last(self):
+        self.assertEqual(
+            order_parentheticals(
+                ["holding that Smith, Judge, erred", "footnote omitted"]),
+            ["footnote omitted", "holding that Smith, Judge, erred"],
+        )
+
+    def test_omission_notes_follow_emphasis(self):
+        self.assertEqual(
+            order_parentheticals([
+                "internal quotation marks and citations omitted",
+                "footnote omitted", "emphasis added", "citation modified",
+            ]),
+            ["emphasis added", "footnote omitted",
+             "internal quotation marks and citations omitted",
+             "citation modified"],
+        )
+
+    def test_join_sets_brackets_without_parentheses(self):
+        self.assertEqual(
+            join_parentheticals(["footnote omitted", "", "[hereinafter X]"]),
+            " [hereinafter X] (footnote omitted)",
+        )
+
+    def test_split_finds_history_after_the_parentheticals(self):
+        self.assertEqual(
+            split_trailing_parentheticals(
+                "Smith v. Jones, 1 F.3d 1 (9th Cir. 1990) (en banc), "
+                "aff'd, 2 U.S. 3 (1991) (per curiam)"),
+            ("Smith v. Jones, 1 F.3d 1 (9th Cir. 1990)", ["en banc"],
+             ", aff'd, 2 U.S. 3 (1991) (per curiam)"),
+        )
+
+    def test_split_without_a_date_parenthetical_leaves_it_whole(self):
+        base = "State v. Prado, 2021 WI 64, 397 Wis. 2d 719, 960 N.W.2d 869"
+        self.assertEqual(split_trailing_parentheticals(base), (base, [], ""))
+
 
 class ReporterAndDecisionDateTests(unittest.TestCase):
     def test_early_scotus_uses_modern_and_nominative_reporters(self):
@@ -2998,6 +3120,53 @@ class CopyWithCitationTests(unittest.TestCase):
 
         self.assertEqual(dump.call_args.kwargs["omit_tags"], {"pagenum"})
         self.assertEqual(plain.call_args.kwargs["omit_tags"], {"pagenum"})
+
+    def test_parenthetical_copy_nests_the_footnote_note_in_the_quotation(self):
+        # "(footnote omitted)" describes the quoted passage, so in a
+        # parenthetical copy it goes inside the quotation's parenthetical
+        # (rule 1.5(b)), not after the case as the other styles have it.
+        win = self._window("parenthetical")
+        win._omitted_footnote_tags = Mock(return_value=(set(), 1))
+        win._bluebook_citation = Mock(
+            return_value=("Case, 1 F.4th 2 (“quotation” (footnote omitted)).",
+                          " rtf"))
+        with (
+            patch("courtlistener_gui._dump_to_rtf", return_value="body\\par\n"),
+            patch("courtlistener_gui._plain_without_layout_chars",
+                  return_value="quotation"),
+            patch("courtlistener_gui._rtf_document", side_effect=lambda b: b)
+            as document,
+            patch("courtlistener_gui._copy_rich_clipboard",
+                  return_value="rich text") as clip,
+        ):
+            win._copy_formatted()
+
+        args = win._bluebook_citation.call_args
+        self.assertEqual(args.args[2], ())
+        plain_q, rtf_q = args.kwargs["explanatory"]
+        self.assertEqual(plain_q, "“quotation” (footnote omitted)")
+        self.assertTrue(rtf_q.endswith(" (footnote omitted)"))
+        self.assertEqual(document.call_args.args[0], "rtf\\par\n")
+        self.assertEqual(
+            clip.call_args.args[2],
+            "Case, 1 F.4th 2 (“quotation” (footnote omitted)).",
+        )
+
+    def test_cited_copy_keeps_the_footnote_note_after_the_case(self):
+        win = self._window("cite")
+        win._omitted_footnote_tags = Mock(return_value=(set(), 2))
+        with (
+            patch("courtlistener_gui._dump_to_rtf", return_value="body"),
+            patch("courtlistener_gui._plain_without_layout_chars",
+                  return_value="quotation"),
+            patch("courtlistener_gui._rtf_document", return_value="document"),
+            patch("courtlistener_gui._copy_rich_clipboard", return_value="rich text"),
+        ):
+            win._copy_formatted()
+
+        args = win._bluebook_citation.call_args
+        self.assertEqual(args.args[2], ("footnotes omitted",))
+        self.assertEqual(args.kwargs["explanatory"], ("", ""))
 
     def test_copy_without_citation_keeps_inline_star_pagination(self):
         win = self._window("plain")
@@ -4712,6 +4881,79 @@ class NotYetReportedCitationTests(unittest.TestCase):
         self.assertEqual(
             win._bluebook_citation(None)[0],
             "Carpenter v. United States, 585 U.S. 296 (2018).",
+        )
+
+
+class CitationParentheticalOrderTests(unittest.TestCase):
+    """The copied citation's parentheticals in rule 1.5(b)'s order: date,
+    writer, omission, then the quotation of a parenthetical copy — and an
+    edited citation's subsequent history after all of them."""
+
+    @staticmethod
+    def _window(edited: str = ""):
+        win = object.__new__(_ScholarTextWindow)
+        win._base_citation_override = edited
+        win._bb = {
+            "name": "Wolf v. Colorado", "cite": "338 U.S. 25",
+            "display_cite": "338 U.S. 25", "court": "", "year": "1949",
+            "docket_cite": "", "docket_paren": "",
+            "omit_parenthetical": "", "pin_kind": "page",
+        }
+        return win
+
+    def test_writer_then_omission(self):
+        plain, rtf = self._window()._bluebook_citation(
+            "47", "Rutledge, J., dissenting", ("footnote omitted",))
+        self.assertEqual(
+            plain,
+            "Wolf v. Colorado, 338 U.S. 25, 47 (1949) "
+            "(Rutledge, J., dissenting) (footnote omitted).",
+        )
+        self.assertIn("(Rutledge, J., dissenting) (footnote omitted).", rtf)
+
+    def test_the_quotation_follows_the_writer(self):
+        plain, rtf = self._window()._bluebook_citation(
+            "47", "Rutledge, J., dissenting", inline=True,
+            explanatory=("“It’s so.” (footnote omitted)",
+                         "\\u8220?It\\u8217?s so.\\u8221? (footnote omitted)"),
+        )
+        self.assertEqual(
+            plain,
+            "Wolf v. Colorado, 338 U.S. 25, 47 (1949) "
+            "(Rutledge, J., dissenting) (“It’s so.” (footnote omitted)).",
+        )
+        self.assertTrue(rtf.startswith(" {\\i Wolf v. Colorado}"))
+        self.assertTrue(rtf.endswith(
+            "(Rutledge, J., dissenting) (\\u8220?It\\u8217?s so.\\u8221? "
+            "(footnote omitted))."))
+
+    def test_the_quotation_precedes_an_edited_citations_history(self):
+        win = self._window(
+            "Wolf v. Colorado, 338 U.S. 25 (1949), "
+            "overruled by Mapp v. Ohio, 367 U.S. 643 (1961)")
+        plain, rtf = win._bluebook_citation(
+            "47", "Rutledge, J., dissenting",
+            explanatory=("“So.”", "\\u8220?So.\\u8221?"),
+        )
+        self.assertEqual(
+            plain,
+            "Wolf v. Colorado, 338 U.S. 25, 47 (1949) "
+            "(Rutledge, J., dissenting) (“So.”), "
+            "overruled by Mapp v. Ohio, 367 U.S. 643 (1961).",
+        )
+        self.assertIn(
+            "(Rutledge, J., dissenting) (\\u8220?So.\\u8221?), overruled by",
+            rtf)
+
+    def test_history_takes_the_typographic_apostrophe(self):
+        win = self._window(
+            "Wolf v. Colorado, 338 U.S. 25 (1949), aff'g 187 P.2d 926 "
+            "(Colo. 1947)")
+        plain, _rtf = win._bluebook_citation(None, "Rutledge, J., dissenting")
+        self.assertEqual(
+            plain,
+            "Wolf v. Colorado, 338 U.S. 25 (1949) (Rutledge, J., dissenting), "
+            "aff’g 187 P.2d 926 (Colo. 1947).",
         )
 
 

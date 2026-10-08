@@ -14,6 +14,8 @@ import re
 import tempfile
 import unittest
 
+from bluebook_parentheticals import join_parentheticals
+
 
 def _load(*names):
     src = pathlib.Path(__file__).with_name("courtlistener_gui.py").read_text()
@@ -53,7 +55,8 @@ def _load(*names):
     missing = wanted - set(found)
     if missing:
         raise AssertionError(f"not found at module level: {sorted(missing)}")
-    ns = {"re": re, "json": json, "pathlib": pathlib, "Path": pathlib.Path}
+    ns = {"re": re, "json": json, "pathlib": pathlib, "Path": pathlib.Path,
+          "join_parentheticals": join_parentheticals}
     for body in consts.values():
         exec(body, ns)
     for name in names:
@@ -150,28 +153,32 @@ class RtfQuoteFlipTests(unittest.TestCase):
 
 
 class ParentheticalCopyTests(unittest.TestCase):
-    def test_plain_citation_precedes_the_flipped_quotation(self):
-        citation = "Smith v. Jones, 1 F.4th 2, 3 (2d Cir. 2020)."
+    """What a parenthetical copy's quotation parenthetical holds; the
+    citation sets it in place (``_bluebook_citation``'s ``explanatory``)."""
+
+    def test_plain_quotation_is_flipped(self):
         passage = f"The Court called it {LD}plain{RD} and O{RS}Connor agreed."
         self.assertEqual(
-            NS["_parenthetical_plain"](citation, passage),
-            (
-                f"Smith v. Jones, 1 F.4th 2, 3 (2d Cir. 2020) "
-                f"({LD}The Court called it {LS}plain{RS} and "
-                f"O{RS}Connor agreed.{RD})."
-            ),
+            NS["_parenthetical_plain"](passage),
+            f"{LD}The Court called it {LS}plain{RS} and "
+            f"O{RS}Connor agreed.{RD}",
         )
 
-    def test_rtf_keeps_citation_first_and_period_after_parenthesis(self):
-        citation = " {\\i Smith v. Jones}, 1 F.4th 2."
+    def test_notes_about_the_quotation_nest_after_it_in_order(self):
+        self.assertEqual(
+            NS["_parenthetical_plain"](
+                "words", ("footnote omitted", "emphasis added")),
+            f"{LD}words{RD} (emphasis added) (footnote omitted)",
+        )
+
+    def test_rtf_drops_the_paragraph_break_and_nests_the_note(self):
         passage = "\\pard The " + esc(LD) + "plain" + esc(RD) + "\\par\n"
-        got = NS["_parenthetical_rtf"](citation, passage)
+        got = NS["_parenthetical_rtf"](passage, ("footnote omitted",))
         self.assertEqual(
             got,
             (
-                "{\\i Smith v. Jones}, 1 F.4th 2 ("
-                + esc(LD) + "\\pard The " + esc(LS) + "plain"
-                + esc(RS) + esc(RD) + ").\\par\n"
+                esc(LD) + "\\pard The " + esc(LS) + "plain"
+                + esc(RS) + esc(RD) + " (footnote omitted)"
             ),
         )
 
