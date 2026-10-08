@@ -12,6 +12,10 @@ import urllib.parse
 from typing import Iterable
 
 import citations
+from bluebook_parentheticals import (
+    join_parentheticals,
+    split_trailing_parentheticals,
+)
 
 
 def clean_base_citation(value: str) -> str:
@@ -132,18 +136,33 @@ def split_name_from_citation(base_citation: str) -> tuple[str, str]:
     return name, base[len(name):]
 
 
+def edited_citation_parts(
+    base_citation: str,
+    pin: str | None = None,
+    suffix_parentheticals: Iterable[str] = (),
+) -> tuple[str, str, str]:
+    """(name, rest, history) of a user-edited base with *pin* added and the
+    *suffix_parentheticals* (a writer's, "footnote omitted") placed among
+    the base's own parentheticals in Bluebook rule 1.5(b) order — ahead of
+    any prior or subsequent history the base ends with, which is returned
+    apart (", aff'd, 2 U.S. 3 (1991)") so a parenthetical can still be set
+    before it.  No final period."""
+    value = add_pin_to_base(base_citation, pin)
+    match = citations.find_case_citation(value, permissive=True)
+    core, own, history = split_trailing_parentheticals(
+        value, match.end() if match else 0)
+    name, rest = split_name_from_citation(core)
+    rest += join_parentheticals((*own, *suffix_parentheticals))
+    return name, rest, history
+
+
 def format_edited_citation(
     base_citation: str,
     pin: str | None = None,
     suffix_parentheticals: Iterable[str] = (),
 ) -> tuple[str, str]:
     """Plain citation and its name/rest split after pin and writer notes."""
-    value = add_pin_to_base(base_citation, pin)
-    for parenthetical in suffix_parentheticals:
-        parenthetical = (parenthetical or "").strip()
-        if parenthetical:
-            value += f" ({parenthetical})"
-    value += "."
-    name, rest = split_name_from_citation(value)
-    return value, name
+    name, rest, history = edited_citation_parts(
+        base_citation, pin, suffix_parentheticals)
+    return f"{name}{rest}{history}.", name
 

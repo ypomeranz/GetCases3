@@ -1217,9 +1217,11 @@ from bluebook_names import (
     split_relator,
     strip_related_case_note,
 )
+from bluebook_parentheticals import join_parentheticals
 from citation_overrides import (
     citation_identity_keys,
     clean_base_citation,
+    edited_citation_parts,
     find_override,
     format_edited_citation,
     update_overrides,
@@ -18543,32 +18545,26 @@ def _flip_rtf_quotes(rtf: str) -> str:
     return _RTF_QUOTE_TOKEN_RE.sub(replace, rtf)
 
 
-def _parenthetical_plain(citation: str, passage: str) -> str:
-    """``Citation.`` + passage -> ``Citation (“passage”).``."""
-    citation = (citation or "").rstrip()
-    if citation.endswith("."):
-        citation = citation[:-1]
+def _parenthetical_plain(passage: str, notes: tuple[str, ...] = ()) -> str:
+    """What a parenthetical quoting *passage* holds: ``“passage”``, its own
+    quotation marks flipped.  *notes* about the quotation ("footnote
+    omitted") nest inside, after the closing quote, in Bluebook rule 1.5(b)
+    order — ``“passage” (footnote omitted)`` — since they describe it, not
+    the case."""
     quoted = _QUOTE_OPEN + _flip_quotes(passage or "") + _QUOTE_CLOSE
-    return f"{citation} ({quoted})." if citation else quoted + "."
+    return quoted + join_parentheticals(notes)
 
 
-def _parenthetical_rtf(citation: str, passage: str) -> str:
-    """RTF-body counterpart of :func:`_parenthetical_plain`.
-
-    ``citation`` is the inline fragment returned by ``_bluebook_citation`` and
-    ``passage`` is the paragraph fragment returned by ``_dump_to_rtf``.
-    """
-    cite = citation[1:] if citation.startswith(" ") else citation
-    if cite.endswith("."):
-        cite = cite[:-1]
+def _parenthetical_rtf(passage: str, notes: tuple[str, ...] = ()) -> str:
+    """RTF counterpart of :func:`_parenthetical_plain`, for the paragraph
+    fragment ``_dump_to_rtf`` returns; the result runs on inside the
+    citation (``_bluebook_citation``'s ``explanatory``)."""
     body = _flip_rtf_quotes(passage or "")
     tail = "\\par\n"
     if body.endswith(tail):
         body = body[:-len(tail)]
-    quoted = _rtf_escape(_QUOTE_OPEN) + body + _rtf_escape(_QUOTE_CLOSE)
-    if cite:
-        return cite + " (" + quoted + ")." + tail
-    return quoted + "." + tail
+    return (_rtf_escape(_QUOTE_OPEN) + body + _rtf_escape(_QUOTE_CLOSE)
+            + _rtf_escape(join_parentheticals(notes)))
 
 
 def _rtf_escape(s: str) -> str:
@@ -28218,7 +28214,9 @@ class _ScholarTextWindow:
         ttk.Label(
             frame,
             text=("Edit the citation without a pinpoint page. Pinpoints and opinion "
-                  "writer parentheticals will still be added automatically when you copy."),
+                  "writer parentheticals will still be added automatically when you copy, "
+                  "in Bluebook order among any parentheticals you give and before any "
+                  "subsequent history."),
             wraplength=650,
             justify="left",
         ).pack(fill="x", pady=(0, 10))
@@ -31745,12 +31743,20 @@ class _ScholarTextWindow:
         return (self._bb["name"] or "").replace("'", "’")
 
     @staticmethod
-    def _citation_rtf(name: str, rest: str, inline: bool) -> str:
+    def _citation_rtf(
+        name: str, rest: str, inline: bool,
+        explanatory_rtf: str = "", history: str = "",
+    ) -> str:
         """The RTF for a citation, as its own paragraph or run on from the
         text.  ``inline`` is the quotation style: the citation follows the
-        closing quote after a single space, the way a brief sets it."""
+        closing quote after a single space, the way a brief sets it.
+        ``explanatory_rtf`` (already RTF) is set in a parenthetical after
+        ``rest`` and before ``history``, which closes the citation."""
         italic = "{\\i " + _rtf_escape(name) + "}" if name else ""
         body = italic + _rtf_escape(rest)
+        if explanatory_rtf:
+            body += (" (" if body else "(") + explanatory_rtf + ")"
+        body += _rtf_escape(history + ".")
         if inline:
             return " " + body
         return "\\par\\pard\\sa120 " + body + "\\par\n"
@@ -31760,59 +31766,65 @@ class _ScholarTextWindow:
         extra_parens: tuple[str, ...] = (),
         inline: bool = False,
         cite_override: str = "",
+        explanatory: tuple[str, str] = ("", ""),
     ) -> tuple[str, str]:
         """Return (plain, rtf-fragment) forms of the Bluebook citation.
-        `extra_parens` follow the writer parenthetical — e.g. "footnote
-        omitted" (Bluebook rule 5.2(d)).  ``inline`` runs the citation on from
-        the quotation instead of giving it a paragraph of its own."""
+        The writer parenthetical and `extra_parens` — e.g. "footnote
+        omitted" (Bluebook rule 5.2(d)) — follow the date in rule 1.5(b)'s
+        order, among any parentheticals an edited citation has of its own.
+        ``explanatory`` is an explanatory parenthetical's contents as
+        (plain, rtf), set after all of them and before any subsequent
+        history.  ``inline`` runs the citation on from the quotation instead
+        of giving it a paragraph of its own."""
         edited = getattr(self, "_base_citation_override", "")
         if edited:
-            suffixes = tuple(p for p in (writer, *extra_parens) if p)
-            plain, name = format_edited_citation(edited, pin, suffixes)
-            rest = plain[len(name):]
-            name = name.replace("'", "’")
-            rest = rest.replace("'", "’")
-            plain = name + rest
-            return plain, self._citation_rtf(name, rest, inline)
-
-        bb = self._bb
-        name = bb["name"]
-        cite = cite_override or bb.get("display_cite") or bb["cite"]
-        court, year = bb["court"], bb["year"]
-        if not cite and bb.get("docket_cite"):
-            # Not reported yet: docket number and exact date (rule 10.8.1(b)).
-            cite, court, year = bb["docket_cite"], bb["docket_paren"], ""
-        rest = ""
-        if cite:
-            if pin and bb.get("pin_kind") == "paragraph" and ", " in cite:
-                first, parallels = cite.split(", ", 1)
-                rest = f", {first}, {pin}, {parallels}"
-            else:
-                rest = f", {cite}"
-                if pin:
-                    m = _CITE_PARSE_RE.match(cite_override or bb.get("cite", ""))
-                    if not (m and pin == m.group(3)):
-                        rest += f", {pin}"
-        paren_inner = "" if bb.get("omit_parenthetical") else " ".join(
-            p for p in (court, year) if p
-        )
-        if paren_inner:
-            rest += f" ({paren_inner})"
-        if writer:
-            rest += f" ({writer})"
-        for extra in extra_parens:
-            if extra:
-                rest += f" ({extra})"
-        rest += "."
+            name, rest, history = edited_citation_parts(
+                edited, pin, (writer, *extra_parens))
+        else:
+            bb = self._bb
+            name = bb["name"]
+            cite = cite_override or bb.get("display_cite") or bb["cite"]
+            court, year = bb["court"], bb["year"]
+            if not cite and bb.get("docket_cite"):
+                # Not reported yet: docket number and exact date (rule
+                # 10.8.1(b)).
+                cite, court, year = bb["docket_cite"], bb["docket_paren"], ""
+            rest = ""
+            if cite:
+                if pin and bb.get("pin_kind") == "paragraph" and ", " in cite:
+                    first, parallels = cite.split(", ", 1)
+                    rest = f", {first}, {pin}, {parallels}"
+                else:
+                    rest = f", {cite}"
+                    if pin:
+                        m = _CITE_PARSE_RE.match(
+                            cite_override or bb.get("cite", ""))
+                        if not (m and pin == m.group(3)):
+                            rest += f", {pin}"
+            paren_inner = "" if bb.get("omit_parenthetical") else " ".join(
+                p for p in (court, year) if p
+            )
+            if paren_inner:
+                rest += f" ({paren_inner})"
+            rest += join_parentheticals((writer, *extra_parens))
+            history = ""
         # Bluebook abbreviations ("Ass'n", "Int'l", "Dep't", "F. App'x"),
         # possessives, and names like O'Connor take a typographic apostrophe
-        # (right single quotation mark) when copied or exported.
+        # (right single quotation mark) when copied or exported.  Not the
+        # explanatory parenthetical's: a quotation keeps its own characters.
         name = name.replace("'", "’")
         rest = rest.replace("'", "’")
-        if name:
-            return f"{name}{rest}", self._citation_rtf(name, rest, inline)
-        plain = rest.lstrip(", ")
-        return plain, self._citation_rtf("", plain, inline)
+        history = history.replace("'", "’")
+        if not name:
+            rest = rest.lstrip(", ")
+        explanatory_plain, explanatory_rtf = explanatory
+        if explanatory_plain:
+            explanatory_plain = (
+                f" ({explanatory_plain})" if name or rest
+                else f"({explanatory_plain})")
+        plain = f"{name}{rest}{explanatory_plain}{history}."
+        return plain, self._citation_rtf(
+            name, rest, inline, explanatory_rtf, history)
 
     @staticmethod
     def _page_num_from(s: str) -> Optional[int]:
@@ -32051,6 +32063,10 @@ class _ScholarTextWindow:
             # pagination and interrupts the copied prose.  A copy without a
             # citation deliberately retains the markers.
             omit_tags.add("pagenum")
+        body = _dump_to_rtf(txt, start, end, fn_links=self._fn_link_map(),
+                            omit_tags=omit_tags)
+        plain = _plain_without_layout_chars(txt, start, end,
+                                            omit_tags=omit_tags).strip()
         if with_cite:
             # Pin cites and the writer parenthetical apply whenever the opinion
             # on screen actually carries reporter page markers — the Google
@@ -32091,18 +32107,25 @@ class _ScholarTextWindow:
             if n_omitted:
                 extras = ("footnote omitted" if n_omitted == 1
                           else "footnotes omitted",)
+            explanatory = ("", "")
+            if parenthetical:
+                # The quotation is the citation's explanatory parenthetical,
+                # last of its parentheticals (after the writer's) and ahead
+                # of any subsequent history; a note about the quotation —
+                # "(footnote omitted)" — nests inside it (Bluebook rule
+                # 1.5(b)) rather than following the case.
+                explanatory = (_parenthetical_plain(plain, extras),
+                               _parenthetical_rtf(body, extras))
+                extras = ()
             plain_cite, rtf_cite = self._bluebook_citation(
                 pin, writer, extras, inline=(quote or parenthetical),
                 cite_override=self._mapped_copy_cite if mapped_us else "",
+                explanatory=explanatory,
             )
-        body = _dump_to_rtf(txt, start, end, fn_links=self._fn_link_map(),
-                            omit_tags=omit_tags)
-        plain = _plain_without_layout_chars(txt, start, end,
-                                            omit_tags=omit_tags).strip()
         if parenthetical:
-            plain = _parenthetical_plain(plain_cite, plain)
-            body = _parenthetical_rtf(rtf_cite, body)
-            rtf = _rtf_document(body)
+            plain = plain_cite
+            cite = rtf_cite[1:] if rtf_cite.startswith(" ") else rtf_cite
+            rtf = _rtf_document(cite + "\\par\n")
         elif quote:
             # A quotation: the passage's own quotation marks drop a level, the
             # whole thing goes inside double quotes, and the citation follows

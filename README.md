@@ -344,10 +344,19 @@ Copying from the text adds the citation for you, in the style chosen in the
   parenthetical after it: *Case*, 410 U.S. 113, 153 (1973) ("…").
 - **Copy without citation:** the passage alone.
 
+A citation's parentheticals come in the Bluebook's order (rule 1.5(b)): the
+date, then the writer of a separate opinion (Scalia, J., dissenting), then
+(footnote omitted) when a footnote marker was left out of the passage. In a
+parenthetical copy, (footnote omitted) describes the quotation, so it goes
+inside the quotation's parenthetical: ("…" (footnote omitted)).
+
 A small card shows exactly what was copied, italics and all, so you can check it
 before you paste. You can turn the card off in the same menu. If the citation
 GetCases builds is wrong, fix it once with **Edit citation…**. Your version is
-saved and reused, with pinpoint pages still added automatically.
+saved and reused, with pinpoint pages still added automatically. If your
+version has parentheticals of its own, such as (en banc), or subsequent history
+(", aff'd, …"), the parentheticals GetCases adds take their Bluebook place among
+yours, ahead of the history.
 
 ---
 
