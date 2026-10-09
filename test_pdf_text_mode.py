@@ -935,6 +935,7 @@ PAGECOL_DIGITS = _class_attr("_ScholarTextWindow", "_PAGECOL_DIGITS")
 PAGECOL_PAD = _class_attr("_ScholarTextWindow", "_PAGECOL_PAD")
 PAGECOL_W_MIN = _class_attr("_ScholarTextWindow", "_PAGECOL_W_MIN")
 US_PAGE_COLOR = "#0f7b7b"
+PAGE_COLOR = _class_attr("_ScholarTextWindow", "_GUTTER_PAGE_COLOR")
 
 PAGECOL_NS = _load(
     "_ScholarTextWindow",
@@ -984,6 +985,7 @@ class _GutterReader:
     _PAGECOL_PAD = PAGECOL_PAD
     _PAGECOL_W_MIN = PAGECOL_W_MIN
     _MAPPED_US_PAGE_COLOR = US_PAGE_COLOR
+    _GUTTER_PAGE_COLOR = PAGE_COLOR
 
     def __init__(self, chromeless=False, per_digit=6, base_size=11, text=None):
         self._chromeless = chromeless
@@ -1107,7 +1109,7 @@ class OneColumnGutterTests(unittest.TestCase):
     def test_both_tracks_land_in_it(self):
         reader = self._reader()
         placed = reader._pagecol_one_column({450: "a"}, {113: "c"})
-        self.assertEqual(placed[10], (450, "black"))
+        self.assertEqual(placed[10], (450, PAGE_COLOR))
         self.assertEqual(placed[50], (113, US_PAGE_COLOR))
 
     def test_a_conflict_leaves_the_us_page_where_it_is(self):
@@ -1118,14 +1120,14 @@ class OneColumnGutterTests(unittest.TestCase):
     def test_and_moves_the_other_up_a_line(self):
         reader = self._reader()
         placed = reader._pagecol_one_column({450: "b"}, {113: "b"})
-        self.assertEqual(placed[10], (450, "black"))
+        self.assertEqual(placed[10], (450, PAGE_COLOR))
 
     def test_it_goes_down_a_line_when_the_one_above_is_taken(self):
         # A U.S. page on the line above as well, so up is not available.
         reader = self._reader()
         placed = reader._pagecol_one_column(
             {450: "b"}, {112: "a", 113: "b"})
-        self.assertEqual(placed[50], (450, "black"))
+        self.assertEqual(placed[50], (450, PAGE_COLOR))
         self.assertEqual(placed[10], (112, US_PAGE_COLOR))
         self.assertEqual(placed[30], (113, US_PAGE_COLOR))
 
@@ -1133,13 +1135,13 @@ class OneColumnGutterTests(unittest.TestCase):
         reader = self._reader()
         placed = reader._pagecol_one_column({450: "a"}, {113: "a"})
         self.assertEqual(placed[10], (113, US_PAGE_COLOR))
-        self.assertEqual(placed[30], (450, "black"))
+        self.assertEqual(placed[30], (450, PAGE_COLOR))
 
     def test_a_page_with_no_line_either_side_is_left_out(self):
         reader = self._reader()
         placed = reader._pagecol_one_column(
             {450: "b"}, {112: "a", 113: "b", 114: "c"})
-        self.assertNotIn((450, "black"), placed.values())
+        self.assertNotIn((450, PAGE_COLOR), placed.values())
         self.assertEqual(len(placed), 3)
 
     def test_a_page_that_is_off_screen_is_not_drawn(self):

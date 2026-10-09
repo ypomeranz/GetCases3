@@ -143,7 +143,7 @@ DETAILS_NS = _load(
     ["_toggle_details", "_resize_for_details", "_window_is_maximized",
      "_can_resize_for_details", "_pin_text_width", "_unpin_text_width",
      "_when_resized", "_show_details_panel", "_open_details_panel",
-     "_on_text_configure"],
+     "_on_text_configure", "_fit_reading_column"],
     {"_CaseTabPage": type("_CaseTabPage", (), {}),
      "_EmbeddedCaseHost": type("_EmbeddedCaseHost", (), {}),
      "_work_area": lambda _w: (0, 0, 1600, 900)},
@@ -248,7 +248,8 @@ class _Reader:
         for name in ("_toggle_details", "_resize_for_details",
                      "_window_is_maximized", "_can_resize_for_details",
                      "_pin_text_width", "_unpin_text_width", "_when_resized",
-                     "_show_details_panel", "_open_details_panel"):
+                     "_show_details_panel", "_open_details_panel",
+                     "_fit_reading_column"):
             setattr(self, name, DETAILS_NS[name].__get__(self))
 
     def _details_panel(self):

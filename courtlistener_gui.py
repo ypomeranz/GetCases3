@@ -20596,6 +20596,32 @@ def _bind_reader_page_keys(win: tk.Misc, turn_cb) -> None:
     win.bind("<KeyPress-Right>", lambda event: handler(event, 1), add="+")
 
 
+def _forward_wheel(widget: tk.Misc, target: tk.Misc) -> None:
+    """Have the mouse wheel over *widget* — a margin beside *target* —
+    scroll *target*, by exactly what its own bindings scroll it: the event is
+    generated on it.  <MouseWheel> on Windows and macOS, buttons 4 and 5 on
+    X11."""
+    def wheel(event):
+        try:
+            target.event_generate("<MouseWheel>", delta=event.delta)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def button(number: int):
+        def press(_event):
+            try:
+                target.event_generate(f"<Button-{number}>")
+            except tk.TclError:
+                pass
+            return "break"
+        return press
+
+    widget.bind("<MouseWheel>", wheel, add="+")
+    widget.bind("<Button-4>", button(4), add="+")
+    widget.bind("<Button-5>", button(5), add="+")
+
+
 def _bind_text_scroll_keys(win: tk.Misc, txt: tk.Text, scroll_cb=None,
                            window_keys: bool = True) -> None:
     """Give a reader Text widget and its surrounding window Up/Down scrolling.
@@ -27619,6 +27645,24 @@ class _ScholarTextWindow:
     _PAGENUM_COLOR = "#8e44ad"   # muted purple — visible but not loud
     # Page boundaries inferred by aligning text to a U.S. Reports PDF.
     _MAPPED_US_PAGE_COLOR = "#087f8c"
+    # The page: white, as the scans are, and type a shade off black, which
+    # is easier on the eye over a long opinion than black on white.
+    _READ_BG = "#ffffff"
+    _READ_FG = "#1f2328"
+    _READ_SELECT_BG = "#cfe0f9"          # a selection that leaves the type be
+    _READ_SELECT_BG_IDLE = "#e3ebf7"     # …while the window is not in front
+    # The source's own reporter pages in the gutter: a dark slate rather than
+    # black, so the margin reads as a margin beside the text.
+    _GUTTER_PAGE_COLOR = "#4f5762"
+    #: The longest line the opinion is set to, in average characters of its
+    #: body face — about the measure of the printed reporter, and well within
+    #: what reads comfortably at length.  A wider window centres the column.
+    _MEASURE_CHARS = 80
+    #: The distance from one line to the next, in ems of the body face: type
+    #: set solid reads cramped at this measure.  Faces differ in how much
+    #: of it they carry already — Century Schoolbook little, Palatino more
+    #: — so only the difference is added (see _apply_leading).
+    _LINE_HEIGHT = 1.5
     _LINK_COLOR = "#1a56b0"
     _DISSENT_COLOR = "#a31515"   # dark red — top-of-window label & RTF headings
     _CONCUR_COLOR = "#1a7a3c"    # dark green
@@ -28221,11 +28265,19 @@ class _ScholarTextWindow:
         # fixed while the side panel opens beside it (see _pin_text_width).
         holder = ttk.Frame(text_frame)
         self._text_holder = holder
-        txt = _ReaderText(holder, wrap="word", font=base, padx=14, pady=10)
+        txt = _ReaderText(
+            holder, wrap="word", font=base, padx=14, pady=10,
+            borderwidth=0, highlightthickness=0, relief="flat",
+            background=self._READ_BG, foreground=self._READ_FG,
+            selectbackground=self._READ_SELECT_BG,
+            selectforeground=self._READ_FG,
+            inactiveselectbackground=self._READ_SELECT_BG_IDLE,
+        )
         self._text = txt
+        self._apply_leading()
         vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=self._on_yscroll)
-        # Left gutter: reporter page numbers in bold black, scrolling with the
+        # Left gutter: reporter page numbers in bold slate, scrolling with the
         # text — a separate Canvas, so it can't be selected/copied (the page is
         # already marked inline in purple).  Right strip: a colour-coded map of
         # where each concurrence/dissent begins (full-opinion view only).
@@ -28236,9 +28288,10 @@ class _ScholarTextWindow:
             family="Georgia", size=max(self._base_size - 2, 7), weight="bold")
         self._partmap_font = tkfont.Font(
             family="TkDefaultFont", size=max(self._base_size - 3, 7))
-        self._pagecol = tk.Canvas(text_frame, width=self._PAGECOL_W, bg="white",
-                                  highlightthickness=0, takefocus=0)
-        self._partmap = tk.Canvas(text_frame, width=0, bg="white",
+        self._pagecol = tk.Canvas(text_frame, width=self._PAGECOL_W,
+                                  bg=self._READ_BG, highlightthickness=0,
+                                  takefocus=0)
+        self._partmap = tk.Canvas(text_frame, width=0, bg=self._READ_BG,
                                   highlightthickness=0, takefocus=0)
         self._partmap_rows: list[tuple[float, float, int]] = []
         self._pagecol.pack(side="left", fill="y")
@@ -28250,6 +28303,21 @@ class _ScholarTextWindow:
         holder.pack(side="left", fill="both", expand=True)
         txt.pack(fill="both", expand=True)
         txt.bind("<Configure>", lambda _e: self._on_text_configure())
+        # The reading column: blank space either side of the page numbers and
+        # the opinion, sized so that on a wide window the text keeps to a
+        # comfortable line (see _fit_reading_column).  The parts' rail and
+        # the scrollbar stay at the window's edge.
+        self._column_left = tk.Frame(text_frame, width=0, bg=self._READ_BG,
+                                     borderwidth=0, highlightthickness=0)
+        self._column_right = tk.Frame(text_frame, width=0, bg=self._READ_BG,
+                                      borderwidth=0, highlightthickness=0)
+        self._column_left.pack(side="left", fill="y", before=self._pagecol)
+        self._column_right.pack(side="right", fill="y", before=holder)
+        text_frame.bind("<Configure>",
+                        lambda _e: self._fit_reading_column(), add="+")
+        # The margins scroll the opinion as the text itself does.
+        for margin in (self._column_left, self._column_right, self._pagecol):
+            _forward_wheel(margin, txt)
         self._partmap.bind("<Button-1>", self._on_partmap_click)
         self._partmap.bind("<Enter>", lambda _e: self._partmap.config(cursor="hand2"))
         self._partmap.bind("<Leave>", lambda _e: self._partmap.config(cursor=""))
@@ -28319,8 +28387,8 @@ class _ScholarTextWindow:
             "pagenum", font=pagenum_font, foreground=self._PAGENUM_COLOR
         )
         txt.tag_configure("citelink", foreground=self._LINK_COLOR)
-        txt.tag_bind("citelink", "<Enter>", lambda _e: txt.config(cursor="hand2"))
-        txt.tag_bind("citelink", "<Leave>", lambda _e: txt.config(cursor=""))
+        txt.tag_bind("citelink", "<Enter>", self._on_link_enter)
+        txt.tag_bind("citelink", "<Leave>", self._on_link_leave)
         txt.tag_configure("jumpflash", background="#fff2a8")
         txt.tag_configure(self._JUSTIFY_PAD_TAG)
         txt.tag_configure(self._JUSTIFY_HIDE_TAG, elide=True)
@@ -28699,9 +28767,113 @@ class _ScholarTextWindow:
         if getattr(self, "_pagecol_font", None) is not None:
             self._pagecol_font.configure(size=max(new - 2, 7))
             self._partmap_font.configure(size=max(new - 3, 7))
+        # And the space between lines, and the width of the column.
+        self._apply_leading()
+        self._fit_reading_column()
         self._schedule_text_justify()
         self._schedule_gutter_redraw()
         self._status_var.set(f"Text size: {new} pt")
+
+    # ------------------------------------------------------------------
+    # The page: leading, the reading column, links
+    # ------------------------------------------------------------------
+
+    #: Prose whose average character stands for the body face's, in sizing
+    #: the reading column.
+    _MEASURE_SAMPLE = (
+        "The judgment of the Court of Appeals is reversed, and the case is "
+        "remanded for further proceedings consistent with this opinion.")
+
+    def _apply_leading(self) -> None:
+        """Space the lines for the body face at its present size.
+
+        Half the gap above every line and half below: Tk splits the space
+        between a paragraph's wrapped lines (spacing2) that way itself, so
+        spacing1 and spacing3 at half of it make every line's box the same —
+        centred on its type, which is where the page gutter sets its numbers
+        (see _pagecol_rows)."""
+        try:
+            font = self._fonts["base"]
+            em = abs(float(font.cget("size")))
+            if float(font.cget("size")) > 0:            # points, not pixels
+                em *= float(self._text.tk.call("tk", "scaling"))
+            gap = max(0, round(self._LINE_HEIGHT * em
+                               - font.metrics("linespace")))
+            gap += gap % 2
+            self._text.configure(spacing1=gap // 2, spacing2=gap,
+                                 spacing3=gap // 2)
+        except (KeyError, AttributeError, ValueError, tk.TclError):
+            pass
+
+    def _measure_px(self) -> int:
+        """The reading column's width for the text, in pixels: _MEASURE_CHARS
+        of the body face at its present size."""
+        font = self._fonts["base"]
+        size = font.cget("size")
+        kept = getattr(self, "_measure_kept", None)
+        if kept is not None and kept[0] == size:
+            return kept[1]
+        sample = self._MEASURE_SAMPLE
+        px = int(font.measure(sample) / len(sample) * self._MEASURE_CHARS)
+        self._measure_kept = (size, px)
+        return px
+
+    def _fit_reading_column(self) -> None:
+        """Centre the page numbers and the opinion between the blank margins
+        either side of them, the text no wider than the reading column; a
+        window narrower than that gives the text all the room there is."""
+        frame = getattr(self, "_text_frame", None)
+        holder = getattr(self, "_text_holder", None)
+        left = getattr(self, "_column_left", None)
+        right = getattr(self, "_column_right", None)
+        if None in (frame, holder, left, right):
+            return
+        try:
+            if not holder.pack_propagate():
+                return      # held at its width while the side panel opens
+            total = frame.winfo_width()
+            if total <= 1:
+                return
+            # What else stands in the row: the page gutter, the parts' rail,
+            # the scrollbar, the side panel when it is open.
+            beside = sum(
+                w.winfo_reqwidth() for w in frame.pack_slaves()
+                if w not in (left, right, holder)
+                and w.pack_info().get("side") in ("left", "right"))
+            text_w = self._measure_px() + 2 * int(self._text.cget("padx"))
+            margin = max(0, (total - beside - text_w) // 2)
+            for spacer in (left, right):
+                if int(spacer.cget("width")) != margin:
+                    spacer.configure(width=margin)
+        except (KeyError, ValueError, tk.TclError):
+            pass
+
+    def _on_link_enter(self, _event=None) -> None:
+        txt = self._text
+        txt.config(cursor="hand2")
+        self._underline_link(next(
+            (t for t in txt.tag_names("current") if t.startswith("lnk")),
+            None))
+
+    def _on_link_leave(self, _event=None) -> None:
+        self._text.config(cursor="")
+        self._underline_link(None)
+
+    def _underline_link(self, tag: Optional[str]) -> None:
+        """Underline the link the pointer is on, and only while it is."""
+        was = getattr(self, "_hover_link", None)
+        if was == tag:
+            return
+        self._hover_link = tag
+        try:
+            if was:
+                # Unset rather than off, so a link the opinion itself
+                # underlines keeps its underline.
+                self._text.tag_configure(was, underline="")
+            if tag:
+                self._text.tag_configure(tag, underline=True)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # Rendering
@@ -30895,11 +31067,11 @@ class _ScholarTextWindow:
                     slot = below
                 else:
                     continue    # no line free either side; leave it out
-            placed[slot] = (page, "black")
+            placed[slot] = (page, self._GUTTER_PAGE_COLOR)
         return placed
 
     def _draw_page_column(self) -> None:
-        """Draw the reporter page numbers (bold black) in the left gutter, each
+        """Draw the reporter page numbers (bold slate) in the left gutter, each
         aligned to the screen line where its star-pagination marker sits.  Only
         the currently visible pages are drawn (it scrolls with the text)."""
         canvas = getattr(self, "_pagecol", None)
@@ -30923,13 +31095,13 @@ class _ScholarTextWindow:
             return
 
         # Keep simultaneous boundaries visible: inferred U.S. pages occupy the
-        # left half in teal; the source's own star pages stay black at right.
+        # left half in teal; the source's own star pages stay slate at right.
         numbers = [
             (4, y, "w", str(page), self._MAPPED_US_PAGE_COLOR)
             for y, (page, _h) in self._pagecol_rows(
                 us_page_pos, prefer_later_page=True).items()
         ] + [
-            (w - 5, y, "e", str(page), "black")
+            (w - 5, y, "e", str(page), self._GUTTER_PAGE_COLOR)
             for y, (page, _h) in self._pagecol_rows(page_pos).items()
         ]
         self._paint_page_numbers(canvas, width, numbers)
@@ -30950,6 +31122,7 @@ class _ScholarTextWindow:
         try:
             if int(float(canvas.cget("width"))) != width:
                 canvas.config(width=width)
+                self._win.after_idle(self._fit_reading_column)
             for i, number in enumerate(numbers):
                 x, y, anchor, text, color = number
                 if i == len(pool):
@@ -33357,6 +33530,9 @@ class _ScholarTextWindow:
                 self._details_frame.pack_forget()
             except tk.TclError:
                 pass
+        # The panel takes its width from the row the reading column is
+        # centred in, wherever the window could not grow to hold it.
+        self._fit_reading_column()
 
     def _open_details_panel(self) -> None:
         """Fill the column the window just grew by, and let the opinion follow
@@ -33395,6 +33571,7 @@ class _ScholarTextWindow:
             holder.configure(width=0)   # back to taking what pack gives it
         except tk.TclError:
             pass
+        self._fit_reading_column()      # held back while it was pinned
 
     def _when_resized(self, done, tries: int = 20, step_ms: int = 15) -> None:
         """Run *done* once the window has taken the width last asked for — or
@@ -43337,6 +43514,13 @@ def main() -> None:
         root.after(5000, _gc_tick)
 
     root.after(5000, _gc_tick)
+
+    # Hand the GIL back to the Tk thread sooner.  Workers read scans and
+    # opinions in pure Python, and every Tk call the window makes gives the
+    # GIL up and then waits — up to this interval — to have it back; a scroll
+    # makes several such calls, so at the default 5 ms an opinion scrolled
+    # while its citations were being read stalled for a third of a second.
+    sys.setswitchinterval(0.001)
 
     app = CourtListenerGUI(root)
     # A GetCases already running — in the background, from another checkout —
