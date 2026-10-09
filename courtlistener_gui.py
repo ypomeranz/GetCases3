@@ -8427,6 +8427,360 @@ def _recent_scotus_menu_label(name: str, date: str, width: int = 72) -> str:
     return name + tail
 
 
+def _one_line(text: str) -> str:
+    """*text* with its runs of whitespace, line breaks included, made one
+    space."""
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+class _SpotlightList:
+    """Spotlight's result rows, drawn on one canvas.
+
+    Each row used to be a stack of CustomTkinter widgets — a rounded frame, a
+    badge, five labels and the frames between them, each its own canvas —
+    some twenty Tk windows a row.  Building them took tens of milliseconds a
+    row, and a highlight re-coloured (so redrew) every widget of every row
+    each time the pointer crossed one of them, so the list lagged under the
+    mouse and the arrow keys.  Here a row is seven canvas items: its
+    highlight, its badge and five pieces of text.  A highlight re-colours two
+    rows, one <Motion> binding follows the pointer, and the canvas scrolls
+    itself.  The layout, colours and type are the widget rows', sizes given
+    in CustomTkinter's unscaled units and scaled the way its widgets are.
+
+    Rows are dicts the caller may keep its own keys on (an opener, the
+    source); the list keeps its texts and canvas items under ``"spot"``."""
+
+    # Unscaled geometry, for the modern (CustomTkinter) and the plain look.
+    # row: height and the gap above it; margin: canvas edge to row; badge: its
+    # inset from the row's left, size, gap to the text and line centres; name
+    # and snippet: their line centres; pad: the text's right inset; inset:
+    # the text's own, inside where a tk.Label's border and padding put it.
+    _MODERN = {
+        "row_h": 72, "gap": 4, "margin": 10, "radius": 10,
+        "badge_x": 10, "badge_w": 78, "badge_h": 44, "badge_r": 6,
+        "badge_gap": 12, "court_y": 12, "year_y": 29,
+        "name_y": 20, "snippet_y": 50, "pad": 12, "detail_gap": 12,
+        "inset": 0,
+    }
+    _PLAIN = {
+        "row_h": 68, "gap": 2, "margin": 4, "radius": 0,
+        "badge_x": 6, "badge_w": 76, "badge_h": 46, "badge_r": 0,
+        "badge_gap": 8, "court_y": 14, "year_y": 33,
+        "name_y": 25, "snippet_y": 45, "pad": 6, "detail_gap": 10,
+        "inset": 2,
+    }
+
+    def __init__(self, parent: tk.Misc, width: int) -> None:
+        self.modern = _CTK_AVAILABLE
+        self.geo = self._MODERN if self.modern else self._PLAIN
+        if self.modern:
+            self.colors = {
+                "bg": _UI["window"], "row": _UI["window"],
+                "selected": _UI["selection"], "name": _UI["text"],
+                "detail": _UI["muted"], "snippet": _UI["muted"],
+            }
+        else:
+            self.colors = {
+                "bg": "#f0f0f0", "row": "#ffffff", "selected": "#d0e0f0",
+                "name": "#222222", "detail": "#888888",
+                "snippet": "#888888",
+            }
+        self.canvas = tk.Canvas(
+            parent, bg=self.colors["bg"], highlightthickness=0, height=1,
+            cursor="" if self.modern else "hand2",
+        )
+        self.scale = 1.0
+        if self.modern:
+            try:
+                self.scale = float(
+                    ctk.ScalingTracker.get_widget_scaling(parent))
+            except Exception:
+                self.scale = 1.0
+        # The fonts CTkLabel would use (CustomTkinter sizes them in pixels,
+        # scaled), so the text matches the rest of the popup exactly.
+        sizes = ({"name": (14, "normal"), "detail": (11, "normal"),
+                  "snippet": (10, "normal"), "court": (11, "bold"),
+                  "year": (10, "normal")} if self.modern else
+                 {"name": (10, ""), "detail": (8, ""), "snippet": (8, ""),
+                  "court": (10, "bold"), "year": (9, "")})
+        self.fonts = {key: self._font(size, weight)
+                      for key, (size, weight) in sizes.items()}
+        self.width = max(1, int(width))
+        self.rows: list[dict] = []
+        self.selected = -1
+        self._images: dict = {}
+        # Rounded corners: the canvas draws them smooth on macOS (and sharp
+        # on a Retina screen, which a bitmap would not be); elsewhere its
+        # edges are jagged, so Pillow draws them.
+        self._images_ok = self.modern and sys.platform != "darwin"
+        self.canvas.bind("<Configure>", self._on_configure, add="+")
+        self.canvas.bind("<Destroy>", self._on_destroy, add="+")
+
+    # -- geometry ---------------------------------------------------------
+
+    def _px(self, value: float) -> int:
+        return int(round(value * self.scale))
+
+    def _font(self, size: int, weight: str):
+        if self.modern:
+            try:
+                return _ui_font(size, weight).create_scaled_tuple(self.scale)
+            except Exception:
+                pass
+        return ("TkDefaultFont", size, weight) if weight else (
+            "TkDefaultFont", size)
+
+    @property
+    def unit(self) -> int:
+        """A row's height with the gap above it."""
+        return self._px(self.geo["row_h"] + self.geo["gap"])
+
+    def content_height(self) -> int:
+        return len(self.rows) * self.unit
+
+    def row_bounds(self, idx: int) -> "tuple[int, int]":
+        """The canvas y-range a row's card covers (the gap above excluded)."""
+        top = idx * self.unit + self._px(self.geo["gap"])
+        return top, top + self._px(self.geo["row_h"])
+
+    def index_at(self, y: int) -> int:
+        """The row under window y-coordinate *y*, or -1 (a gap, or no row)."""
+        try:
+            cy = self.canvas.canvasy(y)
+        except tk.TclError:
+            return -1
+        idx = int(cy // self.unit) if cy >= 0 else -1
+        if not 0 <= idx < len(self.rows):
+            return -1
+        top, bottom = self.row_bounds(idx)
+        return idx if top <= cy < bottom else -1
+
+    # -- shapes -----------------------------------------------------------
+
+    def _rounded_image(self, w: int, h: int, r: int, color: str):
+        """A rounded rectangle drawn smooth-edged by Pillow (one image shared
+        by every row that needs it), or None where Pillow cannot draw it."""
+        key = (w, h, r, color)
+        image = self._images.get(key)
+        if image is not None or not self._images_ok:
+            return image
+        try:
+            from PIL import Image, ImageDraw
+            k = 4                       # drawn 4x, then averaged down
+            big = Image.new("RGBA", (w * k, h * k), (0, 0, 0, 0))
+            ImageDraw.Draw(big).rounded_rectangle(
+                (0, 0, w * k - 1, h * k - 1), radius=r * k, fill=color)
+            image = _make_safe_photo(big.reduce(k))
+        except Exception as exc:
+            print(f"[spotlight] rounded rows fall back to polygons: {exc}")
+            self._images_ok = False
+            return None
+        self._images[key] = image
+        return image
+
+    @staticmethod
+    def _round_points(x: int, y: int, w: int, h: int, r: int) -> list:
+        x1, y1 = x + w, y + h
+        return [x + r, y, x + r, y, x1 - r, y, x1 - r, y, x1, y, x1, y + r,
+                x1, y + r, x1, y1 - r, x1, y1 - r, x1, y1, x1 - r, y1,
+                x1 - r, y1, x + r, y1, x + r, y1, x, y1, x, y1 - r,
+                x, y1 - r, x, y + r, x, y + r, x, y]
+
+    def _shape(self, item, x: int, y: int, w: int, h: int, r: int,
+               color: str):
+        """Draw (*item* None) or redraw a rounded rectangle; return its id."""
+        c = self.canvas
+        image = self._rounded_image(w, h, r, color) if r else None
+        kind = "image" if image is not None else "polygon" if r else "rectangle"
+        if item is not None and c.type(item) != kind:
+            # Pillow gave out part-way: swap in the polygon at the same place
+            # in the stacking order.
+            new = self._shape(None, x, y, w, h, r, color)
+            c.tag_lower(new, item)
+            c.delete(item)
+            return new
+        if image is not None:
+            if item is None:
+                return c.create_image(x, y, image=image, anchor="nw")
+            c.coords(item, x, y)
+            c.itemconfigure(item, image=image)
+        elif r:
+            points = self._round_points(x, y, w, h, r)
+            if item is None:
+                return c.create_polygon(points, smooth=True, fill=color,
+                                        outline="")
+            c.coords(item, *points)
+            c.itemconfigure(item, fill=color)
+        else:
+            if item is None:
+                return c.create_rectangle(x, y, x + w, y + h, fill=color,
+                                          outline="")
+            c.coords(item, x, y, x + w, y + h)
+            c.itemconfigure(item, fill=color)
+        return item
+
+    # -- text -------------------------------------------------------------
+
+    def _fit(self, font, text: str, width: int) -> str:
+        """*text* cut, with an ellipsis, to fit *width* pixels."""
+        if width <= 0 or not text:
+            return ""
+        if self._measure(font, text) <= width:
+            return text
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._measure(font, text[:mid].rstrip() + "…") <= width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo].rstrip() + "…" if lo else ""
+
+    def _measure(self, font, text: str) -> int:
+        """*text*'s width in *font*, a font description rather than a named
+        font: Tk caches it by that description while the row's text items
+        use it, and there is no Font object whose finalizer calls Tcl."""
+        if not text:
+            return 0
+        return int(self.canvas.tk.call("font", "measure", font, text))
+
+    # -- rows -------------------------------------------------------------
+
+    def add(self, court: str, color: str, name: str, detail: str,
+            snippet: str = "", year: str = "") -> dict:
+        """Draw a new row at the bottom of the list and return it."""
+        c, colors, fonts = self.canvas, self.colors, self.fonts
+        bg_box, badge_box = self._boxes(len(self.rows))
+        # Created bottom to top — highlight, badge, text — so each is drawn
+        # over the last; _layout puts the text in place.
+        items = {
+            "bg": self._shape(None, *bg_box, colors["row"]),
+            "badge": self._shape(None, *badge_box, color),
+            "court": c.create_text(0, 0, anchor="center", fill="#ffffff",
+                                   font=fonts["court"]),
+            "year": c.create_text(0, 0, anchor="center", fill="#ffffff",
+                                  font=fonts["year"]),
+            "name": c.create_text(0, 0, anchor="w", fill=colors["name"],
+                                  font=fonts["name"]),
+            "detail": c.create_text(0, 0, anchor="e", fill=colors["detail"],
+                                    font=fonts["detail"]),
+            "snippet": c.create_text(0, 0, anchor="w",
+                                     fill=colors["snippet"],
+                                     font=fonts["snippet"]),
+        }
+        r = {"spot": {"court": court, "color": color, "name": name,
+                      "detail": detail, "snippet": _one_line(snippet),
+                      "year": year, "items": items}}
+        self.rows.append(r)
+        self._layout(len(self.rows) - 1)
+        return r
+
+    def _boxes(self, idx: int) -> tuple:
+        """Row *idx*'s highlight and badge, each as (x, y, w, h, radius)."""
+        g, px = self.geo, self._px
+        top, _bottom = self.row_bounds(idx)
+        left = px(g["margin"])
+        bw, bh = px(g["badge_w"]), px(g["badge_h"])
+        return ((left, top, max(1, self.width - 2 * left), px(g["row_h"]),
+                 px(g["radius"])),
+                (left + px(g["badge_x"]), top + (px(g["row_h"]) - bh) // 2,
+                 bw, bh, px(g["badge_r"])))
+
+    def _place_bg(self, idx: int) -> None:
+        """Size row *idx*'s highlight to the width, coloured for selection."""
+        items = self.rows[idx]["spot"]["items"]
+        color = self.colors["selected" if idx == self.selected else "row"]
+        items["bg"] = self._shape(items["bg"], *self._boxes(idx)[0], color)
+        # The modern look's rows are the canvas's own colour until selected:
+        # hidden, they cost nothing to draw.
+        self.canvas.itemconfigure(
+            items["bg"],
+            state="hidden" if color == self.colors["bg"] else "normal")
+
+    def _layout(self, idx: int) -> None:
+        """Place row *idx*'s items for the current width."""
+        g, px, c = self.geo, self._px, self.canvas
+        r = self.rows[idx]["spot"]
+        items = r["items"]
+        self._place_bg(idx)
+        top, _bottom = self.row_bounds(idx)
+        left = px(g["margin"])
+        badge_box = self._boxes(idx)[1]
+        bx, by, bw, _bh, _br = badge_box
+        items["badge"] = self._shape(items["badge"], *badge_box, r["color"])
+        cx = bx + bw // 2
+        c.coords(items["court"], cx, by + px(g["court_y"]))
+        c.coords(items["year"], cx, by + px(g["year_y"]))
+        c.itemconfigure(items["court"], text=self._fit(
+            self.fonts["court"], r["court"], bw - px(4)))
+        c.itemconfigure(items["year"], text=self._fit(
+            self.fonts["year"], r["year"], bw - px(4)))
+        # Name on the left, the citation and source right-aligned beside it,
+        # the snippet below: each cut with an ellipsis to the room it has.
+        text_left = bx + bw + px(g["badge_gap"]) + px(g["inset"])
+        text_right = self.width - left - px(g["pad"]) - px(g["inset"])
+        text_w = max(0, text_right - text_left)
+        detail = self._fit(self.fonts["detail"], r["detail"],
+                           int(text_w * 0.6))
+        c.coords(items["detail"], text_right, top + px(g["name_y"]))
+        c.itemconfigure(items["detail"], text=detail)
+        name_w = text_w - (self._measure(self.fonts["detail"], detail)
+                           + px(g["detail_gap"]) if detail else 0)
+        c.coords(items["name"], text_left, top + px(g["name_y"]))
+        c.itemconfigure(items["name"], text=self._fit(
+            self.fonts["name"], r["name"], name_w))
+        c.coords(items["snippet"], text_left, top + px(g["snippet_y"]))
+        c.itemconfigure(items["snippet"], text=self._fit(
+            self.fonts["snippet"], r["snippet"], text_w))
+
+    def update(self, r: dict, **changes) -> None:
+        """Change row *r*'s court, color, detail, snippet or year, and redraw
+        it.  A row no longer on the list (or a list taken down) is left be."""
+        if "snippet" in changes:
+            changes["snippet"] = _one_line(changes["snippet"])
+        r["spot"].update(changes)
+        try:
+            self._layout(self.rows.index(r))
+        except (ValueError, tk.TclError):
+            pass
+
+    def select(self, idx: int) -> None:
+        """Highlight row *idx* (-1: none), re-colouring only the two rows
+        whose highlight changes."""
+        old, self.selected = self.selected, idx
+        if old == idx:
+            return
+        for i in (old, idx):
+            if 0 <= i < len(self.rows):
+                try:
+                    self._place_bg(i)
+                except tk.TclError:
+                    pass
+
+    # -- events -----------------------------------------------------------
+
+    def _on_configure(self, event) -> None:
+        if event.width == self.width or event.width <= 1:
+            return
+        self.width = event.width
+        for i in range(len(self.rows)):
+            try:
+                self._layout(i)
+            except tk.TclError:
+                return
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self.canvas:
+            return
+        # Free the shared shape images now, on the Tk thread, rather than
+        # whenever (and on whatever thread) the last reference to the list
+        # happens to go — see the image lifecycle note at _make_safe_photo.
+        images, self._images = self._images, {}
+        self._images_ok = False
+        for image in images.values():
+            _dispose_photo(image)
+
+
 class CourtListenerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -11199,114 +11553,6 @@ class CourtListenerGUI:
         other court a quieter slate, so SCOTUS results stand out at a glance."""
         return _UI["badge"] if court_id == "scotus" else _UI["badge_alt"]
 
-    def _spot_build_row(self, parent, court_abbr: str, tier_color: str,
-                        display_name: str, detail_text: str,
-                        snippet: str = "", year: str = "") -> dict:
-        """Create one spotlight result row and return the widgets the caller
-        needs to bind clicks and re-colour on highlight.  Builds a rounded,
-        themed card when CustomTkinter is present, or the plain-Tk row otherwise.
-        """
-        if _CTK_AVAILABLE:
-            row = ctk.CTkFrame(
-                parent, corner_radius=10, fg_color=_UI["window"],
-                height=72,
-            )
-            row.pack(side="top", fill="x", padx=10, pady=(4, 0))
-            row.pack_propagate(False)
-            badge = ctk.CTkFrame(
-                row, fg_color=tier_color, corner_radius=6,
-                width=78, height=44,
-            )
-            badge.pack(side="left", padx=(10, 12), pady=9)
-            badge.pack_propagate(False)
-            badge_court = ctk.CTkLabel(
-                badge, text=court_abbr, fg_color="transparent",
-                text_color="#ffffff", font=_ui_font(11, "bold"), height=19,
-            )
-            badge_court.pack(fill="x", pady=(3, 0))
-            badge_year = ctk.CTkLabel(
-                badge, text=year, fg_color="transparent",
-                text_color="#ffffff", font=_ui_font(10), height=15,
-            )
-            badge_year.pack(fill="x", pady=(0, 3))
-            text_frame = ctk.CTkFrame(row, fg_color="transparent")
-            text_frame.pack(side="left", fill="both", expand=True, padx=(0, 12))
-            header_frame = ctk.CTkFrame(
-                text_frame, fg_color="transparent",
-            )
-            header_frame.pack(fill="x", pady=(7, 0))
-            detail_lbl = ctk.CTkLabel(
-                header_frame, text=detail_text, fg_color="transparent",
-                text_color=_UI["muted"], font=_ui_font(11), anchor="e",
-            )
-            detail_lbl.pack(side="right", padx=(12, 0))
-            name_lbl = ctk.CTkLabel(
-                header_frame, text=display_name, fg_color="transparent",
-                text_color=_UI["text"], font=_ui_font(14), anchor="w",
-            )
-            name_lbl.pack(side="left", fill="x", expand=True)
-            snippet_lbl = ctk.CTkLabel(
-                text_frame, text=snippet, fg_color="transparent",
-                text_color=_UI["muted"], font=_ui_font(10), anchor="w",
-            )
-            snippet_lbl.pack(fill="x", pady=(2, 6))
-            return {
-                "row": row, "badge": badge, "badge_court": badge_court,
-                "badge_year": badge_year, "year": year,
-                "text_frame": text_frame,
-                "header_frame": header_frame,
-                "name": name_lbl, "detail": detail_lbl,
-                "snippet": snippet_lbl, "modern": True,
-            }
-        row = tk.Frame(
-            parent, bg="#ffffff", height=68,
-            cursor="hand2",
-        )
-        row.pack(side="top", fill="x", padx=4, pady=(2, 0))
-        row.pack_propagate(False)
-        badge = tk.Frame(
-            row, bg=tier_color, width=76, height=46,
-        )
-        badge.pack(side="left", padx=(6, 8))
-        badge.pack_propagate(False)
-        badge_court = tk.Label(
-            badge, text=court_abbr, bg=tier_color, fg="#ffffff",
-            font=("TkDefaultFont", 10, "bold"), anchor="center",
-        )
-        badge_court.pack(fill="x", pady=(3, 0))
-        badge_year = tk.Label(
-            badge, text=year, bg=tier_color, fg="#ffffff",
-            font=("TkDefaultFont", 9), anchor="center",
-        )
-        badge_year.pack(fill="x", pady=(0, 3))
-        text_frame = tk.Frame(row, bg="#ffffff")
-        text_frame.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        header_frame = tk.Frame(text_frame, bg="#ffffff")
-        header_frame.pack(fill="x")
-        detail_lbl = tk.Label(
-            header_frame, text=detail_text, bg="#ffffff", fg="#888888",
-            font=("TkDefaultFont", 8), anchor="e",
-        )
-        detail_lbl.pack(side="right", padx=(10, 0))
-        name_lbl = tk.Label(
-            header_frame, text=display_name, bg="#ffffff", fg="#222222",
-            font=("TkDefaultFont", 10), anchor="w",
-        )
-        name_lbl.pack(side="left", fill="x", expand=True)
-        snippet_lbl = tk.Label(
-            text_frame, text=snippet, bg="#ffffff", fg="#888888",
-            font=("TkDefaultFont", 8), anchor="w",
-        )
-        snippet_lbl.pack(fill="x")
-        return {
-            "row": row, "badge": badge, "badge_court": badge_court,
-            "badge_year": badge_year, "year": year,
-            "text_frame": text_frame,
-            "header_frame": header_frame,
-            "name": name_lbl, "detail": detail_lbl,
-            "snippet": snippet_lbl, "modern": False,
-        }
-
     @staticmethod
     def _spot_court_label(court_id: str) -> str:
         """Badge text for a court id, or the placeholder when none is known."""
@@ -11317,53 +11563,6 @@ class CourtListenerGUI:
         if not court_id:
             return "?"
         return _COURT_BLUEBOOK.get(court_id, court_id.upper())
-
-    def _spot_set_badge(self, r: dict, court_id: str, label: str = "") -> None:
-        """Re-label a result's court badge, in either widget toolkit."""
-        text = label or self._spot_court_label(court_id)
-        color = self._spot_tier_color(court_id)
-        try:
-            if r["modern"]:
-                r["badge"].configure(fg_color=color)
-                r["badge_court"].configure(text=text)
-            else:
-                r["badge"].config(bg=color)
-                r["badge_court"].config(text=text, bg=color)
-                r["badge_year"].config(bg=color)
-        except tk.TclError:
-            pass
-
-    @staticmethod
-    def _spot_set_badge_year(r: dict, year: str) -> None:
-        """Update the smaller year line without disturbing the court label."""
-        r["year"] = year
-        try:
-            if r["modern"]:
-                r["badge_year"].configure(text=year)
-            else:
-                r["badge_year"].config(text=year)
-        except tk.TclError:
-            pass
-
-    def _spot_highlight_row(self, r: dict, selected: bool) -> None:
-        """Colour a result row for the current keyboard/hover selection."""
-        if r["modern"]:
-            r["row"].configure(
-                fg_color=_UI["selection"] if selected else _UI["window"]
-            )
-            return
-        bg = "#d0e0f0" if selected else "#ffffff"
-        for w in (
-            r["row"], r["text_frame"], r.get("header_frame"),
-            r["name"], r["detail"],
-            r.get("snippet"),
-        ):
-            if w is None:
-                continue
-            try:
-                w.config(bg=bg)
-            except tk.TclError:
-                pass
 
     def _show_spotlight_dropdown(
         self, popup: tk.Toplevel, border: tk.Frame,
@@ -11390,14 +11589,13 @@ class CourtListenerGUI:
         # reachable by wheel or arrow keys instead of spilling off-screen.
         max_rows = 10
         pw = 600 if _CTK_AVAILABLE else 580
-        row_unit = 76 if _CTK_AVAILABLE else 70  # snippet-bearing row + gap
         sx = popup.winfo_screenwidth()
         sy = popup.winfo_screenheight()
         pos_x = (sx - pw) // 2
         pos_y = sy // 3
 
-        # Results below the search bar.  Rows pack into `rows_frame`, which rides
-        # inside a scrolling canvas so the list can exceed the visible popup; the
+        # Results below the search bar.  The rows are drawn on one canvas (see
+        # _SpotlightList), which scrolls when the list outgrows the screen; the
         # "Searching…" status stays pinned at the bottom of `results_frame`.
         if _CTK_AVAILABLE:
             results_frame = ctk.CTkFrame(border, fg_color=_UI["window"])
@@ -11411,8 +11609,8 @@ class CourtListenerGUI:
 
         scroll_area = tk.Frame(results_frame, bg=canvas_bg)
         scroll_area.pack(side="top", fill="both", expand=True)
-        results_canvas = tk.Canvas(scroll_area, bg=canvas_bg,
-                                   highlightthickness=0, height=1)
+        spot = _SpotlightList(scroll_area, width=pw - 4)
+        results_canvas = spot.canvas
         results_vsb = ttk.Scrollbar(
             scroll_area, orient="vertical", command=results_canvas.yview,
             style="Modern.Vertical.TScrollbar" if _CTK_AVAILABLE
@@ -11420,21 +11618,9 @@ class CourtListenerGUI:
         )
         results_canvas.configure(yscrollcommand=results_vsb.set)
         results_canvas.pack(side="left", fill="both", expand=True)
-        if _CTK_AVAILABLE:
-            rows_frame = ctk.CTkFrame(results_canvas, fg_color=_UI["window"])
-        else:
-            rows_frame = tk.Frame(results_canvas, bg="#f0f0f0")
-        rows_window = results_canvas.create_window((0, 0), window=rows_frame,
-                                                   anchor="nw")
-        results_canvas.bind(
-            "<Configure>",
-            lambda e: results_canvas.itemconfigure(rows_window, width=e.width),
-        )
 
-        # Wheel scrolling.  The pointer usually rests on a row, not the canvas
-        # gaps, so the handlers bind to the canvas here and to every row as it
-        # streams in (see _add_result); covers Windows/macOS (<MouseWheel>) and
-        # X11 (<Button-4/5>).
+        # Wheel scrolling; covers Windows/macOS (<MouseWheel>) and X11
+        # (<Button-4/5>).
         def _wheel(direction: int) -> None:
             try:
                 results_canvas.yview_scroll(direction, "units")
@@ -11444,37 +11630,53 @@ class CourtListenerGUI:
         def _on_wheel(e) -> None:
             _wheel(-1 if getattr(e, "delta", 0) > 0 else 1)
 
-        def _bind_wheel(widget) -> None:
-            _bind_recursive(widget, "<MouseWheel>", _on_wheel)
-            _bind_recursive(widget, "<Button-4>", lambda _e: _wheel(-1))
-            _bind_recursive(widget, "<Button-5>", lambda _e: _wheel(1))
+        results_canvas.bind("<MouseWheel>", _on_wheel)
+        results_canvas.bind("<Button-4>", lambda _e: _wheel(-1))
+        results_canvas.bind("<Button-5>", lambda _e: _wheel(1))
 
-        _bind_wheel(results_canvas)
+        # The popup's height less the list's, measured once the status line is
+        # in (below): the list's height is a sum, so a row streaming in costs
+        # arithmetic rather than a layout pass of the whole popup.
+        chrome_h = [0]
 
         def _resize_to(n_rows: int = 0) -> None:
             """Grow the popup to fit the rows, capped at the screen bottom; past
             the cap the viewport holds its height and the extra rows scroll."""
             try:
-                popup.update_idletasks()
-                content_h = rows_frame.winfo_reqheight()
-                # Measure the popup's natural (uncapped) height by letting the
-                # canvas request the whole content, then clamp to the screen.
-                results_canvas.configure(height=max(1, content_h),
-                                         scrollregion=(0, 0, pw, content_h))
-                popup.update_idletasks()
-                natural = border.winfo_reqheight()
+                content_h = spot.content_height()
+                results_canvas.configure(scrollregion=(0, 0, pw, content_h))
+                natural = chrome_h[0] + max(1, content_h)
                 max_h = sy - pos_y - 40
                 if natural <= max_h:
+                    results_canvas.configure(height=max(1, content_h))
                     if results_vsb.winfo_ismapped():
                         results_vsb.pack_forget()
                     results_canvas.yview_moveto(0.0)
                     popup.geometry(f"{pw}x{natural}+{pos_x}+{pos_y}")
                 else:
                     results_canvas.configure(
-                        height=max(row_unit, content_h - (natural - max_h)))
+                        height=max(spot.unit, max_h - chrome_h[0]))
                     if not results_vsb.winfo_ismapped():
                         results_vsb.pack(side="right", fill="y")
                     popup.geometry(f"{pw}x{max_h}+{pos_x}+{pos_y}")
+            except tk.TclError:
+                pass
+
+        resize_pending = [None]
+
+        def _resize_soon() -> None:
+            """_resize_to once for a burst of rows, not once a row: a source
+            answers with several at a time, and every resize of the popup
+            repaints the whole window."""
+            if resize_pending[0] is not None:
+                return
+
+            def run() -> None:
+                resize_pending[0] = None
+                _resize_to()
+
+            try:
+                resize_pending[0] = popup.after(15, run)
             except tk.TclError:
                 pass
 
@@ -11484,21 +11686,16 @@ class CourtListenerGUI:
             if not (0 <= idx < len(result_rows)):
                 return
             try:
-                popup.update_idletasks()
-                w = result_rows[idx]["row"]
-                total = max(1, rows_frame.winfo_reqheight())
-                top = w.winfo_y()
-                bot = top + w.winfo_height()
+                total = max(1, spot.content_height())
+                top, bot = spot.row_bounds(idx)
                 vtop = results_canvas.canvasy(0)
-                vh = results_canvas.winfo_height()
+                vh = int(results_canvas.cget("height"))
                 if top < vtop:
                     results_canvas.yview_moveto(top / total)
                 elif bot > vtop + vh:
                     results_canvas.yview_moveto(max(0.0, bot - vh) / total)
             except tk.TclError:
                 pass
-
-        _resize_to(0)
 
         # Tracking state
         result_rows: list[dict] = []
@@ -11525,14 +11722,11 @@ class CourtListenerGUI:
             # not move: it is the same case either way, and a row that shifts
             # under the pointer is a misclick waiting to happen.
             r["open_fn"] = open_fn
-            try:
-                r["detail"].configure(
-                    text=_detail_text(cite, source_label))
-                self._spot_set_badge_year(r, year)
-                if snippet and r.get("snippet") is not None:
-                    r["snippet"].configure(text=snippet)
-            except tk.TclError:
-                pass
+            changes = {"detail": _detail_text(cite, source_label),
+                       "year": year}
+            if snippet:
+                changes["snippet"] = snippet
+            spot.update(r, **changes)
 
         def _resolve_court(r: dict, cite: str, name: str) -> None:
             """Fill in a result's court badge once someone can tell us it.
@@ -11546,7 +11740,8 @@ class CourtListenerGUI:
             def apply(cid: str, label: str) -> None:
                 if my_gen != self._spotlight_generation:
                     return
-                self._spot_set_badge(r, cid, label)
+                spot.update(r, court=label or self._spot_court_label(cid),
+                            color=self._spot_tier_color(cid))
 
             def run() -> None:
                 cid = label = ""
@@ -11639,12 +11834,10 @@ class CourtListenerGUI:
             if len(snippet) > 150:
                 snippet = snippet[:150].rstrip() + "…"
 
-            r = self._spot_build_row(
-                rows_frame, court_abbr,
-                self._spot_tier_color(court_id), display_name, detail,
-                snippet=snippet, year=year,
+            r = spot.add(
+                court_abbr, self._spot_tier_color(court_id), display_name,
+                detail, snippet=snippet, year=year,
             )
-            _bind_wheel(r["row"])
             r["open_fn"] = open_fn
             r["bucket"] = bucket
             r["case"] = (cite, name, year)
@@ -11685,10 +11878,7 @@ class CourtListenerGUI:
                         # the CL opinion was loading; preserve Scholar's text.
                         if r.get("bucket") != original_bucket:
                             return
-                        try:
-                            r["snippet"].configure(text=better)
-                        except tk.TclError:
-                            pass
+                        spot.update(r, snippet=better)
 
                     try:
                         self.root.after(0, apply)
@@ -11699,29 +11889,41 @@ class CourtListenerGUI:
                     target=load_better_snippet, daemon=True,
                 ).start()
 
-            def on_click(_e=None, _r=r) -> None:
-                self._close_quick_popup()
-                _r["open_fn"]()
-
-            _bind_recursive(r["row"], "<Button-1>", on_click)
-            # Hovering a row selects it, so mouse and keyboard share one
-            # highlight and a click always opens the row under the pointer.
-            def on_hover(_e=None, _r=r) -> None:
-                try:
-                    i = result_rows.index(_r)
-                except ValueError:
-                    return
-                selected_idx[0] = i
-                _highlight(i)
-            _bind_recursive(r["row"], "<Enter>", on_hover)
-
             # Grow the dropdown to fit the row just added.
-            _resize_to(len(result_rows))
+            _resize_soon()
 
         def _highlight(idx: int) -> None:
-            for i, r in enumerate(result_rows):
-                self._spot_highlight_row(r, i == idx)
+            spot.select(idx)
             _scan_ahead_soon(idx)
+
+        # Hovering a row selects it, so mouse and keyboard share one highlight
+        # and a click always opens the row under the pointer.  Selected when
+        # the pointer moves onto a row (from another, a gap or outside the
+        # list), so a mouse merely nudged within a row leaves a row picked
+        # with the arrow keys alone.
+        hovered = [-1]
+
+        def _on_motion(e) -> None:
+            i = spot.index_at(e.y)
+            if i == hovered[0]:
+                return
+            hovered[0] = i
+            if i >= 0:
+                selected_idx[0] = i
+                _highlight(i)
+
+        def _on_leave(_e=None) -> None:
+            hovered[0] = -1
+
+        def _on_click(e) -> None:
+            i = spot.index_at(e.y)
+            if 0 <= i < len(result_rows):
+                self._close_quick_popup()
+                result_rows[i]["open_fn"]()
+
+        results_canvas.bind("<Motion>", _on_motion)
+        results_canvas.bind("<Leave>", _on_leave)
+        results_canvas.bind("<Button-1>", _on_click)
 
         # A row the pointer or the arrow keys rest on is likely the one to be
         # opened: its scan is downloaded while the reader decides, so the
@@ -11762,9 +11964,9 @@ class CourtListenerGUI:
         # deliberate signal they're choosing among the rows on screen, even
         # mid-edit).  Once the text is changed without arrow navigation,
         # Return runs a fresh search instead; only a mouse click (or renewed
-        # Up/Down) picks from the now-stale list.  This keeps a row that
-        # merely streamed in under the resting pointer (hover selects) from
-        # hijacking a re-typed search.
+        # Up/Down) picks from the now-stale list.  This keeps a row the
+        # pointer happened to pass over (hover selects) from hijacking a
+        # re-typed search.
         nav_text = [query]
 
         def _on_key(event) -> None:
@@ -11834,8 +12036,15 @@ class CourtListenerGUI:
                 font=("TkDefaultFont", 8), anchor="w",
             )
             status_lbl.pack(side="bottom", fill="x", padx=8, pady=(4, 4))
-        # Re-fit now that the status line is packed, so it shows during the
-        # initial "Searching…" state (the first _resize_to ran before it).
+        # The status line is in: measure what the popup holds besides the list
+        # (once — see _resize_to) and fit it, the status showing while the
+        # first results are awaited.
+        try:
+            popup.update_idletasks()
+            chrome_h[0] = (border.winfo_reqheight()
+                           - results_canvas.winfo_reqheight())
+        except tk.TclError:
+            pass
         _resize_to(0)
         search_done = [0]  # track how many searches completed
         # Never wait for the opinion database here.  When it is already open it
