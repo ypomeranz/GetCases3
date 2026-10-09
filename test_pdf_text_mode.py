@@ -867,8 +867,21 @@ class ChromelessReaderTests(unittest.TestCase):
 
     def test_its_own_button_bar_is_never_packed(self):
         src = _source_of("_ScholarTextWindow", "_build_ui")
-        self.assertIn("if not self._chromeless:\n            btn_frame.pack",
-                      src)
+        self.assertIn("if self._chromeless:", src)
+        self.assertIn("btn_frame = ttk.Frame(win)\n        else:", src)
+        self.assertIn("btn_frame = _ui_frame(win)\n"
+                      "            btn_frame.pack(", src)
+        self.assertEqual(src.count("btn_frame.pack("), 1)
+
+    def test_nor_drawn_in_customtkinter(self):
+        # Never shown, so built of plain ttk widgets: CustomTkinter's rounded
+        # buttons were a good part of the time a reader took to open.
+        src = _source_of("_ScholarTextWindow", "_build_ui")
+        bar = src[src.index("if self._chromeless:\n            def button"):]
+        self.assertIn("return ttk.Button(", bar)
+        self.assertIn("return ttk.Checkbutton(", bar)
+        self.assertNotIn("_ui_button(", bar)
+        self.assertNotIn("_ui_checkbox(", bar)
 
     def test_the_opinion_runs_to_the_edge_of_the_window(self):
         src = _source_of("_ScholarTextWindow", "_build_ui")
@@ -959,6 +972,9 @@ class _GutterText:
         if index not in self.at:
             return None         # that mark is off screen
         return (0, self.at[index], 100, self.height, 15)
+
+    def dlineinfos(self, indices):
+        return [self.dlineinfo(index) for index in indices]
 
 
 class _GutterReader:
@@ -1145,7 +1161,7 @@ class OneColumnGutterTests(unittest.TestCase):
 
     def test_the_column_is_right_aligned_against_the_text(self):
         src = _source_of("_ScholarTextWindow", "_draw_page_column")
-        self.assertIn('w - 4, y, anchor="e"', src)
+        self.assertIn('(w - 4, y, "e", str(page), color)', src)
 
 
 # ---------------------------------------------------------------------------

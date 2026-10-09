@@ -4123,6 +4123,31 @@ def _recap_spec_index(text: str) -> dict[str, str]:
     return out
 
 
+#: The short-cite and RECAP indexes of opinion texts read already, by text:
+#: each is a scan of the whole opinion, redone on every render, and the
+#: reader opened on a page whose citations were read ahead finds them here.
+_TEXT_INDEXES: "dict[tuple, tuple]" = {}
+_TEXT_INDEXES_LOCK = threading.Lock()
+_TEXT_INDEXES_KEPT = 4
+
+
+def _text_indexes(text: str) -> "tuple[dict, dict]":
+    """(short-cite index, RECAP spec index) of an opinion's *text* — see
+    build_short_cite_index and _recap_spec_index — built once and kept.
+    Shared, so read-only."""
+    key = (len(text), hash(text))
+    with _TEXT_INDEXES_LOCK:
+        kept = _TEXT_INDEXES.get(key)
+    if kept is not None:
+        return kept
+    built = (_build_short_cite_index(text), _recap_spec_index(text))
+    with _TEXT_INDEXES_LOCK:
+        _TEXT_INDEXES[key] = built
+        while len(_TEXT_INDEXES) > _TEXT_INDEXES_KEPT:
+            _TEXT_INDEXES.pop(next(iter(_TEXT_INDEXES)))
+    return built
+
+
 def _recap_citation_ranges(
     text: str, spec_index: Optional[dict[str, str]] = None,
 ) -> list[tuple[int, int, tuple[str, str]]]:
@@ -4246,14 +4271,46 @@ def _detected_text_links(text: str, italic: list,
     return list(detected)
 
 
+#: Google Scholar opinion pages parsed already, by their HTML: (blocks,
+#: parts).  A page is parsed on a worker when it is fetched, to read its
+#: citations ahead (_scan_opinion_links_ahead); the reader that later shows
+#: it — the T view of its scan — takes that parse rather than parsing the
+#: page again on the Tk thread, a good part of the time T took to answer.
+_PARSED_OPINIONS: "dict[tuple, tuple]" = {}
+_PARSED_OPINIONS_LOCK = threading.Lock()
+_PARSED_OPINIONS_KEPT = 4
+
+
+def _parsed_opinion(html: str) -> "tuple[list, list]":
+    """(blocks, parts) of a Google Scholar opinion page, parsed once and kept
+    for the next asking.  Shared: a caller that changes a part makes its own
+    copy of it."""
+    key = (len(html), hash(html))
+    with _PARSED_OPINIONS_LOCK:
+        kept = _PARSED_OPINIONS.get(key)
+    if kept is not None:
+        return kept
+    blocks = parse_opinion_blocks(html)
+    parsed = (blocks, segment_blocks(blocks))
+    with _PARSED_OPINIONS_LOCK:
+        _PARSED_OPINIONS[key] = parsed
+        while len(_PARSED_OPINIONS) > _PARSED_OPINIONS_KEPT:
+            _PARSED_OPINIONS.pop(next(iter(_PARSED_OPINIONS)))
+    return parsed
+
+
 def _scan_opinion_links_ahead(html: str) -> None:
-    """Scan a Google Scholar opinion's citations now, on a worker, so the
-    window that shows it — the T view of its scan, opened later — finds the
-    scan done (see _detected_text_links).  After any window going up: the
-    T view is not wanted yet, and the scan's window is (see _ui_first)."""
+    """Parse a Google Scholar opinion and scan its citations now, on a
+    worker, so the window that shows it — the T view of its scan, opened
+    later — finds both done (see _parsed_opinion, _detected_text_links).
+    After any window going up: the T view is not wanted yet, and the scan's
+    window is (see _ui_first)."""
     _yield_to_ui()
     try:
-        _text_opinion_link_ranges(segment_blocks(parse_opinion_blocks(html)))
+        blocks, parts = _parsed_opinion(html)
+        _text_opinion_link_ranges(parts)
+        # The text the reader is drawn from, as it works it out.
+        _text_indexes(blocks_to_text(blocks) or _strip_html(html))
     except Exception as exc:
         print(f"[links] scanning the opinion ahead failed: {exc}")
 
@@ -7585,6 +7642,14 @@ def _warm_spotlight_indexes() -> None:
         eng_rep.iter_nominate_cites("1 Ex. 1")
     except Exception as exc:
         print(f"[spotlight] warming the English Reports index failed: {exc}")
+    # And the Census names every opinion's caption is read against (see
+    # name_persons_by_surname), which the first case opened would otherwise
+    # load on the Tk thread.
+    try:
+        from bluebook_names import _census_names
+        _census_names()
+    except Exception as exc:
+        print(f"[case text] warming the Census names failed: {exc}")
 
 
 #: How long Google Scholar's text is waited for before a lesser text —
@@ -27490,6 +27555,49 @@ def _draw_header_citation(img, box: tuple, text: str, font) -> None:
               anchor="mm")
 
 
+class _ReaderText(tk.Text):
+    """The opinion's Text, which can be asked where a run of indices sit on
+    screen in one call.
+
+    The page gutter asks it of every star page on each scroll.  One
+    ``dlineinfo`` an index was a trip into Tcl each — sixty-odd a scroll for
+    a long opinion — and every trip hands the GIL back and waits to have it
+    again.  While a worker is reading the opinion's citations that wait is
+    the worker's whole switch interval, so a scroll stalled for a third of
+    a second or more.  Asked of Tcl all at once, it is one wait at most."""
+
+    _DLINEINFOS = "::getcases::dlineinfos"
+
+    def __init__(self, master=None, **kw) -> None:
+        super().__init__(master, **kw)
+        # Defined afresh for each widget: it is cheap, and a proc kept per
+        # interpreter would need keeping track of.
+        self.tk.eval(
+            "namespace eval ::getcases {}\n"
+            f"proc {self._DLINEINFOS} {{w indices}} {{\n"
+            "    set out {}\n"
+            "    foreach i $indices {\n"
+            "        if {[catch {$w dlineinfo $i} info]} {set info {}}\n"
+            "        lappend out $info\n"
+            "    }\n"
+            "    return $out\n"
+            "}")
+
+    def dlineinfos(self, indices) -> list:
+        """``dlineinfo`` of each of *indices*: its (x, y, width, height,
+        baseline), or None where it is off screen."""
+        indices = tuple(indices)
+        if not indices:
+            return []
+        raw = self.tk.call(self._DLINEINFOS, self._w, indices)
+        out: list = []
+        for info in self.tk.splitlist(raw):
+            values = self.tk.splitlist(info)
+            out.append(tuple(self.tk.getint(v) for v in values)
+                       if values else None)
+        return out
+
+
 class _ScholarTextWindow:
     """
     Rich viewer for a Google Scholar opinion.
@@ -27636,11 +27744,14 @@ class _ScholarTextWindow:
             self._cl_parts = cl_parts or []
             self._cl_blocks = cl_blocks or []
         else:
-            self._blocks = parse_opinion_blocks(opinion_html)
+            blocks, parts = _parsed_opinion(opinion_html)
+            self._blocks = blocks
             self._scholar_text = (
                 blocks_to_text(self._blocks) or _strip_html(opinion_html)
             )
-            self._parts = segment_blocks(self._blocks)
+            # Copies: the parse is shared (see _parsed_opinion), and the lead
+            # opinion's label is refined in place (_refine_part_labels).
+            self._parts = [_dc_replace(part) for part in parts]
             self._cl_parts = None
             self._cl_blocks = None
         # Kept for the History dropdown: reopening replays this constructor
@@ -28110,7 +28221,7 @@ class _ScholarTextWindow:
         # fixed while the side panel opens beside it (see _pin_text_width).
         holder = ttk.Frame(text_frame)
         self._text_holder = holder
-        txt = tk.Text(holder, wrap="word", font=base, padx=14, pady=10)
+        txt = _ReaderText(holder, wrap="word", font=base, padx=14, pady=10)
         self._text = txt
         vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=self._on_yscroll)
@@ -28227,18 +28338,32 @@ class _ScholarTextWindow:
         _bind_text_scroll_keys(win, txt, self._scroll_reader,
                                window_keys=not self._chromeless)
 
-        btn_frame = _ui_frame(win)
-        if not self._chromeless:
+        # Chromeless, this bar is built but never shown — the viewer's own
+        # strip carries its controls — so it is made of plain ttk widgets,
+        # which cost next to nothing, rather than CustomTkinter's, which drew
+        # (and kept restyling) a row of rounded buttons nobody would see.
+        if self._chromeless:
+            def button(parent, text, command=None, primary=False, width=None):
+                return ttk.Button(parent, text=text, command=command)
+
+            def checkbox(parent, text, variable, command=None):
+                return ttk.Checkbutton(parent, text=text, variable=variable,
+                                       command=command)
+
+            btn_frame = ttk.Frame(win)
+        else:
+            button, checkbox = _ui_button, _ui_checkbox
+            btn_frame = _ui_frame(win)
             btn_frame.pack(fill="x", padx=12, pady=(2, 10))
         self._btn_frame = btn_frame  # PDF/text panes pack just above this
         # (Copy-with-citation lives on Ctrl-C / Cmd-C; no button needed.)
         # In text view this drops the export menu (RTF / PDF via LaTeX /
         # .tex source); in PDF view it becomes "Download PDF".
-        self._export_btn = _ui_button(
+        self._export_btn = button(
             btn_frame, "Export ▾", command=self._post_export_menu, width=104
         )
         self._export_btn.pack(side="right", padx=(6, 0))
-        self._toggle_btn = _ui_button(
+        self._toggle_btn = button(
             btn_frame, "CourtListener", command=self._toggle_source,
             primary=True, width=118,
         )
@@ -28246,7 +28371,7 @@ class _ScholarTextWindow:
         # The CourtListener text view gets its own "PDF" button (the
         # Scholar view reuses the toggle for that).  Packed in _render_cl_blocks
         # / _show_courtlistener, hidden elsewhere; enabled once a PDF is located.
-        self._pdf_btn = _ui_button(
+        self._pdf_btn = button(
             btn_frame, "PDF", command=self._view_pdf, width=64
         )
         try:
@@ -28256,18 +28381,18 @@ class _ScholarTextWindow:
         # The Scholar text view's switch back to the CourtListener opinion (the
         # mirror of CL's "Scholar" button).  Packed in
         # _render_scholar, hidden in the CL and PDF views.
-        self._cl_btn = _ui_button(
+        self._cl_btn = button(
             btn_frame, "CourtListener", command=self._toggle_source,
             width=118,
         )
 
         # Size controls: text size in the reader, PDF zoom in the PDF view
         # (also Ctrl +/−/0 and Ctrl+mouse wheel).
-        self._zoom_out_btn = _ui_button(
+        self._zoom_out_btn = button(
             btn_frame, "A−", command=lambda: self._zoom(-1), width=42
         )
         self._zoom_out_btn.pack(side="left")
-        self._zoom_in_btn = _ui_button(
+        self._zoom_in_btn = button(
             btn_frame, "A+", command=lambda: self._zoom(+1), width=42
         )
         self._zoom_in_btn.pack(side="left", padx=(6, 10))
@@ -28275,7 +28400,7 @@ class _ScholarTextWindow:
         # rather than on this bar — the styles do not fit in a checkbox, and
         # the bar has no room to spare.  Edit citation sits before the two
         # checkboxes so they read as a pair.
-        self._edit_citation_btn = _ui_button(
+        self._edit_citation_btn = button(
             btn_frame, "Edit citation…", command=self._edit_base_citation,
             width=108,
         )
@@ -28288,11 +28413,11 @@ class _ScholarTextWindow:
         # cases, whose Oyez panel the window was widened to fit.
         self._details_var = tk.BooleanVar(value=self._is_scotus)
         self._details_on = self._is_scotus
-        _ui_checkbox(
+        checkbox(
             btn_frame, "Side panel", self._details_var, self._toggle_details,
         ).pack(side="left", padx=(0, 10))
         self._justify_text = tk.BooleanVar(value=False)
-        _ui_checkbox(
+        checkbox(
             btn_frame, "Justify text", self._justify_text,
             self._on_justify_toggle,
         ).pack(side="left", padx=(0, 10))
@@ -28338,7 +28463,11 @@ class _ScholarTextWindow:
                 pass  # modifier not supported on this platform
 
         self._status_var = tk.StringVar()
-        _install_status_label(btn_frame, self._status_var)
+        if self._chromeless:
+            ttk.Label(btn_frame, textvariable=self._status_var).pack(
+                side="left")
+        else:
+            _install_status_label(btn_frame, self._status_var)
         self._button_bar_compact: Optional[bool] = None
         btn_frame.bind("<Configure>", self._on_button_bar_configure)
 
@@ -28505,6 +28634,8 @@ class _ScholarTextWindow:
         return 104, 82
 
     def _apply_button_bar_compact(self) -> None:
+        if getattr(self, "_chromeless", False):
+            return              # the bar is never shown (see _build_ui)
         compact = bool(getattr(self, "_button_bar_compact", False))
         toggle_normal, toggle_small = self._source_or_pdf_widths(self._toggle_btn)
         pdf_normal, pdf_small = self._source_or_pdf_widths(self._pdf_btn)
@@ -30164,8 +30295,8 @@ class _ScholarTextWindow:
         self._fn_def_pos: dict[str, str] = {}  # footnote id → body marker index
         self._reset_page_marks()   # star page → a mark on its marker
         self._cur_page: Optional[int] = None
-        self._short_cite_index = _build_short_cite_index(self._scholar_text)
-        self._recap_spec_index = _recap_spec_index(self._scholar_text)
+        self._short_cite_index, self._recap_spec_index = _text_indexes(
+            self._scholar_text)
         self._prepare_text_link_ranges(self._parts)
         self._last_cite_action = None
         self._pending_id = None
@@ -30671,6 +30802,13 @@ class _ScholarTextWindow:
         as far as any reporter in ordinary use runs."""
         if not self._pagecol_single_column():
             return self._PAGECOL_W
+        # Measured once a size: this is asked on every scroll.
+        widths = getattr(self, "_pagecol_widths", None)
+        if widths is None:
+            widths = self._pagecol_widths = {}
+        size = self._pagecol_base_size()
+        if size in widths:
+            return widths[size]
         ruler = self._pagecol_ruler()
         if ruler is None:
             return self._PAGECOL_W_TIGHT
@@ -30678,7 +30816,8 @@ class _ScholarTextWindow:
             cut = ruler.measure("0" * self._PAGECOL_DIGITS) + self._PAGECOL_PAD
         except tk.TclError:
             return self._PAGECOL_W_TIGHT
-        return max(self._PAGECOL_W_MIN, int(cut))
+        widths[size] = max(self._PAGECOL_W_MIN, int(cut))
+        return widths[size]
 
     def _fit_pagecol_font(self, page_pos: dict, us_page_pos: dict,
                           width: int) -> None:
@@ -30719,16 +30858,14 @@ class _ScholarTextWindow:
 
     def _pagecol_rows(self, series: dict, prefer_later_page: bool = False):
         """{screen y: (page, line height)} for the pages currently on screen."""
-        txt = self._text
         rows: dict[int, tuple[int, int]] = {}
-        for page, index in sorted(
-            (series or {}).items(), key=lambda item: item[0],
-            reverse=prefer_later_page,
-        ):
-            try:
-                info = txt.dlineinfo(index)
-            except tk.TclError:
-                info = None
+        ordered = sorted((series or {}).items(), key=lambda item: item[0],
+                         reverse=prefer_later_page)
+        try:
+            infos = self._text.dlineinfos(index for _page, index in ordered)
+        except tk.TclError:
+            return rows
+        for (page, _index), info in zip(ordered, infos):
             if not info:            # that page is not on screen right now
                 continue
             y = info[1] + info[3] // 2
@@ -30771,59 +30908,72 @@ class _ScholarTextWindow:
         page_pos = getattr(self, "_page_pos", None) or {}
         us_page_pos = getattr(self, "_mapped_us_page_pos", None) or {}
         if not (page_pos or us_page_pos):
-            canvas.delete("all")
-            canvas.config(width=1)
+            self._paint_page_numbers(canvas, 1, [])
             return
         width = self._pagecol_width()
-        canvas.config(width=width)
-        canvas.delete("all")
         self._fit_pagecol_font(page_pos, us_page_pos, width)
-        txt = self._text
         w = width
         if self._pagecol_single_column():
             # One narrow column, right-aligned, both tracks in it.
-            for y, (page, color) in self._pagecol_one_column(
-                page_pos, us_page_pos
-            ).items():
-                canvas.create_text(
-                    w - 4, y, anchor="e", text=str(page),
-                    fill=color, font=self._pagecol_font,
-                )
+            self._paint_page_numbers(canvas, width, [
+                (w - 4, y, "e", str(page), color)
+                for y, (page, color) in self._pagecol_one_column(
+                    page_pos, us_page_pos).items()
+            ])
             return
-
-        def draw(
-            series: dict, x: int, anchor: str, color: str,
-            prefer_later_page: bool = False,
-        ) -> None:
-            seen_y: set[int] = set()
-            rows = sorted(
-                series.items(),
-                key=lambda item: item[0],
-                reverse=prefer_later_page,
-            )
-            for page, idx in rows:
-                try:
-                    di = txt.dlineinfo(idx)
-                except tk.TclError:
-                    di = None
-                if not di:  # page not on screen right now
-                    continue
-                y = di[1] + di[3] // 2
-                if y in seen_y:
-                    continue
-                seen_y.add(y)
-                canvas.create_text(
-                    x, y, anchor=anchor, text=str(page),
-                    fill=color, font=self._pagecol_font,
-                )
 
         # Keep simultaneous boundaries visible: inferred U.S. pages occupy the
         # left half in teal; the source's own star pages stay black at right.
-        draw(
-            us_page_pos, 4, "w", self._MAPPED_US_PAGE_COLOR,
-            prefer_later_page=True,
-        )
-        draw(page_pos, w - 5, "e", "black")
+        numbers = [
+            (4, y, "w", str(page), self._MAPPED_US_PAGE_COLOR)
+            for y, (page, _h) in self._pagecol_rows(
+                us_page_pos, prefer_later_page=True).items()
+        ] + [
+            (w - 5, y, "e", str(page), "black")
+            for y, (page, _h) in self._pagecol_rows(page_pos).items()
+        ]
+        self._paint_page_numbers(canvas, width, numbers)
+
+    def _paint_page_numbers(self, canvas, width: int, numbers: list) -> None:
+        """Show *numbers* — (x, y, anchor, text, colour) each — in the page
+        gutter, *width* wide.
+
+        This runs on every scroll, and a scroll mostly moves the same few
+        numbers up or down: so the gutter keeps its text items and moves
+        them, changing a number's text or colour only when it changes, and
+        does nothing at all when nothing on it has moved."""
+        if getattr(self, "_pagecol_shown", None) == (width, numbers):
+            return
+        pool = getattr(self, "_pagecol_items", None)
+        if pool is None:
+            pool = self._pagecol_items = []     # [canvas id, (x, y, …)]
+        try:
+            if int(float(canvas.cget("width"))) != width:
+                canvas.config(width=width)
+            for i, number in enumerate(numbers):
+                x, y, anchor, text, color = number
+                if i == len(pool):
+                    pool.append([canvas.create_text(
+                        x, y, anchor=anchor, text=text, fill=color,
+                        font=self._pagecol_font), number])
+                    continue
+                item, was = pool[i]
+                if was is None:
+                    canvas.itemconfigure(item, state="normal")
+                if was is None or was[:2] != (x, y):
+                    canvas.coords(item, x, y)
+                if was is None or was[2:] != (anchor, text, color):
+                    canvas.itemconfigure(item, anchor=anchor, text=text,
+                                         fill=color)
+                pool[i][1] = number
+            for spare in pool[len(numbers):]:
+                if spare[1] is not None:
+                    canvas.itemconfigure(spare[0], state="hidden")
+                    spare[1] = None
+        except tk.TclError:
+            self._pagecol_shown = None
+            return
+        self._pagecol_shown = (width, list(numbers))
 
     def _draw_part_map(self) -> None:
         """Draw a colour-coded strip on the right marking where each
@@ -31097,9 +31247,7 @@ class _ScholarTextWindow:
         self._fn_def_pos: dict[str, str] = {}
         self._reset_page_marks()
         self._cur_page: Optional[int] = None
-        self._short_cite_index = _build_short_cite_index(
-            self._scholar_text or self._cl_text or "")
-        self._recap_spec_index = _recap_spec_index(
+        self._short_cite_index, self._recap_spec_index = _text_indexes(
             self._scholar_text or self._cl_text or "")
         self._prepare_text_link_ranges(parts)
         self._last_cite_action = None

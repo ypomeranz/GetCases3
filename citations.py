@@ -1846,7 +1846,11 @@ def _name_at_cites(
 
 def _iter_case_cites(text: str) -> list[re.Match]:
     text = text or ""
-    matches: list[re.Match] = list(CITE_CAPTURE_RE.finditer(text))
+    # A comprehension, not list(): list() draws every match inside C and
+    # holds the GIL from the first to the last — over a long opinion, a
+    # tenth of a second in which the window a worker is scanning for cannot
+    # so much as scroll.  A loop gives it a turn between matches.
+    matches: list[re.Match] = [m for m in CITE_CAPTURE_RE.finditer(text)]
     # Early-SCOTUS nominative cites — the parallel-interpolated forms first
     # (longer spans), then the bare form — all with (vol, reporter, page)
     # groups, so the short-cite index and case_match_text treat them like
@@ -1979,7 +1983,8 @@ def reporter_citation_variants(query: str) -> tuple[str, ...]:
 
 
 def _iter_short_cites(text: str) -> list[re.Match]:
-    matches: list[re.Match] = list(SHORT_CITE_RE.finditer(text or ""))
+    # A comprehension, not list(): see _iter_case_cites.
+    matches: list[re.Match] = [m for m in SHORT_CITE_RE.finditer(text or "")]
     for m in BROAD_SHORT_CITE_RE.finditer(text or ""):
         if not _valid_case_reporter(m.group(2)):
             continue
