@@ -29,6 +29,15 @@ import re
 import shutil
 import subprocess
 import sys
+
+# This program started again to read citations off the window's process (see
+# scan_process): it does that and nothing else — no window, no dependency
+# check.  Before anything heavier is imported.
+if __name__ == "__main__" and sys.argv[1:2] == ["--getcases-scan-worker"]:
+    import scan_process
+    scan_process.serve()
+    sys.exit(0)
+
 import tempfile
 import threading
 import time
@@ -1249,6 +1258,7 @@ import state_statutes
 import statutes_at_large
 import us_code
 import pdfium_lock
+import scan_process
 import us_reports_pdf
 import brief_reader
 import browser_links
@@ -1278,9 +1288,9 @@ from citations import (
     reporter_key as _canonical_reporter_key,
     reporter_family as _reporter_family,
     case_match_text as _case_match_text,
-    build_short_cite_index as _build_short_cite_index,
+    build_short_cite_index as _build_short_cite_index_here,
     cite_target_from_text as _cite_target_from_text,
-    detect_links as detect_brief_links,
+    detect_links as _detect_links_here,
     scan_text as _scan_text,
     page_furniture as _page_furniture,
     docket_numbers_in as _docket_numbers_in,
@@ -4247,6 +4257,33 @@ _TEXT_LINK_SCANS_KEPT = 6
 #: are read (see _ScholarTextWindow._prepare_text_link_ranges): reading them
 #: takes the better part of a second on a long opinion.
 _LINKS_LATER_CHARS = 30_000
+
+
+def _scan_off_thread(name: str, here, *args, **kwargs):
+    """``here(*args, **kwargs)`` — one of citations' whole-document scans,
+    *name* in it — run in the helper process (see scan_process) when asked
+    for off the Tk thread, so that it takes no turns at the GIL from the
+    window.  On the Tk thread, which must not queue behind a scan already
+    running there, and whenever the helper cannot answer, it runs here."""
+    if threading.current_thread() is not threading.main_thread():
+        try:
+            return scan_process.call(name, *args, **kwargs)
+        except scan_process.Unavailable:
+            pass
+    return here(*args, **kwargs)
+
+
+def detect_brief_links(text: str, *, italic=None) -> list:
+    """:func:`citations.detect_links` — read in the helper process when
+    asked for off the Tk thread (see _scan_off_thread)."""
+    return _scan_off_thread("detect_links", _detect_links_here, text,
+                            italic=italic)
+
+
+def _build_short_cite_index(text: str) -> dict:
+    """:func:`citations.build_short_cite_index`, likewise."""
+    return _scan_off_thread("build_short_cite_index",
+                            _build_short_cite_index_here, text)
 
 
 def _detected_text_links(text: str, italic: list,
@@ -30255,14 +30292,40 @@ class _ScholarTextWindow:
             return
         self._text_block_links = links
         waiting, self._links_waiting = self._links_waiting, set()
+        # In document order, a slice at a time (see _link_slice).
+        self._link_slice([b for b in block_ids if b in waiting], blocks,
+                         links, self._location_render_seq)
+
+    #: The longest one slice of linking the opinion in place holds the Tk
+    #: thread.  A long opinion has a few hundred citations, and linking them
+    #: all at once was a noticeable hitch in a scroll that met it.
+    _LINK_SLICE_S = 0.008
+
+    def _link_slice(self, order: list, blocks: dict, links: dict,
+                    render: int, start: int = 0) -> None:
+        """Link the blocks in *order* from *start* for _LINK_SLICE_S, then
+        hand the Tk thread back and carry on from there.  Stopped by the
+        opinion being drawn again (*render* is the drawing it was for): that
+        drawing linked every block itself."""
+        if render != self._location_render_seq:
+            return
         txt = self._text
+        deadline = time.perf_counter() + self._LINK_SLICE_S
+        i = start
         try:
-            for block_id in waiting:
+            while i < len(order):
+                block_id = order[i]
+                i += 1
                 mark = self._location_block_marks.get(block_id)
                 block = blocks.get(block_id)
                 if mark and block is not None:
                     self._link_block_in_place(txt, mark, block,
                                               links.get(block_id) or [])
+                if time.perf_counter() >= deadline:
+                    break
+            if i < len(order):
+                self._win.after(1, self._link_slice, order, blocks, links,
+                                render, i)
         except tk.TclError:
             return
 
@@ -43532,6 +43595,9 @@ def main() -> None:
     tray = app._start_tray_icon()
     eng_rep.warm()  # load the English Reports index in the background
     sec_decisions.warm()  # and the SEC Decisions and Reports' page index
+    # The process that reads opinions' citations off this one's GIL (see
+    # scan_process), started once the window has had a moment to come up.
+    root.after(1000, scan_process.start)
 
     # Run in the background by default: rather than greeting the user with the
     # full search window, GetCases starts hidden and waits.  Ctrl+Space opens
