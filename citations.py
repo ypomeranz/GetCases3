@@ -203,9 +203,11 @@ NOMINATIVE_CITE_RE = re.compile(
 NOMINATIVE_PARALLEL_RE = re.compile(
     r"\b(\d{1,2})\s+(" + _NOM_SCOTUS_ALT + r"\.?)\s*"
     r"[\[(]\s*\d{1,3}\s+U\.\s?S\.\s*[\])]\s*[-–—]?\s*(\d{1,5})\b")
+# Its parentheses are optional: Google Scholar prints "5 U.S. (1 Cranch)
+# 137" as "5 U.S. 1 Cranch 137" (and see STATE_NOMINATIVE_PARALLEL_RE).
 US_NOMINATIVE_PARALLEL_RE = re.compile(
-    r"\b(\d{1,3})\s+(U\.\s?S\.)\s*[\[(]\s*\d{1,2}\s+" + _NOM_SCOTUS_ALT +
-    r"\.?\s*[\])]\s*[-–—]?\s*(\d{1,5})\b")
+    r"\b(\d{1,3})\s+(U\.\s?S\.)\s*[\[(]?\s*\d{1,2}\s+" + _NOM_SCOTUS_ALT +
+    r"\.?\s*[\])]?\s*[-–—]?\s*(\d{1,5})\b")
 
 # Nominative reports folded into a state's official series.  The early reports
 # of several states were published under their reporters' names and later
@@ -346,10 +348,13 @@ STATE_NOMINATIVE_CITE_RE = re.compile(
     r"\b(\d{1,2})\s+(" + _STATE_NOM_ALT + r")(?!['’\w])\s*(\d{1,4})\b")
 # The Bluebook's parallel form, "45 Mass. (4 Met.) 111", "61 Ky. (4 Met.) 1":
 # read as the official cite it leads with.
+# The parentheses are optional: Google Scholar prints Trump v. Barbara's
+# "Hood v. Hood, 93 Mass. (11 Allen) 196" as "93 Mass. 11 Allen 196", which
+# read as "93 Mass. 11" — the nominative volume taken for the page.
 STATE_NOMINATIVE_PARALLEL_RE = re.compile(
     r"\b(\d{1,3})\s+(Mass\.|Ill\.|Ky\.|Tenn\.|Va\.|Del\.|Miss\.|Pa\.|"
-    r"N\.\s?Y\.|N\.\s?C\.|Me\.|N\.\s?J\.\s?L\.)\s*[\[(]\s*\d{1,2}\s+"
-    + _STATE_NOM_ALT + r"\s*[\])]\s*[-–—]?\s*(\d{1,4})\b")
+    r"N\.\s?Y\.|N\.\s?C\.|Me\.|N\.\s?J\.\s?L\.)\s*[\[(]?\s*\d{1,2}\s+"
+    + _STATE_NOM_ALT + r"\s*[\])]?\s*[-–—]?\s*(\d{1,4})\b")
 
 
 def state_nominative_cites(cite: str) -> list[str]:
@@ -445,6 +450,9 @@ HAND_TYPED_CITE_RE = re.compile(
 )
 _NONCASE_REPORTERS = {
     "usc", "usca", "uscs", "cfr", "fr", "fedr", "fedreg",
+    # The Illinois Compiled Statutes, cited by chapter in a reporter's shape
+    # ("775 Ill. Comp. Stat. 35 § 15"); state_statutes reads them.
+    "illcompstat", "illcompstatann", "ilcs",
     # English Reports ("156 Eng. Rep. 145", "95 E.R. 807"): real case cites,
     # but ones Google Scholar / CourtListener / case.law cannot open — the
     # eng_rep pass links them to the CommonLII scan instead, so the broad case
@@ -1546,6 +1554,12 @@ def case_match_text(m: re.Match) -> str:
     ("18 Pick. R., 210" -> "18 Pick. 210")."""
     if canonical_reporter(m.group(2)) == "Johns. Ch.":
         return f"{m.group(1)} Johns. Ch. {m.group(3)}"
+    if m.re in (US_NOMINATIVE_PARALLEL_RE, STATE_NOMINATIVE_PARALLEL_RE):
+        # The official cite the parallel form leads with, with or without
+        # the parentheses round the nominative one: "93 Mass. 11 Allen 196"
+        # is 93 Mass. 196.
+        rep = re.sub(r"\s+", " ", m.group(2)).replace("U. S.", "U.S.")
+        return f"{m.group(1)} {rep} {m.group(3)}"
     suffix = _reports_suffix_start(m.group(2))
     if suffix is not None:
         return re.sub(r"\s+", " ", " ".join(
@@ -1661,21 +1675,66 @@ def _bare_word_reporter(rep: str) -> bool:
                                in _WORD_REPORTER_KEYS)
 
 
-# A reporter's name that means more than one series in the volumes both ran
-# to: "4 Washington, 380" in an 1850s opinion is Washington's Circuit Court
-# Reports (four volumes, 1803–1827), not the state's Washington Reports
-# (from 1889) that the name in full otherwise stands for, and its first two
-# volumes are also Bushrod Washington's Virginia Reports.  Such a citation
-# is left unread rather than sent to the wrong series.
-_AMBIGUOUS_NAME_VOLUMES = {"washington": 4}
+# "Wash." — and "Washington" in full — names three series.  Bushrod
+# Washington reported the Virginia Court of Appeals in two volumes
+# (1790–1796), folded into the Virginia Reports as 1–2 Va., and his own
+# circuit in four (1803–1827), reprinted in the Federal Cases and cited "Wash.
+# C.C." when written out — but often just "4 Washington, 380" (Corfield v.
+# Coryell, in the Slaughter-House Cases); the Washington Reports began in
+# 1889.  So "2 Wash. 298" in an opinion of 1831 is Warder v. Arell, 2 Va. 282,
+# never the Washington case of 1891 that CourtListener files at that page.
+# Each series: its form, the last volume it ran to, the year it began.
+_WASHINGTON_SERIES = (
+    ("Va.", 2, 1790),
+    ("Wash. C.C.", 4, 1803),
+    ("Wash.", None, 1889),
+)
+_WASHINGTON_NAME_KEYS = frozenset({"wash", "washington"})
 
 
-def _ambiguous_name(vol: str, rep: str) -> bool:
-    """Whether *vol* *rep* is a volume :data:`_AMBIGUOUS_NAME_VOLUMES` says
-    two series share."""
-    last = _AMBIGUOUS_NAME_VOLUMES.get(
-        _loose_reporter_key(reporter_without_suffix(rep)))
-    return last is not None and int(vol) <= last
+def _bare_washington(cite: str) -> "tuple[int, str] | None":
+    """``(volume, page)`` of a citation to plain "Wash." or "Washington" —
+    the name the three series share (see :data:`_WASHINGTON_SERIES`) — or
+    None for any other ("Wash. 2d", "Wash. C.C.", "Wn." are each one
+    series)."""
+    m = re.fullmatch(r"\s*(\d{1,4})\s+(.+?),?\s+(\d{1,5})\s*", cite or "")
+    if not m or (_loose_reporter_key(reporter_without_suffix(m.group(2)))
+                 not in _WASHINGTON_NAME_KEYS):
+        return None
+    return int(m.group(1)), m.group(3)
+
+
+def washington_series_cites(cite: str) -> list[str]:
+    """The earlier series a plain "Wash." citation may name besides the
+    Washington Reports, in the order to try them: "2 Wash. 298" →
+    ["2 Va. 298", "2 Wash. C.C. 298"], "4 Washington 380" → ["4 Wash. C.C.
+    380"]; [] past their volumes, or for any other citation."""
+    parts = _bare_washington(cite)
+    if parts is None:
+        return []
+    vol, page = parts
+    return [f"{vol} {series} {page}"
+            for series, last, _began in _WASHINGTON_SERIES
+            if last is not None and vol <= last]
+
+
+def cite_for_era(cite: str, cited_by_year: "str | int" = "") -> str:
+    """*cite* in the series it must name, cited in an opinion of
+    *cited_by_year*: a plain "Wash." in an opinion older than the Washington
+    Reports is one of Bushrod Washington's — "2 Wash. 298" in 1831 is "2
+    Va. 298", "4 Washington 380" in 1873 is "4 Wash. C.C. 380".  Any other
+    citation, or one whose year is unknown or late enough for the
+    Washington Reports, comes back as it is."""
+    year = str(cited_by_year or "").strip()[:4]
+    parts = _bare_washington(cite)
+    if parts is None or not year.isdigit():
+        return cite
+    vol, page = parts
+    possible = [series for series, last, began in _WASHINGTON_SERIES
+                if began <= int(year) and (last is None or vol <= last)]
+    if not possible or possible[-1] == _WASHINGTON_SERIES[-1][0]:
+        return cite
+    return f"{vol} {possible[0]} {page}"
 
 
 def _match_reporter_key(m: re.Match) -> str:
@@ -1855,12 +1914,21 @@ def _iter_case_cites(text: str) -> list[re.Match]:
     # (longer spans), then the bare form — all with (vol, reporter, page)
     # groups, so the short-cite index and case_match_text treat them like
     # any other reporter match.
-    for pat in (NOMINATIVE_PARALLEL_RE, US_NOMINATIVE_PARALLEL_RE,
-                STATE_NOMINATIVE_PARALLEL_RE, NOMINATIVE_CITE_RE,
-                STATE_NOMINATIVE_CITE_RE):
+    parallel = (NOMINATIVE_PARALLEL_RE, US_NOMINATIVE_PARALLEL_RE,
+                STATE_NOMINATIVE_PARALLEL_RE)
+    for pat in (*parallel, NOMINATIVE_CITE_RE, STATE_NOMINATIVE_CITE_RE):
         for m in pat.finditer(text):
-            if any(m.start() < km.end() and km.start() < m.end()
-                   for km in matches):
+            clash = [km for km in matches
+                     if m.start() < km.end() and km.start() < m.end()]
+            # A parallel form read whole — "93 Mass. 11 Allen 196" — beats
+            # the official cite read off its first words, "93 Mass. 11".
+            if clash and pat in parallel and all(
+                    km.start() == m.start() and km.end() < m.end()
+                    for km in clash):
+                for km in clash:
+                    matches.remove(km)
+                clash = []
+            if clash:
                 continue
             if pat is STATE_NOMINATIVE_CITE_RE:
                 if not state_nominative_cites(m.group(0)):
@@ -1884,8 +1952,6 @@ def _iter_case_cites(text: str) -> list[re.Match]:
         if (_bare_word_reporter(m.group(2))
                 and not _at_citation_start(text, m.start())):
             continue
-        if _ambiguous_name(m.group(1), m.group(2)):
-            continue
         matches.append(m)
     # The older comma form, "138 Massachusetts, 165" (COMMA_CITE_CAPTURE_RE),
     # yields to every other reading: a known reporter, where a citation's
@@ -1900,7 +1966,6 @@ def _iter_case_cites(text: str) -> list[re.Match]:
         if (not _comma_form_reporter(m.group(1), m.group(2), m.group(3))
                 or not _at_citation_start(text, m.start())
                 or _CAPITALIZED_WORD_RE.match(text, m.end())
-                or _ambiguous_name(m.group(1), m.group(2))
                 or _pinned_without_at(text, m, cited) is not None):
             continue
         matches.append(m)

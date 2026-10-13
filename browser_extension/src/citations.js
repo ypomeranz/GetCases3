@@ -172,9 +172,12 @@
   }
 
   /** "vol reporter page" for a case-cite match (citations.case_match_text). */
-  function caseMatchText(m) {
+  function caseMatchText(m, parallel = false) {
     const [whole, vol, rep, page] = m;
     if (canonicalReporter(rep) === "Johns. Ch.") return `${vol} Johns. Ch. ${page}`;
+    // The official cite a parallel form leads with, its parentheses or none:
+    // "5 U.S. 1 Cranch 137" is 5 U.S. 137.
+    if (parallel) return squash(`${vol} ${rep.replace(/U\. S\./g, "U.S.")} ${page}`);
     const suffix = reportsSuffixStart(rep);
     if (suffix >= 0) return squash([vol, rep.slice(0, suffix), page].join(" "));
     let s = whole.replace(/\s+/g, " ").replace(/U\. S\./g, "U.S.").replace(/’/g, "'");
@@ -846,7 +849,15 @@
     for (const name of ["caseCite", "nominativeParallel", "usNominativeParallel", "nominativeCite"]) {
       for (const m of matchAll(name, text)) {
         const s = m.index, e = s + m[0].length;
-        if (!taken(s, e)) cases.push({ start: s, end: e, m });
+        const parallel = name === "usNominativeParallel";
+        // A parallel form read whole, "5 U.S. 1 Cranch 137", beats the cite
+        // read off its first words, "5 U.S. 1".
+        const clash = parallel ? cases.filter((c) => s < c.end && c.start < e) : [];
+        if (clash.length && !overlaps(claimed, s, e)
+            && clash.every((c) => c.start === s && c.end < e)) {
+          for (const c of clash) cases.splice(cases.indexOf(c), 1);
+        }
+        if (!taken(s, e)) cases.push({ start: s, end: e, m, parallel });
       }
     }
     for (const m of matchAll("broadCite", text)) {
@@ -860,7 +871,7 @@
     const heads = [...matchAll("runningHead", text)].map((m) => [m.index, m.index + m[0].length]);
     for (const c of cases) {
       if (overlaps(heads, c.start, c.end)) continue;
-      const cite = caseMatchText(c.m);
+      const cite = caseMatchText(c.m, c.parallel);
       let end = c.end;
       let value = cite;
       const p = matchAt("pinAfter", text, end);

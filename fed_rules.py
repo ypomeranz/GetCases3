@@ -32,6 +32,7 @@ import html as _html
 import re
 import threading
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 
 from us_code import infer_enum_level, _enum_value  # shared enumerator engine
 
@@ -196,6 +197,10 @@ class RuleDoc:
     # (kind, indent, text); kind in {"sechead", "head", "body", "credit",
     # "note-head", "note-body"} — same contract as us_code / ecfr.
     paras: list[tuple[str, int, str]] = field(default_factory=list)
+    # Where the rule sits in its set, outermost first, as (unit id, label):
+    # [("frcp", "Fed. R. Civ. P."), ("frcp/3", "Title III")] — each a table of
+    # contents the viewer can show (see load_unit).
+    crumbs: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def kind(self) -> str:
@@ -283,24 +288,194 @@ def load_section(set_key: str, rule: str) -> RuleDoc:
     if not paras:
         raise RuntimeError(
             f"no rule text found for {RULESETS[set_key][0]} {rule}")
-    doc = RuleDoc(set_key=set_key, rule=rule, url=url, paras=paras)
+    try:
+        doc_crumbs = rule_crumbs(set_key, rule)
+    except Exception:
+        doc_crumbs = []     # its place in the set is a nicety, not the rule
+    doc = RuleDoc(set_key=set_key, rule=rule, url=url, paras=paras,
+                  crumbs=doc_crumbs)
     with _lock:
         _cache[key] = doc
     return doc
 
 
-# Table of contents per set, for prev/next navigation (cached per process).
-_order_cache: dict[str, list[str]] = {}
-_TOC_RULE_RE = re.compile(
-    r"/rules/(?:frcp|frcrmp|fre|frap|frbp)/rule_(\d+(?:\.\d+)?)\b"
-)
+# ---------------------------------------------------------------------------
+# A rule set's table of contents
+#
+# Each set's index page on LII lists its rules under the parts the set is
+# divided into — the Civil Rules' titles, the Evidence Rules' articles, the
+# Bankruptcy Rules' parts — as nested lists:
+#
+#   <li>TITLE III. PLEADINGS AND MOTIONS<ul>
+#     <li><a href="/rules/frcp/rule_7">Rule 7</a>. Pleadings Allowed; …</li>
+#
+# It is read once per set: for the viewer's tables of contents (the set, or
+# one of its parts — load_unit), for where a rule sits (rule_crumbs), and for
+# previous/next.  A rule's number is read from its link's words, not its
+# address: Rule 4.1 is linked as "rule_4-1", and the Supplemental Rules as
+# "rule_A" … "rule_G".
+# ---------------------------------------------------------------------------
+
+# What each set calls its parts.
+_PART_WORD = {"frcp": "Title", "frcrmp": "Title", "fre": "Article",
+              "frap": "Title", "frbp": "Part"}
+# A rule's link reads "Rule 4.1" alone; the book navigation at the foot of
+# the page links "Rule 1001. Scope; …" as the page after, not as a list entry.
+_LINKED_RULE_RE = re.compile(r"^\s*Rules?\s+(\d+(?:\.\d+)?|[A-Z])\.?\s*$")
+_ROMAN_RE = re.compile(
+    r"(?=[MDCLXVI])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})")
+_PART_HEAD_RE = re.compile(
+    r"^\[?\s*(?:(TITLE|ARTICLE|PART)\s+)?([IVXLC]+)\b[\s.—–\-:]*(.*)$")
 
 
-def _set_order(set_key: str) -> list[str]:
-    """Ordered rule numbers in a set, scraped from its Cornell index page."""
+@dataclass
+class _IndexPart:
+    heading: str                    # "TITLE III. PLEADINGS AND MOTIONS"
+    label: str                      # "Title III"
+    title: str                      # "Pleadings and Motions"
+    url: str
+    rules: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class _SetIndex:
+    url: str
+    parts: list[_IndexPart] = field(default_factory=list)
+    # rules listed under no part, in order
+    loose: list[tuple[str, str]] = field(default_factory=list)
+
+    def order(self) -> list[str]:
+        out: list[str] = []
+        for rule, _heading in [r for p in self.parts for r in p.rules]:
+            if rule not in out:
+                out.append(rule)
+        for rule, _heading in self.loose:
+            if rule not in out:
+                out.append(rule)
+        return out
+
+
+class _IndexListParser(HTMLParser):
+    """The list items of an index page's <article>, each with its own words
+    (not its nested items'), its first link, and the item it is nested in."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.items: list[dict] = []
+        self._stack: list[dict] = []
+        self._in_article = 0
+        self._in_nav = 0
+        self._link: "dict | None" = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "article":
+            self._in_article += 1
+        elif tag == "nav":
+            self._in_nav += 1
+        if not self._in_article or self._in_nav:
+            return
+        if tag == "li":
+            item = {"text": "", "href": "", "link": "",
+                    "parent": self._stack[-1] if self._stack else None}
+            self.items.append(item)
+            self._stack.append(item)
+        elif tag == "a" and self._stack and not self._stack[-1]["href"]:
+            self._stack[-1]["href"] = dict(attrs).get("href") or ""
+            self._link = self._stack[-1]
+
+    def handle_endtag(self, tag):
+        if tag == "article" and self._in_article:
+            self._in_article -= 1
+        elif tag == "nav" and self._in_nav:
+            self._in_nav -= 1
+        elif self._in_nav:
+            return
+        elif tag == "li" and self._stack:
+            self._stack.pop()
+        elif tag == "a":
+            self._link = None
+
+    def handle_data(self, data):
+        if not self._stack or self._in_nav:
+            return
+        self._stack[-1]["text"] += data
+        if self._link is self._stack[-1]:
+            self._link["link"] += data
+
+
+def _title_case(text: str) -> str:
+    """"PLEADINGS AND MOTIONS" → "Pleadings and Motions"."""
+    small = {"and", "or", "of", "the", "for", "in", "on", "to", "a", "an",
+             "by", "under"}
+    words = []
+    for i, word in enumerate(text.split()):
+        low = word.lower()
+        if (_ROMAN_RE.fullmatch(word)
+                or re.fullmatch(r"U\.S\.C\.?|\(\w\)", word)):
+            words.append(word)
+        elif i and low in small:
+            words.append(low)
+        else:
+            words.append(low[:1].upper() + low[1:])
+    return " ".join(words)
+
+
+def parse_set_index(set_key: str, page_html: str) -> _SetIndex:
+    """A set's index page as its parts and the rules listed under each."""
+    path = RULESETS[set_key][2]
+    base = f"https://www.law.cornell.edu/rules/{path}"
+    word = _PART_WORD.get(set_key, "Title")
+    # The part pages the page links to, by their numeral: "title_III".
+    part_urls = {
+        m.group(2).upper(): f"https://www.law.cornell.edu{m.group(0)}"
+        for m in re.finditer(
+            rf"/rules/{re.escape(path)}/(title|article|part)_([IVXLCivxlc]+)\b",
+            page_html)}
+    parser = _IndexListParser()
+    parser.feed(page_html)
+    index = _SetIndex(url=base)
+    parts: dict[int, _IndexPart] = {}
+    rule_href = re.compile(rf"/rules/{re.escape(path)}/rule_", re.IGNORECASE)
+    for item in parser.items:
+        if not rule_href.search(item["href"]):
+            continue
+        m = _LINKED_RULE_RE.match(item["link"])
+        if not m:
+            continue
+        rule = m.group(1)
+        heading = re.sub(r"\s+", " ", item["text"][len(item["link"]):])
+        heading = heading.strip().lstrip(".").strip()
+        parent = item["parent"]
+        own = re.sub(r"\s+", " ", parent["text"]).strip() if parent else ""
+        hm = _PART_HEAD_RE.match(own)
+        if (parent is None or rule_href.search(parent["href"]) or not hm
+                or not _ROMAN_RE.fullmatch(hm.group(2))):
+            # Listed under no numbered part: the Bankruptcy Rules' Rule 1001
+            # stands under "BANKRUPTCY RULES", ahead of Part I.
+            index.loose.append((rule, heading))
+            continue
+        part = parts.get(id(parent))
+        if part is None:
+            numeral = hm.group(2)
+            label = f"{(hm.group(1) or word).title()} {numeral}"
+            rest = hm.group(3).strip().rstrip("]").strip()
+            part = parts[id(parent)] = _IndexPart(
+                heading=own, label=label,
+                title=_title_case(rest) if rest.isupper() else rest,
+                url=part_urls.get(numeral.upper(), base))
+            index.parts.append(part)
+        part.rules.append((rule, heading))
+    return index
+
+
+_index_cache: dict[str, _SetIndex] = {}
+
+
+def _set_index(set_key: str) -> _SetIndex:
+    """A set's index, read from LII once per run."""
     with _lock:
-        if set_key in _order_cache:
-            return _order_cache[set_key]
+        if set_key in _index_cache:
+            return _index_cache[set_key]
 
     import requests
 
@@ -310,15 +485,93 @@ def _set_order(set_key: str) -> list[str]:
         headers=_HEADERS, timeout=30,
     )
     resp.raise_for_status()
-    order: list[str] = []
-    for m in _TOC_RULE_RE.finditer(resp.content.decode("utf-8", "replace")):
-        r = m.group(1)
-        if r not in order:
-            order.append(r)
-    if order:
+    try:
+        page = resp.content.decode("utf-8")
+    except UnicodeDecodeError:
+        # Some of the pages set their dashes in Windows-1252.
+        page = resp.content.decode("cp1252", "replace")
+    index = parse_set_index(set_key, page)
+    if index.order():
         with _lock:
-            _order_cache[set_key] = order
-    return order
+            _index_cache[set_key] = index
+    return index
+
+
+def _set_order(set_key: str) -> list[str]:
+    """Ordered rule numbers in a set, from its Cornell index page."""
+    return _set_index(set_key).order()
+
+
+def rule_crumbs(set_key: str, rule: str) -> list[tuple[str, str]]:
+    """Where *rule* sits in its set, outermost first: the set, then the part
+    listing it — [("frcp", "Fed. R. Civ. P."), ("frcp/3", "Title III")]."""
+    index = _set_index(set_key)
+    crumbs = [(set_key, RULESETS[set_key][0])]
+    for number, part in enumerate(index.parts, 1):
+        if any(r == rule for r, _h in part.rules):
+            crumbs.append((f"{set_key}/{number}", part.label))
+            break
+    return crumbs
+
+
+@dataclass
+class RulesUnit:
+    """A rule set, or one of its parts, with its contents — read by the
+    viewer as it reads a U.S. Code unit (us_code.UscUnit)."""
+
+    title: str              # the set: "frcp"
+    granule: str            # "frcp", or "frcp/3" for its third part
+    url: str
+    label: str              # "Fed. R. Civ. P." / "Title III"
+    heading: str            # "Federal Rules of Civil Procedure"
+    crumbs: list[tuple[str, str]] = field(default_factory=list)
+    entries: list = field(default_factory=list)   # us_code.UnitEntry
+    partial: bool = False
+    host: str = _HOST
+
+    @property
+    def kind(self) -> str:
+        return "rule"
+
+
+def load_unit(granule: str) -> RulesUnit:
+    """The table of contents of a rule set ("frcp": its parts, each with its
+    rules) or of one of its parts ("frcp/3": that title's rules)."""
+    from us_code import UnitEntry
+
+    set_key, _, number = str(granule).strip().partition("/")
+    if set_key not in RULESETS:
+        raise RuntimeError(f"unknown rule set {set_key!r}")
+    abbr, full, _path = RULESETS[set_key]
+    index = _set_index(set_key)
+
+    def rule_entry(rule: str, heading: str, depth: int) -> "UnitEntry":
+        return UnitEntry(kind="section", depth=depth, label=f"Rule {rule}",
+                         heading=heading, section=rule)
+
+    if not number:
+        entries = []
+        for i, part in enumerate(index.parts, 1):
+            entries.append(UnitEntry(kind="unit", depth=0, label=part.label,
+                                     heading=part.title,
+                                     granule=f"{set_key}/{i}"))
+            entries += [rule_entry(r, h, 1) for r, h in part.rules]
+        entries += [rule_entry(r, h, 0) for r, h in index.loose]
+        return RulesUnit(title=set_key, granule=set_key, url=index.url,
+                         label=abbr, heading=full, entries=entries)
+    if not number.isdigit() or not 1 <= int(number) <= len(index.parts):
+        raise RuntimeError(f"{full} has no part {number}")
+    part = index.parts[int(number) - 1]
+    return RulesUnit(
+        title=set_key, granule=f"{set_key}/{number}", url=part.url,
+        label=part.label, heading=part.heading,
+        crumbs=[(set_key, abbr)],
+        entries=[rule_entry(r, h, 0) for r, h in part.rules])
+
+
+def open_unit_entry(entry, parent: RulesUnit) -> RulesUnit:
+    """A part chosen from a set's table of contents."""
+    return load_unit(entry.granule)
 
 
 # ---------------------------------------------------------------------------

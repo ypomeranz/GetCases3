@@ -156,7 +156,7 @@ globalThis.GetCasesPatterns = {
   },
   "usNominativeParallel": {
    "flags": "",
-   "source": "\\b(\\d{1,3})\\s+(U\\.\\s?S\\.)\\s*[\\[(]\\s*\\d{1,2}\\s+(?:Dall(?:as)?|Cranch|Wheat(?:on)?|Pet(?:ers)?|How(?:ard)?|Black|Wall(?:ace)?|Otto)\\.?\\s*[\\])]\\s*[-–—]?\\s*(\\d{1,5})\\b"
+   "source": "\\b(\\d{1,3})\\s+(U\\.\\s?S\\.)\\s*[\\[(]?\\s*\\d{1,2}\\s+(?:Dall(?:as)?|Cranch|Wheat(?:on)?|Pet(?:ers)?|How(?:ard)?|Black|Wall(?:ace)?|Otto)\\.?\\s*[\\])]?\\s*[-–—]?\\s*(\\d{1,5})\\b"
   },
   "usc": {
    "flags": "",
@@ -2177,6 +2177,9 @@ globalThis.GetCasesPatterns = {
    "fedr",
    "fedreg",
    "fr",
+   "ilcs",
+   "illcompstat",
+   "illcompstatann",
    "jan",
    "jul",
    "jun",

@@ -22,6 +22,7 @@ What the reader has to do with each:
 
 import os
 import unittest
+from unittest import mock
 
 import citations
 from citations import (
@@ -250,16 +251,122 @@ class WhereAWordReporterStandsTests(unittest.TestCase):
 
 
 class AmbiguousNameTests(unittest.TestCase):
-    """ "Washington" in full names more than one series in its first four
-    volumes."""
+    """ "Wash." — and "Washington" in full — names three series in its first
+    volumes: Bushrod Washington's Virginia Reports (1–2 Va.), his Circuit
+    Court Reports (four volumes), and the Washington Reports from 1889.  The
+    year of the opinion citing it says which it can be, and the case's name
+    picks among those left."""
 
-    def test_its_first_volumes_are_left_unread(self):
+    def test_its_first_volumes_are_read(self):
         # Corfield v. Coryell: Washington's Circuit Court Reports.
-        self.assertEqual(cites("Corfield v. Coryell, 4 Washington, 380"), [])
+        self.assertEqual(cites("Corfield v. Coryell, 4 Washington, 380"),
+                         ["4 Washington 380"])
 
     def test_later_ones_are_the_state_s(self):
         self.assertEqual(cites("Some v. Case, 25 Washington, 60"),
                          ["25 Washington 60"])
+
+    def test_an_old_opinion_s_citation_is_bushrod_washington_s(self):
+        for cite, year, meant in (
+                # The Slaughter-House Cases (1873) and Ex parte Lange (1873).
+                ("4 Washington 380", "1873", "4 Wash. C.C. 380"),
+                ("4 Wash. 410", "1873", "4 Wash. C.C. 410"),
+                # Cherokee Nation v. Georgia (1831): Warder v. Arell, 2 Va.
+                # 282 — CourtListener files a Washington case of 1891 at
+                # "2 Wash. 298".
+                ("2 Wash. 298", "1831", "2 Va. 298"),
+                ("1 Wash. 336", "1823", "1 Va. 336")):
+            with self.subTest(cite=cite, year=year):
+                self.assertEqual(citations.cite_for_era(cite, year), meant)
+
+    def test_a_later_or_undated_one_is_left_as_written(self):
+        for cite, year in (("8 Wash. 412", "1926"), ("2 Wash. 298", ""),
+                           ("4 Wash. C.C. 371", "1877"),
+                           ("81 Wash. 2d 788", "1974"),
+                           ("4 Wn. 380", "1873")):
+            with self.subTest(cite=cite, year=year):
+                self.assertEqual(citations.cite_for_era(cite, year), cite)
+
+    def test_the_other_series_are_tried_after_the_state_s(self):
+        self.assertEqual(citations.washington_series_cites("2 Wash. 298"),
+                         ["2 Va. 298", "2 Wash. C.C. 298"])
+        self.assertEqual(citations.washington_series_cites("4 Washington 380"),
+                         ["4 Wash. C.C. 380"])
+        self.assertEqual(citations.washington_series_cites("8 Wash. 412"), [])
+        self.assertEqual(
+            citations.washington_series_cites("57 Wash. 2d 95"), [])
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class PageInsideCaseTests(unittest.TestCase):
+    """A page cited as though the case began there — McCready v. Virginia's
+    "Corfield v. Coryell, 4 Wash. C.C. 380" — is found as the case the name
+    names, beginning a little before it in the same volume."""
+
+    CORFIELD = {"caseName": "Corfield v. Coryell", "cluster_id": 1,
+                "citation": ["6 F. Cas. 546", "4 Wash. C. C. 371"]}
+    COATS = {"caseName": "Coats v. West Coast Fire & Marine Insurance",
+             "cluster_id": 2, "citation": ["4 Wash. 375", "30 P. 404"]}
+
+    def _client(self, results):
+        client = mock.Mock()
+        client.search.return_value = {"results": results}
+        client.lookup_citation.return_value = []
+        return client
+
+    def test_the_named_case_is_found_from_a_page_inside_it(self):
+        client = self._client([self.CORFIELD])
+        self.assertIs(gui._cl_case_containing_page(
+            client, "4 Wash. C.C. 380", "Corfield v. Coryell"), self.CORFIELD)
+        query = client.search.call_args.args[0]
+        self.assertIn('citation:("4 Wash. C. C.")', query)
+        self.assertIn("corfield OR coryell", query)
+
+    def test_only_the_case_the_name_names(self):
+        client = self._client([self.COATS])
+        self.assertIsNone(gui._cl_case_containing_page(
+            client, "4 Wash. 380", "Corfield v. Coryell"))
+
+    def test_far_from_the_page_only_the_volume_s_one_case_of_the_name(self):
+        # Another printing may paginate the volume otherwise (20 N.C.: the
+        # Court's "State v. Manuel, 20 N.C. 144" is page 20 of the printing
+        # CourtListener and static.case.law have).
+        client = self._client([self.CORFIELD])
+        self.assertIs(gui._cl_case_containing_page(
+            client, "4 Wash. C.C. 900", "Corfield v. Coryell"), self.CORFIELD)
+        again = dict(self.CORFIELD, cluster_id=9,
+                     citation=["4 Wash. C. C. 600"])
+        client = self._client([self.CORFIELD, again])
+        self.assertIsNone(gui._cl_case_containing_page(
+            client, "4 Wash. C.C. 900", "Corfield v. Coryell"))
+
+    def test_without_a_name_nothing_is_guessed(self):
+        client = self._client([self.CORFIELD])
+        self.assertIsNone(gui._cl_case_containing_page(
+            client, "4 Wash. C.C. 380", ""))
+        client.search.assert_not_called()
+
+    def test_the_resolver_turns_to_it_when_another_case_is_filed_there(self):
+        # CourtListener files the Washington Reports' Coats at "4 Wash. 380";
+        # the name says the citation is another case's.
+        client = self._client([self.CORFIELD])
+        client.lookup_citation.return_value = [
+            {"status": 200, "clusters": [{
+                "case_name": self.COATS["caseName"], "id": 2,
+                "citations": [{"volume": "4", "reporter": "Wash.",
+                               "page": "375"}]}]}]
+        with mock.patch.object(gui, "_cl_case_containing_page",
+                                        return_value=self.CORFIELD) as inside:
+            got = gui._cl_item_for_citation(client, "4 Wash. 380",
+                                            name="Corfield v. Coryell")
+        self.assertIs(got, self.CORFIELD)
+        inside.assert_called_once()
+
+    def test_the_name_from_the_span_survives_the_series_it_is_read_as(self):
+        self.assertEqual(gui._citation_link_name(
+            "Warder vs. Arrell, 2 Wash. 298", "2 Va. 298"), "Warder vs. Arrell")
+        self.assertEqual(gui._citation_link_name(
+            "Roe v. Wade, 410 U.S. 113", "411 U.S. 113"), "")
 
 
 if __name__ == "__main__":

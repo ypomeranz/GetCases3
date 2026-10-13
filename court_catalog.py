@@ -970,6 +970,12 @@ _FEDERAL_COURT_NAME_RE = re.compile(
 )
 
 
+def is_federal_court(court_id: str) -> bool:
+    """Whether CourtListener's *court_id* ("nysd", "ca2", "scotus") is a
+    federal court's."""
+    return _norm_court_id(court_id) in _FEDERAL_COURT_IDS
+
+
 def state_of_court(court_id: str = "", court_name: str = "") -> str:
     """The state whose own courts decided the case, lowercased ("new york"),
     for rule 10.2.1(f); "" for a federal court, an unrecognized one, or no

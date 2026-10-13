@@ -735,7 +735,9 @@ class ReporterSidePanelTests(unittest.TestCase):
 
     def test_the_window_says_which_views_its_panel_offers(self):
         src = _source_of("_ScholarTextWindow", "_details_panel")
-        self.assertIn("for name in self._details_views", src)
+        self.assertIn("mode_values = self._details_view_names()", src)
+        self.assertIn("for name in self._details_views",
+                      _source_of("_ScholarTextWindow", "_details_view_names"))
 
     def test_a_panel_with_one_view_gets_no_selector(self):
         src = _source_of("_ScholarTextWindow", "_details_panel")
@@ -774,8 +776,11 @@ class ReporterSidePanelTests(unittest.TestCase):
                 _class_value("_ScholarTextWindow", name)[0], "Case details")
 
     def test_the_docket_comes_off_for_a_court_that_has_none(self):
-        src = _source_of("_ScholarTextWindow", "_details_panel")
+        # The Supreme Court's briefs, or a lower federal court's docket in
+        # the RECAP archive (test_recap_docket_view); no other court's.
+        src = _source_of("_ScholarTextWindow", "_details_view_names")
         self.assertIn('if name != "Docket" or self._is_scotus', src)
+        self.assertIn("_recap_docket", src)
 
     def test_a_chromeless_reader_leaves_the_s_key_to_its_viewer(self):
         # The viewer's own "s" serves the scan as well as the opinion, and one

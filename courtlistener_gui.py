@@ -1272,6 +1272,9 @@ from citations import (
     NOMINATIVE_CITE_RE as _NOMINATIVE_TEXT_CITE_RE,
     STATE_NOMINATIVE_CITE_RE as _STATE_NOMINATIVE_CITE_RE,
     state_nominative_cites as _state_nominative_cites,
+    washington_series_cites as _washington_series_cites,
+    cite_for_era as _cite_for_era,
+    reporter_variants as _reporter_variants,
     EARLY_FED_CITE_RE as _EARLY_FED_CITE_RE,
     early_fed_cite_text as _early_fed_cite_text,
     SHORT_CITE_RE as _SHORT_CITE_RE,
@@ -1307,6 +1310,7 @@ from court_catalog import (
     all_court_ids as _all_court_ids,
     bluebook_court_from_name as _bluebook_court_from_name,
     bluebook_federal_trial_court as _bluebook_federal_trial_court,
+    is_federal_court as _is_federal_court,
     plain_state_names as _plain_state_names,
     state_of_court as _state_of_court,
 )
@@ -2885,6 +2889,51 @@ def _case_law_listed_url(cite: str, url: str) -> str:
     return f"{m.group(1)}/{stem}.{m.group(6)}"
 
 
+def _case_law_named_url(cite: str, url: str, name: str) -> str:
+    """*url* — the static.case.law file *cite* names (see
+    :func:`_case_law_listed_url`) — checked against the case the citation
+    names: *url* itself when the volume's list says a case of that name
+    begins there (or says nothing to the contrary), the file of the one case
+    in the volume that answers to *name* when the page begins another case,
+    and "" when none or several do.
+
+    Some volumes were printed more than once, paginated differently, and CAP
+    scanned another printing than the one an opinion cites.  20 N.C. is 3 and
+    4 Dev. & Bat. in one book: the Supreme Court cites "State v. Manuel, 20
+    N.C. 144", the page of the reprint that runs the two on, but CAP's 20
+    N.C. keeps the first one's own pages — State v. Manuel is 20 N.C. 20
+    there, and page 144 begins Carpenter v. Wall, which opened in its place.
+    Only a name that shares no distinctive party with the case at the page
+    sends the lookup elsewhere; a page of several cases is left to the
+    callers, which tell them apart by name (see _case_law_page_opinions)."""
+    m = _CASE_LAW_FILE_URL_RE.match(url or "")
+    cm = _CITE_PARSE_RE.match((cite or "").split("@", 1)[0].strip())
+    name = re.sub(r"<[^>]+>", "", name or "").strip()
+    if not (m and cm and name and len(_name_parties(name)) == 2):
+        return url
+    files, names, _lengths = _case_law_volume(m.group(2), m.group(3))
+    page = m.group(4)
+    on_page = [stem for stem in names if stem.split("-")[0] == page]
+    if not on_page or any(
+            max(_match_tier(name, names[stem]), _match_tier(names[stem], name))
+            >= 1 for stem in on_page):
+        return url
+    prefix = _case_law_cite_key(f"{cm.group(1)} {cm.group(2).strip()} ")
+    named = sorted({
+        stem for key, stems in files.items()
+        if key.startswith(prefix) and key[len(prefix):].isdigit()
+        for stem in stems if _is_the_named_case(name, names.get(stem, ""))})
+    held = names[on_page[0]]
+    if len(named) != 1:
+        print(f"[case.law] {cite!r} begins {held!r} in static.case.law's "
+              f"printing, and {len(named) or 'no'} case(s) there answer to "
+              f"{name!r}")
+        return ""
+    print(f"[case.law] {cite!r} begins {held!r} in static.case.law's "
+          f"printing; {name!r} is its file {named[0]}")
+    return f"{m.group(1)}/{named[0]}.{m.group(6)}"
+
+
 @dataclass(frozen=True)
 class _CaseLawPdfChoice:
     cite: str
@@ -3059,7 +3108,8 @@ def _case_law_pdf_choices_for_cites(
         no file to ask about, or the asking failed."""
         url = _static_case_law_url(cite)
         if url:
-            url = _case_law_listed_url(cite, url)
+            url = _case_law_named_url(
+                cite, _case_law_listed_url(cite, url), expected_name)
         if not url:
             return None, None
         if _shared_pdf_answer(url):     # downloaded already (_CaseOpenRace)
@@ -3259,9 +3309,12 @@ def _official_series_cites(cite: str) -> list[str]:
     Pick. 234" → "36 Mass. 234", "4 Heisk. 20" → "51 Tenn. 20") — which is
     how CourtListener and static.case.law mostly index them.  More than one
     where an abbreviation names two states' reporters ("4 Met." is 45 Mass.
-    or 61 Ky.); [] for any other citation."""
+    or 61 Ky.).  A plain "Wash." in its first volumes may also be one of
+    Bushrod Washington's ("2 Wash. 298" → 2 Va. 298, 2 Wash. C.C. 298; see
+    citations.washington_series_cites).  [] for any other citation."""
     us = _us_reports_cite(cite)
-    return [us] if us else _state_nominative_cites(cite)
+    return ([us] if us else _state_nominative_cites(cite)
+            or _washington_series_cites(cite))
 
 
 def _official_series_cite(cite: str) -> str:
@@ -3802,6 +3855,15 @@ def _case_law_text_for_cite(
             return None
         if matched.json_url and matched.json_url != json_url:
             return _case_law_text_for_json_url(matched.json_url, cite)
+    else:
+        # The one case beginning on the page, in the printing CAP scanned,
+        # may be another than the one cited (see _case_law_named_url): the
+        # named case's own file then, or none at all.
+        named = _case_law_named_url(cite, json_url, expected_name)
+        if not named:
+            return None
+        if named != json_url:
+            return _case_law_text_for_json_url(named, cite)
     return _case_law_text_record(
         data, cite, json_url, _case_law_case_html(json_url))
 
@@ -3940,6 +4002,69 @@ def _scotus_docket_tokens(value: str) -> set[str]:
         re.sub(r"\s+", "", m.group(0)).upper()
         for m in _SCOTUS_DOCKET_TOKEN_RE.finditer(normalized)
     }
+
+
+def _docket_number_list(text: str) -> list[str]:
+    """The docket numbers a record's docket field gives, each on its own:
+    "Nos. 12-3088, 12-3416" → ["12-3088", "12-3416"], "No. 08 Civ.
+    1034(SAS)" → ["08 Civ. 1034(SAS)"]."""
+    out: list[str] = []
+    for piece in re.split(r"\s*[;,]\s*|\s+(?:&|and)\s+", str(text or "")):
+        piece = re.sub(r"^\s*(?:Nos?\.|Numbers?|Dkt\.)\s*", "", piece,
+                       flags=re.IGNORECASE).strip(" .")
+        if re.search(r"\d", piece) and piece not in out:
+            out.append(piece)
+    return out
+
+
+def _recap_docket_for_case(client, dockets: list, court: str, cite: str,
+                           name: str) -> Optional[dict]:
+    """A lower federal court case's docket in CourtListener's RECAP archive
+    (see courtlistener.find_recap_docket), with its newest filings — or None
+    when the archive has none, or the case is no lower federal court's.
+
+    The record an opinion is filed under on CourtListener is not its RECAP
+    docket — Floyd v. City of New York's opinion sits on a docket of its own,
+    "No. 08 Civ. 1034(SAS)"; the case's PACER docket, 1:08-cv-01034, is
+    another — so the docket is found by its number in its court.  Where the
+    opinion on hand gives neither, CourtListener's record of the citation
+    does."""
+    court = (court or "").strip().lower()
+    if not (dockets and court) and cite:
+        hit = _cl_item_for_citation(client, cite, name=name) or {}
+        court = court or str(hit.get("court_id") or "").strip().lower()
+        dockets = dockets or _docket_number_list(
+            hit.get("docketNumber") or hit.get("docket_number") or "")
+        if not dockets and (hit.get("docket_id") or hit.get("cluster_id")):
+            # A record built from the citation lookup's cluster carries no
+            # docket number: its docket does.
+            docket_id = hit.get("docket_id")
+            if not docket_id:
+                cluster = client.get_cluster(int(hit["cluster_id"]),
+                                             fields="docket_id") or {}
+                docket_id = cluster.get("docket_id")
+            if docket_id:
+                record = client.get_docket(
+                    int(docket_id), fields="docket_number,court_id") or {}
+                dockets = _docket_number_list(record.get("docket_number")
+                                              or "")
+                court = court or str(record.get("court_id")
+                                     or "").strip().lower()
+    if (not dockets or not court or court == _SCOTUS_COURT_ID
+            or not _is_federal_court(court)):
+        return None
+    session = getattr(client, "_session", None)
+    for docket in dockets[:3]:
+        found = cl_api.find_recap_docket(docket, court, name, session=session)
+        if not found:
+            continue
+        if found.get("docket_id"):
+            count, latest = cl_api.recap_docket_documents(
+                found["docket_id"], session=session)
+            found["document_count"] = count
+            found["latest"] = latest
+        return found
+    return None
 
 
 def _item_docket_text(item: dict) -> str:
@@ -4571,6 +4696,83 @@ def _cases_beginning_at(client, cite: str) -> list[dict]:
     return cases
 
 
+#: How far into a case a page cited as though the case began there may lie.
+_PIN_AS_CITE_SPAN = 250
+
+
+def _cl_case_containing_page(client, cite: str,
+                             name: str) -> Optional[dict]:
+    """The case *name* names, found in *cite*'s volume beginning a little
+    before the page cited — the cluster as a search-result item, or None.
+
+    Old opinions often cite the page they draw on as though the case began
+    there: McCready v. Virginia's "Corfield v. Coryell, 4 Wash. C.C. 380"
+    is the case at 4 Wash. C.C. 371, Ex parte Lange's "United States v.
+    Haskell, 4 Washington, 410" the case at 402.  CourtListener's citation
+    lookup finds a case from a page inside it in some reporters but not in
+    others (the circuit reporters it knows through the Federal Cases).  Only
+    the name can say which case it is, so without one nothing is found; the
+    hit must answer to it (see :func:`_is_the_named_case`) and begin within
+    :data:`_PIN_AS_CITE_SPAN` pages before the page cited — or, failing
+    that, be the volume's only case of the name, at whatever page: the
+    volume as CourtListener has it may be another printing, paginated
+    otherwise (see _case_law_named_url).  The party names are asked for with
+    OR, as an old opinion may spell them its own way ("Warder vs. Arrell" is
+    Warder v. Arell, 2 Va. 282)."""
+    m = _CITE_PARSE_RE.match((cite or "").split("@", 1)[0].strip())
+    words = _name_tokens(name)
+    if client is None or not m or not words:
+        return None
+    vol, rep, page = m.group(1), m.group(2).strip(), int(m.group(3))
+    key = _canonical_reporter_key(rep)
+    best: Optional[tuple[int, dict]] = None
+    # Named cases in the volume at no page near the one cited, by cluster:
+    # the one case of the name in a volume another printing paginates
+    # differently (see _case_law_named_url).
+    elsewhere: dict = {}
+    for form in _reporter_variants(rep):
+        query = (f'citation:("{vol} {form}") AND '
+                 f'caseName:({" OR ".join(dict.fromkeys(words))})')
+        try:
+            results = client.search(query, type="o",
+                                    page_size=20).get("results") or []
+        except Exception as exc:
+            print(f"[cl-cite] searching {query!r} failed: {exc}")
+            continue
+        for item in results if isinstance(results, list) else ():
+            if not isinstance(item, dict):
+                continue
+            if not _is_the_named_case(
+                    name, re.sub(r"<[^>]+>", "",
+                                 str(item.get("caseName") or ""))):
+                continue
+            for raw in item.get("citation") or ():
+                cm = _CITE_PARSE_RE.match(re.sub(r"<[^>]+>", "", str(raw)))
+                if (not cm or cm.group(1) != vol
+                        or _canonical_reporter_key(cm.group(2)) != key):
+                    continue
+                first = int(cm.group(3))
+                if (first <= page <= first + _PIN_AS_CITE_SPAN
+                        and (best is None or first > best[0])):
+                    best = (first, item)
+                elif not first <= page <= first + _PIN_AS_CITE_SPAN:
+                    ident = item.get("cluster_id") or item.get("id") or first
+                    elsewhere.setdefault(ident, (first, item))
+        if best is not None or elsewhere:
+            break
+    if best is None and len(elsewhere) == 1:
+        first, item = next(iter(elsewhere.values()))
+        print(f"[cl-cite] {cite!r}: {item.get('caseName')!r} is at page "
+              f"{first} of the volume as CourtListener has it — another "
+              f"printing's pages")
+        return item
+    if best is None:
+        return None
+    print(f"[cl-cite] {cite!r} lies inside {best[1].get('caseName')!r}, "
+          f"which begins at page {best[0]}")
+    return best[1]
+
+
 def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     """Resolve a reporter citation to the CourtListener cluster that actually
     bears it, as a search-result-shaped item (or ``None``).
@@ -4593,11 +4795,17 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     parallel wins, then a match on the case ``name`` the caller knows, then
     the Supreme Court for a nominative SCOTUS cite.  Where that still leaves
     different cases level — the page of orders "498 U.S. 807" is borne by all
-    eleven cases whose certiorari it grants — nothing is returned."""
+    eleven cases whose certiorari it grants — nothing is returned.
+
+    Where nothing at all is filed at the citation, or only a case of another
+    name, the page may lie inside the case the name names (see
+    :func:`_cl_case_containing_page`)."""
     cite = (cite or "").split("@", 1)[0].strip()
     if not cite:
         return None
     lookup_cites = _citation_search_variants(cite)
+    # Set when a case of another name is all that is filed at the citation.
+    mismatched: list = []
     want_keys = {
         re.sub(r"\s+", "", variant).lower()
         for variant in lookup_cites
@@ -4661,6 +4869,7 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                         _match_tier(first, name)) < 0):
             print(f"[cl-cite] {cite!r}: CourtListener's {first!r} is not "
                   f"{name!r}")
+            mismatched.append(first)
             return None
         for other in tied[1:]:
             other_name = plain(other)
@@ -4690,6 +4899,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                     lambda cl: str(
                         cl.get("court_id") or cl.get("court") or ""),
                 )
+                if best is None and mismatched:
+                    break           # another case's page: see below
                 if best is None:
                     return None     # ambiguous: a guess is worse than none
                 item = _item_from_cluster(best)
@@ -4700,7 +4911,7 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
 
     # 2) Fall back to full-text search, trusting only a real citation match
     # (and preferring the same disambiguation signals when several match).
-    for lookup_cite in lookup_cites:
+    for lookup_cite in (() if mismatched else lookup_cites):
         matched = []
         seen_items: set[str] = set()
         for q in (f"citation:({lookup_cite})", f'"{lookup_cite}"'):
@@ -4716,13 +4927,17 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                     seen_items.add(key)
                     matched.append(item)
         if matched:
-            return pick(
+            best = pick(
                 matched,
                 lambda it: it.get("caseName") or it.get("case_name"),
                 lambda it: norm_cites(it.get("citation")),
                 lambda it: str(it.get("court_id") or ""),
             )
-    return None
+            if best is not None or not mismatched:
+                return best
+            break
+    # 3) The page cited may lie inside the case rather than begin it.
+    return _cl_case_containing_page(client, cite, name) if name else None
 
 
 def _us_reports_cite_via_courtlistener(
@@ -5144,13 +5359,21 @@ def _late_scotus_us_reports_cite(
     )
 
 
-def _cl_item_for_name(client, name: str) -> Optional[dict]:
+def _cl_item_for_name(client, name: str,
+                      cited_by_year: str = "") -> Optional[dict]:
     """Resolve a case *name* to the best-matching CourtListener cluster as a
     search-result-shaped item (or None).  The fallback for locating a cited case
     when its citation can't be parsed or resolved — e.g. a Scholar hyperlink
     whose text is just the case name, followed when Google Scholar is blocked.
-    Uses the same name ranker as the quick search, so only a strong match
-    (two-party, or a distinctive party) is returned."""
+
+    Nothing but the name says which case it is, so the hit must be the case
+    the name names (see :func:`_is_the_named_case`): both parties of an "A v.
+    B" name.  The quick search's ranker also offers a hit sharing one party,
+    and taking it opened "Durant, Nichols, Houston, Hodgson & Cortese-Costa,
+    P.C. v. Dupont" (2d Cir. 2009) for Isaacson v. Durant, the English case
+    Wong Kim Ark cites.  Nor can a case be cited by one decided before it:
+    *cited_by_year*, the year of the opinion the link is in, passes over any
+    hit decided later."""
     name = re.sub(r"<[^>]+>", "", name or "").strip()
     if not name:
         return None
@@ -5159,7 +5382,15 @@ def _cl_item_for_name(client, name: str) -> Optional[dict]:
     except Exception as exc:
         print(f"[cl-name] lookup failed for {name!r}: {exc}")
         return None
-    return ranked[0][1] if ranked else None
+    limit = int(cited_by_year) if str(cited_by_year).isdigit() else None
+    for _score, item in ranked:
+        if not _is_the_named_case(name, str(item.get("caseName") or "")):
+            continue
+        filed = str(item.get("dateFiled") or "")[:4]
+        if limit is not None and filed.isdigit() and int(filed) > limit:
+            continue
+        return item
+    return None
 
 
 # ======================================================================
@@ -7718,7 +7949,9 @@ def _scan_urls_for_cite(cite: str, name: str = "",
                if m and int(m.group(1)) <= _LOC_PREFERRED_MAX else None)
         return [loc] if loc else list(_us_reports_govinfo_url(us) or ())
     url = _static_case_law_url(cite)
-    return [_case_law_listed_url(cite, url)] if url else []
+    if url:
+        url = _case_law_named_url(cite, _case_law_listed_url(cite, url), name)
+    return [url] if url else []
 
 
 def _download_scan_ahead(cite: str, name: str = "", year: str = "",
@@ -12161,6 +12394,10 @@ class CourtListenerGUI:
         scholar_page: list = []
         phrase_added = [0]
         phrase_done = [False]
+        # The words Google Scholar searched instead of the query, when the
+        # query found nothing there and it said "Did you mean …" (see
+        # GoogleScholarFetcher.search_cases).
+        scholar_suggested = [""]
 
         # Supreme Court rows from the saved-opinion database and CourtListener
         # wait for Google Scholar.  A Supreme Court case comes back as a family
@@ -12240,6 +12477,10 @@ class CourtListenerGUI:
                         status_lbl.configure(
                             text=f"No case of that name — {n} results "
                                  "for this phrase")
+                    elif scholar_suggested[0]:
+                        status_lbl.configure(
+                            text=f"{n} results — Google Scholar searched "
+                                 f"“{scholar_suggested[0]}” instead")
                     else:
                         status_lbl.configure(
                             text=f"{n} results" if n else "No results found"
@@ -12309,6 +12550,16 @@ class CourtListenerGUI:
                 if candidate_results:
                     results = candidate_results
                     break
+            # Found only by the words Scholar suggested: its rows are ranked
+            # against those words, not the misspelled ones typed.
+            last_suggestion = getattr(fetcher, "last_suggestion", None)
+            try:
+                suggested = (str(last_suggestion() or "")
+                             if callable(last_suggestion) else "")
+            except Exception:
+                suggested = ""
+            if results and suggested:
+                scholar_suggested[0] = suggested
             scholar_returned[0] = True
             # Keep the page as Scholar ranked it, before any of our filtering:
             # if the filters leave the dropdown empty, this is what the query
@@ -12341,7 +12592,7 @@ class CourtListenerGUI:
                 # couple of spares are kept past those so a duplicate of a
                 # case another source already listed can be replaced.
                 results = _rank_scholar_spotlight_results(
-                    query,
+                    scholar_suggested[0] or query,
                     results,
                     _BUCKET_CAPS["scholar"] + 2,
                 )
@@ -13185,12 +13436,21 @@ class CourtListenerGUI:
                 if item:
                     break
         cites = [str(c) for c in (item.get("citation") or [])]
+
+        def volume_of(c: str) -> tuple:
+            m = _CITE_PARSE_RE.match(c)
+            return ((m.group(1), _canonical_reporter_key(m.group(2)))
+                    if m else ())
+
+        # A page inside a case the record already cites in that volume
+        # (see _cl_case_containing_page) is no citation of its own.
+        held = {volume_of(c) for c in cites} - {()}
         # The cite as printed, and — for an old nominative cite — its modern
         # U.S. or Mass. Reports form, which is what the scans are filed under:
         # where the reporter's name could mean two states', the one whose
         # case the name names first (see _official_series_for).
         for extra in (cite, *official):
-            if extra and extra not in cites:
+            if extra and extra not in cites and volume_of(extra) not in held:
                 cites.append(extra)
         item["citation"] = cites
         if name and not (item.get("caseName") or item.get("case_name")):
@@ -28390,6 +28650,11 @@ class _ScholarTextWindow:
         self._details_recent: Optional[tuple] = None  # cached (title, lines)
         self._docket_loaded = False
         self._details_docket: Optional[tuple] = None  # cached (title, lines)
+        # A lower federal court's docket in CourtListener's RECAP archive:
+        # looked for once the panel opens, and offered as the "Docket" view
+        # only when there is one (see _check_recap_docket).
+        self._recap_checked = False
+        self._recap_docket: Optional[dict] = None
 
         txt.tag_configure("center", justify="center")
         txt.tag_configure("blockquote", lmargin1=36, lmargin2=36, rmargin=36)
@@ -33402,11 +33667,10 @@ class _ScholarTextWindow:
             # Which of them this panel offers is the window's to say: a case
             # window offers every view, a panel standing beside a scan the
             # case's details, the docket behind them and the Court's recent
-            # opinions.  The docket is a Supreme Court view either way, so it
-            # comes off for any other court — and a panel left with one view
+            # opinions.  The docket comes off for a court that has none to
+            # show (see _details_view_names) — and a panel left with one view
             # needs no selector at all (_details_mode then reads "case").
-            mode_values = [name for name in self._details_views
-                           if name != "Docket" or self._is_scotus]
+            mode_values = self._details_view_names()
             if len(mode_values) > 1:
                 mode_row = ttk.Frame(f)
                 mode_row.pack(fill="x", padx=6, pady=(0, 2))
@@ -33764,12 +34028,22 @@ class _ScholarTextWindow:
             pass
         return "case"
 
+    def _details_view_names(self) -> list[str]:
+        """The views this panel offers now: the window's own (see
+        _details_views), the "Docket" among them only for the Supreme Court
+        — its briefs — or for a lower federal court whose docket the RECAP
+        archive holds (see _check_recap_docket)."""
+        return [name for name in self._details_views
+                if name != "Docket" or self._is_scotus
+                or getattr(self, "_recap_docket", None) is not None]
+
     def _refresh_details_view(self) -> None:
         """Fill the side panel for its selected mode."""
         if self._details_frame is None:
             return
         mode = self._details_mode()
         self._sync_citing_bar()
+        self._check_recap_docket()
         if mode == "outline":
             self._show_outline()
         elif mode == "citing":
@@ -33778,6 +34052,8 @@ class _ScholarTextWindow:
             self._show_related_cases()
         elif mode == "recent":
             self._show_recent_scotus()
+        elif mode == "docket" and not self._is_scotus:
+            self._show_recap_docket()
         elif mode == "docket":
             self._show_scotus_docket()
         else:
@@ -34260,6 +34536,145 @@ class _ScholarTextWindow:
             self._post(self._apply_scotus_docket, title, lines)
 
         threading.Thread(target=run, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Side panel: a lower federal court's docket in the RECAP archive
+    # ------------------------------------------------------------------
+
+    def _check_recap_docket(self) -> None:
+        """Look once, when the panel opens, for the docket of a lower federal
+        court's case in CourtListener's RECAP archive; one found is offered
+        as the panel's "Docket" view (_offer_recap_docket).  Not for the
+        Supreme Court, whose docket view is its briefs, nor a state court."""
+        if self._recap_checked or self._is_scotus:
+            return
+        item = self._pdf_item()
+        court = str(self._bb.get("court_id") or item.get("court_id")
+                    or "").strip().lower()
+        if court and (court == _SCOTUS_COURT_ID
+                      or not _is_federal_court(court)):
+            self._recap_checked = True
+            return
+        # The client is resolved here, on the Tk thread (it reads the token
+        # field), and only with a token: no "Missing Token" dialog for a
+        # panel that merely opened.
+        if self._app is None or not self._app._token_var.get().strip():
+            return
+        client = self._app._get_client()
+        if client is None:
+            return
+        self._recap_checked = True
+        dockets = _docket_number_list(item.get("docketNumber")
+                                      or item.get("docket_number") or "")
+        cite, name = self._bb.get("cite", ""), self._bb.get("name", "")
+
+        def run() -> None:
+            try:
+                found = _recap_docket_for_case(client, dockets, court, cite,
+                                               name)
+            except Exception as exc:
+                print(f"[details] RECAP docket: {exc}")
+                found = None
+            self._post(self._offer_recap_docket, found)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _offer_recap_docket(self, found: Optional[dict]) -> None:
+        """The RECAP archive's answer: a docket found joins the panel's views
+        as "Docket"."""
+        if not found:
+            return
+        self._recap_docket = found
+        combo = getattr(self, "_details_mode_combo", None)
+        if combo is not None:
+            try:
+                combo.configure(values=tuple(self._details_view_names()))
+            except tk.TclError:
+                pass
+        if self._details_mode() == "docket":
+            self._show_recap_docket()
+
+    def _show_recap_docket(self) -> None:
+        found = self._recap_docket
+        if not found:
+            self._apply_details("Docket", [(
+                "lbl", "CourtListener's RECAP archive has no docket for "
+                       "this case.")])
+            return
+        number = found.get("docket_number") or ""
+        self._apply_details(f"Docket · No. {number}" if number else "Docket",
+                            self._details_lines_recap(found))
+
+    @staticmethod
+    def _details_lines_recap(found: dict) -> list[tuple]:
+        """A RECAP docket (courtlistener.find_recap_docket, with its newest
+        filings): the case, its court and number, what the docket says of
+        it, the newest filings — each a link to its PDF where the archive
+        holds one, else to its page — and the whole docket on
+        CourtListener."""
+        lines: list[tuple] = []
+        if found.get("case_name"):
+            lines.append(("title", found["case_name"]))
+        court = _COURT_BLUEBOOK.get(str(found.get("court_id") or ""), "")
+        number = str(found.get("docket_number") or "")
+        sub = " · ".join(p for p in (court, f"No. {number}" if number
+                                      else "") if p)
+        if sub:
+            lines.append(("lbl", sub))
+        web = found.get("web_url") or ""
+        if int(found.get("count") or 1) > 1:
+            lines.append(("", f"{found['count']} dockets are filed under "
+                              f"this number; CourtListener lists them all.",
+                          web) if web else
+                         ("", f"{found['count']} dockets are filed under "
+                              "this number."))
+            return lines
+        filed = found.get("date_filed") or ""
+        ended = found.get("date_terminated") or ""
+        for heading, value in (
+                ("Filed", filed + (f" · terminated {ended}" if ended
+                                   else "")),
+                ("Judge", found.get("assigned_to") or ""),
+                ("Nature of suit", found.get("nature_of_suit") or ""),
+                ("Cause", found.get("cause") or "")):
+            if value:
+                lines.append(("h", heading))
+                lines.append(("", value))
+        latest = list(found.get("latest") or [])
+        if latest:
+            total = int(found.get("document_count") or len(latest))
+            lines.append(("h", "Newest filings in the archive"
+                          + (f" (of {total:,})" if total > len(latest)
+                             else "")))
+            for doc in latest:
+                # A court of appeals' entry is its docket text, tagged with
+                # the clerk's document number, the case number and the time
+                # it was entered ("OPINION [1695572] filed … [15-1202]
+                # [Entered: 09/29/2017 09:59 AM]"); its "entry number" is
+                # CM/ECF's document id, which numbers nothing.
+                text = re.sub(
+                    r"\s*\[(?:\d{5,}|\d{2}-\d{1,6}|Entered:[^\]]*"
+                    r"|Service Date:[^\]]*)\]", "",
+                    str(doc.get("description") or "")).strip()
+                if len(text) > 160:
+                    text = text[:157].rsplit(" ", 1)[0] + "…"
+                entry = doc.get("entry_number")
+                label = " · ".join(p for p in (
+                    f"No. {entry}"
+                    if entry and len(str(entry)) < 6 else "",
+                    text or "Document") if p)
+                target = doc.get("pdf_url") or doc.get("web_url") or ""
+                lines.append(("", label, target) if target else ("", label))
+                note = " · ".join(p for p in (
+                    doc.get("date_filed") or "",
+                    "" if doc.get("pdf_url") else "not in the archive") if p)
+                if note:
+                    lines.append(("lbl", note))
+        if web:
+            lines.append(("h", "Sources"))
+            lines.append(("", "The whole docket on CourtListener (RECAP)",
+                          web))
+        return lines
 
     def _details_lines_parts(self) -> list[tuple[str, str]]:
         """Authorship gleaned from the Scholar text: the syllabus
@@ -35224,6 +35639,10 @@ class _ScholarTextWindow:
             name = _citation_link_name(snippet, cite)
         else:
             cite, pin, url_val = value, "", ""
+        # A reporter's name the opinion's own year says which series it is:
+        # "2 Wash. 298" in 1831 is Bushrod Washington's Virginia Reports.
+        cite = _cite_for_era(cite, (getattr(self, "_bb", None) or {}).get(
+            "year", ""))
         # The reporter interface follows a link to the report itself: the same
         # scan lookup a citation clicked on a *page* gets (see _open_pdf_cite),
         # so a case reached from the T side lands where one reached from the P
@@ -35566,6 +35985,9 @@ class _ScholarTextWindow:
         not_found = (f"No match for {label}"
                      + (" — nor has Google Scholar a copy." if scholar_absent
                         else "."))
+        # The opinion the link is in, which no case it cites can postdate.
+        cited_by_year = str((getattr(self, "_bb", None) or {}).get("year")
+                            or "").strip()[:4]
 
         def run() -> None:
             try:
@@ -35608,7 +36030,7 @@ class _ScholarTextWindow:
                             self._open_cited_case_pdf, pdf, cite, pin, name)
                         return
                 if target is None and name:
-                    target = _cl_item_for_name(client, name)
+                    target = _cl_item_for_name(client, name, cited_by_year)
                 if not target and cite:
                     # Several cases begin at the cite and nothing here said
                     # which: the reader picks, rather than hearing that
@@ -37506,6 +37928,14 @@ class _ScholarTextWindow:
             _open_citation_in_browser(action, snippet)
             return
         parent = self._live_parent()
+        # A reporter's name the opinion's own year says which series it is:
+        # "4 Washington, 380" in 1873 is Washington's Circuit Court Reports.
+        kind, value = action if isinstance(action, tuple) else ("", "")
+        if kind == "cite":
+            cite, at, pin = str(value).partition("@")
+            action = ("cite", _cite_for_era(
+                cite, (getattr(self, "_bb", None) or {}).get("year", ""))
+                + at + pin)
         opened = self._app.open_cited_case_pdf(
             parent, action, snippet, self._safe_status,
             fallback=lambda: _follow_brief_action(
@@ -37665,7 +38095,11 @@ def _citation_link_name(snippet: str, cite: str = "") -> str:
         return ""
     name, parsed_cite, _pin = parsed
     if cite:
-        parsed_keys = set(citation_identity_keys({}, parsed_cite))
+        # The span's citation, or the series it was read as: "Warder vs.
+        # Arrell, 2 Wash. 298" followed as 2 Va. 298 (see _cite_for_era).
+        parsed_keys = set()
+        for form in (parsed_cite, *_official_series_cites(parsed_cite)):
+            parsed_keys.update(citation_identity_keys({}, form))
         wanted_keys = set(citation_identity_keys({}, cite.split("@", 1)[0]))
         if parsed_keys and wanted_keys and not (parsed_keys & wanted_keys):
             return ""
@@ -42458,34 +42892,51 @@ class _StatuteWindow:
     # ------------------------------------------------------------------
 
     def _doc_section(self) -> str:
-        """The number of the U.S. Code section on show ("1983"), also for
-        one reopened from a bookmark."""
+        """The number of the U.S. Code section ("1983") or federal rule
+        ("12") on show, also for one reopened from a bookmark."""
         section = getattr(self._doc, "section", "")
         if section:
             return str(section)
         label = str(getattr(self._doc, "label", ""))
+        if self._doc.kind == "rule":
+            return label.rsplit(" ", 1)[-1] if " " in label else ""
         return label.split("§", 1)[1].strip() if "§" in label else ""
+
+    def _contents_source(self):
+        """The module whose tables of contents this window shows: the U.S.
+        Code's (us_code), the C.F.R.'s (ecfr) or the federal rules'
+        (fed_rules) — each offers load_unit, open_unit_entry and
+        load_section."""
+        return {"rule": fed_rules, "cfr": ecfr}.get(self._doc.kind, us_code)
+
+    #: What the whole of each source is called, in a message.
+    _CONTENTS_WHOLE = {"rule": "rules", "cfr": "C.F.R."}
 
     def _current_url(self) -> str:
         return self._unit.url if self._unit is not None else self._doc.url
 
     def _update_crumbs(self) -> None:
-        """Show where the section or unit on show sits in the Code: the
-        units above it, each a link to its table of contents, then itself.
-        Hidden for anything that is not the U.S. Code."""
+        """Show where the section or unit on show sits in the Code, or the
+        rule in its set: the units above it, each a link to its table of
+        contents, then itself.  Hidden for anything else."""
         bar = self._crumb_bar
         for child in bar.winfo_children():
             child.destroy()
+        rules = self._doc.kind == "rule"
         if self._unit is not None:
             crumbs, here = self._unit.crumbs, self._unit.label
-        elif self._doc.kind == "usc" and getattr(self._doc, "crumbs", None):
-            crumbs, here = self._doc.crumbs, f"§ {self._doc_section()}"
+        elif (self._doc.kind in ("usc", "rule", "cfr")
+              and getattr(self._doc, "crumbs", None)):
+            crumbs = self._doc.crumbs
+            here = (f"Rule {self._doc_section()}" if rules
+                    else f"§ {self._doc_section()}")
         else:
             bar.pack_forget()
             return
         muted = "ModernMuted.TLabel" if _CTK_AVAILABLE else "TLabel"
         for granule, label in crumbs:
-            link = ttk.Label(bar, text=us_code.crumb_label(label),
+            link = ttk.Label(bar, text=us_code.crumb_label(label)
+                             if self._doc.kind == "usc" else label,
                              foreground="#1a56b0", cursor="hand2")
             link.bind("<Button-1>",
                       lambda _e, g=granule: self._show_unit(g))
@@ -42498,7 +42949,7 @@ class _StatuteWindow:
         """Alt+Up: the table of contents of the unit one level up."""
         crumbs = (self._unit.crumbs if self._unit is not None
                   else getattr(self._doc, "crumbs", None)
-                  if self._doc.kind == "usc" else None)
+                  if self._doc.kind in ("usc", "rule", "cfr") else None)
         if crumbs:
             self._show_unit(crumbs[-1][0])
 
@@ -42508,13 +42959,15 @@ class _StatuteWindow:
         if self._unit is None:
             self._unit_from = self._doc_section()
         self._status_var.set("Loading the table of contents…")
+        source = self._contents_source()
+        whole = self._CONTENTS_WHOLE.get(self._doc.kind, "Code")
 
         def run() -> None:
             try:
-                unit = us_code.load_unit(granule)
+                unit = source.load_unit(granule)
             except Exception as exc:
-                self._post_status(f"Could not load that part of the Code: "
-                                  f"{exc}")
+                self._post_status(f"Could not load that part of the "
+                                  f"{whole}: {exc}")
                 return
             try:
                 self._win.after(0, self._open_unit, unit)
@@ -42531,15 +42984,26 @@ class _StatuteWindow:
 
     def _open_unit(self, unit) -> None:
         self._unit = unit
-        self._win.title(f"{unit.title} U.S.C. {unit.label} — "
-                        f"{self._doc.source_name}")
+        kind = getattr(unit, "kind", "usc")
+        rules = kind == "rule"
+        if kind == "cfr":
+            name = (f"{unit.title} C.F.R." if unit.granule == unit.title
+                    else f"{unit.title} C.F.R. {unit.label}")
+        elif not rules:
+            name = f"{unit.title} U.S.C. {unit.label}"
+        elif unit.granule == unit.title:
+            name = unit.heading             # "Federal Rules of Civil Procedure"
+        else:
+            name = f"{fed_rules.RULESETS[unit.title][0]} {unit.label}"
+        self._win.title(f"{name} — {self._doc.source_name}")
         self._src_var.set(unit.url)
         self._notes_btn.configure(state="disabled")
         for button in (self._prev_btn, self._next_btn):
             button.configure(state="disabled")
         count = sum(1 for e in unit.entries if e.kind == "section")
+        noun = "rule" if rules else "section"
         self._status_var.set(
-            f"{unit.heading} — {count} section{'s' if count != 1 else ''}"
+            f"{unit.heading} — {count} {noun}{'s' if count != 1 else ''}"
             if count else unit.heading)
         self._render()
 
@@ -42578,8 +43042,10 @@ class _StatuteWindow:
                               "in your browser for the rest.\n", ("credit",))
         if not unit.entries:
             host = getattr(unit, "host", "uscode.house.gov")
+            whole = self._CONTENTS_WHOLE.get(getattr(unit, "kind", "usc"),
+                                             "Code")
             txt.insert("end", f"{host} lists no contents for this "
-                              "part of the Code.\n", ("credit",))
+                              f"part of the {whole}.\n", ("credit",))
         txt.config(state="disabled")
         self._finder.refresh()
         self._update_crumbs()
@@ -42590,12 +43056,18 @@ class _StatuteWindow:
             txt.yview_moveto(0.0)
 
     def _open_section_here(self, title: str, section: str) -> None:
-        """A section chosen from a table of contents, shown in this window."""
-        self._status_var.set(f"Fetching {title} U.S.C. § {section}…")
+        """A section (or rule) chosen from a table of contents, shown in this
+        window."""
+        source = self._contents_source()
+        self._status_var.set(
+            f"Fetching {fed_rules.spec_label(f'{title}:{section}:')}…"
+            if source is fed_rules
+            else f"Fetching {title} C.F.R. § {section}…" if source is ecfr
+            else f"Fetching {title} U.S.C. § {section}…")
 
         def run() -> None:
             try:
-                doc = us_code.load_section(title, section)
+                doc = source.load_section(title, section)
             except Exception as exc:
                 self._post_status(str(exc))
                 return
@@ -42614,10 +43086,11 @@ class _StatuteWindow:
             return
         entry = parent.entries[index]
         self._status_var.set(f"Loading {entry.label}…")
+        source = self._contents_source()
 
         def run() -> None:
             try:
-                unit = us_code.open_unit_entry(entry, parent)
+                unit = source.open_unit_entry(entry, parent)
             except Exception as exc:
                 self._post_status(f"Could not open {entry.label}: {exc}")
                 return

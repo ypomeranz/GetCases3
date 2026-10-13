@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import bluebook_names
 import citations
@@ -379,6 +379,24 @@ def _http_status(exc: BaseException) -> Optional[int]:
 # A results page carries its results column even when nothing matched; a
 # CAPTCHA or other interstitial served with a 200 does not.
 _RESULTS_PAGE_RE = re.compile(r"""\bid=["']?gs_res_ccl\b""")
+
+# Scholar's spelling suggestion over a page of no results:
+#   <div class="gs_r gs_pda"><span class="gs_red">Did you mean: </span>
+#   <a href="/scholar?hl=en&amp;as_sdt=2006&amp;q=United+States+v+Touset">
+_DID_YOU_MEAN_RE = re.compile(
+    r"Did\s+you\s+mean:?\s*(?:</span>)?\s*<a\b[^>]*\bhref=[\"']([^\"']+)",
+    re.IGNORECASE)
+
+
+def did_you_mean(page_html: str) -> str:
+    """The search Scholar suggests over a results page ("Did you mean:
+    United States v Touset"), as the words it would search — or ""."""
+    m = _DID_YOU_MEAN_RE.search(page_html or "")
+    if not m:
+        return ""
+    href = _html.unescape(m.group(1))
+    words = parse_qs(urlparse(href).query).get("q") or [""]
+    return re.sub(r"\s+", " ", words[0]).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -2146,6 +2164,11 @@ class GoogleScholarFetcher:
         # how_cited_heading).
         self._how_cited: dict[str, str] = {}
 
+        # The searches that found nothing as typed and were answered by
+        # Scholar's "Did you mean" instead, by search key: the words searched
+        # (see search_cases, last_suggestion).
+        self._suggested_for: dict[tuple[str, tuple[str, ...]], str] = {}
+
         # The stored opinions already checked against Scholar this session
         # for a newer version (see current), by Scholar id — each is asked
         # after once — with the newer version found, if one was.
@@ -2542,6 +2565,20 @@ class GoogleScholarFetcher:
     def _note_absent(self, absent: bool) -> None:
         self._miss.absent = absent
 
+    def last_suggestion(self) -> str:
+        """The words the last :meth:`search_cases` on this thread searched
+        instead of the query, taking Scholar's "Did you mean" ("United
+        States v Touset" for "United States v Toussett") because the query
+        found nothing — or "" when it searched the query itself."""
+        return str(getattr(getattr(self, "_miss", None), "suggested", "")
+                   or "")
+
+    def _note_suggested(self, words: str) -> None:
+        miss = self.__dict__.get("_miss")
+        if miss is None:
+            miss = self._miss = threading.local()
+        miss.suggested = words
+
     def take_page_mates(self) -> list["ScholarResult"]:
         """The cases the last :meth:`fetch_by_citation` on this thread found
         beginning at the citation and could not choose among — no name or
@@ -2637,7 +2674,7 @@ class GoogleScholarFetcher:
 
     def search_cases(
         self, query: str, limit: int = 10, courts=None, *,
-        allow_db_fallback: bool = True,
+        allow_db_fallback: bool = True, _follow_suggestion: bool = True,
     ) -> list["ScholarResult"]:
         """
         Search Scholar case law and return parsed results: title, case URL,
@@ -2656,6 +2693,8 @@ class GoogleScholarFetcher:
             str(court).strip().lower() for court in (courts or ()) if court
         }))
         key = (query.strip(), selected_courts)
+        suggested_for = self.__dict__.setdefault("_suggested_for", {})
+        self._note_suggested(suggested_for.get(key, ""))
         if key in self._search_cache:
             return self._search_cache[key][:limit]
         jurisdiction = scholar_jurisdiction_value(selected_courts)
@@ -2672,6 +2711,21 @@ class GoogleScholarFetcher:
                 self._last_search_url = url
                 results = self._parse_results(resp.text)
                 print(f"[scholar] parsed {len(results)} case results")
+                # Nothing for the words as typed, and Scholar's "Did you
+                # mean: United States v Touset" for "United States v
+                # Toussett": its suggestion is searched instead — once.
+                suggestion = ("" if results or not _follow_suggestion
+                              else did_you_mean(resp.text))
+                if (suggestion
+                        and suggestion.casefold() != query.strip().casefold()):
+                    print(f"[scholar] nothing for {query!r}; Scholar "
+                          f"suggests {suggestion!r}")
+                    results = self.search_cases(
+                        suggestion, limit=max(limit, 10), courts=courts,
+                        allow_db_fallback=False, _follow_suggestion=False)
+                    if results:
+                        suggested_for[key] = suggestion
+                        self._note_suggested(suggestion)
             except Exception as exc:
                 print(f"[scholar] search request failed: {exc}")
                 results = []

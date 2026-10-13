@@ -87,6 +87,10 @@ class CfrSection:
     # contract used by the other statute sources and older saved records.
     para_styles: list[list[tuple[int, int, str]]] = field(default_factory=list)
     site_formatting: bool = False
+    # Where the section sits in its title, outermost first, as (unit id,
+    # label): [("29", "Title 29"), ("29/chapter:XIV", "Chapter XIV"), …] —
+    # each a table of contents the viewer can show (see load_unit).
+    crumbs: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def label(self) -> str:
@@ -202,6 +206,16 @@ def load_section(title: str, section: str) -> CfrSection:
     # The page needs no issue date, so it is sent for while the date is.
     first_page = site_page(candidates[0])
     date = _issue_date(title)
+    # Where the section sits in the title, asked beside its text.
+    place: dict = {"crumbs": []}
+
+    def find_place() -> None:
+        try:
+            place["crumbs"] = section_crumbs(title, candidates[0], date)
+        except Exception:
+            pass        # its place is a nicety, not the section
+    place_thread = threading.Thread(target=find_place, daemon=True)
+    place_thread.start()
     last_err = "section not found"
     unreachable = False   # a failure that says nothing about the section
     for index, cand in enumerate(candidates):
@@ -254,12 +268,16 @@ def load_section(title: str, section: str) -> CfrSection:
             paras = xml_paras
             para_styles = [[] for _para in paras]
         if paras:
+            # Its place came with the text, or soon after; never at the cost
+            # of the section waiting on a stalled eCFR.
+            place_thread.join(3)
             doc = CfrSection(
                 title=title, section=cand, date=date,
                 url=human_url(cand),
                 paras=paras,
                 para_styles=para_styles,
                 site_formatting=bool(site_paras),
+                crumbs=list(place["crumbs"]) if index == 0 else [],
             )
             with _lock:
                 _cache[key] = doc
@@ -289,16 +307,184 @@ def _section_order(title: str, date: str) -> list[str]:
     with _lock:
         if title in _order_cache:
             return _order_cache[title]
+    order = _sections_from_structure(_structure(title, date))
+    with _lock:
+        _order_cache[title] = order
+    return order
+
+
+# ---------------------------------------------------------------------------
+# The units above a section, and their tables of contents
+#
+# eCFR's ancestry service names the units a section sits in — "Title 29 ›
+# Subtitle B › Chapter XIV › Part 1614 › Subpart A" — and its structure
+# service gives a unit's contents: the whole title, or only the path down to
+# one chapter or part (?chapter=XIV, ?part=1614).  A unit is named here by
+# its path from the title, "29/chapter:XIV/part:1614/subpart:A", which says
+# which slice of the structure to ask for and where in it the unit is.
+# ---------------------------------------------------------------------------
+
+_structure_cache: dict[tuple, dict] = {}
+# The units a path steps through.  A part's subject groups are headings over
+# its sections, not units of their own (their ids are eCFR's hashes).
+_UNIT_TYPES = ("subtitle", "chapter", "subchapter", "part", "subpart")
+
+
+def _structure(title: str, date: str, **only: str) -> dict:
+    """eCFR's structure of a title, or of the path to one chapter or part
+    of it (*only*: chapter="XIV", part="1614"), cached."""
+    key = (title, date, tuple(sorted(only.items())))
+    with _lock:
+        if key in _structure_cache:
+            return _structure_cache[key]
 
     import requests
 
     resp = requests.get(f"{_API}/structure/{date}/title-{title}.json",
-                        headers=_HEADERS, timeout=60)
+                        params=only or None, headers={
+                            **_HEADERS, "Accept": "application/json"},
+                        timeout=60)
     resp.raise_for_status()
-    order = _sections_from_structure(resp.json())
+    tree = resp.json()
     with _lock:
-        _order_cache[title] = order
-    return order
+        _structure_cache[key] = tree
+    return tree
+
+
+def _level_label(node: dict) -> str:
+    """A unit's designation as the trail shows it: "Chapter XIV", "Part
+    1614", "Subpart A"."""
+    text = str(node.get("label_level") or "").strip()
+    if text:
+        return text
+    kind = str(node.get("type") or "").replace("_", " ").title()
+    return f"{kind} {node.get('identifier') or ''}".strip()
+
+
+def section_crumbs(title: str, section: str,
+                   date: str = "") -> list[tuple[str, str]]:
+    """The units a section sits in, outermost first, as (unit id, label)."""
+    import requests
+
+    date = date or _issue_date(title)
+    resp = requests.get(f"{_API}/ancestry/{date}/title-{title}.json",
+                        params={"section": section}, headers={
+                            **_HEADERS, "Accept": "application/json"},
+                        timeout=30)
+    resp.raise_for_status()
+    crumbs: list[tuple[str, str]] = []
+    path = str(int(title))
+    for node in resp.json().get("ancestors") or []:
+        kind = node.get("type")
+        if kind == "title":
+            crumbs.append((path, f"Title {int(title)}"))
+        elif kind in _UNIT_TYPES:
+            path += f"/{kind}:{node.get('identifier')}"
+            crumbs.append((path, _level_label(node)))
+    return crumbs
+
+
+@dataclass
+class CfrUnit:
+    """A title, chapter, part, subpart … of the C.F.R., with its contents —
+    read by the viewer as it reads a U.S. Code unit (us_code.UscUnit)."""
+
+    title: str              # "29"
+    granule: str            # "29/chapter:XIV/part:1614"
+    url: str
+    label: str              # "Part 1614"
+    heading: str            # "Part 1614—Federal Sector Equal Employment …"
+    crumbs: list[tuple[str, str]] = field(default_factory=list)
+    entries: list = field(default_factory=list)   # us_code.UnitEntry
+    partial: bool = False
+    host: str = "ecfr.gov"
+
+    @property
+    def kind(self) -> str:
+        return "cfr"
+
+
+def _unit_url(title: str, steps: list[tuple[str, str]]) -> str:
+    url = f"https://www.ecfr.gov/current/title-{int(title)}"
+    for kind, ident in steps:
+        if kind != "subject_group":
+            url += f"/{kind.replace('_', '-')}-{ident}"
+    return url
+
+
+def load_unit(granule: str) -> CfrUnit:
+    """The table of contents of a C.F.R. title or one of its units: its
+    units, each a link to its own contents, and its sections — a part's or
+    subpart's grouped under its subparts and subject headings."""
+    from us_code import UnitEntry
+
+    title, *rest = str(granule).strip().split("/")
+    if not title.isdigit():
+        raise RuntimeError(f"no such C.F.R. title {title!r}")
+    steps = [tuple(step.split(":", 1)) for step in rest if ":" in step]
+    date = _issue_date(title)
+    only = {}
+    for kind, ident in steps:
+        if kind in ("chapter", "part"):
+            only = {kind: ident}        # the narrowest slice the path names
+    node = _structure(title, date, **only)
+    # Walking down the path: the units passed are the ones above this one.
+    crumbs: list[tuple[str, str]] = []
+    path, label = str(int(title)), f"Title {int(title)}"
+    for kind, ident in steps:
+        child = next((c for c in node.get("children") or []
+                      if c.get("type") == kind
+                      and str(c.get("identifier")) == ident), None)
+        if child is None:
+            raise RuntimeError(f"eCFR lists no {kind} {ident} in title "
+                               f"{title}")
+        crumbs.append((path, label))
+        path, label = f"{path}/{kind}:{ident}", _level_label(child)
+        node = child
+
+    entries: list = []
+    by_part = node.get("type") in ("part", "subpart")
+
+    def add(children: list, depth: int, under: str) -> None:
+        for child in children:
+            if child.get("reserved"):
+                continue
+            kind = child.get("type")
+            if kind == "section":
+                entries.append(UnitEntry(
+                    kind="section", depth=depth,
+                    label=f"§ {child.get('identifier')}",
+                    heading=str(child.get("label_description") or ""),
+                    section=str(child.get("identifier") or "")))
+            elif kind == "subject_group":
+                entries.append(UnitEntry(
+                    kind="group", depth=depth,
+                    label=str(child.get("label_description")
+                              or child.get("label") or "")))
+                add(child.get("children") or [], depth + 1, under)
+            elif kind in _UNIT_TYPES:
+                ident = str(child.get("identifier") or "")
+                entries.append(UnitEntry(
+                    kind="unit", depth=depth, label=_level_label(child),
+                    heading=str(child.get("label_description") or ""),
+                    granule=f"{under}/{kind}:{ident}"))
+                if by_part:
+                    # A part's subparts are short: their sections are
+                    # listed under them, as the C.F.R. prints a part's
+                    # table of contents.
+                    add(child.get("children") or [], depth + 1,
+                        f"{under}/{kind}:{ident}")
+
+    add(node.get("children") or [], 0, path)
+    return CfrUnit(
+        title=str(int(title)), granule=path, url=_unit_url(title, steps),
+        label=label, heading=str(node.get("label") or label).strip(),
+        crumbs=crumbs, entries=entries)
+
+
+def open_unit_entry(entry, parent: CfrUnit) -> CfrUnit:
+    """A unit chosen from a table of contents."""
+    return load_unit(entry.granule)
 
 
 # ---------------------------------------------------------------------------

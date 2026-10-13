@@ -1434,5 +1434,32 @@ class UsReportsFilenameTests(unittest.TestCase):
         self.assertEqual(norm("138 S. Ct. 577"), "")
 
 
+class IllinoisStatuteTests(unittest.TestCase):
+    """The Illinois Compiled Statutes are cited by chapter, in a reporter's
+    shape: "775 Ill. Comp. Stat. 35 § 15" was linked as volume 775 of a
+    reporter "Ill. Comp. Stat.", page 35 — a case that does not exist."""
+
+    def links(self, text):
+        return [(text[s:e], kind) for s, e, (kind, _v) in detect_links(text)]
+
+    def test_each_form_is_the_statute(self):
+        for text in ("775 Ill. Comp. Stat. 35 § 15",
+                     "775 Ill. Comp. Stat. 35/15 (2020)",
+                     "775 Ill. Comp. Stat. Ann. 35/15",
+                     "735 Ill. Comp. Stat. § 5/2-1116 (2012)",
+                     "65 Ill. Comp. Stat. 5, with six elected trustees",
+                     "775 ILCS 35/15"):
+            with self.subTest(text=text):
+                links = self.links(f"See {text}.")
+                self.assertEqual(len(links), 1, links)
+                self.assertEqual(links[0][1], "browse")
+                self.assertNotEqual(links[0][1], "cite")
+
+    def test_never_a_reporter(self):
+        for rep in ("Ill. Comp. Stat.", "Ill. Comp. Stat. Ann.", "ILCS"):
+            with self.subTest(rep=rep):
+                self.assertFalse(_valid_case_reporter(rep))
+
+
 if __name__ == "__main__":
     unittest.main()

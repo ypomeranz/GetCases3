@@ -1064,12 +1064,35 @@ def _docket_variants(docket_number: str) -> list[str]:
         variants.append(core)
     m = _re.match(r"(?:\d:)?(cr|crim|cv|civ|mj|mc|bk)\.?[\s-]*(\d{2})-(\d{1,6})"
                   r"\b", core, _re.IGNORECASE)
-    if m:
-        pacer = (f"{m.group(2)}-{_PACER_CASE_TYPES[m.group(1).lower()]}-"
-                 f"{int(m.group(3))}")
+    # The Southern District of New York's own order, the year first: "No. 08
+    # Civ. 1034(SAS)" (Floyd v. City of New York) is "1:08-cv-01034".
+    year_first = _re.match(r"(?:Nos?\.\s*)?(\d{2})\s*(cr|crim|cv|civ|mj|mc)\."
+                           r"?\s*(\d{1,6})\b", core, _re.IGNORECASE)
+    for year, kind, number in ([(m.group(2), m.group(1), m.group(3))]
+                               if m else []) + (
+            [(year_first.group(1), year_first.group(2), year_first.group(3))]
+            if year_first else []):
+        pacer = f"{year}-{_PACER_CASE_TYPES[kind.lower()]}-{int(number)}"
         if pacer not in variants:
             variants.append(pacer)
     return variants
+
+
+def _recap_search_document(doc: dict) -> dict:
+    """One RECAP document as a docket search lists it: its entry number,
+    what it is, its page on CourtListener and — where the archive holds it —
+    its PDF."""
+    path = doc.get("filepath_local") or ""
+    web = doc.get("absolute_url") or ""
+    return {
+        "entry_number": doc.get("entry_number"),
+        "description": (doc.get("short_description")
+                        or doc.get("description") or "").strip(),
+        "date_filed": str(doc.get("entry_date_filed") or "")[:10],
+        "web_url": ("https://www.courtlistener.com" + web) if web else "",
+        "pdf_url": ("https://storage.courtlistener.com/" + path.lstrip("/")
+                    if doc.get("is_available") and path else ""),
+    }
 
 
 def find_recap_docket(
@@ -1132,6 +1155,18 @@ def find_recap_docket(
                 "case_name": pick.get("caseName") or "",
                 "docket_number": pick.get("docketNumber") or variant,
                 "count": 1,
+                # What the docket says of the case, for a reader's panel.
+                "docket_id": pick.get("docket_id"),
+                "court_id": pick.get("court_id") or court or "",
+                "date_filed": str(pick.get("dateFiled") or "")[:10],
+                "date_terminated": str(pick.get("dateTerminated")
+                                       or "")[:10],
+                "assigned_to": pick.get("assignedTo") or "",
+                "nature_of_suit": pick.get("suitNature") or "",
+                "cause": pick.get("cause") or "",
+                "documents": [_recap_search_document(d) for d in
+                              pick.get("recap_documents") or []
+                              if isinstance(d, dict)],
             }
         listing = {"type": "r", "docket_number": variant}
         if court:
@@ -1143,6 +1178,33 @@ def find_recap_docket(
             "count": count,
         }
     return None
+
+
+def recap_docket_documents(
+    docket_id: int | str,
+    session: "Session | None" = None,
+    limit: int = 8,
+    timeout: int = 30,
+) -> tuple[int, list[dict]]:
+    """The newest *limit* documents RECAP holds on a docket, and how many it
+    holds in all (see :func:`_recap_search_document` for each one's shape).
+    ``(0, [])`` when it holds none or cannot be asked."""
+    s = session or requests.Session()
+    try:
+        resp = s.get(urljoin(BASE_URL, "search/"), params={
+            "type": "rd", "q": f"docket_id:{int(docket_id)}",
+            "order_by": "entry_date_filed desc",
+        }, timeout=timeout)
+        if resp.status_code != 200:
+            return 0, []
+        data = resp.json()
+    except Exception:
+        return 0, []
+    results = [d for d in data.get("results") or [] if isinstance(d, dict)]
+    count = data.get("count")
+    if not isinstance(count, int):
+        count = len(results)
+    return count, [_recap_search_document(d) for d in results[:limit]]
 
 
 def find_recap_document(

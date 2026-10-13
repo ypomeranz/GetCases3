@@ -257,7 +257,7 @@ class SidePanelKeyTests(unittest.TestCase):
                       _method_source("_ScholarTextWindow", "_details_panel"))
 
     def test_and_the_docket_is_offered_beside_it(self):
-        src = _method_source("_ScholarTextWindow", "_details_panel")
+        src = _method_source("_ScholarTextWindow", "_details_view_names")
         self.assertIn("for name in self._details_views", src)
         self.assertIn('if name != "Docket" or self._is_scotus', src)
         self.assertIn("reader._details_views = _ScholarTextWindow."
