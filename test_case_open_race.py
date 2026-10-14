@@ -1054,6 +1054,31 @@ class UiFirstTests(unittest.TestCase):
         gui._yield_to_ui()
         self.assertLess(time.monotonic() - start, 0.05)
 
+    def test_a_scroll_holds_readers_back_a_moment(self):
+        gui._ui_busy(0.3)
+        self.assertGreaterEqual(self._waited(), 0.25)
+
+    def test_but_never_opens_a_gate_a_window_closed(self):
+        gui._ui_first(60.0)
+        gui._ui_busy(0.0)
+        self.assertGreater(gui._UI_FIRST["until"] - time.monotonic(), 50)
+
+    def test_the_reader_holds_them_only_when_the_opinion_moves(self):
+        # Tk also reports the fractions while it is still measuring a long
+        # opinion's lines; that moves nothing on screen.
+        win = object.__new__(gui._ScholarTextWindow)
+        win._vsb = None
+        win._draw_page_column = mock.Mock()
+        win._text = mock.Mock()
+        tops = iter(["1.0", "1.0", "14.3"])
+        win._text.index.side_effect = lambda _i: next(tops)
+        with mock.patch.object(gui, "_ui_busy") as busy:
+            win._on_yscroll("0.0", "0.1")      # first drawn
+            win._on_yscroll("0.0", "0.08")     # re-measured: same line
+            win._on_yscroll("0.2", "0.28")     # scrolled
+        self.assertEqual(busy.call_count, 2)
+        self.assertEqual(win._draw_page_column.call_count, 3)
+
     def test_text_extraction_gives_way_page_by_page(self):
         calls = []
         gui._extract_pdf_text_and_style(

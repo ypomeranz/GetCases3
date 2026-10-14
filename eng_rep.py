@@ -887,7 +887,11 @@ def iter_nominate_cites(text: str) -> "list[tuple[int, int, str, list[ERCase]]]"
         return []
     assert _BY_NEUTRAL is not None
     out: list[tuple[int, int, str, list[ERCase]]] = []
-    ids = list(_NOM_ID_RE.finditer(text))
+    # A comprehension, not list(): list() draws every match inside C, and
+    # holds the GIL from the first to the last, so the window a worker
+    # scans for keeps still all that while; a loop gives it a turn between
+    # matches.
+    ids = [m for m in _NOM_ID_RE.finditer(text)]
     last: "tuple[int, str] | None" = None   # (end, canonical key) last resolved
     # Where reading resumes.  After a citation read, past it; after a match
     # turned away, at its page, which can be the volume of the citation that

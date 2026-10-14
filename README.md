@@ -158,8 +158,11 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
 - A **case** citation opens that case's scan. A pin cite (`410 U.S. at 153`)
   opens at that page, and a footnote pin (`200 U.S. 12, 13 n.4`) at that note.
 - A **statute, regulation, court rule or the Constitution** opens in a statute
-  viewer. A **legislative history** citation opens the cited pages of the
-  Congressional Record, the committee report and so on.
+  viewer. A U.S. Code or C.F.R. section, or a federal rule, shows where it
+  sits ("Fed. R. Civ. P. › Title III › Rule 12"); click a level, or press
+  **Alt+Up**, for that level's table of contents. A **legislative history**
+  citation opens the cited pages of the Congressional Record, the committee
+  report and so on.
 - The **Constitution** is linked where a document cites it (`U.S. Const. art.
   I, § 3`, `Article I, Section 3`), and only the first time it cites each
   provision. A provision named in a sentence ("the First Amendment",
@@ -214,9 +217,12 @@ maximized window takes the room from the page instead.
     Scholar again.
 - **Recent SCOTUS:** the Supreme Court's latest opinions and opinions relating
   to orders.
-- **Docket** (Supreme Court cases only): the cert-stage and merits-stage
+- **Docket:** for a Supreme Court case, the cert-stage and merits-stage
   briefs, from the Court's docket and SCOTUSblog, colored like the booklet
-  covers.
+  covers. For a federal district court or court of appeals case whose docket
+  is in CourtListener's RECAP archive, the docket's facts (filed, judge,
+  nature of suit), its newest filings, and a link to the whole docket. Other
+  courts' cases have no Docket view.
 
 Press **s** again (or Esc with the panel in use) to close it. **A−**/**A+** change
 its type size.

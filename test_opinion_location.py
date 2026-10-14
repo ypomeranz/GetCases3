@@ -176,6 +176,23 @@ class AlignmentTests(unittest.TestCase):
         )
         self.assertGreater(location_map.confidence, 0.25)
 
+    def test_alignment_gives_way_page_by_page(self):
+        source = build_plain_text_source(
+            "The constitutional analysis therefore requires careful review "
+            "of history and long-standing practice. Congress adopted the "
+            "provision to protect settled expectations under federal law.")
+        pages = [
+            _page(["The constitutional analysis therefore requires careful",
+                   "review of history and long-standing practice."]),
+            _page(["Congress adopted the provision to protect settled",
+                   "expectations under federal law."]),
+        ]
+        calls = []
+        yielding = align_opinion_locations(
+            source, pages, between_pages=lambda: calls.append(1))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(yielding, align_opinion_locations(source, pages))
+
     def test_dual_column_geometry_uses_column_reading_order(self):
         left = [
             "alpha tribunal considered jurisdiction and statutory authority",

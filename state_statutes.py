@@ -288,12 +288,24 @@ _register("il", "Illinois", "ILCS")
 
 
 def _il_build(m: re.Match) -> Cite:
-    ch, act, sec = m.group("ch"), m.group("act"), m.group("sec")
+    ch, act, sec = m.group("ch"), m.group("act"), m.group("sec") or ""
     return Cite(m.start(), m.end(), "il", f"{ch}/{act}/{sec}",
-                f"{ch} ILCS {act}/{sec}", m.group(0))
+                f"{ch} ILCS {act}/{sec}" if sec else f"{ch} ILCS {act}",
+                m.group(0), _subs_of(m))
 
 
-_add(r"\b(?P<ch>\d+)\s*ILCS\s*(?P<act>\d+)\s*/\s*(?P<sec>[0-9A-Za-z.\-]+)",
+# The compilation as the Bluebook names it, "Ill. Comp. Stat." (with or
+# without "Ann."), and as Illinois does, "ILCS".  Opinions set the act and
+# section every way: "765 Ill. Comp. Stat. 605/22", "735 Ill. Comp. Stat. §
+# 5/2-1116", "775 Ill. Comp. Stat. 35 § 15" — or name the act alone, "65 Ill.
+# Comp. Stat. 5".  Read as a case before, "775 Ill. Comp. Stat. 35" was
+# volume 775 of a reporter.
+_IL_ABBR = (r"(?:ILCS|I\.\s?L\.\s?C\.\s?S\.?"
+            r"|Ill\.?\s*Comp\.?\s*Stat\.?(?:\s*Ann\.?)?)")
+# A section ("15", "2-619.1", "3.1-30-5"), never its sentence's period.
+_IL_SEC = r"\d(?:[0-9A-Za-z\-]|\.(?=[0-9A-Za-z]))*"
+_add(rf"\b(?P<ch>\d+)\s*{_IL_ABBR}\s*(?:{_SS})?(?P<act>\d+)"
+     rf"(?:\s*(?:/|{_SS}|,\s*{_SS})\s*(?P<sec>{_IL_SEC})(?P<subs>{_SUBS}))?",
      _il_build)
 
 
@@ -418,7 +430,8 @@ def spec_label(spec: str) -> str:
     tail = "".join(f"({s})" for s in subs.split(",") if s)
     if key == "il":
         ch, act, sec = (section.split("/") + ["", ""])[:3]
-        return f"{ch} ILCS {act}/{sec}{tail}"
+        return (f"{ch} ILCS {act}/{sec}{tail}" if sec
+                else f"{ch} ILCS {act}")
     if key == "ma":
         ch, _, sec = section.partition("/")
         return f"Mass. Gen. Laws ch. {ch}, § {sec}{tail}"
@@ -526,17 +539,31 @@ def _tx_link(c: Cite) -> str | None:
             f"{code}.{chapter}.htm")
 
 
+def _il_link(c: Cite) -> str | None:
+    """The General Assembly's page for one section of the Illinois Compiled
+    Statutes, named by chapter and act (four digits each), "0K" and the
+    section: 775 ILCS 35/15 is ``077500350K15.htm``.  None for an act cited
+    without a section."""
+    ch, act, sec = (c.section.split("/") + ["", ""])[:3]
+    if not (ch.isdigit() and act.isdigit() and sec):
+        return None
+    return ("https://www.ilga.gov/Documents/legislation/ilcs/documents/"
+            f"{int(ch):04d}{int(act):04d}0K{sec}.htm")
+
+
 def link_url(c: Cite) -> str:
     """Browser link-out target for a detected citation.  Priority states that
     can't be rendered in-app (N.Y. — Cloudflare; Tex. — JS SPA) deep-link to
-    the official source; everything else falls back to a web search for the
-    citation, which reliably surfaces the official text without per-state URL
-    schemes."""
+    the official source, as does Illinois, whose sections have pages of their
+    own; everything else falls back to a web search for the citation, which
+    reliably surfaces the official text without per-state URL schemes."""
     deep = None
     if c.key.startswith("ny-"):
         deep = _ny_link(c)
     elif c.key.startswith("tx-"):
         deep = _tx_link(c)
+    elif c.key == "il":
+        deep = _il_link(c)
     if deep:
         return deep
     q = urllib.parse.quote_plus(_norm(c.text))
@@ -602,6 +629,16 @@ if __name__ == "__main__":
         ("Ohio Rev. Code Ann. § 2903.01", "oh", "2903.01", "Ohio Rev. Code Ann. § 2903.01"),
         ("Ga. Code Ann. § 16-5-1", "ga", "16-5-1", "Ga. Code Ann. § 16-5-1"),
         ("720 ILCS 5/9-1", "il", "720/5/9-1", "720 ILCS 5/9-1"),
+        # Illinois as the Bluebook and the opinions write it.
+        ("775 Ill. Comp. Stat. 35/15", "il", "775/35/15", "775 ILCS 35/15"),
+        ("775 Ill. Comp. Stat. 35 § 15", "il", "775/35/15", "775 ILCS 35/15"),
+        ("735 Ill. Comp. Stat. § 5/2-1116", "il", "735/5/2-1116",
+         "735 ILCS 5/2-1116"),
+        ("775 Ill. Comp. Stat. Ann. 35/15", "il", "775/35/15",
+         "775 ILCS 35/15"),
+        ("765 Ill. Comp. Stat. 605/22.", "il", "765/605/22", "765 ILCS 605/22"),
+        ("65 Ill. Comp. Stat. 5, with six trustees", "il", "65/5/",
+         "65 ILCS 5"),
         ("Mass. Gen. Laws ch. 265, § 1", "ma", "265/1", "Mass. Gen. Laws ch. 265, § 1"),
         ("42 Pa. Cons. Stat. § 9711", "pa", "42-9711", "42 Pa. Cons. Stat. § 9711"),
         ("N.J. Stat. Ann. § 2C:11-3", "nj", "2C:11-3", "N.J. Stat. Ann. § 2C:11-3"),
@@ -641,6 +678,17 @@ if __name__ == "__main__":
     # spec round-trips
     check(spec_label("fl:776.012:") == "Fla. Stat. § 776.012", "spec fl")
     check(spec_label("il:720/5/9-1:") == "720 ILCS 5/9-1", "spec il")
+    check(spec_label("il:65/5/:") == "65 ILCS 5", "spec il act alone")
+    c = first("765 Ill. Comp. Stat. 605/22(a) (2018)")
+    check(c and c.subs == ("a",), f"il subs: {c.subs if c else None}")
+    # Illinois sections have pages of their own on the General Assembly's
+    # site; an act alone is searched for.
+    _, il = action_for(first("775 Ill. Comp. Stat. 35 § 15"))
+    check(il == "https://www.ilga.gov/Documents/legislation/ilcs/documents/"
+               "077500350K15.htm", f"IL deep link-out: {il}")
+    _, il = action_for(first("65 ILCS 5"))
+    check(il.startswith("https://www.google.com/search?"),
+          f"IL act link-out: {il}")
     check(spec_label("nj:2C:11-3:") == "N.J. Stat. Ann. § 2C:11-3", "spec nj")
     check(spec_label("de:11-636:") == "Del. Code Ann. tit. 11, § 636", "spec de")
     check(spec_label("pa:42-9711:") == "42 Pa. Cons. Stat. § 9711", "spec pa")

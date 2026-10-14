@@ -412,6 +412,9 @@ APP_NS = _load(
      "_SCHOLAR_AVAILABLE": True,
      # The Federal Cases pattern, as the module defines it.
      "_FED_CAS_CITE_RE": _module_value("_FED_CAS_CITE_RE"),
+     # How a citation's volume and reporter are read, as the module does.
+     "_CITE_PARSE_RE": _module_value("_CITE_PARSE_RE"),
+     "_canonical_reporter_key": citations.reporter_key,
      "_citation_search_variants": lambda cite: (cite,),
      "_case_law_text_for_scan": _case_law_text_for_scan,
      "_courtlistener_text_source": COURTLISTENER_TEXT_SOURCE,
@@ -1647,7 +1650,8 @@ class PdfClickRoutingTests(unittest.TestCase):
     def setUp(self):
         self.ns = _load(
             "_ScholarTextWindow", ["_open_pdf_cite"],
-            {"_follow_brief_action": lambda *a, **kw: TEXT_OPENS.append(a),
+            {"_cite_for_era": citations.cite_for_era,
+             "_follow_brief_action": lambda *a, **kw: TEXT_OPENS.append(a),
              "_open_citation_in_browser": lambda *a: BROWSER.append(a)},
         )
         TEXT_OPENS.clear()

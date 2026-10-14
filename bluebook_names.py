@@ -1785,9 +1785,14 @@ def _reliable_caption_spelling(
         if len(core) > 4 and not (_defined_acronym(best, body_text)
                                   or _caps_in_running_prose(best, body_text)):
             return ""
+        # Fewer times than that will do when the prose writes it no other
+        # way and names it in a parenthesis — "Opposition to Application in
+        # No. 24A884 (CASA)", the only places Trump v. CASA, Inc., 145 S. Ct.
+        # 2540 (2025), names CASA — or in the run of a sentence.
         if unanchored and (votes[best] < 3 or votes[best] <= 2 * cur) and not (
                 cur == 0 and len(votes) == 1
-                and _initialism_in_prose(best, body_text)):
+                and (_defined_acronym(best, body_text)
+                     or _initialism_in_prose(best, body_text))):
             return ""
         # One occurrence is enough when an adjacent caption word anchors it
         # in ordinary mixed-case prose ("GMAC Mortgage").  The stricter
@@ -2440,6 +2445,21 @@ def _first_listed_party(side: str) -> str:
     return re.sub(r"\s+(?:&|and)$", "", side.strip(" ,—–-")).strip(" ,")
 
 
+def _anonymized_initials(p: str) -> str | None:
+    """*p* closed up when it is a person a caption names by initials alone —
+    a minor, a victim: "J.K.J." in "J.K.J. and M.J.J., Plaintiffs-
+    Appellees" (J.K.J. v. Polk County, 960 F.3d 367 (7th Cir. 2020) (en
+    banc)) — or None.  Two letters at least, and no table abbreviation
+    ("N.Y.", "R.R."), which is a place's or a firm's."""
+    p = p.strip(" ,;")
+    if not re.fullmatch(r"(?:[A-Z]\.\s?){2,}", p + " "):
+        return None
+    closed = re.sub(r"\s+", "", p)
+    if _word_key(closed) in _TABLE_ABBREVIATIONS:
+        return None
+    return closed
+
+
 def _strip_given_names(p: str, *, person: bool = False,
                        names: _OpinionNames | None = None,
                        relaxed: bool = True) -> str | None:
@@ -3071,6 +3091,87 @@ def in_re_caps_name(caption: str) -> str | None:
     return f"{prefix} {lead}{name}" if name else None
 
 
+# A group of cases decided together that the reporter heads with a popular
+# name — "SLAUGHTER-HOUSE CASES.", "CIVIL RIGHTS CASES.", "LEGAL TENDER
+# CASES." — is cited by that name alone, not by the first of the captions
+# set under it: Slaughter-House Cases, 83 U.S. (16 Wall.) 36 (1873); Civil
+# Rights Cases, 109 U.S. 3 (1883); Legal Tender Cases, 79 U.S. (12 Wall.)
+# 457 (1871).  The name is a title, not a party's, so table T6 has no word
+# of it to abbreviate (never "C.R. Cases").
+_COLLECTIVE_NAME_RE = re.compile(
+    r"\s*(?:the\s+)?(?P<name>\S+(?:\s+\S+){0,7}?\s+cases)(?:\.|[;:]|$)",
+    re.IGNORECASE)
+# A single case's popular name is a title too, where it is the whole caption
+# — "CHILD LABOR TAX CASE." (259 U.S. 20) is the Child Labor Tax Case, never
+# "Child Lab. Tax Case".  As a heading over a party caption ("LOTTERY CASE.
+# CHAMPION v. AMES.") it gives way to the caption.
+_SINGLE_CASE_NAME_RE = re.compile(
+    r"\s*(?:the\s+)?(?P<name>\S+(?:\s+\S+){0,7}?\s+case)\.?\s*$",
+    re.IGNORECASE)
+# A heading's first word that says how many cases, or that they were heard
+# together, rather than naming them: "CONSOLIDATED CASES.", "SAME CASES."
+_COLLECTIVE_GENERIC_WORDS = frozenset({
+    "the", "all", "both", "these", "those", "other", "same", "such",
+    "several", "related", "companion", "consolidated", "combined",
+    "joined", "joint", "cross", "two", "three", "four", "five", "six",
+    "seven", "eight", "nine", "ten", "eleven", "twelve",
+})
+
+
+def collective_case_name(caption: str) -> str | None:
+    """The popular name a caption opens with when it heads a group of cases
+    — "SLAUGHTER-HOUSE CASES. THE BUTCHERS' BENEVOLENT ASSOCIATION … v. …"
+    is "SLAUGHTER-HOUSE CASES" — without its "The" (rule 10.2.1(d): "The
+    Prize Cases" are Prize Cases) and in the caption's own casing, for the
+    caller to case; or None when the caption opens with no such name."""
+    m = (_COLLECTIVE_NAME_RE.match(caption or "")
+         or _SINGLE_CASE_NAME_RE.match(caption or ""))
+    if not m:
+        return None
+    name = m.group("name")
+    words = name.split()
+    # A name the caption gives "v." in, or that a procedural prefix opens
+    # ("In re Marriage Cases"), is the party caption's own.
+    if (any(w.lower() in ("v.", "vs.", "v", "vs") for w in words)
+            or _PROCEDURAL_PREFIX_RE.match(name)
+            or words[0].lower().strip(",.") in _COLLECTIVE_GENERIC_WORDS
+            or not re.search(r"[^\W\d_]{3}", " ".join(words[:-1]))):
+        return None
+    # …and a sentence ends nowhere in it ("…ET AL. GRAIN CASES" would be
+    # another caption's tail).
+    if any(_caps_run_sentence_end(w) for w in words[:-1]):
+        return None
+    return name
+
+
+# A caption that names one party, as the petitioner or the applicant, and no
+# adversary — "NIELSEN, Petitioner." (131 U.S. 176) — is that party's
+# petition or application, which rule 10.2.1(b) cites "In re" ("petition
+# of", "application of" and similar expressions): In re Nielsen, 131 U.S.
+# 176 (1889), as Brown v. Ohio, 432 U.S. 161, 168 (1977), cites it.
+_LONE_PETITIONER_RE = re.compile(
+    r"^(?P<party>[^,].*?),?\s+(?:petitioners?|applicants?)\b[.,;:]?"
+    r"(?:\s*(?:on|for\s+(?:a\s+)?writ\s+of)\s+habeas\s+corpus\b\.?)?\s*$",
+    re.IGNORECASE)
+
+
+def in_re_for_petition(caption: str) -> str | None:
+    """*caption* as the "In re" matter it is when it names a lone
+    petitioner or applicant and no adversary — "NIELSEN, Petitioner." is
+    "In re NIELSEN, Petitioner." — for the procedural-caption reading to
+    finish; or None for any other caption."""
+    text = re.sub(r"\s+", " ", caption or "").strip()
+    if (not text or _V_SPLIT_RE.search(text)
+            or re.search(r"\b(?:versus|against|respondents?|appellees?|"
+                         r"defendants?)\b", text, re.IGNORECASE)
+            or _PROCEDURAL_PREFIX_RE.match(text)):
+        return None
+    m = _LONE_PETITIONER_RE.match(text)
+    if not m or not re.search(r"[^\W\d_]{2}", m.group("party")):
+        return None
+    return "In re " + text
+
+
 # Where the one party a procedural caption is cited by ends (rule 10.2.1(a),
 # (b)): at an appositive describing it — "a Pennsylvania Corporation", "an
 # Infant" — or its role in the proceeding, "Bankrupt", "Debtor", after which a
@@ -3358,7 +3459,8 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
             return _abbreviate_party(segs[0].strip(" ,;"),
                                      recognize_initials=recognize_initials,
                                      court_state=court_state, names=names)
-        surnames = [_strip_given_names(s, names=names) for s in segs]
+        surnames = [_strip_given_names(s, names=names)
+                    or _anonymized_initials(s) for s in segs]
         if all(surnames):
             return surnames[0]
 
@@ -3842,6 +3944,10 @@ def _clean_caption(name: str) -> str:
     # (THE "SCOTLAND.", 105 U.S. 24) — the quotes are the reporter's
     # typography, never part of the Bluebook name.
     name = re.sub(r"[“”\"]", "", name)
+    # A bracket closed by a brace, or a brace by a bracket, is a scan's
+    # garbling, never a name's: "CHIRAC and Others {VV] against REINICKER."
+    # (24 U.S. 280).
+    name = re.sub(r"\s*(?:\{[^{}\[\]]{0,6}\]|\[[^{}\[\]]{0,6}\})", "", name)
     # A caption's footnote marker clings to the end of the name — a
     # reference symbol ("THE EUGENE F. MORAN.*"), Scholar's bracketed form
     # ("The Eugene F. Moran.[1]", same token shape google_scholar's
@@ -3913,6 +4019,10 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
     name = _clean_caption(name)
     if not name:
         return name
+    collective = collective_case_name(name)
+    if collective:
+        return _finish_case_name(collective)
+    name = in_re_for_petition(name) or name
     # An ejectment party is cited as the caption puts it — "Den ex dem.
     # Murray", "Lessee of Livingston", "Hunter's Lessee" — until the citing
     # opinions say otherwise (see ejectment_case_names).
@@ -4055,6 +4165,9 @@ if __name__ == "__main__":
          "Ward v. Zelikovsky"),
         ("Charles Ward and Mary Ward v. Johanan Zelikovsky",
          "Ward v. Zelikovsky"),
+        # …and a person named by initials alone is one too.
+        ("J.K.J. and M.J.J. v. Polk County and Darryl L. Christensen",
+         "J.K.J. v. Polk County"),
         ("John Smith & Acme Corp. v. Jane Doe",
          "John Smith & Acme Corp. v. Doe"),
         ("United States v. Carolene Products Company",
@@ -4304,6 +4417,9 @@ if __name__ == "__main__":
         # a bare business name: their leading article still drops.
         ("The Prize Cases", "Prize Cases"),
         ("The Pocket Veto Case", "Pocket Veto Case"),
+        # A group's popular name is cited alone, its words unabbreviated.
+        ("Civil Rights Cases", "Civil Rights Cases"),
+        ("Legal Tender Cases. Knox v. Lee", "Legal Tender Cases"),
         ("The Boeing Company", "Boeing Co."),
         # Widely recognized initials (rule 10.2.1(c))
         ("Lorenzo v. Securities and Exchange Commission", "Lorenzo v. SEC"),

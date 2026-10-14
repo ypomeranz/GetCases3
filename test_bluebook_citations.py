@@ -23,6 +23,8 @@ from bluebook_names import (
     refine_caption_case,
 )
 from bluebook_parentheticals import (
+    bench_size,
+    decided_en_banc,
     join_parentheticals,
     order_parentheticals,
     split_trailing_parentheticals,
@@ -1414,6 +1416,24 @@ class AcronymCaseTests(unittest.TestCase):
         self.assertEqual(
             refine_caption_case("Nifla v. Becerra", body), "NIFLA v. Becerra")
 
+    def test_a_short_one_the_prose_names_in_a_parenthesis(self):
+        # Trump v. CASA, Inc., 145 S. Ct. 2540 (2025): CASA appears twice,
+        # each time labelling the party's papers — too few for capitals set
+        # bare in the prose, and "Casa" is a surname in the Census files.
+        body = ("See Opposition to Application in No. 24A884 (CASA), pp. "
+                "30-31; see also Brief for Professor Mila Sohoni as Amica "
+                "Curiae 6-8.\nSee Opposition to Application in No. 24A884 "
+                "(CASA), at 22-25; Opposition to Application in No. 24A885 "
+                "(Washington), pp. 28-32.")
+        self.assertEqual(refine_caption_case("Trump v. Casa, Inc.", body),
+                         "Trump v. CASA, Inc.")
+        # The prose writing it in ordinary case as well settles it the
+        # other way.
+        self.assertEqual(
+            refine_caption_case("Trump v. Casa, Inc.",
+                                body + "\nThen Casa sued."),
+            "Trump v. Casa, Inc.")
+
     def test_a_long_acronym_the_prose_writes_in_capitals(self):
         # CBOCS West, Inc. v. Humphries, 553 U.S. 442 (2008): the opinion
         # never defines "(CBOCS)", but writes it in capitals in its
@@ -2409,6 +2429,141 @@ class ParentheticalOrderTests(unittest.TestCase):
     def test_split_without_a_date_parenthetical_leaves_it_whole(self):
         base = "State v. Prado, 2021 WI 64, 397 Wis. 2d 719, 960 N.W.2d 869"
         self.assertEqual(split_trailing_parentheticals(base), (base, [], ""))
+
+
+class EnBancTests(unittest.TestCase):
+    """A decision of the full court is cited "(en banc)" (rule 10.6.1(a));
+    the opinions that only mention rehearing en banc — a panel's whose
+    rehearing was denied, the order denying it — are not."""
+
+    SEVENTH = "United States Court of Appeals, Seventh Circuit."
+
+    def test_the_front_matter_says_the_full_court_heard_it(self):
+        for line in ("Reargued En Banc May 22, 2007.",
+                     "Argued and Submitted En Banc June 24, 2013.",
+                     "Argued En Banc on February 15, 2023.",
+                     "ON REHEARING EN BANC",
+                     "UPON A REHEARING EN BANC",
+                     "Before BAZELON, Chief Judge, and WRIGHT, McGOWAN, "
+                     "LEVENTHAL, ROBINSON, MacKINNON and WILKEY, Circuit "
+                     "Judges, sitting en banc.",
+                     "Before STEELE, Chief Justice, HOLLAND, BERGER, JACOBS, "
+                     "and RIDGELY, Justices, constituting the court en banc.",
+                     "Before the court en banc."):
+            with self.subTest(line=line):
+                self.assertTrue(decided_en_banc([self.SEVENTH, line]))
+
+    def test_or_its_bench_is_the_whole_court_of_appeals(self):
+        # Scholar prints Skoien's "Argued En Banc" as "Argued".
+        bench = ("Before EASTERBROOK, Chief Judge, and BAUER, POSNER, FLAUM, "
+                 "KANNE, ROVNER, WOOD, WILLIAMS, SYKES, TINDER, and HAMILTON, "
+                 "Circuit Judges.")
+        front = [self.SEVENTH, "Argued May 20, 2010.", bench]
+        self.assertTrue(decided_en_banc(front, panel_court=True))
+        # A court that sits whole in any case says nothing by it.
+        self.assertFalse(decided_en_banc(front, panel_court=False))
+
+    def test_a_bench_of_three_is_a_panel(self):
+        for bench, judges in (
+                ("Before CANBY, JR., NOONAN, and THOMAS, Circuit Judges.", 3),
+                ("Before: Park, Robinson, and Pérez, Circuit Judges.", 3),
+                ("Before MIKVA and D.H. GINSBURG, Circuit Judges, and MAX "
+                 "ROSENN,[*] U.S. Senior Circuit Judge for the Third "
+                 "Circuit.", 3),
+                ("Before TAMM and ROBINSON, Circuit Judges and GERHARD A. "
+                 "GESELL[*], United States District Judge for the United "
+                 "States District Court for the District of Columbia.", 3),
+                ("Before the court is the Department of Homeland Security’s "
+                 "request to stay the district court’s vacatur.", 0)):
+            with self.subTest(bench=bench):
+                self.assertEqual(bench_size(bench), judges)
+                self.assertFalse(decided_en_banc([bench], panel_court=True))
+
+    def test_a_bench_behind_the_reporter_s_page_or_the_counsel(self):
+        self.assertEqual(bench_size(
+            "*292 Before CLARK, Chief Judge, and HINCKS and LUMBARD, Circuit "
+            "Judges."), 3)
+        bench = ("*767 Before: SENTELLE, Chief Judge, and GINSBURG, "
+                 "HENDERSON, ROGERS, TATEL, GARLAND, BROWN, GRIFFITH, and "
+                 "KAVANAUGH, Circuit Judges.")
+        self.assertEqual(bench_size(bench), 9)
+        self.assertTrue(decided_en_banc([bench], panel_court=True))
+        # Counsel can push the bench well past the front matter's first
+        # lines; it is still read for its size…
+        front = ["United States Court of Appeals, Fifth Circuit.",
+                 "Argued May 1, 2023."]
+        self.assertTrue(decided_en_banc(front, benches=[
+            "Counsel for appellant.", "Counsel for appellee.", bench],
+            panel_court=True))
+        # …but nothing else so far in counts against the decision.
+        self.assertTrue(decided_en_banc(front, benches=[
+            "The Ninth Circuit denied rehearing en banc.", bench],
+            panel_court=True))
+
+    def test_a_state_supreme_court_sits_whole(self):
+        for court, bench in (
+                ("Supreme Court of Pennsylvania.",
+                 "*30 BEFORE: CASTILLE, C.J., SAYLOR, EAKIN, BAER, TODD, "
+                 "McCAFFERY, ORIE MELVIN, JJ."),
+                ("Supreme Judicial Court of Massachusetts, Suffolk.",
+                 "Present: Marshall, C.J., Greaney, Ireland, Spina, Cowin, "
+                 "Sosman, & Cordy, JJ."),
+                ("Supreme Court of Alaska.",
+                 "Before: Winfree, Chief Justice, and Maassen, Carney, "
+                 "Borghesan, and Henderson, Justices."),
+                # The Appellate Division sits five to a panel.
+                ("Appellate Division of the Supreme Court of New York, "
+                 "Fourth Department.",
+                 "Present — Smith, J.P., Centra, Fahey, Peradotto and Pine, "
+                 "JJ.")):
+            with self.subTest(court=court):
+                self.assertGreater(bench_size(bench), 3)
+                self.assertFalse(decided_en_banc([court, bench],
+                                                 benches=[bench]))
+
+    def test_not_a_rehearing_en_banc_denied_nor_granted(self):
+        whole = ("Before WOOD, Chief Judge, and EASTERBROOK, ROVNER, SYKES, "
+                 "HAMILTON, BRENNAN, SCUDDER, ST. EVE, KIRSCH, and "
+                 "JACKSON-AKIWUMI, Circuit Judges.")
+        for front, openings in (
+                (["Argued May 1, 1987.", "Decided August 27, 1987.",
+                  "Rehearing and Rehearing En Banc Denied November 16, "
+                  "1987."], ()),
+                (["As Amended on Denial of Rehearing and Rehearing En Banc "
+                  "June 13, 2012."], ()),
+                (["Rehearing and Suggestion for Rehearing En Banc Denied "
+                  "April 25, 1996."], ()),
+                # The order denying it, with the whole court on its bench.
+                (["On Petition for Rehearing and Rehearing En Banc.", whole],
+                 ()),
+                ([whole, "ORDER"],
+                 ("WOOD, Circuit Judge, with whom ROVNER, HAMILTON, ST. EVE "
+                  "and JACKSON-AKIWUMI, Circuit Judges, join, dissenting "
+                  "from the denial of rehearing en banc.",)),
+                # A panel opinion later vacated for rehearing en banc says
+                # nothing of its own hearing.
+                (["Argued May 5, 2023.", "Rehearing En Banc Granted, "
+                  "Opinion Vacated July 1, 2023.",
+                  "Before SMITH, JONES, and DUNCAN, Circuit Judges."], ())):
+            with self.subTest(front=front[0][:40]):
+                self.assertFalse(
+                    decided_en_banc(front, openings, panel_court=True))
+
+    def test_nor_a_court_named_en_banc(self):
+        # Washington's and Colorado's supreme courts sit en banc in every
+        # case, and say so in their name.
+        for front in (["The Supreme Court of Washington, En Banc."],
+                      ["Supreme Court of Colorado.", "En banc."]):
+            with self.subTest(front=front):
+                self.assertFalse(decided_en_banc(front))
+
+    def test_nor_an_opinion_that_only_discusses_one(self):
+        prose = ("Rahimi filed a petition for rehearing en banc; while that "
+                 "petition was pending, the Supreme Court decided Bruen. The "
+                 "prior panel withdrew its opinion. " * 4)
+        self.assertFalse(decided_en_banc(
+            ["Before JONES, HO, and WILSON, Circuit Judges.", prose],
+            panel_court=True))
 
 
 class ReporterAndDecisionDateTests(unittest.TestCase):
@@ -3450,6 +3605,81 @@ class ReporterEquivalenceTests(unittest.TestCase):
             finally:
                 rebuilt.close()
 
+
+    def test_a_record_saved_without_a_name_is_named_from_its_caption(self):
+        # In re Nielsen, 131 U.S. 176 (1889), was stored nameless: the
+        # caption names a lone petitioner and no adversary.
+        html = (
+            '<div id="gs_opinion"><center><b>131 U.S. 176 (1889)</b></center>'
+            '<center><h3 id="gsl_case_name">HANS NIELSEN, Petitioner.</h3>'
+            '</center><center>Supreme Court of United States.</center>'
+            '<p>The petitioner was convicted.</p></div>')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = OpinionDB(root / "opinions.jsonl", root / "opinions.db")
+            try:
+                self.assertTrue(db.add({
+                    "scholar_id": "131", "name": "", "parties": [],
+                    "cites": ["131 U.S. 176"], "court": "scotus",
+                    "html_gz": _gz_pack(html),
+                }))
+                self.assertEqual(
+                    [hit["name"] for hit in db.search_names("Nielsen")],
+                    ["In re Nielsen"])
+            finally:
+                db.close()
+
+    def test_captions_the_light_reading_cannot_take(self):
+        # In rem vessels, captions joined by "versus", a case's own name:
+        # the database reads them as the opinion window does.  They had
+        # been stored without a name.
+        from opinion_db import extract_record
+        for cite_line, caption, named in (
+                ("189 U.S. 185 (1903)", "THE ROANOKE.", "The Roanoke"),
+                ("175 U.S. 677 (1900)", "THE PAQUETE HABANA. THE LOLA.",
+                 "The Paquete Habana"),
+                ("3 U.S. 386 (1798)", "Calder et Wife versus Bull et Wife.",
+                 "Calder v. Bull"),
+                ("259 U.S. 20 (1922)", "CHILD LABOR TAX CASE.",
+                 "Child Labor Tax Case"),
+                ("24 U.S. 280 (1826)",
+                 "CHIRAC and Others {VV] against REINICKER.",
+                 "Chirac v. Reinicker")):
+            with self.subTest(caption=caption):
+                record = extract_record(
+                    "https://scholar.google.com/scholar_case?case=1",
+                    _scholar_page(cite_line, caption,
+                                  "Supreme Court of United States."))
+                self.assertEqual(record["name"], named)
+        html = _scholar_page("189 U.S. 185 (1903)", "THE ROANOKE.",
+                             "Supreme Court of United States.")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = OpinionDB(root / "opinions.jsonl", root / "opinions.db")
+            try:
+                self.assertTrue(db.add({
+                    "scholar_id": "189", "name": "", "parties": [],
+                    "cites": ["189 U.S. 185"], "court": "scotus",
+                    "html_gz": _gz_pack(html),
+                }))
+                self.assertEqual(
+                    [hit["name"] for hit in db.search_names("Roanoke")],
+                    ["The Roanoke"])
+            finally:
+                db.close()
+
+    def test_the_caption_reader_needs_no_tkinter(self):
+        # The database reads captions on worker threads and in builds
+        # without Tk.
+        import subprocess
+        import sys
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, scholar_caption, opinion_db; "
+             "print('tkinter' in sys.modules)"],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parent))
+        self.assertEqual(out.stdout.strip(), "False", out.stderr)
 
     def test_index_points_at_the_jsonl_instead_of_copying_opinions(self):
         # The index keeps only what search reads plus a byte offset into the
@@ -4901,6 +5131,27 @@ class CitationParentheticalOrderTests(unittest.TestCase):
         }
         return win
 
+    def test_en_banc_comes_first(self):
+        win = self._window()
+        win._bb.update({"name": "United States v. Skoien",
+                        "cite": "614 F.3d 638", "display_cite": "614 F.3d 638",
+                        "court": "7th Cir.", "year": "2010",
+                        "court_id": "ca7"})
+        line = SimpleNamespace(text=lambda: "Argued En Banc May 20, 2010.")
+        win._parts = [SimpleNamespace(kind="header", blocks=[line])]
+        plain, _rtf = win._bluebook_citation(
+            "640", "Sykes, J., dissenting", ("footnote omitted",))
+        self.assertEqual(
+            plain,
+            "United States v. Skoien, 614 F.3d 638, 640 (7th Cir. 2010) "
+            "(en banc) (Sykes, J., dissenting) (footnote omitted).")
+        # An edited citation is the user's own: nothing is added to it.
+        win._base_citation_override = (
+            "United States v. Skoien, 614 F.3d 638 (7th Cir. 2010)")
+        self.assertEqual(win._bluebook_citation(None)[0],
+                         "United States v. Skoien, 614 F.3d 638 "
+                         "(7th Cir. 2010).")
+
     def test_writer_then_omission(self):
         plain, rtf = self._window()._bluebook_citation(
             "47", "Rutledge, J., dissenting", ("footnote omitted",))
@@ -5564,6 +5815,162 @@ class InReCapitalsCaptionTests(unittest.TestCase):
         self.assertIsNone(in_re_caps_name("In re J. C. PENNEY CO., Debtor."))
         self.assertEqual(self._cited("In re J. C. PENNEY CO., Debtor."),
                          "In re J.C. Penney Co.")
+
+
+class InitialedPartyTests(unittest.TestCase):
+    """A person a caption names by initials alone is a party like any
+    other: J.K.J. v. Polk County, 960 F.3d 367 (7th Cir. 2020) (en banc),
+    whose plaintiffs are "J.K.J. and M.J.J.", had been cited "J.K.J. &
+    M.J.J. v. Polk County" (rule 10.2.1(a) keeps the first alone)."""
+
+    def test_the_first_listed_is_cited(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "960 F.3d 367 (2020)",
+            "J.K.J. and M.J.J., Plaintiffs-Appellees, v. POLK COUNTY and "
+            "Darryl L. Christensen, Defendants-Appellants."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "J.K.J. v. Polk County")
+        for name, cited in (
+                ("J.K.J. & M.J.J. v. Polk County", "J.K.J. v. Polk County"),
+                ("A.B. & C.D. v. Smith", "A.B. v. Smith"),
+                ("J. K. J. & Jane Doe v. Smith", "J.K.J. v. Smith")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_but_not_a_place_s_or_a_firm_s_initials(self):
+        for name in ("N.Y. & N.E. R.R. Co. v. Smith",
+                     "C. & O. Ry. v. Smith",
+                     "S.H. Kress & Co. v. Smith"):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), name)
+
+
+class LonePetitionerTests(unittest.TestCase):
+    """A caption naming one party, as petitioner or applicant, and no
+    adversary is that party's petition: In re Nielsen, 131 U.S. 176 (1889),
+    whose caption is "HANS NIELSEN, Petitioner.", had been cited
+    "Nielsen"."""
+
+    def test_the_petition_is_an_in_re_matter(self):
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import _caption_name
+        for caption, cited in (
+                ("HANS NIELSEN, Petitioner.", "In re Nielsen"),
+                ("SNOW, Petitioner.", "In re Snow"),
+                ("JOHN SMITH AND MARY JONES, Petitioners.", "In re Smith"),
+                ("JOHN DOE, Applicant.", "In re Doe"),
+                ("UNITED STATES, Petitioner.", "In re United States")):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(
+                    _scholar_page("131 U.S. 176 (1889)", caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)), cited)
+                self.assertEqual(abbreviate_case_name(
+                    normal_case_caption(_caption_name(blocks))), cited)
+        for name, cited in (("Nielsen, Petitioner", "In re Nielsen"),
+                            ("Hans Nielsen, Petitioner.", "In re Nielsen"),
+                            ("Smith et al., Petitioners", "In re Smith")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_where_it_does_not_apply(self):
+        from bluebook_names import in_re_for_petition
+        for name in (
+                # An adversary makes it a case between parties.
+                "Smith, Petitioner, v. Jones, Respondent",
+                "Smith, Petitioner, versus Jones",
+                "SMITH, Petitioner. JONES, Respondent.",
+                # It already has its procedural phrase.
+                "Ex parte Milligan, Petitioner",
+                "In re Debs, Petitioner",
+                # A party other than a petitioner or applicant.
+                "The People, Plaintiff and Respondent",
+                "John Doe, Appellant"):
+            with self.subTest(name=name):
+                self.assertIsNone(in_re_for_petition(name))
+        self.assertEqual(abbreviate_case_name(
+            "Smith, Petitioner, v. Jones, Respondent"), "Smith v. Jones")
+        self.assertEqual(abbreviate_case_name("In re Debs, Petitioner"),
+                         "In re Debs")
+
+
+class CollectiveCaseNameTests(unittest.TestCase):
+    """A group of cases the reporter heads with a popular name is cited by
+    that name alone.  The Slaughter-House Cases had been cited "Slaughter-
+    House Cases. the Butchers' Benevolent Ass'n v. Crescent City Live-Stock
+    Landing & Slaughter-House Co.", and the Civil Rights Cases "C.R.
+    Cases"."""
+
+    SLAUGHTER_HOUSE = (
+        "SLAUGHTER-HOUSE CASES.<br/>THE BUTCHERS' BENEVOLENT ASSOCIATION OF "
+        "NEW ORLEANS<br/>v.<br/>THE CRESCENT CITY LIVE-STOCK LANDING AND "
+        "SLAUGHTER-HOUSE COMPANY.<br/>PAUL ESTEBEN, L. RUCH, ET AL.<br/>v."
+        "<br/>THE STATE OF LOUISIANA, ex rel. S. BELDEN, Attorney-General.")
+
+    def test_the_heading_is_the_name(self):
+        from google_scholar import parse_opinion_blocks
+        for cite_line, caption, cited in (
+                ("83 U.S. 36 (1873)", self.SLAUGHTER_HOUSE,
+                 "Slaughter-House Cases"),
+                ("109 U.S. 3 (1883)", "CIVIL RIGHTS CASES.",
+                 "Civil Rights Cases"),
+                ("109 U.S. 3 (1883)", "CIVIL RIGHTS CASES.<br/>UNITED STATES"
+                 "<br/>v.<br/>STANLEY.<br/>SAME<br/>v.<br/>RYAN.",
+                 "Civil Rights Cases"),
+                ("79 U.S. 457 (1871)", "LEGAL TENDER CASES.<br/>KNOX<br/>v."
+                 "<br/>LEE.<br/>PARKER<br/>v.<br/>DAVIS.",
+                 "Legal Tender Cases"),
+                ("112 U.S. 580 (1884)", "HEAD MONEY CASES.<br/>EDYE &amp; "
+                 "Another<br/>v.<br/>ROBERTSON, Collector.",
+                 "Head Money Cases"),
+                ("207 U.S. 463 (1908)", "EMPLOYERS' LIABILITY CASES.<br/>"
+                 "HOWARD<br/>v.<br/>ILLINOIS CENTRAL RAILROAD COMPANY.",
+                 "Employers’ Liability Cases")):
+            with self.subTest(cited=cited, caption=caption[:40]):
+                blocks = parse_opinion_blocks(_scholar_page(cite_line,
+                                                            caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    cited)
+                # The opinion database reads the caption the same way.
+                from opinion_db import _caption_name
+                self.assertEqual(abbreviate_case_name(
+                    normal_case_caption(_caption_name(blocks))), cited)
+
+    def test_a_stored_or_listed_name_too(self):
+        for name, cited in (
+                # An opinion database record saved before this reading.
+                ("Slaughter-house Cases. the Butchers’ Benevolent Ass'n of "
+                 "New Orleans v. Crescent City Live-stock Landing & "
+                 "Slaughter-house Company. Paul Esteben, L. Ruch",
+                 "Slaughter-House Cases"),
+                # CourtListener's and case.law's names: no T6 abbreviation.
+                ("Civil Rights Cases", "Civil Rights Cases"),
+                ("The Civil Rights Cases", "Civil Rights Cases"),
+                ("Legal Tender Cases. Knox v. Lee", "Legal Tender Cases"),
+                ("Sinking-Fund Cases.", "Sinking-Fund Cases"),
+                ("Penn Central Merger and N & W Inclusion Cases",
+                 "Penn Central Merger and N & W Inclusion Cases"),
+                ("The Prize Cases", "Prize Cases")):
+            with self.subTest(name=name[:40]):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_where_the_rule_stands_aside(self):
+        for name, cited in (
+                ("In re Marriage Cases", "In re Marriage Cases"),
+                ("In re Western Liquid Asphalt Cases",
+                 "In re W. Liquid Asphalt Cases"),
+                # A firm's name that ends in the word.
+                ("Brief Cases, Inc. v. Jones", "Brief Cases, Inc. v. Jones"),
+                # A heading that only counts the cases or joins them.
+                ("Consolidated Cases. Smith v. Jones",
+                 "Consol. Cases. Smith v. Jones"),
+                ("Two Cases", "Two Cases"),
+                # One case's popular name is left as before.
+                ("The Pocket Veto Case", "Pocket Veto Case")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
 
 
 class FirmInitialsCaptionTests(unittest.TestCase):

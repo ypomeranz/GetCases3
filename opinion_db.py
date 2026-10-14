@@ -58,9 +58,12 @@ from court_catalog import (
     bluebook_federal_trial_court,
     state_of_court,
 )
+from scholar_caption import scholar_caption_name
 from bluebook_names import (
     abbreviate_case_name,
+    collective_case_name,
     cut_companion_cases,
+    in_re_for_petition,
     normal_case_caption,
     refine_caption_case,
     simplify_historical_entity_caption,
@@ -69,8 +72,12 @@ from bluebook_names import (
 
 # v7 re-reads every stored opinion's decision date and year from its front
 # matter, past the dates of later events — an affirmance, a rehearing, an
-# amendment — that older releases saved as the decision's.
-_SCHEMA_VERSION = 7
+# amendment — that older releases saved as the decision's.  v8 names, from
+# its caption, a stored opinion saved without a name: a lone petitioner's
+# ("HANS NIELSEN, Petitioner." is In re Nielsen), a group's popular name.
+# v9 reads those it still could not name as the opinion window reads them:
+# an in rem vessel's ("THE ROANOKE."), a caption joined by "versus".
+_SCHEMA_VERSION = 9
 
 # Record field holding the reporter pagination recovered from an official scan
 # (see :meth:`OpinionDB.save_pagination`).  Records written before this field
@@ -555,6 +562,13 @@ def _caption_name(blocks: list) -> str:
             continue
         if citations.TEXT_CITE_RE.match(t):
             continue  # a bare citation line, not the caption
+        # A group of cases is cited by the popular name heading it
+        # ("SLAUGHTER-HOUSE CASES."), not by the first caption under it.
+        collective = collective_case_name(t)
+        if collective:
+            return collective
+        # …and a lone petitioner's caption is an in-re matter.
+        t = in_re_for_petition(t) or t
         sides = re.split(r"\s+vs?\.\s+", t, maxsplit=1)
         if len(sides) != 2:
             sides = re.split(r"\s+[vV]s?\.\s+", t, maxsplit=1)
@@ -657,6 +671,12 @@ def extract_record(
             # guesses ("Us Dominion" -> "US Dominion").
             raw_name = refine_caption_case(raw_name, prose)
             raw_name = simplify_historical_entity_caption(raw_name, prose)
+        else:
+            # A caption this reading can't take — an in rem vessel's ("THE
+            # ROANOKE."), one joined by "versus" (Calder v. Bull), a case's
+            # own name ("Hayburn's Case") — is read as the opinion window
+            # reads it.
+            raw_name = scholar_caption_name(blocks)
 
     cites = _header_cites(blocks)
     for c in item.get("citation", []) or []:
@@ -1051,9 +1071,21 @@ class OpinionDB:
         # reporters even though the caption HTML still contains them.
         stored_cites = rec.get("cites") or []
         cites = _dedupe_cites([*stored_cites, *_header_cites(blocks)])
+        name = str(rec.get("name") or "").strip()
         parties = rec.get("parties")
+        if not name and blocks:
+            # Saved before its caption could be read; read now as
+            # extract_record reads one.
+            raw = _caption_name(blocks)
+            raw = _smart_titlecase(raw) if raw else scholar_caption_name(
+                blocks)
+            if raw:
+                name = abbreviate_case_name(
+                    raw,
+                    court_state=state_of_court(str(rec.get("court") or "")))
+                parties = None
         if parties is None:
-            parties = parties_from_name(rec.get("name", ""))
+            parties = parties_from_name(name)
         # The opinion's front matter dates it, read as extract_record reads
         # it now: a record saved by an earlier release can carry a later
         # event's date ("Rehearing Denied January 23, 1990." beneath
@@ -1081,7 +1113,7 @@ class OpinionDB:
             "parties_json, snippet, added_at, source) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                sid, rec.get("url", ""), rec.get("name", ""), court,
+                sid, rec.get("url", ""), name, court,
                 year, date_filed,
                 int(offset), int(length),
                 json.dumps(cites, ensure_ascii=False),

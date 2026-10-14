@@ -143,7 +143,7 @@ DETAILS_NS = _load(
     ["_toggle_details", "_resize_for_details", "_window_is_maximized",
      "_can_resize_for_details", "_pin_text_width", "_unpin_text_width",
      "_when_resized", "_show_details_panel", "_open_details_panel",
-     "_on_text_configure"],
+     "_on_text_configure", "_fit_reading_column"],
     {"_CaseTabPage": type("_CaseTabPage", (), {}),
      "_EmbeddedCaseHost": type("_EmbeddedCaseHost", (), {}),
      "_work_area": lambda _w: (0, 0, 1600, 900)},
@@ -248,7 +248,8 @@ class _Reader:
         for name in ("_toggle_details", "_resize_for_details",
                      "_window_is_maximized", "_can_resize_for_details",
                      "_pin_text_width", "_unpin_text_width", "_when_resized",
-                     "_show_details_panel", "_open_details_panel"):
+                     "_show_details_panel", "_open_details_panel",
+                     "_fit_reading_column"):
             setattr(self, name, DETAILS_NS[name].__get__(self))
 
     def _details_panel(self):
@@ -734,7 +735,9 @@ class ReporterSidePanelTests(unittest.TestCase):
 
     def test_the_window_says_which_views_its_panel_offers(self):
         src = _source_of("_ScholarTextWindow", "_details_panel")
-        self.assertIn("for name in self._details_views", src)
+        self.assertIn("mode_values = self._details_view_names()", src)
+        self.assertIn("for name in self._details_views",
+                      _source_of("_ScholarTextWindow", "_details_view_names"))
 
     def test_a_panel_with_one_view_gets_no_selector(self):
         src = _source_of("_ScholarTextWindow", "_details_panel")
@@ -773,8 +776,11 @@ class ReporterSidePanelTests(unittest.TestCase):
                 _class_value("_ScholarTextWindow", name)[0], "Case details")
 
     def test_the_docket_comes_off_for_a_court_that_has_none(self):
-        src = _source_of("_ScholarTextWindow", "_details_panel")
+        # The Supreme Court's briefs, or a lower federal court's docket in
+        # the RECAP archive (test_recap_docket_view); no other court's.
+        src = _source_of("_ScholarTextWindow", "_details_view_names")
         self.assertIn('if name != "Docket" or self._is_scotus', src)
+        self.assertIn("_recap_docket", src)
 
     def test_a_chromeless_reader_leaves_the_s_key_to_its_viewer(self):
         # The viewer's own "s" serves the scan as well as the opinion, and one

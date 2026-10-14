@@ -29,6 +29,15 @@ import re
 import shutil
 import subprocess
 import sys
+
+# This program started again to read citations off the window's process (see
+# scan_process): it does that and nothing else — no window, no dependency
+# check.  Before anything heavier is imported.
+if __name__ == "__main__" and sys.argv[1:2] == ["--getcases-scan-worker"]:
+    import scan_process
+    scan_process.serve()
+    sys.exit(0)
+
 import tempfile
 import threading
 import time
@@ -1203,21 +1212,18 @@ from bluebook_names import (
     apply_caption_case_reference,
     abbreviate_case_name,
     caption_case_reference_tokens,
-    collapse_personal_all_caps_run,
     cut_companion_cases,
-    described_person_surname,
     ejectment_case_names,
-    ejectment_party_caption,
-    in_re_caps_name,
     is_recognized_given_name,
-    name_persons_by_surname,
     normal_case_caption,
     refine_caption_case,
     simplify_historical_entity_caption,
-    split_relator,
-    strip_related_case_note,
 )
-from bluebook_parentheticals import join_parentheticals
+from bluebook_parentheticals import decided_en_banc, join_parentheticals
+from scholar_caption import (
+    scholar_body_text as _scholar_body_text,
+    scholar_caption_name as _scholar_caption_name,
+)
 from citation_overrides import (
     citation_identity_keys,
     clean_base_citation,
@@ -1249,6 +1255,7 @@ import state_statutes
 import statutes_at_large
 import us_code
 import pdfium_lock
+import scan_process
 import us_reports_pdf
 import brief_reader
 import browser_links
@@ -1262,6 +1269,9 @@ from citations import (
     NOMINATIVE_CITE_RE as _NOMINATIVE_TEXT_CITE_RE,
     STATE_NOMINATIVE_CITE_RE as _STATE_NOMINATIVE_CITE_RE,
     state_nominative_cites as _state_nominative_cites,
+    washington_series_cites as _washington_series_cites,
+    cite_for_era as _cite_for_era,
+    reporter_variants as _reporter_variants,
     EARLY_FED_CITE_RE as _EARLY_FED_CITE_RE,
     early_fed_cite_text as _early_fed_cite_text,
     SHORT_CITE_RE as _SHORT_CITE_RE,
@@ -1278,9 +1288,9 @@ from citations import (
     reporter_key as _canonical_reporter_key,
     reporter_family as _reporter_family,
     case_match_text as _case_match_text,
-    build_short_cite_index as _build_short_cite_index,
+    build_short_cite_index as _build_short_cite_index_here,
     cite_target_from_text as _cite_target_from_text,
-    detect_links as detect_brief_links,
+    detect_links as _detect_links_here,
     scan_text as _scan_text,
     page_furniture as _page_furniture,
     docket_numbers_in as _docket_numbers_in,
@@ -1297,6 +1307,7 @@ from court_catalog import (
     all_court_ids as _all_court_ids,
     bluebook_court_from_name as _bluebook_court_from_name,
     bluebook_federal_trial_court as _bluebook_federal_trial_court,
+    is_federal_court as _is_federal_court,
     plain_state_names as _plain_state_names,
     state_of_court as _state_of_court,
 )
@@ -2875,6 +2886,51 @@ def _case_law_listed_url(cite: str, url: str) -> str:
     return f"{m.group(1)}/{stem}.{m.group(6)}"
 
 
+def _case_law_named_url(cite: str, url: str, name: str) -> str:
+    """*url* — the static.case.law file *cite* names (see
+    :func:`_case_law_listed_url`) — checked against the case the citation
+    names: *url* itself when the volume's list says a case of that name
+    begins there (or says nothing to the contrary), the file of the one case
+    in the volume that answers to *name* when the page begins another case,
+    and "" when none or several do.
+
+    Some volumes were printed more than once, paginated differently, and CAP
+    scanned another printing than the one an opinion cites.  20 N.C. is 3 and
+    4 Dev. & Bat. in one book: the Supreme Court cites "State v. Manuel, 20
+    N.C. 144", the page of the reprint that runs the two on, but CAP's 20
+    N.C. keeps the first one's own pages — State v. Manuel is 20 N.C. 20
+    there, and page 144 begins Carpenter v. Wall, which opened in its place.
+    Only a name that shares no distinctive party with the case at the page
+    sends the lookup elsewhere; a page of several cases is left to the
+    callers, which tell them apart by name (see _case_law_page_opinions)."""
+    m = _CASE_LAW_FILE_URL_RE.match(url or "")
+    cm = _CITE_PARSE_RE.match((cite or "").split("@", 1)[0].strip())
+    name = re.sub(r"<[^>]+>", "", name or "").strip()
+    if not (m and cm and name and len(_name_parties(name)) == 2):
+        return url
+    files, names, _lengths = _case_law_volume(m.group(2), m.group(3))
+    page = m.group(4)
+    on_page = [stem for stem in names if stem.split("-")[0] == page]
+    if not on_page or any(
+            max(_match_tier(name, names[stem]), _match_tier(names[stem], name))
+            >= 1 for stem in on_page):
+        return url
+    prefix = _case_law_cite_key(f"{cm.group(1)} {cm.group(2).strip()} ")
+    named = sorted({
+        stem for key, stems in files.items()
+        if key.startswith(prefix) and key[len(prefix):].isdigit()
+        for stem in stems if _is_the_named_case(name, names.get(stem, ""))})
+    held = names[on_page[0]]
+    if len(named) != 1:
+        print(f"[case.law] {cite!r} begins {held!r} in static.case.law's "
+              f"printing, and {len(named) or 'no'} case(s) there answer to "
+              f"{name!r}")
+        return ""
+    print(f"[case.law] {cite!r} begins {held!r} in static.case.law's "
+          f"printing; {name!r} is its file {named[0]}")
+    return f"{m.group(1)}/{named[0]}.{m.group(6)}"
+
+
 @dataclass(frozen=True)
 class _CaseLawPdfChoice:
     cite: str
@@ -3049,7 +3105,8 @@ def _case_law_pdf_choices_for_cites(
         no file to ask about, or the asking failed."""
         url = _static_case_law_url(cite)
         if url:
-            url = _case_law_listed_url(cite, url)
+            url = _case_law_named_url(
+                cite, _case_law_listed_url(cite, url), expected_name)
         if not url:
             return None, None
         if _shared_pdf_answer(url):     # downloaded already (_CaseOpenRace)
@@ -3249,9 +3306,12 @@ def _official_series_cites(cite: str) -> list[str]:
     Pick. 234" → "36 Mass. 234", "4 Heisk. 20" → "51 Tenn. 20") — which is
     how CourtListener and static.case.law mostly index them.  More than one
     where an abbreviation names two states' reporters ("4 Met." is 45 Mass.
-    or 61 Ky.); [] for any other citation."""
+    or 61 Ky.).  A plain "Wash." in its first volumes may also be one of
+    Bushrod Washington's ("2 Wash. 298" → 2 Va. 298, 2 Wash. C.C. 298; see
+    citations.washington_series_cites).  [] for any other citation."""
     us = _us_reports_cite(cite)
-    return [us] if us else _state_nominative_cites(cite)
+    return ([us] if us else _state_nominative_cites(cite)
+            or _washington_series_cites(cite))
 
 
 def _official_series_cite(cite: str) -> str:
@@ -3792,6 +3852,15 @@ def _case_law_text_for_cite(
             return None
         if matched.json_url and matched.json_url != json_url:
             return _case_law_text_for_json_url(matched.json_url, cite)
+    else:
+        # The one case beginning on the page, in the printing CAP scanned,
+        # may be another than the one cited (see _case_law_named_url): the
+        # named case's own file then, or none at all.
+        named = _case_law_named_url(cite, json_url, expected_name)
+        if not named:
+            return None
+        if named != json_url:
+            return _case_law_text_for_json_url(named, cite)
     return _case_law_text_record(
         data, cite, json_url, _case_law_case_html(json_url))
 
@@ -3930,6 +3999,69 @@ def _scotus_docket_tokens(value: str) -> set[str]:
         re.sub(r"\s+", "", m.group(0)).upper()
         for m in _SCOTUS_DOCKET_TOKEN_RE.finditer(normalized)
     }
+
+
+def _docket_number_list(text: str) -> list[str]:
+    """The docket numbers a record's docket field gives, each on its own:
+    "Nos. 12-3088, 12-3416" → ["12-3088", "12-3416"], "No. 08 Civ.
+    1034(SAS)" → ["08 Civ. 1034(SAS)"]."""
+    out: list[str] = []
+    for piece in re.split(r"\s*[;,]\s*|\s+(?:&|and)\s+", str(text or "")):
+        piece = re.sub(r"^\s*(?:Nos?\.|Numbers?|Dkt\.)\s*", "", piece,
+                       flags=re.IGNORECASE).strip(" .")
+        if re.search(r"\d", piece) and piece not in out:
+            out.append(piece)
+    return out
+
+
+def _recap_docket_for_case(client, dockets: list, court: str, cite: str,
+                           name: str) -> Optional[dict]:
+    """A lower federal court case's docket in CourtListener's RECAP archive
+    (see courtlistener.find_recap_docket), with its newest filings — or None
+    when the archive has none, or the case is no lower federal court's.
+
+    The record an opinion is filed under on CourtListener is not its RECAP
+    docket — Floyd v. City of New York's opinion sits on a docket of its own,
+    "No. 08 Civ. 1034(SAS)"; the case's PACER docket, 1:08-cv-01034, is
+    another — so the docket is found by its number in its court.  Where the
+    opinion on hand gives neither, CourtListener's record of the citation
+    does."""
+    court = (court or "").strip().lower()
+    if not (dockets and court) and cite:
+        hit = _cl_item_for_citation(client, cite, name=name) or {}
+        court = court or str(hit.get("court_id") or "").strip().lower()
+        dockets = dockets or _docket_number_list(
+            hit.get("docketNumber") or hit.get("docket_number") or "")
+        if not dockets and (hit.get("docket_id") or hit.get("cluster_id")):
+            # A record built from the citation lookup's cluster carries no
+            # docket number: its docket does.
+            docket_id = hit.get("docket_id")
+            if not docket_id:
+                cluster = client.get_cluster(int(hit["cluster_id"]),
+                                             fields="docket_id") or {}
+                docket_id = cluster.get("docket_id")
+            if docket_id:
+                record = client.get_docket(
+                    int(docket_id), fields="docket_number,court_id") or {}
+                dockets = _docket_number_list(record.get("docket_number")
+                                              or "")
+                court = court or str(record.get("court_id")
+                                     or "").strip().lower()
+    if (not dockets or not court or court == _SCOTUS_COURT_ID
+            or not _is_federal_court(court)):
+        return None
+    session = getattr(client, "_session", None)
+    for docket in dockets[:3]:
+        found = cl_api.find_recap_docket(docket, court, name, session=session)
+        if not found:
+            continue
+        if found.get("docket_id"):
+            count, latest = cl_api.recap_docket_documents(
+                found["docket_id"], session=session)
+            found["document_count"] = count
+            found["latest"] = latest
+        return found
+    return None
 
 
 def _item_docket_text(item: dict) -> str:
@@ -4123,6 +4255,31 @@ def _recap_spec_index(text: str) -> dict[str, str]:
     return out
 
 
+#: The short-cite and RECAP indexes of opinion texts read already, by text:
+#: each is a scan of the whole opinion, redone on every render, and the
+#: reader opened on a page whose citations were read ahead finds them here.
+_TEXT_INDEXES: "dict[tuple, tuple]" = {}
+_TEXT_INDEXES_LOCK = threading.Lock()
+_TEXT_INDEXES_KEPT = 4
+
+
+def _text_indexes(text: str) -> "tuple[dict, dict]":
+    """(short-cite index, RECAP spec index) of an opinion's *text* — see
+    build_short_cite_index and _recap_spec_index — built once and kept.
+    Shared, so read-only."""
+    key = (len(text), hash(text))
+    with _TEXT_INDEXES_LOCK:
+        kept = _TEXT_INDEXES.get(key)
+    if kept is not None:
+        return kept
+    built = (_build_short_cite_index(text), _recap_spec_index(text))
+    with _TEXT_INDEXES_LOCK:
+        _TEXT_INDEXES[key] = built
+        while len(_TEXT_INDEXES) > _TEXT_INDEXES_KEPT:
+            _TEXT_INDEXES.pop(next(iter(_TEXT_INDEXES)))
+    return built
+
+
 def _recap_citation_ranges(
     text: str, spec_index: Optional[dict[str, str]] = None,
 ) -> list[tuple[int, int, tuple[str, str]]]:
@@ -4224,6 +4381,33 @@ _TEXT_LINK_SCANS_KEPT = 6
 _LINKS_LATER_CHARS = 30_000
 
 
+def _scan_off_thread(name: str, here, *args, **kwargs):
+    """``here(*args, **kwargs)`` — one of citations' whole-document scans,
+    *name* in it — run in the helper process (see scan_process) when asked
+    for off the Tk thread, so that it takes no turns at the GIL from the
+    window.  On the Tk thread, which must not queue behind a scan already
+    running there, and whenever the helper cannot answer, it runs here."""
+    if threading.current_thread() is not threading.main_thread():
+        try:
+            return scan_process.call(name, *args, **kwargs)
+        except scan_process.Unavailable:
+            pass
+    return here(*args, **kwargs)
+
+
+def detect_brief_links(text: str, *, italic=None) -> list:
+    """:func:`citations.detect_links` — read in the helper process when
+    asked for off the Tk thread (see _scan_off_thread)."""
+    return _scan_off_thread("detect_links", _detect_links_here, text,
+                            italic=italic)
+
+
+def _build_short_cite_index(text: str) -> dict:
+    """:func:`citations.build_short_cite_index`, likewise."""
+    return _scan_off_thread("build_short_cite_index",
+                            _build_short_cite_index_here, text)
+
+
 def _detected_text_links(text: str, italic: list,
                          cached_only: bool = False) -> "Optional[list]":
     """:func:`detect_brief_links` over a whole opinion's text, remembered for
@@ -4246,14 +4430,46 @@ def _detected_text_links(text: str, italic: list,
     return list(detected)
 
 
+#: Google Scholar opinion pages parsed already, by their HTML: (blocks,
+#: parts).  A page is parsed on a worker when it is fetched, to read its
+#: citations ahead (_scan_opinion_links_ahead); the reader that later shows
+#: it — the T view of its scan — takes that parse rather than parsing the
+#: page again on the Tk thread, a good part of the time T took to answer.
+_PARSED_OPINIONS: "dict[tuple, tuple]" = {}
+_PARSED_OPINIONS_LOCK = threading.Lock()
+_PARSED_OPINIONS_KEPT = 4
+
+
+def _parsed_opinion(html: str) -> "tuple[list, list]":
+    """(blocks, parts) of a Google Scholar opinion page, parsed once and kept
+    for the next asking.  Shared: a caller that changes a part makes its own
+    copy of it."""
+    key = (len(html), hash(html))
+    with _PARSED_OPINIONS_LOCK:
+        kept = _PARSED_OPINIONS.get(key)
+    if kept is not None:
+        return kept
+    blocks = parse_opinion_blocks(html)
+    parsed = (blocks, segment_blocks(blocks))
+    with _PARSED_OPINIONS_LOCK:
+        _PARSED_OPINIONS[key] = parsed
+        while len(_PARSED_OPINIONS) > _PARSED_OPINIONS_KEPT:
+            _PARSED_OPINIONS.pop(next(iter(_PARSED_OPINIONS)))
+    return parsed
+
+
 def _scan_opinion_links_ahead(html: str) -> None:
-    """Scan a Google Scholar opinion's citations now, on a worker, so the
-    window that shows it — the T view of its scan, opened later — finds the
-    scan done (see _detected_text_links).  After any window going up: the
-    T view is not wanted yet, and the scan's window is (see _ui_first)."""
+    """Parse a Google Scholar opinion and scan its citations now, on a
+    worker, so the window that shows it — the T view of its scan, opened
+    later — finds both done (see _parsed_opinion, _detected_text_links).
+    After any window going up: the T view is not wanted yet, and the scan's
+    window is (see _ui_first)."""
     _yield_to_ui()
     try:
-        _text_opinion_link_ranges(segment_blocks(parse_opinion_blocks(html)))
+        blocks, parts = _parsed_opinion(html)
+        _text_opinion_link_ranges(parts)
+        # The text the reader is drawn from, as it works it out.
+        _text_indexes(blocks_to_text(blocks) or _strip_html(html))
     except Exception as exc:
         print(f"[links] scanning the opinion ahead failed: {exc}")
 
@@ -4477,6 +4693,83 @@ def _cases_beginning_at(client, cite: str) -> list[dict]:
     return cases
 
 
+#: How far into a case a page cited as though the case began there may lie.
+_PIN_AS_CITE_SPAN = 250
+
+
+def _cl_case_containing_page(client, cite: str,
+                             name: str) -> Optional[dict]:
+    """The case *name* names, found in *cite*'s volume beginning a little
+    before the page cited — the cluster as a search-result item, or None.
+
+    Old opinions often cite the page they draw on as though the case began
+    there: McCready v. Virginia's "Corfield v. Coryell, 4 Wash. C.C. 380"
+    is the case at 4 Wash. C.C. 371, Ex parte Lange's "United States v.
+    Haskell, 4 Washington, 410" the case at 402.  CourtListener's citation
+    lookup finds a case from a page inside it in some reporters but not in
+    others (the circuit reporters it knows through the Federal Cases).  Only
+    the name can say which case it is, so without one nothing is found; the
+    hit must answer to it (see :func:`_is_the_named_case`) and begin within
+    :data:`_PIN_AS_CITE_SPAN` pages before the page cited — or, failing
+    that, be the volume's only case of the name, at whatever page: the
+    volume as CourtListener has it may be another printing, paginated
+    otherwise (see _case_law_named_url).  The party names are asked for with
+    OR, as an old opinion may spell them its own way ("Warder vs. Arrell" is
+    Warder v. Arell, 2 Va. 282)."""
+    m = _CITE_PARSE_RE.match((cite or "").split("@", 1)[0].strip())
+    words = _name_tokens(name)
+    if client is None or not m or not words:
+        return None
+    vol, rep, page = m.group(1), m.group(2).strip(), int(m.group(3))
+    key = _canonical_reporter_key(rep)
+    best: Optional[tuple[int, dict]] = None
+    # Named cases in the volume at no page near the one cited, by cluster:
+    # the one case of the name in a volume another printing paginates
+    # differently (see _case_law_named_url).
+    elsewhere: dict = {}
+    for form in _reporter_variants(rep):
+        query = (f'citation:("{vol} {form}") AND '
+                 f'caseName:({" OR ".join(dict.fromkeys(words))})')
+        try:
+            results = client.search(query, type="o",
+                                    page_size=20).get("results") or []
+        except Exception as exc:
+            print(f"[cl-cite] searching {query!r} failed: {exc}")
+            continue
+        for item in results if isinstance(results, list) else ():
+            if not isinstance(item, dict):
+                continue
+            if not _is_the_named_case(
+                    name, re.sub(r"<[^>]+>", "",
+                                 str(item.get("caseName") or ""))):
+                continue
+            for raw in item.get("citation") or ():
+                cm = _CITE_PARSE_RE.match(re.sub(r"<[^>]+>", "", str(raw)))
+                if (not cm or cm.group(1) != vol
+                        or _canonical_reporter_key(cm.group(2)) != key):
+                    continue
+                first = int(cm.group(3))
+                if (first <= page <= first + _PIN_AS_CITE_SPAN
+                        and (best is None or first > best[0])):
+                    best = (first, item)
+                elif not first <= page <= first + _PIN_AS_CITE_SPAN:
+                    ident = item.get("cluster_id") or item.get("id") or first
+                    elsewhere.setdefault(ident, (first, item))
+        if best is not None or elsewhere:
+            break
+    if best is None and len(elsewhere) == 1:
+        first, item = next(iter(elsewhere.values()))
+        print(f"[cl-cite] {cite!r}: {item.get('caseName')!r} is at page "
+              f"{first} of the volume as CourtListener has it — another "
+              f"printing's pages")
+        return item
+    if best is None:
+        return None
+    print(f"[cl-cite] {cite!r} lies inside {best[1].get('caseName')!r}, "
+          f"which begins at page {best[0]}")
+    return best[1]
+
+
 def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     """Resolve a reporter citation to the CourtListener cluster that actually
     bears it, as a search-result-shaped item (or ``None``).
@@ -4499,11 +4792,17 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
     parallel wins, then a match on the case ``name`` the caller knows, then
     the Supreme Court for a nominative SCOTUS cite.  Where that still leaves
     different cases level — the page of orders "498 U.S. 807" is borne by all
-    eleven cases whose certiorari it grants — nothing is returned."""
+    eleven cases whose certiorari it grants — nothing is returned.
+
+    Where nothing at all is filed at the citation, or only a case of another
+    name, the page may lie inside the case the name names (see
+    :func:`_cl_case_containing_page`)."""
     cite = (cite or "").split("@", 1)[0].strip()
     if not cite:
         return None
     lookup_cites = _citation_search_variants(cite)
+    # Set when a case of another name is all that is filed at the citation.
+    mismatched: list = []
     want_keys = {
         re.sub(r"\s+", "", variant).lower()
         for variant in lookup_cites
@@ -4567,6 +4866,7 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                         _match_tier(first, name)) < 0):
             print(f"[cl-cite] {cite!r}: CourtListener's {first!r} is not "
                   f"{name!r}")
+            mismatched.append(first)
             return None
         for other in tied[1:]:
             other_name = plain(other)
@@ -4596,6 +4896,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                     lambda cl: str(
                         cl.get("court_id") or cl.get("court") or ""),
                 )
+                if best is None and mismatched:
+                    break           # another case's page: see below
                 if best is None:
                     return None     # ambiguous: a guess is worse than none
                 item = _item_from_cluster(best)
@@ -4606,7 +4908,7 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
 
     # 2) Fall back to full-text search, trusting only a real citation match
     # (and preferring the same disambiguation signals when several match).
-    for lookup_cite in lookup_cites:
+    for lookup_cite in (() if mismatched else lookup_cites):
         matched = []
         seen_items: set[str] = set()
         for q in (f"citation:({lookup_cite})", f'"{lookup_cite}"'):
@@ -4622,13 +4924,17 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                     seen_items.add(key)
                     matched.append(item)
         if matched:
-            return pick(
+            best = pick(
                 matched,
                 lambda it: it.get("caseName") or it.get("case_name"),
                 lambda it: norm_cites(it.get("citation")),
                 lambda it: str(it.get("court_id") or ""),
             )
-    return None
+            if best is not None or not mismatched:
+                return best
+            break
+    # 3) The page cited may lie inside the case rather than begin it.
+    return _cl_case_containing_page(client, cite, name) if name else None
 
 
 def _us_reports_cite_via_courtlistener(
@@ -5050,13 +5356,21 @@ def _late_scotus_us_reports_cite(
     )
 
 
-def _cl_item_for_name(client, name: str) -> Optional[dict]:
+def _cl_item_for_name(client, name: str,
+                      cited_by_year: str = "") -> Optional[dict]:
     """Resolve a case *name* to the best-matching CourtListener cluster as a
     search-result-shaped item (or None).  The fallback for locating a cited case
     when its citation can't be parsed or resolved — e.g. a Scholar hyperlink
     whose text is just the case name, followed when Google Scholar is blocked.
-    Uses the same name ranker as the quick search, so only a strong match
-    (two-party, or a distinctive party) is returned."""
+
+    Nothing but the name says which case it is, so the hit must be the case
+    the name names (see :func:`_is_the_named_case`): both parties of an "A v.
+    B" name.  The quick search's ranker also offers a hit sharing one party,
+    and taking it opened "Durant, Nichols, Houston, Hodgson & Cortese-Costa,
+    P.C. v. Dupont" (2d Cir. 2009) for Isaacson v. Durant, the English case
+    Wong Kim Ark cites.  Nor can a case be cited by one decided before it:
+    *cited_by_year*, the year of the opinion the link is in, passes over any
+    hit decided later."""
     name = re.sub(r"<[^>]+>", "", name or "").strip()
     if not name:
         return None
@@ -5065,7 +5379,15 @@ def _cl_item_for_name(client, name: str) -> Optional[dict]:
     except Exception as exc:
         print(f"[cl-name] lookup failed for {name!r}: {exc}")
         return None
-    return ranked[0][1] if ranked else None
+    limit = int(cited_by_year) if str(cited_by_year).isdigit() else None
+    for _score, item in ranked:
+        if not _is_the_named_case(name, str(item.get("caseName") or "")):
+            continue
+        filed = str(item.get("dateFiled") or "")[:4]
+        if limit is not None and filed.isdigit() and int(filed) > limit:
+            continue
+        return item
+    return None
 
 
 # ======================================================================
@@ -7585,6 +7907,14 @@ def _warm_spotlight_indexes() -> None:
         eng_rep.iter_nominate_cites("1 Ex. 1")
     except Exception as exc:
         print(f"[spotlight] warming the English Reports index failed: {exc}")
+    # And the Census names every opinion's caption is read against (see
+    # name_persons_by_surname), which the first case opened would otherwise
+    # load on the Tk thread.
+    try:
+        from bluebook_names import _census_names
+        _census_names()
+    except Exception as exc:
+        print(f"[case text] warming the Census names failed: {exc}")
 
 
 #: How long Google Scholar's text is waited for before a lesser text —
@@ -7616,7 +7946,9 @@ def _scan_urls_for_cite(cite: str, name: str = "",
                if m and int(m.group(1)) <= _LOC_PREFERRED_MAX else None)
         return [loc] if loc else list(_us_reports_govinfo_url(us) or ())
     url = _static_case_law_url(cite)
-    return [_case_law_listed_url(cite, url)] if url else []
+    if url:
+        url = _case_law_named_url(cite, _case_law_listed_url(cite, url), name)
+    return [url] if url else []
 
 
 def _download_scan_ahead(cite: str, name: str = "", year: str = "",
@@ -12059,6 +12391,10 @@ class CourtListenerGUI:
         scholar_page: list = []
         phrase_added = [0]
         phrase_done = [False]
+        # The words Google Scholar searched instead of the query, when the
+        # query found nothing there and it said "Did you mean …" (see
+        # GoogleScholarFetcher.search_cases).
+        scholar_suggested = [""]
 
         # Supreme Court rows from the saved-opinion database and CourtListener
         # wait for Google Scholar.  A Supreme Court case comes back as a family
@@ -12138,6 +12474,10 @@ class CourtListenerGUI:
                         status_lbl.configure(
                             text=f"No case of that name — {n} results "
                                  "for this phrase")
+                    elif scholar_suggested[0]:
+                        status_lbl.configure(
+                            text=f"{n} results — Google Scholar searched "
+                                 f"“{scholar_suggested[0]}” instead")
                     else:
                         status_lbl.configure(
                             text=f"{n} results" if n else "No results found"
@@ -12207,6 +12547,16 @@ class CourtListenerGUI:
                 if candidate_results:
                     results = candidate_results
                     break
+            # Found only by the words Scholar suggested: its rows are ranked
+            # against those words, not the misspelled ones typed.
+            last_suggestion = getattr(fetcher, "last_suggestion", None)
+            try:
+                suggested = (str(last_suggestion() or "")
+                             if callable(last_suggestion) else "")
+            except Exception:
+                suggested = ""
+            if results and suggested:
+                scholar_suggested[0] = suggested
             scholar_returned[0] = True
             # Keep the page as Scholar ranked it, before any of our filtering:
             # if the filters leave the dropdown empty, this is what the query
@@ -12239,7 +12589,7 @@ class CourtListenerGUI:
                 # couple of spares are kept past those so a duplicate of a
                 # case another source already listed can be replaced.
                 results = _rank_scholar_spotlight_results(
-                    query,
+                    scholar_suggested[0] or query,
                     results,
                     _BUCKET_CAPS["scholar"] + 2,
                 )
@@ -13083,12 +13433,21 @@ class CourtListenerGUI:
                 if item:
                     break
         cites = [str(c) for c in (item.get("citation") or [])]
+
+        def volume_of(c: str) -> tuple:
+            m = _CITE_PARSE_RE.match(c)
+            return ((m.group(1), _canonical_reporter_key(m.group(2)))
+                    if m else ())
+
+        # A page inside a case the record already cites in that volume
+        # (see _cl_case_containing_page) is no citation of its own.
+        held = {volume_of(c) for c in cites} - {()}
         # The cite as printed, and — for an old nominative cite — its modern
         # U.S. or Mass. Reports form, which is what the scans are filed under:
         # where the reporter's name could mean two states', the one whose
         # case the name names first (see _official_series_for).
         for extra in (cite, *official):
-            if extra and extra not in cites:
+            if extra and extra not in cites and volume_of(extra) not in held:
                 cites.append(extra)
         item["citation"] = cites
         if name and not (item.get("caseName") or item.get("case_name")):
@@ -17880,11 +18239,6 @@ def _extract_opinion_id(url: str) -> Optional[int]:
 # without pulling in tkinter; they're imported above under their old private
 # names (``_TEXT_CITE_RE`` etc.).
 
-# A citation line in the Scholar header: each parallel cite sits on its own
-# centered line, e.g. "306 Md. 556 (1986)" / "510 A.2d 562" / "87 F.4th 563 (2023)"
-_HEADER_CITE_RE = re.compile(
-    r"^\s*(\d{1,4})\s+([A-Z][A-Za-z0-9.'’ ]{0,24}?)\s+(\d{1,5})\s*(?:\(|$)"
-)
 # The CourtListener metadata header can put all parallels on one centered
 # comma-separated line.  Scan each field rather than recognizing only its
 # first citation.
@@ -17984,276 +18338,6 @@ def _titlecase_caps(s: str) -> str:
     return normal_case_caption(s)
 
 
-# Entity abbreviations that legitimately end a party name with a period, so the
-# period must be kept ("Acme Co.", "Foo Corp.", "Bar Inc.").  Initialisms with
-# internal periods (L.L.C., N.A., S.A.) are recognized separately.
-_PARTY_ABBR_SUFFIXES = {
-    "co", "cos", "corp", "corps", "inc", "ltd", "llc", "llp", "lp", "lllp",
-    "plc", "pc", "pa", "pllc", "na", "sa", "ag", "nv", "bros",
-}
-# One letter and a period: an initial, whether it stands in a person's name
-# or is a letter of a spaced initialism ("A. A. R. P.").
-_SINGLE_INITIAL_RE = re.compile(r"[A-Za-z]\.")
-# The same dotted abbreviation repeated back to back, as consolidated
-# captions leave it ("United States U.S. U.S.").
-_REPEATED_ABBREV_RE = re.compile(r"\b((?:[A-Za-z]+\.)+)(\s+\1)+")
-
-
-def _party_ends_in_abbrev(s: str) -> bool:
-    """True if the party name ends in an abbreviation whose trailing period is
-    part of the name (an entity suffix like 'Co.' or an initialism like
-    'L.L.C.'), as opposed to a stray sentence period."""
-    parts = s.split()
-    if not parts:
-        return False
-    last = parts[-1]
-    if "." in last[:-1]:  # an internal period → initialism (L.L.C., N.A.)
-        return True
-    # A lone initial closing the name — the last letter of a spaced
-    # initialism ("A. A. R. P."), or a person's middle initial ("John Q.").
-    # A single letter is never a word a sentence ended on.
-    if _SINGLE_INITIAL_RE.fullmatch(last):
-        return True
-    return last.rstrip(".").replace("’", "'").lower() in _PARTY_ABBR_SUFFIXES
-
-
-# A comma segment of a caption that is a procedural designation, personal
-# suffix, or descriptive office — not part of the party's name — so
-# _caption_party can strip such segments from the right.  Role/office
-# segments swallow their qualifiers ("Warden of the Penitentiary", "U.S.
-# Senator from the State of New York", "Sec'y of the U.S. Senate").
-_ROLE_WORD = (
-    r"(?:cross[- ])?(?:plaintiffs?|defendants?|appellants?|appellees?|"
-    r"petitioners?|respondents?|intervenors?|movants?|claimants?|relators?|"
-    r"libell?ants?|libell?ees?|garnishees?|contestants?)"
-)
-_US_STATE_NAMES = (
-    r"alabama|alaska|arizona|arkansas|california|colorado|connecticut|"
-    r"delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|"
-    r"kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|"
-    r"mississippi|missouri|montana|nebraska|nevada|new\s+hampshire|"
-    r"new\s+jersey|new\s+mexico|new\s+york|north\s+carolina|north\s+dakota|"
-    r"ohio|oklahoma|oregon|pennsylvania|rhode\s+island|south\s+carolina|"
-    r"south\s+dakota|tennessee|texas|utah|vermont|virginia|washington|"
-    r"west\s+virginia|wisconsin|wyoming|district\s+of\s+columbia"
-)
-_PARTY_DESIGNATION_RE = re.compile(
-    r"(?:"
-    r"et\s+als?\.?|etc\.?|jr\.?|sr\.?|ii|iii|iv|deceased|minor|an?\s+minor|"
-    r"m\.?d\.?|ph\.?d\.?|esq\.?|afl[-\s]?cio(?:[-\s]?clc)?|"
-    + _ROLE_WORD + r"(?:[-/\s]+" + _ROLE_WORD + r")*(?:\s+in\s+error)?|"
-    # a role ending one consolidated caption, with the next spilling into the
-    # same segment ("Appellant. United States of America")
-    + _ROLE_WORD + r"\.\s+.*|"
-    r"in\s+error|successors?\b.*|"
-    # a bare state name qualifying a governmental party ("Humboldt County,
-    # California"; "City of Milwaukee, Wisconsin")
-    r"(?:" + _US_STATE_NAMES + r")|"
-    # offices / roles, with any qualifiers around them ("Warden", "Michigan
-    # Secretary of State", "District Attorney of Dallas County",
-    # "Corrections Director", "Assessor of Contra Costa County")
-    r"[\w.'’ -]{0,40}\b"
-    r"(?:secretary|sec'y|superintendent|directors?|commissioners?|"
-    r"administrat(?:ors?|rix)|attorneys?|att'y|assessors?|treasurer|"
-    r"wardens?|sheriffs?|governor|senators?|representatives?|"
-    r"execut(?:ors?|rix)|trustees?|receivers?|guardians?|conservators?|"
-    r"comptroller|clerk|marshal|postmaster|solicitor)\b[\w.'’ -]{0,60}|"
-    r"president\s+of\b.*|grand\s+jury\b.*|fictitious\w*\b.*|"
-    r"national\s+association|"
-    # descriptive phrases
-    r"(?:individually|personally)\b.*|(?:as|by|in\s+(?:his|her|its|their))\b.*|"
-    r"on\s+behalf\b.*|for\s+the\s+use\b.*|d/?b/?a\b.*|"
-    r"(?:[A-Za-z]\.\s*){2,}(?:[;,]\s*(?:[A-Za-z]\.\s*){2,})+|"  # minors' initials
-    r"an?\s+(?:\w+\s+)*(?:corporation|company|partnership|association|"
-    r"municipality|municipal\s+corporation|body\s+politic)\b.*"
-    r")\s*\.?\s*$",
-    re.IGNORECASE,
-)
-
-# A comma segment that is a business-entity suffix continuing the previous
-# segment ("Socony-Vacuum Oil Co., Inc." — one party, two segments).
-_ENTITY_SUFFIX_RE = re.compile(
-    r"(?:inc|incorporated|l\.?l\.?c|l\.?l\.?p|l\.?p|ltd|ltda|p\.?l\.?c|"
-    r"p\.?c|s\.?a|s\.?p\.?a|a\.?g|n\.?v|s\.?l|gmbh|co|corp|n\.?a)\.?",
-    re.IGNORECASE,
-)
-
-# A segment *ending* in an organization word plausibly continues the first
-# segment's name ("CHICAGO, BURLINGTON AND QUINCY RAILROAD COMPANY";
-# "LOCAL 174, TEAMSTERS, ..., WAREHOUSEMEN & HELPERS OF AMERICA").
-_ORG_TAIL_RE = re.compile(
-    r"\b(?:company|co\.?|corp\.?|corporation|incorporated|railroad|railway|"
-    r"r\.?r\.?|union|association|ass'n|brotherhood|workers|helpers|"
-    r"america|bank|trust|society|club|university|college|institute|"
-    r"partners(?:hip)?|group|bros\.?|brothers|sons|"
-    r"inc\.?|llc|llp|ltd\.?|plc)\s*\.?\s*$",
-    re.IGNORECASE,
-)
-
-
-def _caption_party(s: str) -> str:
-    """One side of a Scholar caption → its Bluebook party name.  Drops the
-    procedural designation and 'et al.'; when Scholar mixes cases, the
-    all-caps run is the operative name ('Brent BREWBAKER' → 'Brewbaker',
-    'UNITED STATES of America' → 'United States').
-
-    Comma segments after the first are handled structurally rather than by
-    cutting at the first comma (which would amputate a party whose own name
-    contains one — "CHICAGO, BURLINGTON AND QUINCY RAILROAD COMPANY" is one
-    party, not "CHICAGO"):
-
-      1. cut at the first sign of a co-party / consolidated caption (a
-         repeated party, an "and Ace Garage" co-defendant, a new "v."),
-      2. strip procedural designations, offices and suffixes from the right,
-      3. keep a business-entity suffix ("…Oil Co., Inc."), and
-      4. keep the remaining segments only when they read as one entity name
-         (few, short, ending in an organization word — "…RAILROAD COMPANY",
-         "…HELPERS OF AMERICA"); otherwise they are co-parties: dropped."""
-
-    def clean_seg(p: str) -> str:
-        p = re.sub(r"\s*\[[^\]]{1,4}\]\s*$", "", p.strip())  # footnote marker
-        p = re.sub(r"[:]+$", "", p).strip()
-        return re.sub(r"\s+et\s+als?\.?$", "", p, flags=re.IGNORECASE).strip()
-
-    # A relator clause is the party's, not a co-party to cut away (rule
-    # 10.2.1(b)): "THE UNITED STATES, ON THE RELATION OF WILLIAM B. STOKES
-    # ET AL." is United States ex rel. Stokes — Kendall v. United States ex
-    # rel. Stokes, 37 U.S. (12 Pet.) 524, was cited without its relator.
-    # One past a semicolon is a co-party's, though: "WASHINGTON State; The
-    # People of the State of California, ex rel. Kamala D. Harris, …" is
-    # Washington alone (rule 10.2.1(a)).
-    relation = split_relator(s.split(";", 1)[0])
-    if relation is not None:
-        party, relator = (_caption_party(p) for p in relation)
-        if party and relator:
-            return f"{party} ex rel. {relator}"
-    # So is a demise, the old ejectment plaintiff's: "JOHN DEN, ex dem. JAMES
-    # B. MURRAY AND JOHN C. KAYSER" is Den suing on Murray's demise — cited
-    # "Murray's Lessee v. Hoboken Land & Improvement Co." — not John Den and
-    # a co-party; abbreviate_case_name reads it whole.
-    ejectment = ejectment_party_caption(s)
-    if ejectment:
-        # (A "V." in it is a lessor's middle initial — "ON THE DEMISE OF
-        # HARMAN V. HART" — which title-casing would take for "v.".)
-        out = _titlecase_caps(ejectment)
-        if re.search(r"(?<=\s)V\.(?=\s)", ejectment):
-            out = re.sub(r"(?<=\s)v\.(?=\s)", "V.", out)
-        return out
-
-    raw = [clean_seg(p) for p in re.split(r"[,;]", s)]
-    segs = [p for p in raw if p]
-    description = ""
-    if segs:
-        # A charter-era bank's formal corporate style contains structural
-        # commas that do not separate parties: "The President, Directors,
-        # and Company of the Bank of ...".  Reassemble that fixed title
-        # before the ordinary co-party logic examines comma segments.  The
-        # opinion-evidence refinement later decides whether the embedded
-        # "Bank of ..." may stand alone as the working party name.
-        if (len(segs) >= 3
-                and re.fullmatch(r"(?:the\s+)?(?:president|governor)",
-                                 segs[0], re.IGNORECASE)
-                and re.fullmatch(r"(?:directors?|dirs?\.?|trustees?)",
-                                 segs[1], re.IGNORECASE)
-                and re.match(
-                    r"(?:and|&)\s+(?:company|co\.?|corporation)\s+of\s+"
-                    r"(?:the\s+)?bank\s+of\b",
-                    segs[2], re.IGNORECASE)):
-            segs = [", ".join(segs[:3])] + segs[3:]
-        # 1. Consolidation cut: a later segment that re-names the first party
-        # (same final token), contains its own " v. ", or introduces another
-        # party ("and Ace Garage" — unless it ends the entity's own name,
-        # "…, and Paperhangers of America") starts a different case/party.
-        first_last_tok = segs[0].split()[-1].rstrip(".,").lower() if segs[0].split() else ""
-        cut = len(segs)
-        for i in range(1, len(segs)):
-            seg = segs[i]
-            toks = [t.rstrip(".,").lower() for t in seg.split()]
-            # An "and X" segment continues the entity's own name only when it
-            # ends in an organization word and is not itself a complete
-            # company ("…, and Paperhangers of America" continues; "…, and
-            # Midway Mfg. Co." is a co-plaintiff).
-            and_co_party = (
-                re.match(r"and\b", seg, re.IGNORECASE)
-                and (not _ORG_TAIL_RE.search(seg)
-                     or any(_ENTITY_SUFFIX_RE.fullmatch(t.strip(".,"))
-                            or t.strip(".,").lower() in ("mfg", "mfrs")
-                            for t in seg.split()))
-            )
-            if (re.search(r"\s[vV]s?\.\s", f" {seg} ")
-                    or re.match(r"(?:et\s+als?\.?|successors?)\b", seg,
-                                re.IGNORECASE)
-                    or (first_last_tok and first_last_tok in toks)
-                    or and_co_party):
-                cut = i
-                break
-        segs = segs[:cut]
-        # What follows the first party's comma, which an office there shows
-        # to be a person (below) before step 2 strips the office away.
-        description = ", ".join(segs[1:])
-        # 2. Designations / offices / suffixes strip from the right.
-        while len(segs) > 1 and _PARTY_DESIGNATION_RE.fullmatch(segs[-1]):
-            segs.pop()
-        # 3. A business-entity suffix continues the first segment's name.
-        kept = [segs[0]]
-        rest = segs[1:]
-        if rest and _ENTITY_SUFFIX_RE.fullmatch(rest[0]):
-            kept.append(rest.pop(0))
-        # 4. The remaining segments stay only when they read as one entity
-        # name; anything else is a co-party list, dropped as before.  Bare
-        # leftover suffixes ("…, LLC, Inc." from a consolidated caption)
-        # never extend the name a second time.
-        joined = ", ".join(kept + rest)
-        if rest and (
-            all(_ENTITY_SUFFIX_RE.fullmatch(p) for p in rest)
-            or not (len(rest) <= 3
-                    and _ORG_TAIL_RE.search(rest[-1])
-                    and len(joined) <= 72)
-        ):
-            rest = []
-        s = ", ".join(kept + rest)
-        if len(kept + rest) > 1:
-            description = ""    # the segments were more of an entity's name
-    else:
-        s = ""
-    s = s.strip().lstrip(".;").rstrip(";").strip()
-    s = re.sub(r"\s+et\s+als?\.?$", "", s, flags=re.IGNORECASE).strip()
-    # Repeated dotted abbreviations from consolidated captions ("United
-    # States U.S. U.S.") collapse to the first occurrence.  A doubled *single*
-    # initial is not one of those — it is the name: the anonymized applicants
-    # in "A. A. R. P. v. Trump" and "W. M. M. v. Trump" lose their case if
-    # the second letter goes, and so does "J. J. Smith".
-    s = _REPEATED_ABBREV_RE.sub(
-        lambda m: (m.group(0) if _SINGLE_INITIAL_RE.fullmatch(m.group(1))
-                   else m.group(1)),
-        s,
-    )
-    s = re.sub(r"\b([Uu]nited\s+[Ss]tates)(?:\s+U\.?S\.?A?\.?)+", r"\1", s)
-    # Drop a stray trailing period, but keep an entity abbreviation's period
-    # ("Acme Co.", "Foo Corp.", "Bar Inc.").
-    if s.endswith(".") and not _party_ends_in_abbrev(s):
-        s = s[:-1].rstrip()
-    # Scholar signals surnames with all caps ("Corrine Morgan THOMAS"), but
-    # entity initialisms ("McDonald's USA, LLC") must remain intact.
-    s = collapse_personal_all_caps_run(s)
-    out = _titlecase_caps(s).strip(" ,;&")
-    # One side of a caption has no "v." of its own: a "V." in it is a middle
-    # initial, which title-casing takes for the separator — "BEATRICE V.
-    # DITTUS" became "Beatrice v. Dittus", and Dittus v. Cranston, 53 Cal. 2d
-    # 284, was cited "Beatrice v. Dittus v. Alan Cranston".
-    if re.search(r"(?<=\s)V\.(?=\s)", s):
-        out = re.sub(r"(?<=\s)v\.(?=\s)", "V.", out)
-    # A suffix or an office only a person holds, after the party's comma,
-    # makes it a person whose given names drop, though no list knows them
-    # (rules 10.2.1(e), (g)): "MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF
-    # HOMELAND SECURITY, ET AL." is Mullin — Mullin v. Doe (2026) had been
-    # cited "Markwayne Mullin v. Doe" — and so is "MARKWAYNE MULLIN, JR.".
-    if description:
-        out = described_person_surname(
-            out, _titlecase_caps(description)) or out
-    return out
-
-
 _CIRCUIT_ORDINALS = {
     # Spelled-out (opinion headers) and digit ordinals (results bylines).
     "first": "ca1", "second": "ca2", "third": "ca3", "fourth": "ca4",
@@ -18348,6 +18432,12 @@ def _scholar_court_id(blocks) -> str:
                    ).strip().rstrip(".").lower()
         if not t or "court" not in t or "district court" in t or "bankruptcy" in t:
             continue
+        # The caption is no court line, though its parties may name a state
+        # and a "court" — "WP Company LLC, d/b/a The Washington Post" put a
+        # Fourth Circuit case in the Supreme Court of Washington.  A court
+        # line is short and names no adversaries.
+        if len(t) > 160 or re.search(r"\svs?\.\s", t):
+            continue
         if "supreme court" in t and "united states" in t:
             return "scotus"
         for court_name, court_id in _SCHOLAR_FEDERAL_COURTS:
@@ -18402,160 +18492,6 @@ def _scholar_header_court(blocks) -> str:
 # bluebook_names.cut_companion_cases (tkinter-free).  The private alias keeps
 # this module's call sites and tests stable.
 _cut_companion_cases = cut_companion_cases
-
-
-_PROCEDURAL_ALIAS_RE = re.compile(
-    r",?\s+(?:d/b/a|d\.b\.a\.|dba|a/k/a|a\.k\.a\.|f/k/a|f\.k\.a\.|"
-    r"doing\s+business\s+as|also\s+known\s+as|formerly\s+known\s+as)\s+",
-    re.IGNORECASE,
-)
-
-
-def _trim_procedural_caption(text: str) -> str:
-    """Remove structural matter following an ``In re``-style case name.
-
-    Lowercase text alone is not a boundary (``In re Estate of Smith`` and
-    ballot-title matters need it).  Alias introductions and comma-delimited
-    litigation roles are reliable boundaries, however: neither identifies the
-    primary party used in the citation.  Cutting at the marker also handles a
-    run of aliases whose individual corporate suffixes contain commas.
-    """
-    alias = _PROCEDURAL_ALIAS_RE.search(text or "")
-    if alias:
-        text = text[:alias.start()]
-    text = re.sub(
-        r",\s*(?:et\s+al\.?|debtors?|appellants?|appellees?|petitioners?|"
-        r"respondents?|relators?|movants?|claimants?|plaintiffs?|defendants?|"
-        r"creditors?|trustees?)\b.*$",
-        "", text, flags=re.IGNORECASE,
-    )
-    return text.strip().rstrip(",")
-
-
-def _scholar_caption_name(blocks) -> str:
-    """Bluebook case name derived from the Scholar page's party caption."""
-
-    def refine(name: str) -> str:
-        body = _scholar_body_text(blocks)
-        # The prose also settles a person's surname where the given-name
-        # lists can't ("Chad Everet Brackeen" is Brackeen), which every
-        # later abbreviation of this caption — a file name, a window title
-        # — then keeps without needing the text again.
-        return name_persons_by_surname(simplify_historical_entity_caption(
-            refine_caption_case(name, body), body), body)
-
-    for b in blocks[:8]:
-        if b.kind != "center":
-            continue
-        # Keep a trailing period here — it may belong to an entity abbreviation
-        # ending the caption ("… v. Acme Co."); _caption_party drops only a
-        # stray one.
-        # A reporter star-page can occur in the middle of a long, wrapped
-        # caption.  It is pagination metadata, not part of the case name.
-        t = re.sub(
-            r"\s+", " ",
-            "".join(s.text for s in b.spans if not s.pagenum),
-        ).strip()
-        # The reporter's annotation mark a caption can carry — "*Jones v.
-        # The Commonwealth." (72 Va. 582), its note below — is no part of
-        # the name.
-        t = re.sub(r"^[*†‡]+\s*", "", t)
-        # An Alabama-style "(Re <underlying case>)" cross-reference carries
-        # its own " v. " and would masquerade as this case's caption.
-        t = strip_related_case_note(t)
-        if not t or _HEADER_CITE_RE.match(t) or t.startswith(("No.", "Nos.")):
-            continue
-        # A docket, court or date line set ahead of the caption — "[Sac.
-        # No. 7096.", "CASE No. 1078.", "In Bank.", "Dec. 18, 1959.]" — is
-        # not the case's name.  (A caption's own footnote mark closes a
-        # bracket it opened: "IN RE NEAGLE, Petitioner.[1]".)
-        if (t.startswith("[") or (t.endswith("]") and "[" not in t)
-                or re.match(r"(?:case\s+|sac\.\s+|crim\.\s+|civ\.\s+|"
-                            r"l\.\s*a\.\s+|s\.\s*f\.\s+)?nos?\.\s*\d",
-                            t, re.IGNORECASE)
-                or re.fullmatch(r"(?:in\s+bank|en\s+banc|(?:department|"
-                                r"division)\s+\w+)\.?", t, re.IGNORECASE)):
-            continue
-        # An in-re style caption owns no separator, so any "v." inside it
-        # belongs to a companion case ("In re Nexium Antitrust Litigation.
-        # AstraZeneca AB v. United Food…") — classify it before splitting.
-        # Only a role tail is cut at a comma; a comma can continue the
-        # matter's own title ("In re Title, Ballot Title & Submission
-        # Clause for 2015-2016 #156").  Companions are cut BEFORE the role
-        # trim: trimming first would delete the companion's ", et al.,
-        # Defendants-Appellants, v. …" tail — the very " v. " that proves
-        # a companion case follows.
-        if re.match(r"(?:IN\s+RE|EX\s+PARTE|(?:IN\s+THE\s+)?MATTER\s+OF)\b", t, re.IGNORECASE):
-            # Scholar sets the matter's name in capitals, all else in
-            # ordinary case: the capitals are the name.
-            named = in_re_caps_name(t)
-            if named:
-                return refine(_titlecase_caps(named))
-            t2 = _trim_procedural_caption(_cut_companion_cases(t))
-            return refine(_titlecase_caps(t2.strip()))
-        # Google Scholar renders the party separator in lowercase ("… v. …")
-        # even for ALL-CAPS captions ("MERCY HOSPITAL, INC. v. JACKSON"), so
-        # a lowercase "v."/"vs." — or the earliest reports' spelled-out
-        # "versus"/"against" — is the reliable separator and never collides
-        # with an uppercase middle initial like the "V." in "Francis V.
-        # Lorenzo" or a party's own "AGAINST".  Only fall back to a
-        # case-insensitive split (for a caption that happens to capitalize
-        # the separator) when no lowercase one is found.
-        sides = re.split(r"\s+(?:vs?\.|versus|against)\s+", t, maxsplit=1)
-        if len(sides) != 2:
-            sides = re.split(r"\s+[vV]s?\.\s+", t, maxsplit=1)
-        if len(sides) != 2:
-            sides = re.split(
-                r"\s+(?:VERSUS|Versus|AGAINST|Against)\s+", t, maxsplit=1)
-        if len(sides) == 2:
-            sides[1] = _cut_companion_cases(sides[1])
-            left, right = _caption_party(sides[0]), _caption_party(sides[1])
-            if left and right:
-                return refine(f"{left} v. {right}")
-        # A single-party caption ("HAYBURN'S CASE.", "THE AMISTAD.") has no
-        # separator to split on; without this branch the cite line would
-        # become the case name downstream.  Court, date, and docket lines
-        # never qualify (cites and "No." lines were filtered above; the
-        # digit guard covers public-domain cites — "2006-Ohio-3799" — that
-        # the volume-reporter-page pattern does not).
-        if (len(t) <= 80
-                and sum(c.isalpha() for c in t) >= 4
-                and not t[0].isdigit()
-                and "court" not in t.lower()
-                and not re.match(
-                    r"(?:Argued|Reargued|Decided|Submitted|Filed|Released|"
-                    r"January|February|March|April|May|June|July|August|"
-                    r"September|October|November|December)\b",
-                    t, re.IGNORECASE)
-                # Procedural notes ride the header as their own centered
-                # lines ("As Modified on Denial of Petition for Rehearing
-                # December 1, 1964.") and are never the caption.
-                and not re.search(
-                    r"\b(?:rehearing|certiorari|en banc|as amended|"
-                    r"as modified|as corrected|petition for)\b",
-                    t, re.IGNORECASE)):
-            return refine(
-                _titlecase_caps(_cut_companion_cases(t).split(",")[0].strip()))
-    return ""
-
-
-def _scholar_body_text(blocks) -> str:
-    """The opinion's prose paragraphs, joined — the mixed-case evidence
-    :func:`refine_caption_case` reads party-name capitalization from.
-    Capped: the parties are named within the first pages."""
-    out: list = []
-    total = 0
-    for b in blocks:
-        if b.kind in ("center", "heading"):
-            continue  # caption/heading lines: their casing is stylized
-        t = re.sub(r"\s+", " ", b.text()).strip()
-        if not t:
-            continue
-        out.append(t)
-        total += len(t)
-        if total > 40000:
-            break
-    return "\n".join(out)
 
 
 def _scholar_source_segments(source: str) -> list[str]:
@@ -20531,6 +20467,32 @@ def _bind_reader_page_keys(win: tk.Misc, turn_cb) -> None:
     win.bind("<KeyPress-Right>", lambda event: handler(event, 1), add="+")
 
 
+def _forward_wheel(widget: tk.Misc, target: tk.Misc) -> None:
+    """Have the mouse wheel over *widget* — a margin beside *target* —
+    scroll *target*, by exactly what its own bindings scroll it: the event is
+    generated on it.  <MouseWheel> on Windows and macOS, buttons 4 and 5 on
+    X11."""
+    def wheel(event):
+        try:
+            target.event_generate("<MouseWheel>", delta=event.delta)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def button(number: int):
+        def press(_event):
+            try:
+                target.event_generate(f"<Button-{number}>")
+            except tk.TclError:
+                pass
+            return "break"
+        return press
+
+    widget.bind("<MouseWheel>", wheel, add="+")
+    widget.bind("<Button-4>", button(4), add="+")
+    widget.bind("<Button-5>", button(5), add="+")
+
+
 def _bind_text_scroll_keys(win: tk.Misc, txt: tk.Text, scroll_cb=None,
                            window_keys: bool = True) -> None:
     """Give a reader Text widget and its surrounding window Up/Down scrolling.
@@ -20813,6 +20775,21 @@ def _ui_first(seconds: float) -> None:
     called as a window starts to be built, and again — shorter, which opens
     the gate sooner — once it is up, to cover its first pages' drawing."""
     _UI_FIRST["until"] = time.monotonic() + seconds
+
+
+#: How long after the reader last moves an opinion the background readers
+#: stay held back (see _ui_busy).
+_SCROLL_HOLD_S = 0.35
+
+
+def _ui_busy(seconds: float = _SCROLL_HOLD_S) -> None:
+    """Hold background PDF reading back for *seconds* more while the reader
+    scrolls (Tk thread).  A scroll makes dozens of Tk calls, and each waits
+    to win the GIL back from a worker reading or aligning a scan, so an
+    opinion opened moments before scrolled in jerks until its scan had been
+    read.  Unlike _ui_first this only ever extends the hold: a scroll must
+    not open a gate a window going up has closed."""
+    _UI_FIRST["until"] = max(_UI_FIRST["until"], time.monotonic() + seconds)
 
 
 def _yield_to_ui() -> None:
@@ -27490,6 +27467,49 @@ def _draw_header_citation(img, box: tuple, text: str, font) -> None:
               anchor="mm")
 
 
+class _ReaderText(tk.Text):
+    """The opinion's Text, which can be asked where a run of indices sit on
+    screen in one call.
+
+    The page gutter asks it of every star page on each scroll.  One
+    ``dlineinfo`` an index was a trip into Tcl each — sixty-odd a scroll for
+    a long opinion — and every trip hands the GIL back and waits to have it
+    again.  While a worker is reading the opinion's citations that wait is
+    the worker's whole switch interval, so a scroll stalled for a third of
+    a second or more.  Asked of Tcl all at once, it is one wait at most."""
+
+    _DLINEINFOS = "::getcases::dlineinfos"
+
+    def __init__(self, master=None, **kw) -> None:
+        super().__init__(master, **kw)
+        # Defined afresh for each widget: it is cheap, and a proc kept per
+        # interpreter would need keeping track of.
+        self.tk.eval(
+            "namespace eval ::getcases {}\n"
+            f"proc {self._DLINEINFOS} {{w indices}} {{\n"
+            "    set out {}\n"
+            "    foreach i $indices {\n"
+            "        if {[catch {$w dlineinfo $i} info]} {set info {}}\n"
+            "        lappend out $info\n"
+            "    }\n"
+            "    return $out\n"
+            "}")
+
+    def dlineinfos(self, indices) -> list:
+        """``dlineinfo`` of each of *indices*: its (x, y, width, height,
+        baseline), or None where it is off screen."""
+        indices = tuple(indices)
+        if not indices:
+            return []
+        raw = self.tk.call(self._DLINEINFOS, self._w, indices)
+        out: list = []
+        for info in self.tk.splitlist(raw):
+            values = self.tk.splitlist(info)
+            out.append(tuple(self.tk.getint(v) for v in values)
+                       if values else None)
+        return out
+
+
 class _ScholarTextWindow:
     """
     Rich viewer for a Google Scholar opinion.
@@ -27511,6 +27531,24 @@ class _ScholarTextWindow:
     _PAGENUM_COLOR = "#8e44ad"   # muted purple — visible but not loud
     # Page boundaries inferred by aligning text to a U.S. Reports PDF.
     _MAPPED_US_PAGE_COLOR = "#087f8c"
+    # The page: white, as the scans are, and type a shade off black, which
+    # is easier on the eye over a long opinion than black on white.
+    _READ_BG = "#ffffff"
+    _READ_FG = "#1f2328"
+    _READ_SELECT_BG = "#cfe0f9"          # a selection that leaves the type be
+    _READ_SELECT_BG_IDLE = "#e3ebf7"     # …while the window is not in front
+    # The source's own reporter pages in the gutter: a dark slate rather than
+    # black, so the margin reads as a margin beside the text.
+    _GUTTER_PAGE_COLOR = "#4f5762"
+    #: The longest line the opinion is set to, in average characters of its
+    #: body face — about the measure of the printed reporter, and well within
+    #: what reads comfortably at length.  A wider window centres the column.
+    _MEASURE_CHARS = 80
+    #: The distance from one line to the next, in ems of the body face: type
+    #: set solid reads cramped at this measure.  Faces differ in how much
+    #: of it they carry already — Century Schoolbook little, Palatino more
+    #: — so only the difference is added (see _apply_leading).
+    _LINE_HEIGHT = 1.5
     _LINK_COLOR = "#1a56b0"
     _DISSENT_COLOR = "#a31515"   # dark red — top-of-window label & RTF headings
     _CONCUR_COLOR = "#1a7a3c"    # dark green
@@ -27636,11 +27674,14 @@ class _ScholarTextWindow:
             self._cl_parts = cl_parts or []
             self._cl_blocks = cl_blocks or []
         else:
-            self._blocks = parse_opinion_blocks(opinion_html)
+            blocks, parts = _parsed_opinion(opinion_html)
+            self._blocks = blocks
             self._scholar_text = (
                 blocks_to_text(self._blocks) or _strip_html(opinion_html)
             )
-            self._parts = segment_blocks(self._blocks)
+            # Copies: the parse is shared (see _parsed_opinion), and the lead
+            # opinion's label is refined in place (_refine_part_labels).
+            self._parts = [_dc_replace(part) for part in parts]
             self._cl_parts = None
             self._cl_blocks = None
         # Kept for the History dropdown: reopening replays this constructor
@@ -28110,11 +28151,19 @@ class _ScholarTextWindow:
         # fixed while the side panel opens beside it (see _pin_text_width).
         holder = ttk.Frame(text_frame)
         self._text_holder = holder
-        txt = tk.Text(holder, wrap="word", font=base, padx=14, pady=10)
+        txt = _ReaderText(
+            holder, wrap="word", font=base, padx=14, pady=10,
+            borderwidth=0, highlightthickness=0, relief="flat",
+            background=self._READ_BG, foreground=self._READ_FG,
+            selectbackground=self._READ_SELECT_BG,
+            selectforeground=self._READ_FG,
+            inactiveselectbackground=self._READ_SELECT_BG_IDLE,
+        )
         self._text = txt
+        self._apply_leading()
         vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=self._on_yscroll)
-        # Left gutter: reporter page numbers in bold black, scrolling with the
+        # Left gutter: reporter page numbers in bold slate, scrolling with the
         # text — a separate Canvas, so it can't be selected/copied (the page is
         # already marked inline in purple).  Right strip: a colour-coded map of
         # where each concurrence/dissent begins (full-opinion view only).
@@ -28125,9 +28174,10 @@ class _ScholarTextWindow:
             family="Georgia", size=max(self._base_size - 2, 7), weight="bold")
         self._partmap_font = tkfont.Font(
             family="TkDefaultFont", size=max(self._base_size - 3, 7))
-        self._pagecol = tk.Canvas(text_frame, width=self._PAGECOL_W, bg="white",
-                                  highlightthickness=0, takefocus=0)
-        self._partmap = tk.Canvas(text_frame, width=0, bg="white",
+        self._pagecol = tk.Canvas(text_frame, width=self._PAGECOL_W,
+                                  bg=self._READ_BG, highlightthickness=0,
+                                  takefocus=0)
+        self._partmap = tk.Canvas(text_frame, width=0, bg=self._READ_BG,
                                   highlightthickness=0, takefocus=0)
         self._partmap_rows: list[tuple[float, float, int]] = []
         self._pagecol.pack(side="left", fill="y")
@@ -28139,6 +28189,21 @@ class _ScholarTextWindow:
         holder.pack(side="left", fill="both", expand=True)
         txt.pack(fill="both", expand=True)
         txt.bind("<Configure>", lambda _e: self._on_text_configure())
+        # The reading column: blank space either side of the page numbers and
+        # the opinion, sized so that on a wide window the text keeps to a
+        # comfortable line (see _fit_reading_column).  The parts' rail and
+        # the scrollbar stay at the window's edge.
+        self._column_left = tk.Frame(text_frame, width=0, bg=self._READ_BG,
+                                     borderwidth=0, highlightthickness=0)
+        self._column_right = tk.Frame(text_frame, width=0, bg=self._READ_BG,
+                                      borderwidth=0, highlightthickness=0)
+        self._column_left.pack(side="left", fill="y", before=self._pagecol)
+        self._column_right.pack(side="right", fill="y", before=holder)
+        text_frame.bind("<Configure>",
+                        lambda _e: self._fit_reading_column(), add="+")
+        # The margins scroll the opinion as the text itself does.
+        for margin in (self._column_left, self._column_right, self._pagecol):
+            _forward_wheel(margin, txt)
         self._partmap.bind("<Button-1>", self._on_partmap_click)
         self._partmap.bind("<Enter>", lambda _e: self._partmap.config(cursor="hand2"))
         self._partmap.bind("<Leave>", lambda _e: self._partmap.config(cursor=""))
@@ -28174,6 +28239,11 @@ class _ScholarTextWindow:
         self._details_recent: Optional[tuple] = None  # cached (title, lines)
         self._docket_loaded = False
         self._details_docket: Optional[tuple] = None  # cached (title, lines)
+        # A lower federal court's docket in CourtListener's RECAP archive:
+        # looked for once the panel opens, and offered as the "Docket" view
+        # only when there is one (see _check_recap_docket).
+        self._recap_checked = False
+        self._recap_docket: Optional[dict] = None
 
         txt.tag_configure("center", justify="center")
         txt.tag_configure("blockquote", lmargin1=36, lmargin2=36, rmargin=36)
@@ -28208,8 +28278,8 @@ class _ScholarTextWindow:
             "pagenum", font=pagenum_font, foreground=self._PAGENUM_COLOR
         )
         txt.tag_configure("citelink", foreground=self._LINK_COLOR)
-        txt.tag_bind("citelink", "<Enter>", lambda _e: txt.config(cursor="hand2"))
-        txt.tag_bind("citelink", "<Leave>", lambda _e: txt.config(cursor=""))
+        txt.tag_bind("citelink", "<Enter>", self._on_link_enter)
+        txt.tag_bind("citelink", "<Leave>", self._on_link_leave)
         txt.tag_configure("jumpflash", background="#fff2a8")
         txt.tag_configure(self._JUSTIFY_PAD_TAG)
         txt.tag_configure(self._JUSTIFY_HIDE_TAG, elide=True)
@@ -28227,18 +28297,32 @@ class _ScholarTextWindow:
         _bind_text_scroll_keys(win, txt, self._scroll_reader,
                                window_keys=not self._chromeless)
 
-        btn_frame = _ui_frame(win)
-        if not self._chromeless:
+        # Chromeless, this bar is built but never shown — the viewer's own
+        # strip carries its controls — so it is made of plain ttk widgets,
+        # which cost next to nothing, rather than CustomTkinter's, which drew
+        # (and kept restyling) a row of rounded buttons nobody would see.
+        if self._chromeless:
+            def button(parent, text, command=None, primary=False, width=None):
+                return ttk.Button(parent, text=text, command=command)
+
+            def checkbox(parent, text, variable, command=None):
+                return ttk.Checkbutton(parent, text=text, variable=variable,
+                                       command=command)
+
+            btn_frame = ttk.Frame(win)
+        else:
+            button, checkbox = _ui_button, _ui_checkbox
+            btn_frame = _ui_frame(win)
             btn_frame.pack(fill="x", padx=12, pady=(2, 10))
         self._btn_frame = btn_frame  # PDF/text panes pack just above this
         # (Copy-with-citation lives on Ctrl-C / Cmd-C; no button needed.)
         # In text view this drops the export menu (RTF / PDF via LaTeX /
         # .tex source); in PDF view it becomes "Download PDF".
-        self._export_btn = _ui_button(
+        self._export_btn = button(
             btn_frame, "Export ▾", command=self._post_export_menu, width=104
         )
         self._export_btn.pack(side="right", padx=(6, 0))
-        self._toggle_btn = _ui_button(
+        self._toggle_btn = button(
             btn_frame, "CourtListener", command=self._toggle_source,
             primary=True, width=118,
         )
@@ -28246,7 +28330,7 @@ class _ScholarTextWindow:
         # The CourtListener text view gets its own "PDF" button (the
         # Scholar view reuses the toggle for that).  Packed in _render_cl_blocks
         # / _show_courtlistener, hidden elsewhere; enabled once a PDF is located.
-        self._pdf_btn = _ui_button(
+        self._pdf_btn = button(
             btn_frame, "PDF", command=self._view_pdf, width=64
         )
         try:
@@ -28256,18 +28340,18 @@ class _ScholarTextWindow:
         # The Scholar text view's switch back to the CourtListener opinion (the
         # mirror of CL's "Scholar" button).  Packed in
         # _render_scholar, hidden in the CL and PDF views.
-        self._cl_btn = _ui_button(
+        self._cl_btn = button(
             btn_frame, "CourtListener", command=self._toggle_source,
             width=118,
         )
 
         # Size controls: text size in the reader, PDF zoom in the PDF view
         # (also Ctrl +/−/0 and Ctrl+mouse wheel).
-        self._zoom_out_btn = _ui_button(
+        self._zoom_out_btn = button(
             btn_frame, "A−", command=lambda: self._zoom(-1), width=42
         )
         self._zoom_out_btn.pack(side="left")
-        self._zoom_in_btn = _ui_button(
+        self._zoom_in_btn = button(
             btn_frame, "A+", command=lambda: self._zoom(+1), width=42
         )
         self._zoom_in_btn.pack(side="left", padx=(6, 10))
@@ -28275,7 +28359,7 @@ class _ScholarTextWindow:
         # rather than on this bar — the styles do not fit in a checkbox, and
         # the bar has no room to spare.  Edit citation sits before the two
         # checkboxes so they read as a pair.
-        self._edit_citation_btn = _ui_button(
+        self._edit_citation_btn = button(
             btn_frame, "Edit citation…", command=self._edit_base_citation,
             width=108,
         )
@@ -28288,11 +28372,11 @@ class _ScholarTextWindow:
         # cases, whose Oyez panel the window was widened to fit.
         self._details_var = tk.BooleanVar(value=self._is_scotus)
         self._details_on = self._is_scotus
-        _ui_checkbox(
+        checkbox(
             btn_frame, "Side panel", self._details_var, self._toggle_details,
         ).pack(side="left", padx=(0, 10))
         self._justify_text = tk.BooleanVar(value=False)
-        _ui_checkbox(
+        checkbox(
             btn_frame, "Justify text", self._justify_text,
             self._on_justify_toggle,
         ).pack(side="left", padx=(0, 10))
@@ -28338,7 +28422,11 @@ class _ScholarTextWindow:
                 pass  # modifier not supported on this platform
 
         self._status_var = tk.StringVar()
-        _install_status_label(btn_frame, self._status_var)
+        if self._chromeless:
+            ttk.Label(btn_frame, textvariable=self._status_var).pack(
+                side="left")
+        else:
+            _install_status_label(btn_frame, self._status_var)
         self._button_bar_compact: Optional[bool] = None
         btn_frame.bind("<Configure>", self._on_button_bar_configure)
 
@@ -28505,6 +28593,8 @@ class _ScholarTextWindow:
         return 104, 82
 
     def _apply_button_bar_compact(self) -> None:
+        if getattr(self, "_chromeless", False):
+            return              # the bar is never shown (see _build_ui)
         compact = bool(getattr(self, "_button_bar_compact", False))
         toggle_normal, toggle_small = self._source_or_pdf_widths(self._toggle_btn)
         pdf_normal, pdf_small = self._source_or_pdf_widths(self._pdf_btn)
@@ -28568,9 +28658,95 @@ class _ScholarTextWindow:
         if getattr(self, "_pagecol_font", None) is not None:
             self._pagecol_font.configure(size=max(new - 2, 7))
             self._partmap_font.configure(size=max(new - 3, 7))
+        # And the space between lines, and the width of the column.
+        self._apply_leading()
+        self._fit_reading_column()
         self._schedule_text_justify()
         self._schedule_gutter_redraw()
         self._status_var.set(f"Text size: {new} pt")
+
+    # ------------------------------------------------------------------
+    # The page: leading, the reading column, links
+    # ------------------------------------------------------------------
+
+    #: Prose whose average character stands for the body face's, in sizing
+    #: the reading column.
+    _MEASURE_SAMPLE = (
+        "The judgment of the Court of Appeals is reversed, and the case is "
+        "remanded for further proceedings consistent with this opinion.")
+
+    def _apply_leading(self) -> None:
+        """Space the lines for the body face at its present size.
+
+        Half the gap above every line and half below: Tk splits the space
+        between a paragraph's wrapped lines (spacing2) that way itself, so
+        spacing1 and spacing3 at half of it make every line's box the same —
+        centred on its type, which is where the page gutter sets its numbers
+        (see _pagecol_rows)."""
+        try:
+            font = self._fonts["base"]
+            em = abs(float(font.cget("size")))
+            if float(font.cget("size")) > 0:            # points, not pixels
+                em *= float(self._text.tk.call("tk", "scaling"))
+            gap = max(0, round(self._LINE_HEIGHT * em
+                               - font.metrics("linespace")))
+            gap += gap % 2
+            self._text.configure(spacing1=gap // 2, spacing2=gap,
+                                 spacing3=gap // 2)
+        except (KeyError, AttributeError, ValueError, tk.TclError):
+            pass
+
+    def _measure_px(self) -> int:
+        """The reading column's width for the text, in pixels: _MEASURE_CHARS
+        of the body face at its present size."""
+        font = self._fonts["base"]
+        size = font.cget("size")
+        kept = getattr(self, "_measure_kept", None)
+        if kept is not None and kept[0] == size:
+            return kept[1]
+        sample = self._MEASURE_SAMPLE
+        px = int(font.measure(sample) / len(sample) * self._MEASURE_CHARS)
+        self._measure_kept = (size, px)
+        return px
+
+    def _fit_reading_column(self) -> None:
+        """Centre the page numbers and the opinion between the blank margins
+        either side of them, the text no wider than the reading column; a
+        window narrower than that gives the text all the room there is."""
+        frame = getattr(self, "_text_frame", None)
+        holder = getattr(self, "_text_holder", None)
+        left = getattr(self, "_column_left", None)
+        right = getattr(self, "_column_right", None)
+        if None in (frame, holder, left, right):
+            return
+        try:
+            if not holder.pack_propagate():
+                return      # held at its width while the side panel opens
+            total = frame.winfo_width()
+            if total <= 1:
+                return
+            # What else stands in the row: the page gutter, the parts' rail,
+            # the scrollbar, the side panel when it is open.
+            beside = sum(
+                w.winfo_reqwidth() for w in frame.pack_slaves()
+                if w not in (left, right, holder)
+                and w.pack_info().get("side") in ("left", "right"))
+            text_w = self._measure_px() + 2 * int(self._text.cget("padx"))
+            margin = max(0, (total - beside - text_w) // 2)
+            for spacer in (left, right):
+                if int(spacer.cget("width")) != margin:
+                    spacer.configure(width=margin)
+        except (KeyError, ValueError, tk.TclError):
+            pass
+
+    # A link shows itself by the hand the pointer becomes over it, not by an
+    # underline: one drawn under the citation the pointer happened to rest
+    # on only flickered across the opinion as it was read.
+    def _on_link_enter(self, _event=None) -> None:
+        self._text.config(cursor="hand2")
+
+    def _on_link_leave(self, _event=None) -> None:
+        self._text.config(cursor="")
 
     # ------------------------------------------------------------------
     # Rendering
@@ -29952,14 +30128,40 @@ class _ScholarTextWindow:
             return
         self._text_block_links = links
         waiting, self._links_waiting = self._links_waiting, set()
+        # In document order, a slice at a time (see _link_slice).
+        self._link_slice([b for b in block_ids if b in waiting], blocks,
+                         links, self._location_render_seq)
+
+    #: The longest one slice of linking the opinion in place holds the Tk
+    #: thread.  A long opinion has a few hundred citations, and linking them
+    #: all at once was a noticeable hitch in a scroll that met it.
+    _LINK_SLICE_S = 0.008
+
+    def _link_slice(self, order: list, blocks: dict, links: dict,
+                    render: int, start: int = 0) -> None:
+        """Link the blocks in *order* from *start* for _LINK_SLICE_S, then
+        hand the Tk thread back and carry on from there.  Stopped by the
+        opinion being drawn again (*render* is the drawing it was for): that
+        drawing linked every block itself."""
+        if render != self._location_render_seq:
+            return
         txt = self._text
+        deadline = time.perf_counter() + self._LINK_SLICE_S
+        i = start
         try:
-            for block_id in waiting:
+            while i < len(order):
+                block_id = order[i]
+                i += 1
                 mark = self._location_block_marks.get(block_id)
                 block = blocks.get(block_id)
                 if mark and block is not None:
                     self._link_block_in_place(txt, mark, block,
                                               links.get(block_id) or [])
+                if time.perf_counter() >= deadline:
+                    break
+            if i < len(order):
+                self._win.after(1, self._link_slice, order, blocks, links,
+                                render, i)
         except tk.TclError:
             return
 
@@ -30164,8 +30366,8 @@ class _ScholarTextWindow:
         self._fn_def_pos: dict[str, str] = {}  # footnote id → body marker index
         self._reset_page_marks()   # star page → a mark on its marker
         self._cur_page: Optional[int] = None
-        self._short_cite_index = _build_short_cite_index(self._scholar_text)
-        self._recap_spec_index = _recap_spec_index(self._scholar_text)
+        self._short_cite_index, self._recap_spec_index = _text_indexes(
+            self._scholar_text)
         self._prepare_text_link_ranges(self._parts)
         self._last_cite_action = None
         self._pending_id = None
@@ -30239,6 +30441,18 @@ class _ScholarTextWindow:
         vsb = getattr(self, "_vsb", None)
         if vsb is not None:
             vsb.set(first, last)
+        # The reader moving the opinion — wheel, keys, scrollbar — holds the
+        # scan's background reading back until the scrolling stops (see
+        # _ui_busy).  Told apart by the line at the top: Tk also reports here
+        # while it is still measuring a long opinion's lines, which changes
+        # the fractions but not what is on screen.
+        try:
+            top = self._text.index("@0,0")
+        except tk.TclError:
+            top = None
+        if top != getattr(self, "_yscroll_top", None):
+            self._yscroll_top = top
+            _ui_busy()
         self._draw_page_column()
 
     # ------------------------------------------------------------------
@@ -30671,6 +30885,13 @@ class _ScholarTextWindow:
         as far as any reporter in ordinary use runs."""
         if not self._pagecol_single_column():
             return self._PAGECOL_W
+        # Measured once a size: this is asked on every scroll.
+        widths = getattr(self, "_pagecol_widths", None)
+        if widths is None:
+            widths = self._pagecol_widths = {}
+        size = self._pagecol_base_size()
+        if size in widths:
+            return widths[size]
         ruler = self._pagecol_ruler()
         if ruler is None:
             return self._PAGECOL_W_TIGHT
@@ -30678,7 +30899,8 @@ class _ScholarTextWindow:
             cut = ruler.measure("0" * self._PAGECOL_DIGITS) + self._PAGECOL_PAD
         except tk.TclError:
             return self._PAGECOL_W_TIGHT
-        return max(self._PAGECOL_W_MIN, int(cut))
+        widths[size] = max(self._PAGECOL_W_MIN, int(cut))
+        return widths[size]
 
     def _fit_pagecol_font(self, page_pos: dict, us_page_pos: dict,
                           width: int) -> None:
@@ -30719,16 +30941,14 @@ class _ScholarTextWindow:
 
     def _pagecol_rows(self, series: dict, prefer_later_page: bool = False):
         """{screen y: (page, line height)} for the pages currently on screen."""
-        txt = self._text
         rows: dict[int, tuple[int, int]] = {}
-        for page, index in sorted(
-            (series or {}).items(), key=lambda item: item[0],
-            reverse=prefer_later_page,
-        ):
-            try:
-                info = txt.dlineinfo(index)
-            except tk.TclError:
-                info = None
+        ordered = sorted((series or {}).items(), key=lambda item: item[0],
+                         reverse=prefer_later_page)
+        try:
+            infos = self._text.dlineinfos(index for _page, index in ordered)
+        except tk.TclError:
+            return rows
+        for (page, _index), info in zip(ordered, infos):
             if not info:            # that page is not on screen right now
                 continue
             y = info[1] + info[3] // 2
@@ -30758,11 +30978,11 @@ class _ScholarTextWindow:
                     slot = below
                 else:
                     continue    # no line free either side; leave it out
-            placed[slot] = (page, "black")
+            placed[slot] = (page, self._GUTTER_PAGE_COLOR)
         return placed
 
     def _draw_page_column(self) -> None:
-        """Draw the reporter page numbers (bold black) in the left gutter, each
+        """Draw the reporter page numbers (bold slate) in the left gutter, each
         aligned to the screen line where its star-pagination marker sits.  Only
         the currently visible pages are drawn (it scrolls with the text)."""
         canvas = getattr(self, "_pagecol", None)
@@ -30771,59 +30991,73 @@ class _ScholarTextWindow:
         page_pos = getattr(self, "_page_pos", None) or {}
         us_page_pos = getattr(self, "_mapped_us_page_pos", None) or {}
         if not (page_pos or us_page_pos):
-            canvas.delete("all")
-            canvas.config(width=1)
+            self._paint_page_numbers(canvas, 1, [])
             return
         width = self._pagecol_width()
-        canvas.config(width=width)
-        canvas.delete("all")
         self._fit_pagecol_font(page_pos, us_page_pos, width)
-        txt = self._text
         w = width
         if self._pagecol_single_column():
             # One narrow column, right-aligned, both tracks in it.
-            for y, (page, color) in self._pagecol_one_column(
-                page_pos, us_page_pos
-            ).items():
-                canvas.create_text(
-                    w - 4, y, anchor="e", text=str(page),
-                    fill=color, font=self._pagecol_font,
-                )
+            self._paint_page_numbers(canvas, width, [
+                (w - 4, y, "e", str(page), color)
+                for y, (page, color) in self._pagecol_one_column(
+                    page_pos, us_page_pos).items()
+            ])
             return
 
-        def draw(
-            series: dict, x: int, anchor: str, color: str,
-            prefer_later_page: bool = False,
-        ) -> None:
-            seen_y: set[int] = set()
-            rows = sorted(
-                series.items(),
-                key=lambda item: item[0],
-                reverse=prefer_later_page,
-            )
-            for page, idx in rows:
-                try:
-                    di = txt.dlineinfo(idx)
-                except tk.TclError:
-                    di = None
-                if not di:  # page not on screen right now
-                    continue
-                y = di[1] + di[3] // 2
-                if y in seen_y:
-                    continue
-                seen_y.add(y)
-                canvas.create_text(
-                    x, y, anchor=anchor, text=str(page),
-                    fill=color, font=self._pagecol_font,
-                )
-
         # Keep simultaneous boundaries visible: inferred U.S. pages occupy the
-        # left half in teal; the source's own star pages stay black at right.
-        draw(
-            us_page_pos, 4, "w", self._MAPPED_US_PAGE_COLOR,
-            prefer_later_page=True,
-        )
-        draw(page_pos, w - 5, "e", "black")
+        # left half in teal; the source's own star pages stay slate at right.
+        numbers = [
+            (4, y, "w", str(page), self._MAPPED_US_PAGE_COLOR)
+            for y, (page, _h) in self._pagecol_rows(
+                us_page_pos, prefer_later_page=True).items()
+        ] + [
+            (w - 5, y, "e", str(page), self._GUTTER_PAGE_COLOR)
+            for y, (page, _h) in self._pagecol_rows(page_pos).items()
+        ]
+        self._paint_page_numbers(canvas, width, numbers)
+
+    def _paint_page_numbers(self, canvas, width: int, numbers: list) -> None:
+        """Show *numbers* — (x, y, anchor, text, colour) each — in the page
+        gutter, *width* wide.
+
+        This runs on every scroll, and a scroll mostly moves the same few
+        numbers up or down: so the gutter keeps its text items and moves
+        them, changing a number's text or colour only when it changes, and
+        does nothing at all when nothing on it has moved."""
+        if getattr(self, "_pagecol_shown", None) == (width, numbers):
+            return
+        pool = getattr(self, "_pagecol_items", None)
+        if pool is None:
+            pool = self._pagecol_items = []     # [canvas id, (x, y, …)]
+        try:
+            if int(float(canvas.cget("width"))) != width:
+                canvas.config(width=width)
+                self._win.after_idle(self._fit_reading_column)
+            for i, number in enumerate(numbers):
+                x, y, anchor, text, color = number
+                if i == len(pool):
+                    pool.append([canvas.create_text(
+                        x, y, anchor=anchor, text=text, fill=color,
+                        font=self._pagecol_font), number])
+                    continue
+                item, was = pool[i]
+                if was is None:
+                    canvas.itemconfigure(item, state="normal")
+                if was is None or was[:2] != (x, y):
+                    canvas.coords(item, x, y)
+                if was is None or was[2:] != (anchor, text, color):
+                    canvas.itemconfigure(item, anchor=anchor, text=text,
+                                         fill=color)
+                pool[i][1] = number
+            for spare in pool[len(numbers):]:
+                if spare[1] is not None:
+                    canvas.itemconfigure(spare[0], state="hidden")
+                    spare[1] = None
+        except tk.TclError:
+            self._pagecol_shown = None
+            return
+        self._pagecol_shown = (width, list(numbers))
 
     def _draw_part_map(self) -> None:
         """Draw a colour-coded strip on the right marking where each
@@ -31097,9 +31331,7 @@ class _ScholarTextWindow:
         self._fn_def_pos: dict[str, str] = {}
         self._reset_page_marks()
         self._cur_page: Optional[int] = None
-        self._short_cite_index = _build_short_cite_index(
-            self._scholar_text or self._cl_text or "")
-        self._recap_spec_index = _recap_spec_index(
+        self._short_cite_index, self._recap_spec_index = _text_indexes(
             self._scholar_text or self._cl_text or "")
         self._prepare_text_link_ranges(parts)
         self._last_cite_action = None
@@ -31473,6 +31705,34 @@ class _ScholarTextWindow:
             # The forms of an ejectment party still to be asked about.
             "_ejectment": ejectment,
         }
+
+    def _decided_en_banc(self) -> bool:
+        """Whether this opinion was its court's decision en banc, which its
+        citation says: "(7th Cir. 2010) (en banc)" (rule 10.6.1(a)).  Read
+        off the front matter of the parts on show (see decided_en_banc),
+        once for each set of them.  Never the Supreme Court's: it always
+        sits as one."""
+        if getattr(self, "_is_scotus", False):
+            return False
+        parts = (getattr(self, "_rendered_parts", None)
+                 or getattr(self, "_parts", None) or [])
+        key = tuple(id(p) for p in parts)
+        known = getattr(self, "_en_banc_known", None)
+        if known is not None and known[0] == key:
+            return known[1]
+        header = [b for p in parts if p.kind == "header" for b in p.blocks]
+        lead = next((p for p in parts if p.kind == "majority"), None)
+        front = [b.text() for b in header + (lead.blocks[:3] if lead else [])]
+        openings = [p.blocks[0].text() for p in parts
+                    if p.kind not in ("header", "majority") and p.blocks]
+        # The bench may follow a long list of counsel.
+        opening = header + (lead.blocks if lead else [])
+        benches = [b.text() for b in opening[:30]]
+        found = decided_en_banc(
+            front, openings, benches=benches,
+            panel_court=self._bb.get("court_id", "") in _CIRCUIT_COURTS)
+        self._en_banc_known = (key, found)
+        return found
 
     def _writer_parenthetical(self, part) -> str:
         """
@@ -32015,7 +32275,8 @@ class _ScholarTextWindow:
             )
             if paren_inner:
                 rest += f" ({paren_inner})"
-            rest += join_parentheticals((writer, *extra_parens))
+            en_banc = "en banc" if self._decided_en_banc() else ""
+            rest += join_parentheticals((en_banc, writer, *extra_parens))
             history = ""
         # Bluebook abbreviations ("Ass'n", "Int'l", "Dep't", "F. App'x"),
         # possessives, and names like O'Connor take a typographic apostrophe
@@ -33018,11 +33279,10 @@ class _ScholarTextWindow:
             # Which of them this panel offers is the window's to say: a case
             # window offers every view, a panel standing beside a scan the
             # case's details, the docket behind them and the Court's recent
-            # opinions.  The docket is a Supreme Court view either way, so it
-            # comes off for any other court — and a panel left with one view
+            # opinions.  The docket comes off for a court that has none to
+            # show (see _details_view_names) — and a panel left with one view
             # needs no selector at all (_details_mode then reads "case").
-            mode_values = [name for name in self._details_views
-                           if name != "Docket" or self._is_scotus]
+            mode_values = self._details_view_names()
             if len(mode_values) > 1:
                 mode_row = ttk.Frame(f)
                 mode_row.pack(fill="x", padx=6, pady=(0, 2))
@@ -33209,6 +33469,9 @@ class _ScholarTextWindow:
                 self._details_frame.pack_forget()
             except tk.TclError:
                 pass
+        # The panel takes its width from the row the reading column is
+        # centred in, wherever the window could not grow to hold it.
+        self._fit_reading_column()
 
     def _open_details_panel(self) -> None:
         """Fill the column the window just grew by, and let the opinion follow
@@ -33247,6 +33510,7 @@ class _ScholarTextWindow:
             holder.configure(width=0)   # back to taking what pack gives it
         except tk.TclError:
             pass
+        self._fit_reading_column()      # held back while it was pinned
 
     def _when_resized(self, done, tries: int = 20, step_ms: int = 15) -> None:
         """Run *done* once the window has taken the width last asked for — or
@@ -33376,12 +33640,22 @@ class _ScholarTextWindow:
             pass
         return "case"
 
+    def _details_view_names(self) -> list[str]:
+        """The views this panel offers now: the window's own (see
+        _details_views), the "Docket" among them only for the Supreme Court
+        — its briefs — or for a lower federal court whose docket the RECAP
+        archive holds (see _check_recap_docket)."""
+        return [name for name in self._details_views
+                if name != "Docket" or self._is_scotus
+                or getattr(self, "_recap_docket", None) is not None]
+
     def _refresh_details_view(self) -> None:
         """Fill the side panel for its selected mode."""
         if self._details_frame is None:
             return
         mode = self._details_mode()
         self._sync_citing_bar()
+        self._check_recap_docket()
         if mode == "outline":
             self._show_outline()
         elif mode == "citing":
@@ -33390,6 +33664,8 @@ class _ScholarTextWindow:
             self._show_related_cases()
         elif mode == "recent":
             self._show_recent_scotus()
+        elif mode == "docket" and not self._is_scotus:
+            self._show_recap_docket()
         elif mode == "docket":
             self._show_scotus_docket()
         else:
@@ -33872,6 +34148,145 @@ class _ScholarTextWindow:
             self._post(self._apply_scotus_docket, title, lines)
 
         threading.Thread(target=run, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Side panel: a lower federal court's docket in the RECAP archive
+    # ------------------------------------------------------------------
+
+    def _check_recap_docket(self) -> None:
+        """Look once, when the panel opens, for the docket of a lower federal
+        court's case in CourtListener's RECAP archive; one found is offered
+        as the panel's "Docket" view (_offer_recap_docket).  Not for the
+        Supreme Court, whose docket view is its briefs, nor a state court."""
+        if self._recap_checked or self._is_scotus:
+            return
+        item = self._pdf_item()
+        court = str(self._bb.get("court_id") or item.get("court_id")
+                    or "").strip().lower()
+        if court and (court == _SCOTUS_COURT_ID
+                      or not _is_federal_court(court)):
+            self._recap_checked = True
+            return
+        # The client is resolved here, on the Tk thread (it reads the token
+        # field), and only with a token: no "Missing Token" dialog for a
+        # panel that merely opened.
+        if self._app is None or not self._app._token_var.get().strip():
+            return
+        client = self._app._get_client()
+        if client is None:
+            return
+        self._recap_checked = True
+        dockets = _docket_number_list(item.get("docketNumber")
+                                      or item.get("docket_number") or "")
+        cite, name = self._bb.get("cite", ""), self._bb.get("name", "")
+
+        def run() -> None:
+            try:
+                found = _recap_docket_for_case(client, dockets, court, cite,
+                                               name)
+            except Exception as exc:
+                print(f"[details] RECAP docket: {exc}")
+                found = None
+            self._post(self._offer_recap_docket, found)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _offer_recap_docket(self, found: Optional[dict]) -> None:
+        """The RECAP archive's answer: a docket found joins the panel's views
+        as "Docket"."""
+        if not found:
+            return
+        self._recap_docket = found
+        combo = getattr(self, "_details_mode_combo", None)
+        if combo is not None:
+            try:
+                combo.configure(values=tuple(self._details_view_names()))
+            except tk.TclError:
+                pass
+        if self._details_mode() == "docket":
+            self._show_recap_docket()
+
+    def _show_recap_docket(self) -> None:
+        found = self._recap_docket
+        if not found:
+            self._apply_details("Docket", [(
+                "lbl", "CourtListener's RECAP archive has no docket for "
+                       "this case.")])
+            return
+        number = found.get("docket_number") or ""
+        self._apply_details(f"Docket · No. {number}" if number else "Docket",
+                            self._details_lines_recap(found))
+
+    @staticmethod
+    def _details_lines_recap(found: dict) -> list[tuple]:
+        """A RECAP docket (courtlistener.find_recap_docket, with its newest
+        filings): the case, its court and number, what the docket says of
+        it, the newest filings — each a link to its PDF where the archive
+        holds one, else to its page — and the whole docket on
+        CourtListener."""
+        lines: list[tuple] = []
+        if found.get("case_name"):
+            lines.append(("title", found["case_name"]))
+        court = _COURT_BLUEBOOK.get(str(found.get("court_id") or ""), "")
+        number = str(found.get("docket_number") or "")
+        sub = " · ".join(p for p in (court, f"No. {number}" if number
+                                      else "") if p)
+        if sub:
+            lines.append(("lbl", sub))
+        web = found.get("web_url") or ""
+        if int(found.get("count") or 1) > 1:
+            lines.append(("", f"{found['count']} dockets are filed under "
+                              f"this number; CourtListener lists them all.",
+                          web) if web else
+                         ("", f"{found['count']} dockets are filed under "
+                              "this number."))
+            return lines
+        filed = found.get("date_filed") or ""
+        ended = found.get("date_terminated") or ""
+        for heading, value in (
+                ("Filed", filed + (f" · terminated {ended}" if ended
+                                   else "")),
+                ("Judge", found.get("assigned_to") or ""),
+                ("Nature of suit", found.get("nature_of_suit") or ""),
+                ("Cause", found.get("cause") or "")):
+            if value:
+                lines.append(("h", heading))
+                lines.append(("", value))
+        latest = list(found.get("latest") or [])
+        if latest:
+            total = int(found.get("document_count") or len(latest))
+            lines.append(("h", "Newest filings in the archive"
+                          + (f" (of {total:,})" if total > len(latest)
+                             else "")))
+            for doc in latest:
+                # A court of appeals' entry is its docket text, tagged with
+                # the clerk's document number, the case number and the time
+                # it was entered ("OPINION [1695572] filed … [15-1202]
+                # [Entered: 09/29/2017 09:59 AM]"); its "entry number" is
+                # CM/ECF's document id, which numbers nothing.
+                text = re.sub(
+                    r"\s*\[(?:\d{5,}|\d{2}-\d{1,6}|Entered:[^\]]*"
+                    r"|Service Date:[^\]]*)\]", "",
+                    str(doc.get("description") or "")).strip()
+                if len(text) > 160:
+                    text = text[:157].rsplit(" ", 1)[0] + "…"
+                entry = doc.get("entry_number")
+                label = " · ".join(p for p in (
+                    f"No. {entry}"
+                    if entry and len(str(entry)) < 6 else "",
+                    text or "Document") if p)
+                target = doc.get("pdf_url") or doc.get("web_url") or ""
+                lines.append(("", label, target) if target else ("", label))
+                note = " · ".join(p for p in (
+                    doc.get("date_filed") or "",
+                    "" if doc.get("pdf_url") else "not in the archive") if p)
+                if note:
+                    lines.append(("lbl", note))
+        if web:
+            lines.append(("h", "Sources"))
+            lines.append(("", "The whole docket on CourtListener (RECAP)",
+                          web))
+        return lines
 
     def _details_lines_parts(self) -> list[tuple[str, str]]:
         """Authorship gleaned from the Scholar text: the syllabus
@@ -34836,6 +35251,10 @@ class _ScholarTextWindow:
             name = _citation_link_name(snippet, cite)
         else:
             cite, pin, url_val = value, "", ""
+        # A reporter's name the opinion's own year says which series it is:
+        # "2 Wash. 298" in 1831 is Bushrod Washington's Virginia Reports.
+        cite = _cite_for_era(cite, (getattr(self, "_bb", None) or {}).get(
+            "year", ""))
         # The reporter interface follows a link to the report itself: the same
         # scan lookup a citation clicked on a *page* gets (see _open_pdf_cite),
         # so a case reached from the T side lands where one reached from the P
@@ -35178,6 +35597,9 @@ class _ScholarTextWindow:
         not_found = (f"No match for {label}"
                      + (" — nor has Google Scholar a copy." if scholar_absent
                         else "."))
+        # The opinion the link is in, which no case it cites can postdate.
+        cited_by_year = str((getattr(self, "_bb", None) or {}).get("year")
+                            or "").strip()[:4]
 
         def run() -> None:
             try:
@@ -35220,7 +35642,7 @@ class _ScholarTextWindow:
                             self._open_cited_case_pdf, pdf, cite, pin, name)
                         return
                 if target is None and name:
-                    target = _cl_item_for_name(client, name)
+                    target = _cl_item_for_name(client, name, cited_by_year)
                 if not target and cite:
                     # Several cases begin at the cite and nothing here said
                     # which: the reader picks, rather than hearing that
@@ -35835,6 +36257,7 @@ class _ScholarTextWindow:
                     pdf_cite=pdf_cite,
                     native_cite=self._bb.get("cite", ""),
                     us_cite=us_cite,
+                    between_pages=_yield_to_ui,
                 )
             except Exception as exc:
                 print(f"[pdf-location] {mode} alignment failed: {exc}")
@@ -37118,6 +37541,14 @@ class _ScholarTextWindow:
             _open_citation_in_browser(action, snippet)
             return
         parent = self._live_parent()
+        # A reporter's name the opinion's own year says which series it is:
+        # "4 Washington, 380" in 1873 is Washington's Circuit Court Reports.
+        kind, value = action if isinstance(action, tuple) else ("", "")
+        if kind == "cite":
+            cite, at, pin = str(value).partition("@")
+            action = ("cite", _cite_for_era(
+                cite, (getattr(self, "_bb", None) or {}).get("year", ""))
+                + at + pin)
         opened = self._app.open_cited_case_pdf(
             parent, action, snippet, self._safe_status,
             fallback=lambda: _follow_brief_action(
@@ -37277,7 +37708,11 @@ def _citation_link_name(snippet: str, cite: str = "") -> str:
         return ""
     name, parsed_cite, _pin = parsed
     if cite:
-        parsed_keys = set(citation_identity_keys({}, parsed_cite))
+        # The span's citation, or the series it was read as: "Warder vs.
+        # Arrell, 2 Wash. 298" followed as 2 Va. 298 (see _cite_for_era).
+        parsed_keys = set()
+        for form in (parsed_cite, *_official_series_cites(parsed_cite)):
+            parsed_keys.update(citation_identity_keys({}, form))
         wanted_keys = set(citation_identity_keys({}, cite.split("@", 1)[0]))
         if parsed_keys and wanted_keys and not (parsed_keys & wanted_keys):
             return ""
@@ -37939,6 +38374,7 @@ class _PdfWindow:
                         )
                         else ""
                     ),
+                    between_pages=_yield_to_ui,
                 )
             except Exception as exc:
                 print(f"[pdf-location] PDF-first alignment failed: {exc}")
@@ -42070,34 +42506,51 @@ class _StatuteWindow:
     # ------------------------------------------------------------------
 
     def _doc_section(self) -> str:
-        """The number of the U.S. Code section on show ("1983"), also for
-        one reopened from a bookmark."""
+        """The number of the U.S. Code section ("1983") or federal rule
+        ("12") on show, also for one reopened from a bookmark."""
         section = getattr(self._doc, "section", "")
         if section:
             return str(section)
         label = str(getattr(self._doc, "label", ""))
+        if self._doc.kind == "rule":
+            return label.rsplit(" ", 1)[-1] if " " in label else ""
         return label.split("§", 1)[1].strip() if "§" in label else ""
+
+    def _contents_source(self):
+        """The module whose tables of contents this window shows: the U.S.
+        Code's (us_code), the C.F.R.'s (ecfr) or the federal rules'
+        (fed_rules) — each offers load_unit, open_unit_entry and
+        load_section."""
+        return {"rule": fed_rules, "cfr": ecfr}.get(self._doc.kind, us_code)
+
+    #: What the whole of each source is called, in a message.
+    _CONTENTS_WHOLE = {"rule": "rules", "cfr": "C.F.R."}
 
     def _current_url(self) -> str:
         return self._unit.url if self._unit is not None else self._doc.url
 
     def _update_crumbs(self) -> None:
-        """Show where the section or unit on show sits in the Code: the
-        units above it, each a link to its table of contents, then itself.
-        Hidden for anything that is not the U.S. Code."""
+        """Show where the section or unit on show sits in the Code, or the
+        rule in its set: the units above it, each a link to its table of
+        contents, then itself.  Hidden for anything else."""
         bar = self._crumb_bar
         for child in bar.winfo_children():
             child.destroy()
+        rules = self._doc.kind == "rule"
         if self._unit is not None:
             crumbs, here = self._unit.crumbs, self._unit.label
-        elif self._doc.kind == "usc" and getattr(self._doc, "crumbs", None):
-            crumbs, here = self._doc.crumbs, f"§ {self._doc_section()}"
+        elif (self._doc.kind in ("usc", "rule", "cfr")
+              and getattr(self._doc, "crumbs", None)):
+            crumbs = self._doc.crumbs
+            here = (f"Rule {self._doc_section()}" if rules
+                    else f"§ {self._doc_section()}")
         else:
             bar.pack_forget()
             return
         muted = "ModernMuted.TLabel" if _CTK_AVAILABLE else "TLabel"
         for granule, label in crumbs:
-            link = ttk.Label(bar, text=us_code.crumb_label(label),
+            link = ttk.Label(bar, text=us_code.crumb_label(label)
+                             if self._doc.kind == "usc" else label,
                              foreground="#1a56b0", cursor="hand2")
             link.bind("<Button-1>",
                       lambda _e, g=granule: self._show_unit(g))
@@ -42110,7 +42563,7 @@ class _StatuteWindow:
         """Alt+Up: the table of contents of the unit one level up."""
         crumbs = (self._unit.crumbs if self._unit is not None
                   else getattr(self._doc, "crumbs", None)
-                  if self._doc.kind == "usc" else None)
+                  if self._doc.kind in ("usc", "rule", "cfr") else None)
         if crumbs:
             self._show_unit(crumbs[-1][0])
 
@@ -42120,13 +42573,15 @@ class _StatuteWindow:
         if self._unit is None:
             self._unit_from = self._doc_section()
         self._status_var.set("Loading the table of contents…")
+        source = self._contents_source()
+        whole = self._CONTENTS_WHOLE.get(self._doc.kind, "Code")
 
         def run() -> None:
             try:
-                unit = us_code.load_unit(granule)
+                unit = source.load_unit(granule)
             except Exception as exc:
-                self._post_status(f"Could not load that part of the Code: "
-                                  f"{exc}")
+                self._post_status(f"Could not load that part of the "
+                                  f"{whole}: {exc}")
                 return
             try:
                 self._win.after(0, self._open_unit, unit)
@@ -42143,15 +42598,26 @@ class _StatuteWindow:
 
     def _open_unit(self, unit) -> None:
         self._unit = unit
-        self._win.title(f"{unit.title} U.S.C. {unit.label} — "
-                        f"{self._doc.source_name}")
+        kind = getattr(unit, "kind", "usc")
+        rules = kind == "rule"
+        if kind == "cfr":
+            name = (f"{unit.title} C.F.R." if unit.granule == unit.title
+                    else f"{unit.title} C.F.R. {unit.label}")
+        elif not rules:
+            name = f"{unit.title} U.S.C. {unit.label}"
+        elif unit.granule == unit.title:
+            name = unit.heading             # "Federal Rules of Civil Procedure"
+        else:
+            name = f"{fed_rules.RULESETS[unit.title][0]} {unit.label}"
+        self._win.title(f"{name} — {self._doc.source_name}")
         self._src_var.set(unit.url)
         self._notes_btn.configure(state="disabled")
         for button in (self._prev_btn, self._next_btn):
             button.configure(state="disabled")
         count = sum(1 for e in unit.entries if e.kind == "section")
+        noun = "rule" if rules else "section"
         self._status_var.set(
-            f"{unit.heading} — {count} section{'s' if count != 1 else ''}"
+            f"{unit.heading} — {count} {noun}{'s' if count != 1 else ''}"
             if count else unit.heading)
         self._render()
 
@@ -42190,8 +42656,10 @@ class _StatuteWindow:
                               "in your browser for the rest.\n", ("credit",))
         if not unit.entries:
             host = getattr(unit, "host", "uscode.house.gov")
+            whole = self._CONTENTS_WHOLE.get(getattr(unit, "kind", "usc"),
+                                             "Code")
             txt.insert("end", f"{host} lists no contents for this "
-                              "part of the Code.\n", ("credit",))
+                              f"part of the {whole}.\n", ("credit",))
         txt.config(state="disabled")
         self._finder.refresh()
         self._update_crumbs()
@@ -42202,12 +42670,18 @@ class _StatuteWindow:
             txt.yview_moveto(0.0)
 
     def _open_section_here(self, title: str, section: str) -> None:
-        """A section chosen from a table of contents, shown in this window."""
-        self._status_var.set(f"Fetching {title} U.S.C. § {section}…")
+        """A section (or rule) chosen from a table of contents, shown in this
+        window."""
+        source = self._contents_source()
+        self._status_var.set(
+            f"Fetching {fed_rules.spec_label(f'{title}:{section}:')}…"
+            if source is fed_rules
+            else f"Fetching {title} C.F.R. § {section}…" if source is ecfr
+            else f"Fetching {title} U.S.C. § {section}…")
 
         def run() -> None:
             try:
-                doc = us_code.load_section(title, section)
+                doc = source.load_section(title, section)
             except Exception as exc:
                 self._post_status(str(exc))
                 return
@@ -42226,10 +42700,11 @@ class _StatuteWindow:
             return
         entry = parent.entries[index]
         self._status_var.set(f"Loading {entry.label}…")
+        source = self._contents_source()
 
         def run() -> None:
             try:
-                unit = us_code.open_unit_entry(entry, parent)
+                unit = source.open_unit_entry(entry, parent)
             except Exception as exc:
                 self._post_status(f"Could not open {entry.label}: {exc}")
                 return
@@ -43190,6 +43665,13 @@ def main() -> None:
 
     root.after(5000, _gc_tick)
 
+    # Hand the GIL back to the Tk thread sooner.  Workers read scans and
+    # opinions in pure Python, and every Tk call the window makes gives the
+    # GIL up and then waits — up to this interval — to have it back; a scroll
+    # makes several such calls, so at the default 5 ms an opinion scrolled
+    # while its citations were being read stalled for a third of a second.
+    sys.setswitchinterval(0.001)
+
     app = CourtListenerGUI(root)
     # A GetCases already running — in the background, from another checkout —
     # would answer the hotkey too, and the two spotlights fall out of step.
@@ -43200,6 +43682,9 @@ def main() -> None:
     tray = app._start_tray_icon()
     eng_rep.warm()  # load the English Reports index in the background
     sec_decisions.warm()  # and the SEC Decisions and Reports' page index
+    # The process that reads opinions' citations off this one's GIL (see
+    # scan_process), started once the window has had a moment to come up.
+    root.after(1000, scan_process.start)
 
     # Run in the background by default: rather than greeting the user with the
     # full search window, GetCases starts hidden and waits.  Ctrl+Space opens
