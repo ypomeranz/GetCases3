@@ -1216,6 +1216,7 @@ from bluebook_names import (
     collective_case_name,
     cut_companion_cases,
     described_person_surname,
+    in_re_for_petition,
     ejectment_case_names,
     ejectment_party_caption,
     in_re_caps_name,
@@ -18845,6 +18846,9 @@ def _scholar_caption_name(blocks) -> str:
                 or re.fullmatch(r"(?:in\s+bank|en\s+banc|(?:department|"
                                 r"division)\s+\w+)\.?", t, re.IGNORECASE)):
             continue
+        # A lone petitioner's caption is an in-re matter: "NIELSEN,
+        # Petitioner." is In re Nielsen.
+        t = in_re_for_petition(t) or t
         # An in-re style caption owns no separator, so any "v." inside it
         # belongs to a companion case ("In re Nexium Antitrust Litigation.
         # AstraZeneca AB v. United Food…") — classify it before splitting.

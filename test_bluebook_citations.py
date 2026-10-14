@@ -3606,6 +3606,29 @@ class ReporterEquivalenceTests(unittest.TestCase):
                 rebuilt.close()
 
 
+    def test_a_record_saved_without_a_name_is_named_from_its_caption(self):
+        # In re Nielsen, 131 U.S. 176 (1889), was stored nameless: the
+        # caption names a lone petitioner and no adversary.
+        html = (
+            '<div id="gs_opinion"><center><b>131 U.S. 176 (1889)</b></center>'
+            '<center><h3 id="gsl_case_name">HANS NIELSEN, Petitioner.</h3>'
+            '</center><center>Supreme Court of United States.</center>'
+            '<p>The petitioner was convicted.</p></div>')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = OpinionDB(root / "opinions.jsonl", root / "opinions.db")
+            try:
+                self.assertTrue(db.add({
+                    "scholar_id": "131", "name": "", "parties": [],
+                    "cites": ["131 U.S. 176"], "court": "scotus",
+                    "html_gz": _gz_pack(html),
+                }))
+                self.assertEqual(
+                    [hit["name"] for hit in db.search_names("Nielsen")],
+                    ["In re Nielsen"])
+            finally:
+                db.close()
+
     def test_index_points_at_the_jsonl_instead_of_copying_opinions(self):
         # The index keeps only what search reads plus a byte offset into the
         # JSONL; the opinion itself is read back through that pointer.
@@ -5740,6 +5763,55 @@ class InReCapitalsCaptionTests(unittest.TestCase):
         self.assertIsNone(in_re_caps_name("In re J. C. PENNEY CO., Debtor."))
         self.assertEqual(self._cited("In re J. C. PENNEY CO., Debtor."),
                          "In re J.C. Penney Co.")
+
+
+class LonePetitionerTests(unittest.TestCase):
+    """A caption naming one party, as petitioner or applicant, and no
+    adversary is that party's petition: In re Nielsen, 131 U.S. 176 (1889),
+    whose caption is "HANS NIELSEN, Petitioner.", had been cited
+    "Nielsen"."""
+
+    def test_the_petition_is_an_in_re_matter(self):
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import _caption_name
+        for caption, cited in (
+                ("HANS NIELSEN, Petitioner.", "In re Nielsen"),
+                ("SNOW, Petitioner.", "In re Snow"),
+                ("JOHN SMITH AND MARY JONES, Petitioners.", "In re Smith"),
+                ("JOHN DOE, Applicant.", "In re Doe"),
+                ("UNITED STATES, Petitioner.", "In re United States")):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(
+                    _scholar_page("131 U.S. 176 (1889)", caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)), cited)
+                self.assertEqual(abbreviate_case_name(
+                    normal_case_caption(_caption_name(blocks))), cited)
+        for name, cited in (("Nielsen, Petitioner", "In re Nielsen"),
+                            ("Hans Nielsen, Petitioner.", "In re Nielsen"),
+                            ("Smith et al., Petitioners", "In re Smith")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_where_it_does_not_apply(self):
+        from bluebook_names import in_re_for_petition
+        for name in (
+                # An adversary makes it a case between parties.
+                "Smith, Petitioner, v. Jones, Respondent",
+                "Smith, Petitioner, versus Jones",
+                "SMITH, Petitioner. JONES, Respondent.",
+                # It already has its procedural phrase.
+                "Ex parte Milligan, Petitioner",
+                "In re Debs, Petitioner",
+                # A party other than a petitioner or applicant.
+                "The People, Plaintiff and Respondent",
+                "John Doe, Appellant"):
+            with self.subTest(name=name):
+                self.assertIsNone(in_re_for_petition(name))
+        self.assertEqual(abbreviate_case_name(
+            "Smith, Petitioner, v. Jones, Respondent"), "Smith v. Jones")
+        self.assertEqual(abbreviate_case_name("In re Debs, Petitioner"),
+                         "In re Debs")
 
 
 class CollectiveCaseNameTests(unittest.TestCase):

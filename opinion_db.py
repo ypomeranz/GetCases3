@@ -62,6 +62,7 @@ from bluebook_names import (
     abbreviate_case_name,
     collective_case_name,
     cut_companion_cases,
+    in_re_for_petition,
     normal_case_caption,
     refine_caption_case,
     simplify_historical_entity_caption,
@@ -70,8 +71,10 @@ from bluebook_names import (
 
 # v7 re-reads every stored opinion's decision date and year from its front
 # matter, past the dates of later events — an affirmance, a rehearing, an
-# amendment — that older releases saved as the decision's.
-_SCHEMA_VERSION = 7
+# amendment — that older releases saved as the decision's.  v8 names, from
+# its caption, a stored opinion saved without a name: a lone petitioner's
+# ("HANS NIELSEN, Petitioner." is In re Nielsen), a group's popular name.
+_SCHEMA_VERSION = 8
 
 # Record field holding the reporter pagination recovered from an official scan
 # (see :meth:`OpinionDB.save_pagination`).  Records written before this field
@@ -561,6 +564,8 @@ def _caption_name(blocks: list) -> str:
         collective = collective_case_name(t)
         if collective:
             return collective
+        # …and a lone petitioner's caption is an in-re matter.
+        t = in_re_for_petition(t) or t
         sides = re.split(r"\s+vs?\.\s+", t, maxsplit=1)
         if len(sides) != 2:
             sides = re.split(r"\s+[vV]s?\.\s+", t, maxsplit=1)
@@ -1057,9 +1062,19 @@ class OpinionDB:
         # reporters even though the caption HTML still contains them.
         stored_cites = rec.get("cites") or []
         cites = _dedupe_cites([*stored_cites, *_header_cites(blocks)])
+        name = str(rec.get("name") or "").strip()
         parties = rec.get("parties")
+        if not name and blocks:
+            # Saved before its caption could be read; read now as
+            # extract_record reads one.
+            raw = _caption_name(blocks)
+            if raw:
+                name = abbreviate_case_name(
+                    _smart_titlecase(raw),
+                    court_state=state_of_court(str(rec.get("court") or "")))
+                parties = None
         if parties is None:
-            parties = parties_from_name(rec.get("name", ""))
+            parties = parties_from_name(name)
         # The opinion's front matter dates it, read as extract_record reads
         # it now: a record saved by an earlier release can carry a later
         # event's date ("Rehearing Denied January 23, 1990." beneath
@@ -1087,7 +1102,7 @@ class OpinionDB:
             "parties_json, snippet, added_at, source) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                sid, rec.get("url", ""), rec.get("name", ""), court,
+                sid, rec.get("url", ""), name, court,
                 year, date_filed,
                 int(offset), int(length),
                 json.dumps(cites, ensure_ascii=False),
