@@ -17,6 +17,7 @@ from bluebook_names import (
     collapse_personal_all_caps_run,
     courtlistener_case_name,
     described_person_surname,
+    group_case_name,
     is_personal_all_caps_run,
     name_persons_by_surname,
     normal_case_caption,
@@ -5973,6 +5974,31 @@ class CollectiveCaseNameTests(unittest.TestCase):
                 ("The Prize Cases", "Prize Cases")):
             with self.subTest(name=name[:40]):
                 self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_a_group_its_caption_never_names(self):
+        # Google Scholar heads 109 U.S. 3 with the five cases' own captions,
+        # and the Civil Rights Cases were cited "United States v. Stanley".
+        stanley = ("United States v. Stanley. U.S. v. Ryan. U.S. v. Nichols. "
+                   "U.S. v. Singleton. Robinson & Wife v. Memphis & "
+                   "Charleston R.R. Company.")
+        for cites, cited in (
+                (["109 U.S. 3"], "109 U.S. 3"),
+                (["3 S.Ct. 18"], "3 S. Ct. 18"),
+                (["3 S. Ct. 18", "27 L. Ed. 835", "109 U.S. 3"],
+                 "109 U.S. 3")):
+            with self.subTest(cites=cites):
+                self.assertEqual(_bluebook_display_name({
+                    "caseName": stanley, "citation": cites,
+                    "court_id": "scotus", "dateFiled": "1883-10-15"}),
+                    f"Civil Rights Cases, {cited} (1883)")
+        for cites in (("109 U. S. 3",), ("27 L.Ed. 835",), ("", "3 S. Ct. 18")):
+            with self.subTest(cites=cites):
+                self.assertEqual(group_case_name(*cites),
+                                 "Civil Rights Cases")
+        for cites in ((), ("",), ("109 U.S. 4",), ("1109 U.S. 3",),
+                      ("109 U.S. 30",), ("3 F. 18",)):
+            with self.subTest(cites=cites):
+                self.assertIsNone(group_case_name(*cites))
 
     def test_where_the_rule_stands_aside(self):
         for name, cited in (

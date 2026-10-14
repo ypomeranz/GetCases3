@@ -3144,6 +3144,40 @@ def collective_case_name(caption: str) -> str | None:
     return name
 
 
+# Groups of cases decided together and cited by the group's name, which a
+# caption source may leave out altogether: Google Scholar heads 109 U.S. 3
+# with the five cases' own captions — "United States v. Stanley. U.S. v.
+# Ryan. U.S. v. Nichols. …" — and the name they are cited by, Civil Rights
+# Cases, 109 U.S. 3 (1883), nowhere.  (A caption that opens with the name
+# is read by collective_case_name.)  Each by every citation of its report.
+_GROUP_CASE_NAMES = {
+    "Civil Rights Cases": ("109 U.S. 3", "3 S. Ct. 18", "27 L. Ed. 835"),
+}
+
+
+def _group_cite_key(cite: str) -> str:
+    """*cite* compared without its spacing, periods or case: "109 U. S. 3"
+    is "109 U.S. 3"."""
+    return re.sub(r"[\s.]+", "", cite or "").lower()
+
+
+_GROUP_CASE_NAME_BY_CITE = {
+    _group_cite_key(cite): name
+    for name, cites in _GROUP_CASE_NAMES.items() for cite in cites
+}
+
+
+def group_case_name(*cites: str) -> str | None:
+    """The name a group of cases reported together is cited by, when one
+    of *cites* is the group's report (see _GROUP_CASE_NAMES) — "Civil
+    Rights Cases" for "109 U.S. 3" — or None."""
+    for cite in cites:
+        name = _GROUP_CASE_NAME_BY_CITE.get(_group_cite_key(str(cite or "")))
+        if name:
+            return name
+    return None
+
+
 # A caption that names one party, as the petitioner or the applicant, and no
 # adversary — "NIELSEN, Petitioner." (131 U.S. 176) — is that party's
 # petition or application, which rule 10.2.1(b) cites "In re" ("petition

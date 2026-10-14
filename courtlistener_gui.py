@@ -1214,6 +1214,7 @@ from bluebook_names import (
     caption_case_reference_tokens,
     cut_companion_cases,
     ejectment_case_names,
+    group_case_name,
     is_recognized_given_name,
     normal_case_caption,
     refine_caption_case,
@@ -2309,6 +2310,10 @@ def _bluebook_display_name(item: dict) -> str:
     if "(" not in citation_str:
         citation_str = _respace_reporter_in_cite(citation_str)
     citation_str = _bluebook_reporter_spelling(citation_str)
+    # Cases reported together under one name are cited by it (see
+    # group_case_name), whatever the parties' captions say.
+    case_name = group_case_name(
+        citation_str, *(item.get("citation") or [])) or case_name
 
     # Year from date filed
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
@@ -27420,6 +27425,9 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
                 name, court_state=court_state)
         except Exception:
             pass
+    # Cases reported together under one name are cited by it (see
+    # group_case_name).
+    name = group_case_name(cite, *m_cites) or name
 
     if m_court:
         court = _court_for_paren(cite, "", m_court)
@@ -31690,6 +31698,15 @@ class _ScholarTextWindow:
             if known is not None:
                 name = ejectment.names.get(known, name)
                 ejectment = None
+        # Cases reported together under a name the caption leaves out are
+        # cited by it — Civil Rights Cases, 109 U.S. 3 (1883) — and nothing
+        # about the parties' names is left to settle.
+        group = group_case_name(
+            cite, *header_cites, *(item.get("citation") or []))
+        if group:
+            name = group
+            ejectment = None
+            unresolved_caption_case = ()
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
