@@ -959,34 +959,64 @@ def _page_variants(chars: list) -> tuple[tuple[_Word, ...], ...]:
     return tuple(unique)
 
 
-def _source_token_index(words: tuple[_Word, ...], source_offset: int) -> int:
-    starts = [word.start for word in words]
-    return max(0, bisect.bisect_right(starts, source_offset) - 1)
+class _SourceIndex:
+    """The opinion's words and the lookups that match a page against them,
+    built once for all of a PDF's pages.  Rebuilt for every page, and for
+    each of its variants, they were most of the time a long opinion took to
+    align — seconds of pure Python on a worker thread, every one of them
+    taken from a window being scrolled."""
+
+    def __init__(self, words: tuple[_Word, ...]) -> None:
+        self.words = words
+        self.values = tuple(word.value for word in words)
+        self._starts = [word.start for word in words]
+        self._grams: dict[int, dict[tuple[str, ...], list[int]]] = {}
+        self._occurrences: Optional[dict[str, list[int]]] = None
+
+    def grams(self, width: int) -> dict[tuple[str, ...], list[int]]:
+        """Where each run of *width* words begins, in the opinion's order."""
+        found = self._grams.get(width)
+        if found is None:
+            runs: dict[tuple[str, ...], list[int]] = defaultdict(list)
+            values = self.values
+            for i in range(max(0, len(values) - width + 1)):
+                runs[values[i:i + width]].append(i)
+            found = self._grams[width] = dict(runs)
+        return found
+
+    def occurrences(self) -> dict[str, list[int]]:
+        """Where each word of four letters or more stands, in order."""
+        if self._occurrences is None:
+            found: dict[str, list[int]] = defaultdict(list)
+            for i, value in enumerate(self.values):
+                if len(value) >= 4:
+                    found[value].append(i)
+            self._occurrences = dict(found)
+        return self._occurrences
+
+    def token_index(self, source_offset: int) -> int:
+        """The word that *source_offset* falls in (or after)."""
+        return max(0, bisect.bisect_right(self._starts, source_offset) - 1)
 
 
 def _alignment_candidates(
-    source_words: tuple[_Word, ...],
+    source: _SourceIndex,
     page_words: tuple[_Word, ...],
     hints: Iterable[int] = (),
 ) -> list[int]:
-    source_values = tuple(word.value for word in source_words)
+    source_values = source.values
     page_values = tuple(word.value for word in page_words)
     votes: Counter[int] = Counter()
 
     width = 4 if min(len(source_values), len(page_values)) >= 8 else 2
-    grams: dict[tuple[str, ...], list[int]] = defaultdict(list)
-    for i in range(max(0, len(source_values) - width + 1)):
-        grams[source_values[i:i + width]].append(i)
+    grams = source.grams(width)
     for i in range(max(0, len(page_values) - width + 1)):
         positions = grams.get(page_values[i:i + width], ())
         if len(positions) <= 8:
             for pos in positions:
                 votes[pos - i] += 6
 
-    occurrences: dict[str, list[int]] = defaultdict(list)
-    for i, value in enumerate(source_values):
-        if len(value) >= 4:
-            occurrences[value].append(i)
+    occurrences = source.occurrences()
     for i, value in enumerate(page_values):
         positions = occurrences.get(value, ())
         if positions and len(positions) <= 8:
@@ -996,7 +1026,7 @@ def _alignment_candidates(
                 votes[int(round(delta / 4.0)) * 4] += 1
 
     for source_offset in hints:
-        votes[_source_token_index(source_words, source_offset)] += 10
+        votes[source.token_index(source_offset)] += 10
     if not votes:
         # With heavily damaged OCR there may be no exact word or n-gram vote.
         # Probe the whole opinion evenly; insertion-ordered ``most_common(12)``
@@ -1014,18 +1044,18 @@ def _alignment_candidates(
 
 
 def _align_variant(
-    source_words: tuple[_Word, ...],
+    source: _SourceIndex,
     page_words: tuple[_Word, ...],
     hints: Iterable[int] = (),
 ) -> tuple[float, tuple[tuple[int, int, int], ...]]:
-    if len(source_words) < 2 or len(page_words) < 2:
+    if len(source.words) < 2 or len(page_words) < 2:
         return 0.0, ()
-    source_values = tuple(word.value for word in source_words)
+    source_values = source.values
     page_values = tuple(word.value for word in page_words)
     best_score = 0.0
     best_blocks: tuple[tuple[int, int, int], ...] = ()
     margin = max(12, min(40, len(page_values) // 4))
-    for delta in _alignment_candidates(source_words, page_words, hints):
+    for delta in _alignment_candidates(source, page_words, hints):
         lo = max(0, delta - margin)
         hi = min(len(source_values), delta + len(page_values) + margin)
         if hi - lo < 2:
@@ -1239,8 +1269,13 @@ def align_opinion_locations(
     pdf_cite: str = "",
     native_cite: str = "",
     us_cite: str = "",
+    between_pages=None,
 ) -> OpinionLocationMap:
-    """Align an opinion source with extracted PDF glyph pages."""
+    """Align an opinion source with extracted PDF glyph pages.
+
+    *between_pages*, when given, is called before each page is matched: a
+    worker's chance to stand aside while the window is busy (the GUI passes
+    its ``_yield_to_ui``)."""
     native_cite = native_cite or source.native_cite
     native = parse_reporter_cite(native_cite)
     us = parse_reporter_cite(us_cite)
@@ -1250,6 +1285,7 @@ def align_opinion_locations(
         source.text,
         [(None, index) for index in range(len(source.text))],
     )
+    source_index = _SourceIndex(source_words)
 
     exact_by_pdf: dict[int, NativePageAnchor] = {}
     if _same_reporter(native, pdf):
@@ -1274,6 +1310,8 @@ def align_opinion_locations(
     matched_tokens_by_page: dict[int, set[int]] = {}
     source_frontier: Optional[int] = None
     for page_index, chars in enumerate(pdf_pages or ()):
+        if between_pages is not None:
+            between_pages()
         hints = []
         exact = exact_by_pdf.get(page_index)
         if exact is not None:
@@ -1282,7 +1320,7 @@ def align_opinion_locations(
         best_words: tuple[_Word, ...] = ()
         best_blocks: tuple[tuple[int, int, int], ...] = ()
         for variant in _page_variants(chars):
-            score, blocks = _align_variant(source_words, variant, hints)
+            score, blocks = _align_variant(source_index, variant, hints)
             if score > best_score:
                 best_score, best_words, best_blocks = score, variant, blocks
         matched = sum(size for _p, _s, size in best_blocks)

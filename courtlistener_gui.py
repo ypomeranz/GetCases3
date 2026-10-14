@@ -21203,6 +21203,21 @@ def _ui_first(seconds: float) -> None:
     _UI_FIRST["until"] = time.monotonic() + seconds
 
 
+#: How long after the reader last moves an opinion the background readers
+#: stay held back (see _ui_busy).
+_SCROLL_HOLD_S = 0.35
+
+
+def _ui_busy(seconds: float = _SCROLL_HOLD_S) -> None:
+    """Hold background PDF reading back for *seconds* more while the reader
+    scrolls (Tk thread).  A scroll makes dozens of Tk calls, and each waits
+    to win the GIL back from a worker reading or aligning a scan, so an
+    opinion opened moments before scrolled in jerks until its scan had been
+    read.  Unlike _ui_first this only ever extends the hold: a scroll must
+    not open a gate a window going up has closed."""
+    _UI_FIRST["until"] = max(_UI_FIRST["until"], time.monotonic() + seconds)
+
+
 def _yield_to_ui() -> None:
     """Wait while a window is going up (see _ui_first) — never on the Tk
     thread itself, and never for more than _UI_FIRST_MAX_S."""
@@ -30870,6 +30885,18 @@ class _ScholarTextWindow:
         vsb = getattr(self, "_vsb", None)
         if vsb is not None:
             vsb.set(first, last)
+        # The reader moving the opinion — wheel, keys, scrollbar — holds the
+        # scan's background reading back until the scrolling stops (see
+        # _ui_busy).  Told apart by the line at the top: Tk also reports here
+        # while it is still measuring a long opinion's lines, which changes
+        # the fractions but not what is on screen.
+        try:
+            top = self._text.index("@0,0")
+        except tk.TclError:
+            top = None
+        if top != getattr(self, "_yscroll_top", None):
+            self._yscroll_top = top
+            _ui_busy()
         self._draw_page_column()
 
     # ------------------------------------------------------------------
@@ -36645,6 +36672,7 @@ class _ScholarTextWindow:
                     pdf_cite=pdf_cite,
                     native_cite=self._bb.get("cite", ""),
                     us_cite=us_cite,
+                    between_pages=_yield_to_ui,
                 )
             except Exception as exc:
                 print(f"[pdf-location] {mode} alignment failed: {exc}")
@@ -38761,6 +38789,7 @@ class _PdfWindow:
                         )
                         else ""
                     ),
+                    between_pages=_yield_to_ui,
                 )
             except Exception as exc:
                 print(f"[pdf-location] PDF-first alignment failed: {exc}")
