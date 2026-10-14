@@ -788,6 +788,31 @@ _LIGATURES = {
     "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ſ": "s",
 }
 
+#: Each character as :func:`_words` reads it — its letters and digits folded
+#: to lowercase ASCII, a space for anything else, nothing for a mark OCR
+#: loses — filled in as characters are met.  Normalizing every character
+#: afresh was most of what reading a long opinion's words cost.
+_FOLDED: dict[str, str] = {}
+
+
+def _folded(ch: str) -> str:
+    """*ch* as :func:`_words` reads it (see _FOLDED)."""
+    out: list[str] = []
+    replacement = _LIGATURES.get(ch, ch)
+    for c in unicodedata.normalize("NFKD", replacement).casefold():
+        if unicodedata.combining(c):
+            continue
+        if c.isascii() and c.isalnum():
+            out.append(c)
+        elif c in "'’.":
+            # OCR commonly loses these; joining is more stable than making
+            # an extra one-letter token ("Court's" -> "courts").
+            continue
+        else:
+            out.append(" ")
+    folded = _FOLDED[ch] = "".join(out)
+    return folded
+
 # What a United States Reports PDF prints about itself.  The running head of
 # every interior recto names the volume and the page the opinion *starts* on
 # ("Cite as: 607 U. S. 7 (2025)   9"), and a preliminary print's cover repeats
@@ -868,20 +893,15 @@ def _words(
             if saw_break and j < len(text) and text[j].isalpha():
                 i = j
                 continue
-        replacement = _LIGATURES.get(ch, ch)
-        replacement = unicodedata.normalize("NFKD", replacement).casefold()
-        for out in replacement:
-            if unicodedata.combining(out):
-                continue
-            if out.isascii() and out.isalnum():
+        reads = _FOLDED.get(ch)
+        if reads is None:
+            reads = _folded(ch)
+        if len(reads) == 1:
+            folded.append(reads)
+            origins.append(i)
+        else:
+            for out in reads:
                 folded.append(out)
-                origins.append(i)
-            elif out in "'’.":
-                # OCR commonly loses these; joining is more stable than making
-                # an extra one-letter token ("Court's" -> "courts").
-                continue
-            else:
-                folded.append(" ")
                 origins.append(i)
         i += 1
     normalized = "".join(folded)
@@ -1289,10 +1309,9 @@ def align_opinion_locations(
     us = parse_reporter_cite(us_cite)
     pdf = parse_reporter_cite(pdf_cite) or us
     effective_pdf_cite = pdf.cite if pdf else pdf_cite
-    source_words = _words(
-        source.text,
-        [(None, index) for index in range(len(source.text))],
-    )
+    # No coordinates: a source word has no height on a page, and is indexed
+    # by its own first character — what _words gives without them.
+    source_words = _words(source.text)
     source_index = _SourceIndex(source_words)
 
     exact_by_pdf: dict[int, NativePageAnchor] = {}
