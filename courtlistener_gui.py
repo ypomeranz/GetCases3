@@ -1219,7 +1219,11 @@ from bluebook_names import (
     refine_caption_case,
     simplify_historical_entity_caption,
 )
-from bluebook_parentheticals import decided_en_banc, join_parentheticals
+from bluebook_parentheticals import (
+    decided_en_banc,
+    join_parentheticals,
+    judges_named,
+)
 from scholar_caption import (
     scholar_body_text as _scholar_body_text,
     scholar_caption_name as _scholar_caption_name,
@@ -22710,8 +22714,28 @@ def _part_author(label: str, loose: bool = False) -> str:
     m = (re.search(r"\b(?:[Cc]hief\s+)?(?:JUSTICE|Justice)\s+"
                    r"([A-Z][A-Za-z'’.]+)", text)
          or re.search(r"\b([A-Z][A-Za-z'’]{2,}),\s*(?:C\.\s*)?J\.", text)
-         or re.search(r"\(([A-Z][A-Za-z'’.]+)", text)
-         or (re.search(r"\b([A-Z][A-Za-z'’]{2,})\b", text) if loose else None))
+         or re.search(r"\(([A-Z][A-Za-z'’.]+)", text))
+    if not m:
+        # A circuit byline names its judge in full as often as not: "KAREN
+        # LeCRAFT HENDERSON, Circuit Judge, dissenting" is Henderson, and
+        # "ST. EVE, Circuit Judge" St. Eve.
+        judge = re.match(
+            r"(?:\*\d+[A-Za-z]{0,2}\s+)*([A-Z][\w.'’ -]{1,60}?),\s*"
+            r"(?:(?:Chief|Senior|Presiding)\s+)?(?:(?:Circuit|District)\s+)?"
+            r"Judge\b", text)
+        if judge:
+            words = judge.group(1).split()
+            surname = words[-1:]
+            while (len(words) > len(surname)
+                   and words[-len(surname) - 1].rstrip(".").lower() in (
+                       "st", "van", "von", "de", "del", "della", "la", "le",
+                       "da", "di", "du")):
+                surname = words[-len(surname) - 1:]
+            return " ".join(
+                w[:1] + w[1:].lower() if w.isupper() and len(w) > 1 else w
+                for w in surname)
+        if loose:
+            m = re.search(r"\b([A-Z][A-Za-z'’]{2,})\b", text)
     if not m:
         return ""
     name = m.group(1).rstrip(".")
@@ -31706,6 +31730,26 @@ class _ScholarTextWindow:
             "_ejectment": ejectment,
         }
 
+    def _judges_named(self) -> set:
+        """The judges the opinion's front matter names (see judges_named),
+        in lower case, read once."""
+        known = getattr(self, "_judges_named_cache", None)
+        if known is None:
+            parts = (getattr(self, "_rendered_parts", None)
+                     or getattr(self, "_parts", None) or [])
+            header = [b for p in parts if getattr(p, "kind", "") == "header"
+                      for b in p.blocks]
+            lead = next((p for p in parts
+                         if getattr(p, "kind", "") == "majority"), None)
+            try:
+                known = judges_named(
+                    b.text() for b in (header + (lead.blocks[:30]
+                                                 if lead else []))[:60])
+            except Exception:
+                known = set()
+            self._judges_named_cache = known
+        return known
+
     def _decided_en_banc(self) -> bool:
         """Whether this opinion was its court's decision en banc, which its
         citation says: "(7th Cir. 2010) (en banc)" (rule 10.6.1(a)).  Read
@@ -31882,8 +31926,10 @@ class _ScholarTextWindow:
             surname = _fix_name_case(
                 author.split(",")[0].split()[-1].replace("’", "'"))
             return f"{surname}, J., {phrase}"
-        phrase = t[m.start():].rstrip(" .:;")
-        phrase = re.sub(r"\s*\[[^\]]{1,6}\]$", "", phrase)  # trailing footnote marker
+        # The byline's own footnote mark goes before its closing colon:
+        # "GRIFFITH, Circuit Judge, concurring in the judgment:[1]".
+        phrase = re.sub(r"\s*\[[^\]]{1,6}\]$", "", t[m.start():].rstrip())
+        phrase = phrase.rstrip(" .:;")
         head = t[: m.start()].strip().rstrip(", ")
         head = re.sub(r"^(?:MR\.|MRS\.|MS\.)\s+", "", head, flags=re.IGNORECASE)
         # The chief-justice test must look only at the author's own
@@ -31908,10 +31954,23 @@ class _ScholarTextWindow:
         name = _fix_name_case(name)
         # A circuit byline may print the judge's full name ("TOBY HEYTENS,
         # Circuit Judge, …"); the writer parenthetical takes the surname
-        # alone, while disambiguating initials ("R. Nelson") stay.
+        # alone, while disambiguating initials ("R. Nelson") stay.  The
+        # surname is the one the opinion's own bench and list of writings
+        # give the judge, where they do: "KAREN LeCRAFT HENDERSON" sits as
+        # Henderson.  Otherwise only a given name goes — "Yvonne Gonzalez
+        # Rogers" is Gonzalez Rogers.
         tokens = name.split()
-        if len(tokens) > 1 and is_recognized_given_name(tokens[0]):
+        known = self._judges_named()
+        listed = next((" ".join(tokens[k:]) for k in range(1, len(tokens))
+                       if " ".join(tokens[k:]).lower() in known), None)
+        if listed:
+            name = listed
+        elif len(tokens) > 1 and is_recognized_given_name(tokens[0]):
             name = " ".join(tokens[1:])
+        # A surname of two letters keeps the byline's capitals through the
+        # case fixing, which spares "IN" and "OF": "HO" is Ho.
+        if re.fullmatch(r"[A-Z]{2}", name):
+            name = name[0] + name[1].lower()
         if not name:
             return ""
         return f"{name}, {title}, {phrase}"

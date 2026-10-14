@@ -261,26 +261,54 @@ _BENCH_WORDS_RE = re.compile(
     re.IGNORECASE)
 
 
-def bench_size(line: str) -> int:
-    """How many judges a bench line names — "Before EASTERBROOK, Chief
-    Judge, and BAUER, POSNER, …, Circuit Judges." — or 0 for a line that is
-    none: it must open "Before" or "Present" and give its judges a title."""
+def bench_names(line: str) -> list[str]:
+    """The judges a bench line names — "Before EASTERBROOK, Chief Judge,
+    and BAUER, POSNER, …, Circuit Judges." gives ["EASTERBROOK", "BAUER",
+    "POSNER", …] — or [] for a line that is none: it must open "Before" or
+    "Present" and give its judges a title."""
     line = _LEADING_STAR_PAGES_RE.sub("", (line or "").strip())
     m = _BENCH_LINE_RE.match(line)
     if not m or not _JUDGE_TITLE_RE.search(line):
-        return 0
+        return []
     body = re.sub(r"\[[^\]]{0,6}\]|[*†‡]", "", line[m.end():])
     # The bench ends with the sentence that names it.
     body = re.split(r"(?<![A-Z])\.\s+(?=[A-Z][a-z])", body)[0]
-    count = 0
+    names = []
     for piece in re.split(r"[,;]|\band\b|&", body):
         # "…, United States District Judge for the Eastern District of …"
         piece = re.sub(r"\b(?:for|of)\s+the\b.*", "", piece,
                        flags=re.IGNORECASE)
-        name = _BENCH_WORDS_RE.sub(" ", piece)
+        name = re.sub(r"\s+", " ", _BENCH_WORDS_RE.sub(" ", piece)).strip()
         if re.search(r"(?<![^\W\d_])[^\W\d_a-z][^\W\d_]", name):
-            count += 1
-    return count
+            names.append(name)
+    return names
+
+
+def bench_size(line: str) -> int:
+    """How many judges a bench line names (see :func:`bench_names`)."""
+    return len(bench_names(line))
+
+
+# The D.C. Circuit lists its writings by their authors ahead of the
+# opinion: "Dissenting opinion filed by Circuit Judge Kavanaugh, with whom
+# Senior Circuit Judge Randolph joins."
+_FILED_BY_JUDGE_RE = re.compile(
+    r"\b(?:filed|written)\s+by\s+(?:(?:Chief|Senior|Presiding)\s+)?"
+    r"(?:Circuit\s+|District\s+)?Judges?\s+"
+    r"(?P<name>[A-Z][\w'’.-]*(?:\s+[A-Z][\w'’.-]*)*)")
+
+
+def judges_named(front_matter: Iterable[str]) -> set[str]:
+    """The judges the opinion's front matter names, as it names them, in
+    lower case: its bench, and the authors of the writings it lists ("…
+    filed by Circuit Judge Henderson")."""
+    found: set[str] = set()
+    for text in front_matter:
+        line = _front_line(text)
+        found.update(n.lower() for n in bench_names(line))
+        found.update(m.group("name").rstrip(".,;:").lower()
+                     for m in _FILED_BY_JUDGE_RE.finditer(line))
+    return found
 
 
 def _front_line(text: str) -> str:

@@ -713,6 +713,19 @@ class PartMapLabelTests(unittest.TestCase):
         self.assertEqual(self.short("PER CURIAM", "majority"),
                          "Opinion (per curiam)")
 
+    def test_a_circuit_judge_named_in_full_is_the_surname(self):
+        # PHH Corp. v. CFPB, 881 F.3d 75 (D.C. Cir. 2018): the strip had
+        # named Judge Henderson "Karen".
+        for label, name in (
+                ("KAREN LeCRAFT HENDERSON, Circuit Judge, dissenting:",
+                 "Henderson"),
+                ("Kavanaugh, Circuit Judge, with whom Senior Circuit Judge "
+                 "Randolph joins, dissenting:", "Kavanaugh"),
+                ("ST. EVE, Circuit Judge, concurring:", "St. Eve"),
+                ("JAMES C. HO, Circuit Judge, concurring:", "Ho")):
+            with self.subTest(label=label):
+                self.assertEqual(self.short(label, "dissent"), name)
+
     def test_an_unattributed_writing_falls_back_to_its_kind(self):
         self.assertEqual(self.short("", "concurrence"), "Concurrence")
 

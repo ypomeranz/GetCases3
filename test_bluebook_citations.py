@@ -6244,6 +6244,52 @@ class WriterParentheticalTests(unittest.TestCase):
             [Block("para", [Span(first_line)])],
         )
 
+    def test_the_surname_the_bench_gives_a_judge(self):
+        # PHH Corp. v. CFPB, 881 F.3d 75 (D.C. Cir. 2018) (en banc): the
+        # byline prints "KAREN LeCRAFT HENDERSON", the bench and the list
+        # of writings "Henderson" — she had been "LeCraft Henderson, J.".
+        win = self._win()
+        header = OpinionPart("Header", "header", [
+            Block("para", [Span(
+                "Before: Garland, Chief Judge, Henderson, Rogers, Tatel, "
+                "Brown, Griffith, Kavanaugh, Srinivasan, Millett, Pillard, "
+                "Wilkins, and Katsas, Circuit Judges and Randolph, Senior "
+                "Circuit Judge.")]),
+            Block("para", [Span(
+                "Dissenting opinion filed by Circuit Judge Henderson.")])])
+        dissent = self._part(
+            "dissent", "KAREN LeCRAFT HENDERSON, Circuit Judge, dissenting:")
+        win._parts = [header, dissent]
+        self.assertEqual(win._writer_parenthetical(dissent),
+                         "Henderson, J., dissenting")
+        # Where neither names the judge, only a given name goes: "Yvonne
+        # Gonzalez Rogers" is Gonzalez Rogers.
+        win = self._win()
+        rogers = self._part(
+            "concurrence",
+            "YVONNE GONZALEZ ROGERS, District Judge, concurring:")
+        win._parts = [rogers]
+        self.assertEqual(win._writer_parenthetical(rogers),
+                         "Gonzalez Rogers, J., concurring")
+
+    def test_a_byline_s_footnote_mark_takes_no_colon_with_it(self):
+        part = self._part(
+            "concurrence",
+            "GRIFFITH, Circuit Judge, concurring in the judgment:[1]")
+        self.assertEqual(self._win()._writer_parenthetical(part),
+                         "Griffith, J., concurring in the judgment")
+
+    def test_a_two_letter_surname_is_cased(self):
+        # United States v. Rahimi, 61 F.4th 443 (5th Cir. 2023).
+        win = self._win()
+        header = OpinionPart("Header", "header", [Block("para", [Span(
+            "Before JONES, HO, and WILSON, Circuit Judges.")])])
+        ho = self._part("concurrence",
+                        "JAMES C. HO, Circuit Judge, concurring:")
+        win._parts = [header, ho]
+        self.assertEqual(win._writer_parenthetical(ho),
+                         "Ho, J., concurring")
+
     def test_joinder_byline_without_role_uses_part_kind(self):
         # Cohen v. California, 403 U.S. 15 (1971): Blackmun's byline names
         # only the joiners; the role was read from his opening lines when
