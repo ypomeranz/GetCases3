@@ -3071,6 +3071,51 @@ def in_re_caps_name(caption: str) -> str | None:
     return f"{prefix} {lead}{name}" if name else None
 
 
+# A group of cases decided together that the reporter heads with a popular
+# name — "SLAUGHTER-HOUSE CASES.", "CIVIL RIGHTS CASES.", "LEGAL TENDER
+# CASES." — is cited by that name alone, not by the first of the captions
+# set under it: Slaughter-House Cases, 83 U.S. (16 Wall.) 36 (1873); Civil
+# Rights Cases, 109 U.S. 3 (1883); Legal Tender Cases, 79 U.S. (12 Wall.)
+# 457 (1871).  The name is a title, not a party's, so table T6 has no word
+# of it to abbreviate (never "C.R. Cases").
+_COLLECTIVE_NAME_RE = re.compile(
+    r"\s*(?:the\s+)?(?P<name>\S+(?:\s+\S+){0,7}?\s+cases)(?:\.|[;:]|$)",
+    re.IGNORECASE)
+# A heading's first word that says how many cases, or that they were heard
+# together, rather than naming them: "CONSOLIDATED CASES.", "SAME CASES."
+_COLLECTIVE_GENERIC_WORDS = frozenset({
+    "the", "all", "both", "these", "those", "other", "same", "such",
+    "several", "related", "companion", "consolidated", "combined",
+    "joined", "joint", "cross", "two", "three", "four", "five", "six",
+    "seven", "eight", "nine", "ten", "eleven", "twelve",
+})
+
+
+def collective_case_name(caption: str) -> str | None:
+    """The popular name a caption opens with when it heads a group of cases
+    — "SLAUGHTER-HOUSE CASES. THE BUTCHERS' BENEVOLENT ASSOCIATION … v. …"
+    is "SLAUGHTER-HOUSE CASES" — without its "The" (rule 10.2.1(d): "The
+    Prize Cases" are Prize Cases) and in the caption's own casing, for the
+    caller to case; or None when the caption opens with no such name."""
+    m = _COLLECTIVE_NAME_RE.match(caption or "")
+    if not m:
+        return None
+    name = m.group("name")
+    words = name.split()
+    # A name the caption gives "v." in, or that a procedural prefix opens
+    # ("In re Marriage Cases"), is the party caption's own.
+    if (any(w.lower() in ("v.", "vs.", "v", "vs") for w in words)
+            or _PROCEDURAL_PREFIX_RE.match(name)
+            or words[0].lower().strip(",.") in _COLLECTIVE_GENERIC_WORDS
+            or not re.search(r"[^\W\d_]{3}", " ".join(words[:-1]))):
+        return None
+    # …and a sentence ends nowhere in it ("…ET AL. GRAIN CASES" would be
+    # another caption's tail).
+    if any(_caps_run_sentence_end(w) for w in words[:-1]):
+        return None
+    return name
+
+
 # Where the one party a procedural caption is cited by ends (rule 10.2.1(a),
 # (b)): at an appositive describing it — "a Pennsylvania Corporation", "an
 # Infant" — or its role in the proceeding, "Bankrupt", "Debtor", after which a
@@ -3913,6 +3958,9 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
     name = _clean_caption(name)
     if not name:
         return name
+    collective = collective_case_name(name)
+    if collective:
+        return _finish_case_name(collective)
     # An ejectment party is cited as the caption puts it — "Den ex dem.
     # Murray", "Lessee of Livingston", "Hunter's Lessee" — until the citing
     # opinions say otherwise (see ejectment_case_names).
@@ -4304,6 +4352,9 @@ if __name__ == "__main__":
         # a bare business name: their leading article still drops.
         ("The Prize Cases", "Prize Cases"),
         ("The Pocket Veto Case", "Pocket Veto Case"),
+        # A group's popular name is cited alone, its words unabbreviated.
+        ("Civil Rights Cases", "Civil Rights Cases"),
+        ("Legal Tender Cases. Knox v. Lee", "Legal Tender Cases"),
         ("The Boeing Company", "Boeing Co."),
         # Widely recognized initials (rule 10.2.1(c))
         ("Lorenzo v. Securities and Exchange Commission", "Lorenzo v. SEC"),

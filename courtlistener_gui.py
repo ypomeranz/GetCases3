@@ -1213,6 +1213,7 @@ from bluebook_names import (
     abbreviate_case_name,
     caption_case_reference_tokens,
     collapse_personal_all_caps_run,
+    collective_case_name,
     cut_companion_cases,
     described_person_surname,
     ejectment_case_names,
@@ -18855,6 +18856,12 @@ def _scholar_caption_name(blocks) -> str:
                 return refine(_titlecase_caps(named))
             t2 = _trim_procedural_caption(_cut_companion_cases(t))
             return refine(_titlecase_caps(t2.strip()))
+        # A group of cases the reporter heads with its popular name
+        # ("SLAUGHTER-HOUSE CASES. THE BUTCHERS' BENEVOLENT ASSOCIATION … v.
+        # …") is cited by that name, not by the first caption under it.
+        collective = collective_case_name(t)
+        if collective:
+            return refine(_titlecase_caps(collective))
         # Google Scholar renders the party separator in lowercase ("… v. …")
         # even for ALL-CAPS captions ("MERCY HOSPITAL, INC. v. JACKSON"), so
         # a lowercase "v."/"vs." — or the earliest reports' spelled-out

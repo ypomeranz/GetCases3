@@ -60,6 +60,7 @@ from court_catalog import (
 )
 from bluebook_names import (
     abbreviate_case_name,
+    collective_case_name,
     cut_companion_cases,
     normal_case_caption,
     refine_caption_case,
@@ -555,6 +556,11 @@ def _caption_name(blocks: list) -> str:
             continue
         if citations.TEXT_CITE_RE.match(t):
             continue  # a bare citation line, not the caption
+        # A group of cases is cited by the popular name heading it
+        # ("SLAUGHTER-HOUSE CASES."), not by the first caption under it.
+        collective = collective_case_name(t)
+        if collective:
+            return collective
         sides = re.split(r"\s+vs?\.\s+", t, maxsplit=1)
         if len(sides) != 2:
             sides = re.split(r"\s+[vV]s?\.\s+", t, maxsplit=1)

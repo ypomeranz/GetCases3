@@ -5566,6 +5566,84 @@ class InReCapitalsCaptionTests(unittest.TestCase):
                          "In re J.C. Penney Co.")
 
 
+class CollectiveCaseNameTests(unittest.TestCase):
+    """A group of cases the reporter heads with a popular name is cited by
+    that name alone.  The Slaughter-House Cases had been cited "Slaughter-
+    House Cases. the Butchers' Benevolent Ass'n v. Crescent City Live-Stock
+    Landing & Slaughter-House Co.", and the Civil Rights Cases "C.R.
+    Cases"."""
+
+    SLAUGHTER_HOUSE = (
+        "SLAUGHTER-HOUSE CASES.<br/>THE BUTCHERS' BENEVOLENT ASSOCIATION OF "
+        "NEW ORLEANS<br/>v.<br/>THE CRESCENT CITY LIVE-STOCK LANDING AND "
+        "SLAUGHTER-HOUSE COMPANY.<br/>PAUL ESTEBEN, L. RUCH, ET AL.<br/>v."
+        "<br/>THE STATE OF LOUISIANA, ex rel. S. BELDEN, Attorney-General.")
+
+    def test_the_heading_is_the_name(self):
+        from google_scholar import parse_opinion_blocks
+        for cite_line, caption, cited in (
+                ("83 U.S. 36 (1873)", self.SLAUGHTER_HOUSE,
+                 "Slaughter-House Cases"),
+                ("109 U.S. 3 (1883)", "CIVIL RIGHTS CASES.",
+                 "Civil Rights Cases"),
+                ("109 U.S. 3 (1883)", "CIVIL RIGHTS CASES.<br/>UNITED STATES"
+                 "<br/>v.<br/>STANLEY.<br/>SAME<br/>v.<br/>RYAN.",
+                 "Civil Rights Cases"),
+                ("79 U.S. 457 (1871)", "LEGAL TENDER CASES.<br/>KNOX<br/>v."
+                 "<br/>LEE.<br/>PARKER<br/>v.<br/>DAVIS.",
+                 "Legal Tender Cases"),
+                ("112 U.S. 580 (1884)", "HEAD MONEY CASES.<br/>EDYE &amp; "
+                 "Another<br/>v.<br/>ROBERTSON, Collector.",
+                 "Head Money Cases"),
+                ("207 U.S. 463 (1908)", "EMPLOYERS' LIABILITY CASES.<br/>"
+                 "HOWARD<br/>v.<br/>ILLINOIS CENTRAL RAILROAD COMPANY.",
+                 "Employers’ Liability Cases")):
+            with self.subTest(cited=cited, caption=caption[:40]):
+                blocks = parse_opinion_blocks(_scholar_page(cite_line,
+                                                            caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    cited)
+                # The opinion database reads the caption the same way.
+                from opinion_db import _caption_name
+                self.assertEqual(abbreviate_case_name(
+                    normal_case_caption(_caption_name(blocks))), cited)
+
+    def test_a_stored_or_listed_name_too(self):
+        for name, cited in (
+                # An opinion database record saved before this reading.
+                ("Slaughter-house Cases. the Butchers’ Benevolent Ass'n of "
+                 "New Orleans v. Crescent City Live-stock Landing & "
+                 "Slaughter-house Company. Paul Esteben, L. Ruch",
+                 "Slaughter-House Cases"),
+                # CourtListener's and case.law's names: no T6 abbreviation.
+                ("Civil Rights Cases", "Civil Rights Cases"),
+                ("The Civil Rights Cases", "Civil Rights Cases"),
+                ("Legal Tender Cases. Knox v. Lee", "Legal Tender Cases"),
+                ("Sinking-Fund Cases.", "Sinking-Fund Cases"),
+                ("Penn Central Merger and N & W Inclusion Cases",
+                 "Penn Central Merger and N & W Inclusion Cases"),
+                ("The Prize Cases", "Prize Cases")):
+            with self.subTest(name=name[:40]):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_where_the_rule_stands_aside(self):
+        for name, cited in (
+                ("In re Marriage Cases", "In re Marriage Cases"),
+                ("In re Western Liquid Asphalt Cases",
+                 "In re W. Liquid Asphalt Cases"),
+                # A firm's name that ends in the word.
+                ("Brief Cases, Inc. v. Jones", "Brief Cases, Inc. v. Jones"),
+                # A heading that only counts the cases or joins them.
+                ("Consolidated Cases. Smith v. Jones",
+                 "Consol. Cases. Smith v. Jones"),
+                ("Two Cases", "Two Cases"),
+                # One case's popular name is left as before.
+                ("The Pocket Veto Case", "Pocket Veto Case")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+
 class FirmInitialsCaptionTests(unittest.TestCase):
     """A firm keeps the initials in its name (rule 10.2.1(g)).  In Scholar's
     all-caps "S. H. KRESS & CO." the initials had read as a person's given
