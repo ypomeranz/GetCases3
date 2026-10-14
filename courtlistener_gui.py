@@ -18711,6 +18711,12 @@ def _scholar_court_id(blocks) -> str:
                    ).strip().rstrip(".").lower()
         if not t or "court" not in t or "district court" in t or "bankruptcy" in t:
             continue
+        # The caption is no court line, though its parties may name a state
+        # and a "court" — "WP Company LLC, d/b/a The Washington Post" put a
+        # Fourth Circuit case in the Supreme Court of Washington.  A court
+        # line is short and names no adversaries.
+        if len(t) > 160 or re.search(r"\svs?\.\s", t):
+            continue
         if "supreme court" in t and "united states" in t:
             return "scotus"
         for court_name, court_id in _SCHOLAR_FEDERAL_COURTS:
