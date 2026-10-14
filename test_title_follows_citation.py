@@ -84,6 +84,24 @@ class HeaderCourtTests(unittest.TestCase):
         self.assertEqual(g._scholar_court_id(centers(
             "On Appeal from the United States Court of Claims.")), "")
 
+    def test_the_caption_is_no_court_line(self):
+        # Blankenship v. NBCUniversal, 60 F.4th 744 (4th Cir. 2023), had
+        # been cited "(Wash. 2023)": a party is The Washington Post.
+        self.assertEqual(g._scholar_court_id(centers(
+            "60 F.4th 744 (2023)",
+            "Don BLANKENSHIP, Plaintiff-Appellant, v. NBCUNIVERSAL, LLC; "
+            "Fox News Network, L.L.C.; WP Company LLC, d/b/a The "
+            "Washington Post; Court TV Media, LLC, Defendants-Appellees.",
+            "No. 22-1198.",
+            "United States Court of Appeals, Fourth Circuit.")), "ca4")
+        # Bristol-Myers Squibb Co. v. Superior Court of California.
+        self.assertEqual(g._scholar_court_id(centers(
+            "137 S.Ct. 1773 (2017)",
+            "BRISTOL-MYERS SQUIBB COMPANY, Petitioner v. SUPERIOR COURT OF "
+            "CALIFORNIA, SAN FRANCISCO COUNTY, et al.",
+            "No. 16-466.",
+            "Supreme Court of United States.")), "scotus")
+
     def test_the_circuits_and_the_supreme_court_as_before(self):
         self.assertEqual(g._scholar_court_id(centers(
             "United States Court of Appeals, Ninth Circuit.")), "ca9")
