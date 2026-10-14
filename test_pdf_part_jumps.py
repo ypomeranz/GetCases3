@@ -146,6 +146,27 @@ class StartAtTests(unittest.TestCase):
         self.assertIsNone(so.SlipSection("X", "majority", 3).start_at)
 
 
+class GivingWayTests(unittest.TestCase):
+    """A worker reading the parts stands aside a page at a time while the
+    window is busy (the GUI passes its _yield_to_ui), and reads the same."""
+
+    def test_each_pass_gives_way_page_by_page(self):
+        calls = []
+        paced = so.detect_sections(
+            _MIDPAGE_DOC, between_pages=lambda: calls.append(1))
+        # The lines, the running heads, the parts: a page at a time each.
+        self.assertEqual(len(calls), 3 * len(_MIDPAGE_DOC))
+        self.assertEqual(paced, so.detect_sections(_MIDPAGE_DOC))
+
+    def test_so_does_the_scan_for_openings_on_headless_pages(self):
+        doc = [_page(["SMITH, Circuit Judge:", "The judgment is affirmed."]),
+               _page(["JONES, Circuit Judge, dissenting.", "I would not."])]
+        calls = []
+        paced = so.detect_sections(doc, between_pages=lambda: calls.append(1))
+        self.assertEqual(len(calls), 3 * len(doc))
+        self.assertEqual(paced, so.detect_sections(doc))
+
+
 # ---------------------------------------------------------------------------
 # The reader's footnote markers, which have to survive justification
 # ---------------------------------------------------------------------------

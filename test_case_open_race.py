@@ -1086,6 +1086,16 @@ class UiFirstTests(unittest.TestCase):
             between_pages=lambda: calls.append(1))
         self.assertEqual(len(calls), 3)
 
+    def test_the_citation_scan_gives_way_page_by_page(self):
+        data = _pdf(TEXT_BLOCK, TEXT_BLOCK, TEXT_BLOCK)
+        pages, italics = gui._extract_pdf_text_and_style(data)
+        calls = []
+        with mock.patch.object(gui, "detect_brief_links", return_value=[]):
+            gui._citation_links_from_visible_pdf_text(
+                data, pages, italics, between_pages=lambda: calls.append(1))
+        # A page at a time in the look for OCR scans, and in the reading.
+        self.assertEqual(len(calls), 6)
+
 
 # ---------------------------------------------------------------------------
 # Cyclic garbage, collected on the Tk thread out of the reader's way

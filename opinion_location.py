@@ -1047,7 +1047,12 @@ def _align_variant(
     source: _SourceIndex,
     page_words: tuple[_Word, ...],
     hints: Iterable[int] = (),
+    between_tries=None,
 ) -> tuple[float, tuple[tuple[int, int, int], ...]]:
+    """How well *page_words* match the source, and where: the best of the
+    likeliest placements, each tried with a sequence match.
+    *between_tries*, when given, is called before each try (see
+    align_opinion_locations)."""
     if len(source.words) < 2 or len(page_words) < 2:
         return 0.0, ()
     source_values = source.values
@@ -1056,6 +1061,8 @@ def _align_variant(
     best_blocks: tuple[tuple[int, int, int], ...] = ()
     margin = max(12, min(40, len(page_values) // 4))
     for delta in _alignment_candidates(source, page_words, hints):
+        if between_tries is not None:
+            between_tries()
         lo = max(0, delta - margin)
         hi = min(len(source_values), delta + len(page_values) + margin)
         if hi - lo < 2:
@@ -1273,9 +1280,10 @@ def align_opinion_locations(
 ) -> OpinionLocationMap:
     """Align an opinion source with extracted PDF glyph pages.
 
-    *between_pages*, when given, is called before each page is matched: a
-    worker's chance to stand aside while the window is busy (the GUI passes
-    its ``_yield_to_ui``)."""
+    *between_pages*, when given, is called before each page is matched,
+    and every few milliseconds while it is — before each reading of the
+    page, and each placement of a reading tried: a worker's chance to stand
+    aside while the window is busy (the GUI passes its ``_yield_to_ui``)."""
     native_cite = native_cite or source.native_cite
     native = parse_reporter_cite(native_cite)
     us = parse_reporter_cite(us_cite)
@@ -1320,7 +1328,10 @@ def align_opinion_locations(
         best_words: tuple[_Word, ...] = ()
         best_blocks: tuple[tuple[int, int, int], ...] = ()
         for variant in _page_variants(chars):
-            score, blocks = _align_variant(source_index, variant, hints)
+            if between_pages is not None:
+                between_pages()
+            score, blocks = _align_variant(
+                source_index, variant, hints, between_pages)
             if score > best_score:
                 best_score, best_words, best_blocks = score, variant, blocks
         matched = sum(size for _p, _s, size in best_blocks)

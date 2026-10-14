@@ -176,7 +176,7 @@ class AlignmentTests(unittest.TestCase):
         )
         self.assertGreater(location_map.confidence, 0.25)
 
-    def test_alignment_gives_way_page_by_page(self):
+    def test_alignment_gives_way_page_by_page_and_within_one(self):
         source = build_plain_text_source(
             "The constitutional analysis therefore requires careful review "
             "of history and long-standing practice. Congress adopted the "
@@ -190,7 +190,8 @@ class AlignmentTests(unittest.TestCase):
         calls = []
         yielding = align_opinion_locations(
             source, pages, between_pages=lambda: calls.append(1))
-        self.assertEqual(len(calls), 2)
+        # Before each page, and each reading of it and placement tried.
+        self.assertGreaterEqual(len(calls), 3 * len(pages))
         self.assertEqual(yielding, align_opinion_locations(source, pages))
 
     def test_dual_column_geometry_uses_column_reading_order(self):

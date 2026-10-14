@@ -14198,14 +14198,15 @@ class CourtListenerGUI:
                 _yield_to_ui()
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
-                        data, pages, italics)
+                        data, pages, italics, between_pages=_yield_to_ui)
                     if state_court:
                         # A state court's "Article I, § 7": its own.
                         links = _federal_constitution_only_pages(links)
                 except Exception as exc:
                     print(f"[cite-pdf] citation scan failed: {exc}")
                 try:
-                    sections = slip_opinion.detect_sections(pages)
+                    sections = slip_opinion.detect_sections(
+                        pages, between_pages=_yield_to_ui)
                 except Exception as exc:
                     print(f"[cite-pdf] section detection failed: {exc}")
             # What the pages call themselves, where they say: a preliminary
@@ -21586,7 +21587,7 @@ def _page_has_scan_background(page) -> bool:
     return False
 
 
-def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
+def _pdf_ocr_scan_pages(pdf_bytes: bytes, between_pages=None) -> set[int]:
     """Page indexes whose OCR geometry is not safe to color.
 
     Some GovInfo U.S. Reports PDFs (including volume 567) are full-page
@@ -21595,14 +21596,23 @@ def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
     letter-spaced (``"C i t e  a s: 5 6 7 U. S."``). The extractor repairs
     that distinctive geometry; those pages can therefore use the ordinary
     blue citation treatment. Other OCR-over-scan pages remain quiet.
+
+    The PDFium lock is taken a page at a time, as in
+    :func:`_extract_pdf_text_and_style`, and ``between_pages`` is called
+    before each page (see _yield_to_ui).
     """
     import pypdfium2 as pdfium
 
     pages: set[int] = set()
     with _PDFIUM_LOCK:
         doc = pdfium.PdfDocument(pdf_bytes)
-        try:
-            for i in range(len(doc)):
+    try:
+        with _PDFIUM_LOCK:
+            n_pages = len(doc)
+        for i in range(n_pages):
+            if between_pages is not None:
+                between_pages()
+            with _PDFIUM_LOCK:
                 page = doc[i]
                 try:
                     if (
@@ -21612,7 +21622,8 @@ def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
                         pages.add(i)
                 finally:
                     page.close()
-        finally:
+    finally:
+        with _PDFIUM_LOCK:
             doc.close()
     return pages
 
@@ -22465,7 +22476,8 @@ def _extract_pdf_text_and_style(
             doc.close()
 
 
-def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) -> dict:
+def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None,
+                               between_pages=None) -> dict:
     """Build the per-page clickable-citation rectangles from extracted page char
     data (see :func:`_extract_pdf_text_pages`).  Pure — no PDFium, no tk — so it
     is cheap to run on the worker right after extraction:
@@ -22475,11 +22487,14 @@ def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) ->
     Detection runs over the whole document at once (so "Id." and short forms
     resolve against citations anywhere in it); a per-character offset map ties
     each detected span back to its glyph boxes, and a citation that wraps across
-    lines (or pages) becomes one rectangle per line."""
+    lines (or pages) becomes one rectangle per line.  ``between_pages`` is
+    called before each page is read (see _yield_to_ui)."""
     parts: list = []               # global text pieces
     gmap: list = []                # global index -> (page, local) or (None, None)
     slants: list = []              # global index -> is the glyph italic
     for pi, chars in enumerate(pages):
+        if between_pages is not None:
+            between_pages()
         page_italics = italics[pi] if italics and pi < len(italics) else ()
         # A footnote mark is scanned as a space: in front of a record cite it
         # would be a volume ("injury.⁴ Appl. 6" as 4 Appl. 6), after a page
@@ -22546,19 +22561,22 @@ def _detect_pdf_citation_links(pdf_bytes: bytes) -> dict:
 
 def _citation_links_from_visible_pdf_text(
     pdf_bytes: bytes, pages: list, italics: "Optional[list]" = None,
+    between_pages=None,
 ) -> "tuple[dict, set[int]]":
     """Citation rectangles for the whole document, plus the page indexes
     whose OCR glyph geometry remains unsuitable for coloring. The repairable
     zero-height GovInfo layer has already been normalized by extraction; other
     OCR boxes can land imprecisely, so the pane renders those pages' links
     *quietly* — no tint, no recoloring — while keeping them clickable (see
-    :meth:`_PdfPane.set_citation_links`)."""
+    :meth:`_PdfPane.set_citation_links`).  ``between_pages`` is called
+    before each page is read, in both passes (see _yield_to_ui)."""
     try:
-        ocr_pages = _pdf_ocr_scan_pages(pdf_bytes)
+        ocr_pages = _pdf_ocr_scan_pages(pdf_bytes, between_pages)
     except Exception as exc:
         print(f"[pdf-links] OCR scan check failed: {exc}")
         ocr_pages = set()
-    return _citation_links_from_pages(pages, italics), ocr_pages
+    return (_citation_links_from_pages(pages, italics, between_pages),
+            ocr_pages)
 
 
 # ---------------------------------------------------------------------------
@@ -36361,7 +36379,7 @@ class _ScholarTextWindow:
                 _yield_to_ui()
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
-                        data, pages, italics
+                        data, pages, italics, between_pages=_yield_to_ui
                     )
                     if state_court:
                         # A state court's "Article I, § 7": its own.
@@ -36369,7 +36387,8 @@ class _ScholarTextWindow:
                 except Exception as exc:
                     print(f"[pdf-links] citation scan failed: {exc}")
                 try:
-                    sections = slip_opinion.detect_sections(pages)
+                    sections = slip_opinion.detect_sections(
+                        pages, between_pages=_yield_to_ui)
                 except Exception as exc:
                     print(f"[pdf-parts] section detection failed: {exc}")
                 if not cite:
@@ -36395,6 +36414,10 @@ class _ScholarTextWindow:
                 "pdf_cite": cite,
                 "url": url,
             }
+            # Taking the result in is Tk work too — a mark in the text for
+            # every anchor found, some tens of milliseconds of a long
+            # opinion's — so it waits for a scroll to finish, as a page does.
+            _yield_to_ui()
             self._post(self._finish_pdf_analysis, key, result)
 
         threading.Thread(target=run, daemon=True).start()
