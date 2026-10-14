@@ -58,6 +58,7 @@ from court_catalog import (
     bluebook_federal_trial_court,
     state_of_court,
 )
+from scholar_caption import scholar_caption_name
 from bluebook_names import (
     abbreviate_case_name,
     collective_case_name,
@@ -74,7 +75,9 @@ from bluebook_names import (
 # amendment — that older releases saved as the decision's.  v8 names, from
 # its caption, a stored opinion saved without a name: a lone petitioner's
 # ("HANS NIELSEN, Petitioner." is In re Nielsen), a group's popular name.
-_SCHEMA_VERSION = 8
+# v9 reads those it still could not name as the opinion window reads them:
+# an in rem vessel's ("THE ROANOKE."), a caption joined by "versus".
+_SCHEMA_VERSION = 9
 
 # Record field holding the reporter pagination recovered from an official scan
 # (see :meth:`OpinionDB.save_pagination`).  Records written before this field
@@ -668,6 +671,12 @@ def extract_record(
             # guesses ("Us Dominion" -> "US Dominion").
             raw_name = refine_caption_case(raw_name, prose)
             raw_name = simplify_historical_entity_caption(raw_name, prose)
+        else:
+            # A caption this reading can't take — an in rem vessel's ("THE
+            # ROANOKE."), one joined by "versus" (Calder v. Bull), a case's
+            # own name ("Hayburn's Case") — is read as the opinion window
+            # reads it.
+            raw_name = scholar_caption_name(blocks)
 
     cites = _header_cites(blocks)
     for c in item.get("citation", []) or []:
@@ -1068,9 +1077,11 @@ class OpinionDB:
             # Saved before its caption could be read; read now as
             # extract_record reads one.
             raw = _caption_name(blocks)
+            raw = _smart_titlecase(raw) if raw else scholar_caption_name(
+                blocks)
             if raw:
                 name = abbreviate_case_name(
-                    _smart_titlecase(raw),
+                    raw,
                     court_state=state_of_court(str(rec.get("court") or "")))
                 parties = None
         if parties is None:

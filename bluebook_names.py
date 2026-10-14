@@ -3101,6 +3101,13 @@ def in_re_caps_name(caption: str) -> str | None:
 _COLLECTIVE_NAME_RE = re.compile(
     r"\s*(?:the\s+)?(?P<name>\S+(?:\s+\S+){0,7}?\s+cases)(?:\.|[;:]|$)",
     re.IGNORECASE)
+# A single case's popular name is a title too, where it is the whole caption
+# — "CHILD LABOR TAX CASE." (259 U.S. 20) is the Child Labor Tax Case, never
+# "Child Lab. Tax Case".  As a heading over a party caption ("LOTTERY CASE.
+# CHAMPION v. AMES.") it gives way to the caption.
+_SINGLE_CASE_NAME_RE = re.compile(
+    r"\s*(?:the\s+)?(?P<name>\S+(?:\s+\S+){0,7}?\s+case)\.?\s*$",
+    re.IGNORECASE)
 # A heading's first word that says how many cases, or that they were heard
 # together, rather than naming them: "CONSOLIDATED CASES.", "SAME CASES."
 _COLLECTIVE_GENERIC_WORDS = frozenset({
@@ -3117,7 +3124,8 @@ def collective_case_name(caption: str) -> str | None:
     is "SLAUGHTER-HOUSE CASES" — without its "The" (rule 10.2.1(d): "The
     Prize Cases" are Prize Cases) and in the caption's own casing, for the
     caller to case; or None when the caption opens with no such name."""
-    m = _COLLECTIVE_NAME_RE.match(caption or "")
+    m = (_COLLECTIVE_NAME_RE.match(caption or "")
+         or _SINGLE_CASE_NAME_RE.match(caption or ""))
     if not m:
         return None
     name = m.group("name")
@@ -3936,6 +3944,10 @@ def _clean_caption(name: str) -> str:
     # (THE "SCOTLAND.", 105 U.S. 24) — the quotes are the reporter's
     # typography, never part of the Bluebook name.
     name = re.sub(r"[“”\"]", "", name)
+    # A bracket closed by a brace, or a brace by a bracket, is a scan's
+    # garbling, never a name's: "CHIRAC and Others {VV] against REINICKER."
+    # (24 U.S. 280).
+    name = re.sub(r"\s*(?:\{[^{}\[\]]{0,6}\]|\[[^{}\[\]]{0,6}\})", "", name)
     # A caption's footnote marker clings to the end of the name — a
     # reference symbol ("THE EUGENE F. MORAN.*"), Scholar's bracketed form
     # ("The Eugene F. Moran.[1]", same token shape google_scholar's

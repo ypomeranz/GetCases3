@@ -3629,6 +3629,58 @@ class ReporterEquivalenceTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_captions_the_light_reading_cannot_take(self):
+        # In rem vessels, captions joined by "versus", a case's own name:
+        # the database reads them as the opinion window does.  They had
+        # been stored without a name.
+        from opinion_db import extract_record
+        for cite_line, caption, named in (
+                ("189 U.S. 185 (1903)", "THE ROANOKE.", "The Roanoke"),
+                ("175 U.S. 677 (1900)", "THE PAQUETE HABANA. THE LOLA.",
+                 "The Paquete Habana"),
+                ("3 U.S. 386 (1798)", "Calder et Wife versus Bull et Wife.",
+                 "Calder v. Bull"),
+                ("259 U.S. 20 (1922)", "CHILD LABOR TAX CASE.",
+                 "Child Labor Tax Case"),
+                ("24 U.S. 280 (1826)",
+                 "CHIRAC and Others {VV] against REINICKER.",
+                 "Chirac v. Reinicker")):
+            with self.subTest(caption=caption):
+                record = extract_record(
+                    "https://scholar.google.com/scholar_case?case=1",
+                    _scholar_page(cite_line, caption,
+                                  "Supreme Court of United States."))
+                self.assertEqual(record["name"], named)
+        html = _scholar_page("189 U.S. 185 (1903)", "THE ROANOKE.",
+                             "Supreme Court of United States.")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = OpinionDB(root / "opinions.jsonl", root / "opinions.db")
+            try:
+                self.assertTrue(db.add({
+                    "scholar_id": "189", "name": "", "parties": [],
+                    "cites": ["189 U.S. 185"], "court": "scotus",
+                    "html_gz": _gz_pack(html),
+                }))
+                self.assertEqual(
+                    [hit["name"] for hit in db.search_names("Roanoke")],
+                    ["The Roanoke"])
+            finally:
+                db.close()
+
+    def test_the_caption_reader_needs_no_tkinter(self):
+        # The database reads captions on worker threads and in builds
+        # without Tk.
+        import subprocess
+        import sys
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, scholar_caption, opinion_db; "
+             "print('tkinter' in sys.modules)"],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parent))
+        self.assertEqual(out.stdout.strip(), "False", out.stderr)
+
     def test_index_points_at_the_jsonl_instead_of_copying_opinions(self):
         # The index keeps only what search reads plus a byte offset into the
         # JSONL; the opinion itself is read back through that pointer.
