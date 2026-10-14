@@ -449,5 +449,31 @@ class HistoricalAndSignatureBoundaryTests(unittest.TestCase):
         self.assertEqual([part.kind for part in parts], ["majority", "dissent", "dissent"])
 
 
+    def test_a_list_of_the_writings_opens_none_of_them(self):
+        # PHH Corp. v. CFPB, 881 F.3d 75 (D.C. Cir. 2018) (en banc): the
+        # court's list of who filed what precedes the separate opinions, and
+        # "filed" in it was read as a clerk's filing banner — two phantom
+        # opinions, labelled "filed by Senior Circuit Judge Randolph. Tatel".
+        parts = segment_blocks([
+            _block("PILLARD, Circuit Judge:"),
+            _block("We granted en banc review to consider the statute."),
+            _block("Concurring opinion filed by Circuit Judge Tatel, with "
+                   "whom Circuit Judges Millett and Pillard join."),
+            _block("Dissenting opinion filed by Circuit Judge Kavanaugh, "
+                   "with whom Senior Circuit Judge Randolph joins."),
+            _block("Dissenting opinion filed by Senior Circuit Judge "
+                   "Randolph."),
+            _block("Tatel, Circuit Judge, with whom Circuit Judges Millett "
+                   "and Pillard join, concurring:"),
+            _block("Finding no way to avoid the constitutional question, I "
+                   "concur."),
+            _block("Randolph, Senior Circuit Judge, dissenting:"),
+            _block("The Director is an officer of the United States."),
+        ])
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence", "dissent"])
+        self.assertTrue(parts[1].label.startswith("Tatel"))
+
+
 if __name__ == "__main__":
     unittest.main()

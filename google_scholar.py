@@ -1557,9 +1557,14 @@ _INLINE_ROLE_OPEN_RE = re.compile(
     re.IGNORECASE,
 )
 # PDF-to-text extraction sometimes glues a filing banner to the dissent byline:
-# ``6 FILED ... CLERK R. NELSON, Circuit Judge, dissenting:``.
+# ``6 FILED ... CLERK R. NELSON, Circuit Judge, dissenting:``.  The banner
+# is set in capitals; the D.C. Circuit's list of the writings ("Dissenting
+# opinion filed by Circuit Judge Kavanaugh, with whom …") is no banner, and
+# read as one it split PHH Corp. v. CFPB, 881 F.3d 75, into two phantom
+# opinions.
+_FILED_BANNER_WORD_RE = re.compile(r"\b(?:FILED|CLERK)\b")
 _FILED_BANNER_ROLE_RE = re.compile(
-    r"(?:\bFILED\b|\bCLERK\b).{0,400}?"
+    r"(?-i:\bFILED\b|\bCLERK\b).{0,400}?"
     r"(?P<label>[A-Z](?:\.\s*)?[A-Z][A-Z.'’ -]{0,45},\s*"
     r"(?:(?:Chief|Senior)\s+)?(?:Circuit\s+)?Judge,.{0,160}?"
     r"(?P<role>concurring|dissenting)[^:]{0,100}:)",
@@ -1772,8 +1777,7 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
             if _content_text(nb)
         )
         filed_role = (_FILED_BANNER_ROLE_RE.search(joined_text[:4000])
-                      if re.search(r"\b(?:FILED|CLERK)\b", t, re.IGNORECASE)
-                      else None)
+                      if _FILED_BANNER_WORD_RE.search(t) else None)
         public_role = _PUBLIC_ROLE_BYLINE_RE.search(t[:4000])
         inline_role = _INLINE_ROLE_OPEN_RE.match(t[:300])
         joined_role = _JOINED_ROLE_BYLINE_RE.match(joined_text[:700])
