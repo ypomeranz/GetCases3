@@ -216,19 +216,24 @@ def split_trailing_parentheticals(
 
 _EN_BANC_WORDS = r"en\s+banc"
 
-# The front matter of a decision about rehearing en banc, or of one that
+# The front matter of a decision denying rehearing en banc, or of one that
 # records its denial: "Rehearing En Banc Denied", "As Amended on Denial of
 # Rehearing and Rehearing En Banc", "voted to deny rehearing en banc", "the
 # request for en banc review is denied", "dissenting from the denial of
-# rehearing en banc", "On Petition for Rehearing and Rehearing En Banc".
+# rehearing en banc", and the heading of the order on a petition for both
+# kinds of rehearing, "On Petition for Rehearing and Rehearing En Banc".  A
+# heading "On Petition for Rehearing En Banc" alone says neither way: the
+# D.C. Circuit heads its en banc decisions so (PHH Corp. v. CFPB, 881 F.3d
+# 75 (2018)), and an order denying the petition says so in words of its
+# own.
 _EN_BANC_REFUSED_RES = (
     re.compile(r"\b(?:deni(?:al|ed|es)|deny(?:ing)?)\b[^.;]{0,100}?\b"
                + _EN_BANC_WORDS, re.IGNORECASE),
     re.compile(_EN_BANC_WORDS + r"\b[^.;]{0,60}?\b(?:deni(?:al|ed)|"
                r"(?:is|are|was|were)\s+denied)\b", re.IGNORECASE),
     re.compile(r"\bon\s+(?:the\s+)?(?:[\w’']+\s+)?petitions?\s+for\s+"
-               r"(?:panel\s+)?rehearing\b[^.;]{0,60}?" + _EN_BANC_WORDS,
-               re.IGNORECASE),
+               r"(?:panel\s+)?rehearing\s+(?:and|or)\s+(?:for\s+)?rehearing\s+"
+               + _EN_BANC_WORDS, re.IGNORECASE),
 )
 # The front matter saying the full court heard the case: "Argued En Banc",
 # "Reargued En Banc", "Argued and Submitted En Banc", "Submitted En Banc",

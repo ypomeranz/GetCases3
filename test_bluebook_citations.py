@@ -2521,6 +2521,24 @@ class EnBancTests(unittest.TestCase):
                 self.assertFalse(decided_en_banc([court, bench],
                                                  benches=[bench]))
 
+    def test_on_petition_for_rehearing_en_banc_is_the_full_court(self):
+        # The D.C. Circuit heads its en banc decisions so: PHH Corp. v.
+        # CFPB, 881 F.3d 75 (2018), had been left unmarked.
+        front = ["United States Court of Appeals, District of Columbia "
+                 "Circuit.", "Argued May 24, 2017.",
+                 "On Petition for Rehearing En Banc.",
+                 "*77 Before: Garland[*], Chief Judge, Henderson, Rogers, "
+                 "Tatel, Brown[**], Griffith, Kavanaugh, Srinivasan, Millett, "
+                 "Pillard, Wilkins, and Katsas[*], Circuit Judges and "
+                 "Randolph, Senior Circuit Judge."]
+        self.assertTrue(decided_en_banc(front, panel_court=True))
+        # An order denying the petition says so in words of its own.
+        self.assertFalse(decided_en_banc(
+            front[:1] + ["On Petition for Rehearing En Banc."] + front[3:]
+            + ["Upon consideration of the petition for rehearing en banc, "
+               "it is ORDERED that the petition be denied."],
+            panel_court=True))
+
     def test_not_a_rehearing_en_banc_denied_nor_granted(self):
         whole = ("Before WOOD, Chief Judge, and EASTERBROOK, ROVNER, SYKES, "
                  "HAMILTON, BRENNAN, SCUDDER, ST. EVE, KIRSCH, and "
