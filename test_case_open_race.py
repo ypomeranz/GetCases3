@@ -1088,6 +1088,127 @@ class UiFirstTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Cyclic garbage, collected on the Tk thread out of the reader's way
+# ---------------------------------------------------------------------------
+
+class _FakeRoot:
+    """A Tk root that runs nothing until told: its after() callbacks queue."""
+
+    def __init__(self, clock: list) -> None:
+        self.clock = clock
+        self.queued: list = []
+        self.children: list = []
+
+    def after(self, ms, fn, *args):
+        self.queued.append((ms, fn, args))
+
+    def winfo_children(self):
+        return list(self.children)
+
+    def tick(self) -> int:
+        """Run the next queued callback, as long after as it asked."""
+        ms, fn, args = self.queued.pop(0)
+        self.clock[0] += ms / 1000
+        fn(*args)
+        return ms
+
+
+class GcTimerTests(unittest.TestCase):
+
+    def setUp(self):
+        self.clock = [1000.0]
+        clock = SimpleNamespace(monotonic=lambda: self.clock[0])
+        patches = [
+            mock.patch.object(gui, "time", clock),
+            mock.patch.object(gui, "gc"),
+            mock.patch.object(gui, "_UI_FIRST", {"until": 0.0}),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.root = _FakeRoot(self.clock)
+        self.loading = mock.Mock(is_alive=mock.Mock(return_value=True))
+
+    def _collections(self) -> list:
+        """The generations collected so far (2: the whole heap)."""
+        return [c.args[0] if c.args else 2
+                for c in gui.gc.collect.call_args_list]
+
+    def _next_tick_at(self) -> float:
+        return self.clock[0] + self.root.queued[0][0] / 1000
+
+    def _scrolling(self) -> None:
+        """The reader scrolls just before the next tick."""
+        gui._UI_FIRST["until"] = self._next_tick_at() + gui._SCROLL_HOLD_S
+
+    def test_the_young_are_collected_each_second(self):
+        gui._start_gc_timer(self.root, (self.loading,))
+        self.assertEqual(self.root.tick(), 1000)
+        self.assertEqual(self.root.tick(), 1000)
+        self.assertEqual(self._collections(), [1, 1])
+        gui.gc.freeze.assert_not_called()
+
+    def test_once_the_indexes_are_in_what_lives_is_frozen_out(self):
+        gui._start_gc_timer(self.root, (self.loading,))
+        self.root.tick()
+        self.loading.is_alive.return_value = False
+        self.root.tick()
+        self.root.tick()
+        self.assertEqual(self._collections(), [1, 2, 1])
+        gui.gc.freeze.assert_called_once()
+
+    def test_but_not_while_a_window_is_open(self):
+        # What lives in it dies with it — frozen, it never would.
+        self.loading.is_alive.return_value = False
+        self.root.children.append(object.__new__(gui.tk.Toplevel))
+        gui._start_gc_timer(self.root, (self.loading,))
+        self.root.tick()
+        gui.gc.freeze.assert_not_called()
+        self.root.children.clear()
+        self.root.tick()
+        gui.gc.freeze.assert_called_once()
+
+    def test_nothing_is_collected_while_the_reader_scrolls(self):
+        gui._start_gc_timer(self.root, (self.loading,))
+        self.root.tick()
+        self._scrolling()
+        self.root.tick()
+        self.assertEqual(self.root.queued[0][0], gui._GC_RECHECK_MS)
+        self.assertEqual(self._collections(), [1])
+        while len(self._collections()) == 1:
+            self.root.tick()
+        # Collected once the scroll had stopped.
+        self.assertGreaterEqual(self.clock[0], gui._UI_FIRST["until"])
+
+    def test_nor_put_off_for_ever(self):
+        gui._start_gc_timer(self.root, (self.loading,))
+        self.root.tick()
+        for _ in range(200):
+            self._scrolling()
+            self.root.tick()
+            if len(self._collections()) > 1:
+                break
+        self.assertEqual(self._collections(), [1, 1])
+        self.assertLess(self.clock[0], gui._UI_FIRST["until"])
+        self.assertLess(self.clock[0] - 1002.0, gui._GC_PUT_OFF_MAX_S + 0.5)
+
+    def test_the_whole_heap_waits_for_the_reader_to_be_still(self):
+        self.loading.is_alive.return_value = False
+        gui._start_gc_timer(self.root, (self.loading,))
+        self.root.tick()                  # frozen, with the whole heap
+        self.clock[0] += gui._GC_FULL_EVERY_S
+        # The reader has only just stopped scrolling: the young alone.
+        gui._UI_FIRST["until"] = self._next_tick_at()
+        self.root.tick()
+        self.assertEqual(self._collections(), [2, 1])
+        # Still for a moment since: the whole heap.
+        self.assertGreaterEqual(self._next_tick_at() - gui._UI_FIRST["until"],
+                                gui._GC_FULL_QUIET_S)
+        self.root.tick()
+        self.assertEqual(self._collections(), [2, 1, 2])
+
+
+# ---------------------------------------------------------------------------
 # An opinion's citations, read once for every window that shows it
 # ---------------------------------------------------------------------------
 

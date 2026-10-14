@@ -43705,6 +43705,62 @@ class _CitingOpinionsWindow:
         )
 
 
+# Every collection the cyclic garbage collector makes stops the whole app
+# until it is done, and a full one walks every container object alive: the
+# English Reports index alone is some 300,000 of them, so a full collection
+# took 140 ms and more — a hitch, every five seconds, in any opinion being
+# scrolled.  So the timer below collects only the young generations each
+# second (what was made since the last: milliseconds' work), the whole
+# heap once a minute and only while the reader is still, and nothing while
+# they scroll or a window goes up.  The indexes loaded at start live
+# as long as the app; once they are in, everything then alive is frozen out
+# of later collections' walk (gc.freeze).
+_GC_TICK_MS = 1000
+_GC_RECHECK_MS = 100       # how soon a collection put off for the reader looks again
+_GC_PUT_OFF_MAX_S = 5.0    # longest a young collection waits on the reader
+_GC_FULL_EVERY_S = 60.0
+_GC_FULL_QUIET_S = 1.0     # stillness a full collection waits for
+_GC_FULL_PUT_OFF_MAX_S = 300.0
+
+
+def _start_gc_timer(root: tk.Misc,
+                    warmers: "tuple[threading.Thread, ...]" = ()) -> None:
+    """Collect cyclic garbage on *root*'s (the Tk) thread, out of the
+    reader's way (see above).  *warmers* are the threads loading the
+    long-lived indexes: once they are done — and while no window is open,
+    whose objects die with it — the heap is frozen."""
+    now = time.monotonic()
+    state = {"due": now, "full": now + _GC_FULL_EVERY_S, "freeze": True}
+
+    def tick() -> None:
+        now = time.monotonic()
+        # How long the reader has been still: below zero while a scroll's
+        # hold or a window going up keeps the gate shut (see _ui_busy).
+        quiet = now - _UI_FIRST["until"]
+        freeze = (state["freeze"]
+                  and not any(t.is_alive() for t in warmers)
+                  and not any(isinstance(w, tk.Toplevel)
+                              for w in root.winfo_children()))
+        if (freeze or now >= state["full"]) and (
+                quiet >= _GC_FULL_QUIET_S
+                or now - state["full"] >= _GC_FULL_PUT_OFF_MAX_S):
+            gc.collect()
+            if freeze:
+                gc.freeze()
+                state["freeze"] = False
+            state["full"] = time.monotonic() + _GC_FULL_EVERY_S
+        elif quiet >= 0 or now - state["due"] >= _GC_PUT_OFF_MAX_S:
+            gc.collect(1)
+        else:
+            root.after(_GC_RECHECK_MS, tick)
+            return
+        _flush_tk_image_graveyard()
+        state["due"] = time.monotonic() + _GC_TICK_MS / 1000
+        root.after(_GC_TICK_MS, tick)
+
+    root.after(_GC_TICK_MS, tick)
+
+
 def main() -> None:
     root = tk.Tk()
 
@@ -43714,15 +43770,8 @@ def main() -> None:
     # safe on the main thread; a worker-thread collection can therefore
     # deadlock or abort the process (see the Tk-image lifecycle note above
     # _PdfPane).  Reference counting still frees non-cyclic objects instantly;
-    # only cycle collection is deferred to this timer.
+    # only cycle collection is deferred to the timer (_start_gc_timer).
     gc.disable()
-
-    def _gc_tick() -> None:
-        gc.collect()
-        _flush_tk_image_graveyard()
-        root.after(5000, _gc_tick)
-
-    root.after(5000, _gc_tick)
 
     # Hand the GIL back to the Tk thread sooner.  Workers read scans and
     # opinions in pure Python, and every Tk call the window makes gives the
@@ -43739,8 +43788,11 @@ def main() -> None:
     bridge = app._start_browser_bridge()
     # Windows: the scales in the taskbar, to reach it when nothing is open.
     tray = app._start_tray_icon()
-    eng_rep.warm()  # load the English Reports index in the background
-    sec_decisions.warm()  # and the SEC Decisions and Reports' page index
+    warmers = (
+        eng_rep.warm(),  # load the English Reports index in the background
+        sec_decisions.warm(),  # and the SEC Decisions and Reports' page index
+    )
+    _start_gc_timer(root, warmers)
     # The process that reads opinions' citations off this one's GIL (see
     # scan_process), started once the window has had a moment to come up.
     root.after(1000, scan_process.start)

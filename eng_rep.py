@@ -228,15 +228,18 @@ def _load() -> None:
         _INDEX = idx
 
 
-def warm() -> None:
+def warm() -> threading.Thread:
     """Load the indexes in a background thread (call at GUI start so the first
-    click is instant).  Best-effort."""
+    click is instant).  Best-effort.  Returns the thread, which ends once
+    they are in."""
 
     def run() -> None:
         _load()
         _load_nominate()
 
-    threading.Thread(target=run, daemon=True).start()
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
 
 
 def is_available() -> bool:

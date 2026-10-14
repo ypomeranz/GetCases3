@@ -133,9 +133,12 @@ def is_available() -> bool:
     return bool(_index().pages)
 
 
-def warm() -> None:
-    """Load the index on a background thread, off the first click's path."""
-    threading.Thread(target=_index, daemon=True).start()
+def warm() -> threading.Thread:
+    """Load the index on a background thread, off the first click's path.
+    Returns the thread, which ends once the index is in."""
+    thread = threading.Thread(target=_index, daemon=True)
+    thread.start()
+    return thread
 
 
 def last_page(vol: int) -> int:
