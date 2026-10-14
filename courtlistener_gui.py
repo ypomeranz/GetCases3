@@ -32164,8 +32164,11 @@ class _ScholarTextWindow:
         front = [b.text() for b in header + (lead.blocks[:3] if lead else [])]
         openings = [p.blocks[0].text() for p in parts
                     if p.kind not in ("header", "majority") and p.blocks]
+        # The bench may follow a long list of counsel.
+        opening = header + (lead.blocks if lead else [])
+        benches = [b.text() for b in opening[:30]]
         found = decided_en_banc(
-            front, openings,
+            front, openings, benches=benches,
             panel_court=self._bb.get("court_id", "") in _CIRCUIT_COURTS)
         self._en_banc_known = (key, found)
         return found

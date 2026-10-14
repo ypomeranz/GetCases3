@@ -240,6 +240,9 @@ _EN_BANC_HEARD_RES = (
                + r"\b", re.IGNORECASE),
 )
 _BENCH_LINE_RE = re.compile(r"^(?:before|present)\b\s*:?\s*", re.IGNORECASE)
+# The reporter's page markers Scholar sets ahead of a line: "*292 Before
+# CLARK, Chief Judge, and HINCKS and LUMBARD, Circuit Judges."
+_LEADING_STAR_PAGES_RE = re.compile(r"^(?:\*\d+[A-Za-z]{0,2}\s*)+")
 # …or the bench it lists sat so: "…, Circuit Judges, sitting en banc", "…,
 # Circuit Judges, En Banc", "…, Justices, constituting the court en banc",
 # "Before the court en banc".
@@ -262,7 +265,8 @@ def bench_size(line: str) -> int:
     """How many judges a bench line names — "Before EASTERBROOK, Chief
     Judge, and BAUER, POSNER, …, Circuit Judges." — or 0 for a line that is
     none: it must open "Before" or "Present" and give its judges a title."""
-    m = _BENCH_LINE_RE.match(line or "")
+    line = _LEADING_STAR_PAGES_RE.sub("", (line or "").strip())
+    m = _BENCH_LINE_RE.match(line)
     if not m or not _JUDGE_TITLE_RE.search(line):
         return 0
     body = re.sub(r"\[[^\]]{0,6}\]|[*†‡]", "", line[m.end():])
@@ -279,8 +283,13 @@ def bench_size(line: str) -> int:
     return count
 
 
+def _front_line(text: str) -> str:
+    return _LEADING_STAR_PAGES_RE.sub("", re.sub(r"\s+", " ", text or "").strip())
+
+
 def decided_en_banc(front_matter: Iterable[str],
                     separate_openings: Iterable[str] = (), *,
+                    benches: Iterable[str] = (),
                     panel_court: bool = False) -> bool:
     """Whether an opinion was the decision of its court sitting en banc.
 
@@ -288,30 +297,35 @@ def decided_en_banc(front_matter: Iterable[str],
     lines, through the first lines of the lead opinion;
     *separate_openings* the first line of each separate writing ("WOOD,
     Circuit Judge, … dissenting from the denial of rehearing en banc").
+    *benches* are further lines that may hold the bench, read for that
+    alone — the list of counsel can push it well into the opinion's first
+    blocks, past where a passing "the Ninth Circuit denied rehearing en
+    banc" should be taken as anything about this decision.
     *panel_court* says the court ordinarily sits in panels of three — a
     federal court of appeals — so that a bench of more names the whole
     court even where the front matter does not say so (Google Scholar's
     copy of United States v. Skoien, 614 F.3d 638 (7th Cir. 2010) (en banc),
-    prints its "Argued En Banc" as "Argued").
+    prints its "Argued En Banc" as "Argued").  The size of a bench says
+    nothing of a court that is not one: a state supreme court sits whole.
 
     Words of the court's own name ("Supreme Court of Washington, En Banc")
     are not taken: a court of last resort that always sits en banc says so
     of every decision, and none is cited "(en banc)" for it."""
-    lines = [re.sub(r"\s+", " ", t or "").strip() for t in front_matter]
-    lines = [t for t in lines if t]
-    openings = [re.sub(r"\s+", " ", t or "").strip()
-                for t in separate_openings]
+    lines = [t for t in map(_front_line, front_matter) if t]
+    openings = [_front_line(t) for t in separate_openings]
     if any(r.search(t) for t in lines + openings
            for r in _EN_BANC_REFUSED_RES):
         return False
+    bench_lines = [t for t in lines + [_front_line(t) for t in benches]
+                   if _BENCH_LINE_RE.match(t) and len(t) <= 600]
+    if any(_BENCH_EN_BANC_RE.search(t) for t in bench_lines):
+        return True
     for t in lines:
         if len(t) > 300:
             continue            # the opinion's prose, not its front matter
         if any(r.search(t) for r in _EN_BANC_HEARD_RES):
             return True
-        if _BENCH_LINE_RE.match(t) and _BENCH_EN_BANC_RE.search(t):
-            return True
         if panel_court and re.fullmatch(_EN_BANC_WORDS + r"\.?", t,
                                         re.IGNORECASE):
             return True
-    return panel_court and any(bench_size(t) > 3 for t in lines)
+    return panel_court and any(bench_size(t) > 3 for t in bench_lines)

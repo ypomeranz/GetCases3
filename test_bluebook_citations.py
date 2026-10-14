@@ -2479,6 +2479,48 @@ class EnBancTests(unittest.TestCase):
                 self.assertEqual(bench_size(bench), judges)
                 self.assertFalse(decided_en_banc([bench], panel_court=True))
 
+    def test_a_bench_behind_the_reporter_s_page_or_the_counsel(self):
+        self.assertEqual(bench_size(
+            "*292 Before CLARK, Chief Judge, and HINCKS and LUMBARD, Circuit "
+            "Judges."), 3)
+        bench = ("*767 Before: SENTELLE, Chief Judge, and GINSBURG, "
+                 "HENDERSON, ROGERS, TATEL, GARLAND, BROWN, GRIFFITH, and "
+                 "KAVANAUGH, Circuit Judges.")
+        self.assertEqual(bench_size(bench), 9)
+        self.assertTrue(decided_en_banc([bench], panel_court=True))
+        # Counsel can push the bench well past the front matter's first
+        # lines; it is still read for its size…
+        front = ["United States Court of Appeals, Fifth Circuit.",
+                 "Argued May 1, 2023."]
+        self.assertTrue(decided_en_banc(front, benches=[
+            "Counsel for appellant.", "Counsel for appellee.", bench],
+            panel_court=True))
+        # …but nothing else so far in counts against the decision.
+        self.assertTrue(decided_en_banc(front, benches=[
+            "The Ninth Circuit denied rehearing en banc.", bench],
+            panel_court=True))
+
+    def test_a_state_supreme_court_sits_whole(self):
+        for court, bench in (
+                ("Supreme Court of Pennsylvania.",
+                 "*30 BEFORE: CASTILLE, C.J., SAYLOR, EAKIN, BAER, TODD, "
+                 "McCAFFERY, ORIE MELVIN, JJ."),
+                ("Supreme Judicial Court of Massachusetts, Suffolk.",
+                 "Present: Marshall, C.J., Greaney, Ireland, Spina, Cowin, "
+                 "Sosman, & Cordy, JJ."),
+                ("Supreme Court of Alaska.",
+                 "Before: Winfree, Chief Justice, and Maassen, Carney, "
+                 "Borghesan, and Henderson, Justices."),
+                # The Appellate Division sits five to a panel.
+                ("Appellate Division of the Supreme Court of New York, "
+                 "Fourth Department.",
+                 "Present — Smith, J.P., Centra, Fahey, Peradotto and Pine, "
+                 "JJ.")):
+            with self.subTest(court=court):
+                self.assertGreater(bench_size(bench), 3)
+                self.assertFalse(decided_en_banc([court, bench],
+                                                 benches=[bench]))
+
     def test_not_a_rehearing_en_banc_denied_nor_granted(self):
         whole = ("Before WOOD, Chief Judge, and EASTERBROOK, ROVNER, SYKES, "
                  "HAMILTON, BRENNAN, SCUDDER, ST. EVE, KIRSCH, and "
