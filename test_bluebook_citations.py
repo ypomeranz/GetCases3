@@ -6061,6 +6061,37 @@ class SpelledOutSeparatorTests(unittest.TestCase):
                                  cited)
 
 
+class PartnersCapacityTests(unittest.TestCase):
+    """Partners suing or sued as partners are cited by name alone: "RUSSELL
+    ET AL., CO-PARTNERS, v. TODD ET AL., CO-PARTNERS." (309 U.S. 280) had
+    been cited "Russell, Co-Partners v. Todd, Co-Partners"."""
+
+    def test_the_capacity_goes(self):
+        from google_scholar import parse_opinion_blocks
+        for caption in (
+                "RUSSELL ET AL., CO-PARTNERS,<br/>v.<br/>TODD ET AL., "
+                "CO-PARTNERS.",
+                "RUSSELL ET AL., COPARTNERS,<br/>v.<br/>TODD ET AL., "
+                "PARTNERS."):
+            with self.subTest(caption=caption):
+                blocks = parse_opinion_blocks(
+                    _scholar_page("309 U.S. 280 (1940)", caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)),
+                    "Russell v. Todd")
+        # A name stored or listed that way, too.
+        self.assertEqual(abbreviate_case_name(
+            "Russell et al., Co-Partners v. Todd et al., Co-Partners"),
+            "Russell v. Todd")
+
+    def test_a_firm_s_partners_stay(self):
+        for name in ("Goldman, Sachs & Partners v. Jones",
+                     "Jones v. Acme Partners, L.P.",
+                     "Silver Lake Partners, L.P. v. Jones"):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), name)
+
+
 class FirmInitialsCaptionTests(unittest.TestCase):
     """A firm keeps the initials in its name (rule 10.2.1(g)).  In Scholar's
     all-caps "S. H. KRESS & CO." the initials had read as a person's given

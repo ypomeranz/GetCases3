@@ -2330,7 +2330,10 @@ _ROLE_WORD = (
     r"(?:cross-|counter-|third-party )?"
     r"(?:appell(?:ants?|ees?)|plaintiffs?|defendants?|petitioners?|"
     r"respondents?|relators?|intervenors?|movants?|claimants?|garnishees?|"
-    r"complainants?|libell?ants?|libell?ees?)"
+    r"complainants?|libell?ants?|libell?ees?|"
+    # the capacity partners sue in, which names no firm ("Russell et al.,
+    # Co-Partners")
+    r"(?:co-?)?partners?)"
     r"(?:\s+in\s+error)?"
 )
 _PARTY_ROLE_RE = re.compile(

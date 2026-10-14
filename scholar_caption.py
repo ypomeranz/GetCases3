@@ -93,6 +93,9 @@ _PARTY_DESIGNATION_RE = re.compile(
     # same segment ("Appellant. United States of America")
     + _ROLE_WORD + r"\.\s+.*|"
     r"in\s+error|successors?\b.*|"
+    # the capacity partners sue or are sued in, which names no firm:
+    # "RUSSELL ET AL., CO-PARTNERS," (309 U.S. 280) is Russell
+    r"(?:co-?)?partners?(?:\s+(?:doing|trading|carrying\s+on)\b.*)?|"
     # a bare state name qualifying a governmental party ("Humboldt County,
     # California"; "City of Milwaukee, Wisconsin")
     r"(?:" + _US_STATE_NAMES + r")|"
