@@ -198,3 +198,120 @@ def split_trailing_parentheticals(
         parens.append(group[1:-1].strip() if group[0] == "(" else group)
         pos = end
     return text[:date_end], parens, text[pos:].rstrip()
+
+
+# ---------------------------------------------------------------------------
+# Whether a decision was the full court's: "(en banc)"
+# ---------------------------------------------------------------------------
+#
+# Rule 10.6.1(a) marks a decision of a court that ordinarily sits in panels
+# but heard this case as a whole: "(7th Cir. 2010) (en banc)".  An opinion's
+# front matter is where it says so, but the words "en banc" there as often
+# say the opposite — a panel opinion whose rehearing en banc was denied
+# ("Rehearing and Rehearing En Banc Denied", "As Amended on Denial of
+# Rehearing En Banc"), or the order denying it, with its statements and
+# dissents from the denial.  Those are no decisions of the full court, and
+# nor is a panel opinion later vacated for rehearing en banc ("Rehearing En
+# Banc Granted"), which says nothing here of its own hearing.
+
+_EN_BANC_WORDS = r"en\s+banc"
+
+# The front matter of a decision about rehearing en banc, or of one that
+# records its denial: "Rehearing En Banc Denied", "As Amended on Denial of
+# Rehearing and Rehearing En Banc", "voted to deny rehearing en banc", "the
+# request for en banc review is denied", "dissenting from the denial of
+# rehearing en banc", "On Petition for Rehearing and Rehearing En Banc".
+_EN_BANC_REFUSED_RES = (
+    re.compile(r"\b(?:deni(?:al|ed|es)|deny(?:ing)?)\b[^.;]{0,100}?\b"
+               + _EN_BANC_WORDS, re.IGNORECASE),
+    re.compile(_EN_BANC_WORDS + r"\b[^.;]{0,60}?\b(?:deni(?:al|ed)|"
+               r"(?:is|are|was|were)\s+denied)\b", re.IGNORECASE),
+    re.compile(r"\bon\s+(?:the\s+)?(?:[\w’']+\s+)?petitions?\s+for\s+"
+               r"(?:panel\s+)?rehearing\b[^.;]{0,60}?" + _EN_BANC_WORDS,
+               re.IGNORECASE),
+)
+# The front matter saying the full court heard the case: "Argued En Banc",
+# "Reargued En Banc", "Argued and Submitted En Banc", "Submitted En Banc",
+# "Reheard En Banc", "ON REHEARING EN BANC", "Upon a Rehearing En Banc".
+_EN_BANC_HEARD_RES = (
+    re.compile(r"\b(?:re)?(?:argued|submitted|heard)(?:\s+and\s+submitted)?"
+               r"\s+" + _EN_BANC_WORDS + r"\b", re.IGNORECASE),
+    re.compile(r"\b(?:on|upon)\s+(?:a\s+)?rehearing\s+" + _EN_BANC_WORDS
+               + r"\b", re.IGNORECASE),
+)
+_BENCH_LINE_RE = re.compile(r"^(?:before|present)\b\s*:?\s*", re.IGNORECASE)
+# …or the bench it lists sat so: "…, Circuit Judges, sitting en banc", "…,
+# Circuit Judges, En Banc", "…, Justices, constituting the court en banc",
+# "Before the court en banc".
+_BENCH_EN_BANC_RE = re.compile(
+    r"\b(?:judges?|justices?|j{1,2}\.|court)\s*,?\s*(?:sitting\s+|"
+    r"constituting\s+the\s+court\s+)?" + _EN_BANC_WORDS + r"\b",
+    re.IGNORECASE)
+_JUDGE_TITLE_RE = re.compile(
+    r"\b(?:judges?|justices?)\b|\b(?:c\.\s?j|jj?|p\.\s?j)\.", re.IGNORECASE)
+# What a bench line says of its judges besides their names.
+_BENCH_WORDS_RE = re.compile(
+    r"\b(?:chief|senior|presiding|circuit|district|associate|retired|active|"
+    r"judges?|justices?|united|states|sitting|by|designation|en\s+banc|the|"
+    r"court|constituting|all|jr|sr|ii|iii|iv)\b\.?|\bu\.\s?s\.|"
+    r"\b(?:c\.\s?j|jj?|p\.\s?j)\.",
+    re.IGNORECASE)
+
+
+def bench_size(line: str) -> int:
+    """How many judges a bench line names — "Before EASTERBROOK, Chief
+    Judge, and BAUER, POSNER, …, Circuit Judges." — or 0 for a line that is
+    none: it must open "Before" or "Present" and give its judges a title."""
+    m = _BENCH_LINE_RE.match(line or "")
+    if not m or not _JUDGE_TITLE_RE.search(line):
+        return 0
+    body = re.sub(r"\[[^\]]{0,6}\]|[*†‡]", "", line[m.end():])
+    # The bench ends with the sentence that names it.
+    body = re.split(r"(?<![A-Z])\.\s+(?=[A-Z][a-z])", body)[0]
+    count = 0
+    for piece in re.split(r"[,;]|\band\b|&", body):
+        # "…, United States District Judge for the Eastern District of …"
+        piece = re.sub(r"\b(?:for|of)\s+the\b.*", "", piece,
+                       flags=re.IGNORECASE)
+        name = _BENCH_WORDS_RE.sub(" ", piece)
+        if re.search(r"(?<![^\W\d_])[^\W\d_a-z][^\W\d_]", name):
+            count += 1
+    return count
+
+
+def decided_en_banc(front_matter: Iterable[str],
+                    separate_openings: Iterable[str] = (), *,
+                    panel_court: bool = False) -> bool:
+    """Whether an opinion was the decision of its court sitting en banc.
+
+    *front_matter* is the opinion's caption, docket, court, date and bench
+    lines, through the first lines of the lead opinion;
+    *separate_openings* the first line of each separate writing ("WOOD,
+    Circuit Judge, … dissenting from the denial of rehearing en banc").
+    *panel_court* says the court ordinarily sits in panels of three — a
+    federal court of appeals — so that a bench of more names the whole
+    court even where the front matter does not say so (Google Scholar's
+    copy of United States v. Skoien, 614 F.3d 638 (7th Cir. 2010) (en banc),
+    prints its "Argued En Banc" as "Argued").
+
+    Words of the court's own name ("Supreme Court of Washington, En Banc")
+    are not taken: a court of last resort that always sits en banc says so
+    of every decision, and none is cited "(en banc)" for it."""
+    lines = [re.sub(r"\s+", " ", t or "").strip() for t in front_matter]
+    lines = [t for t in lines if t]
+    openings = [re.sub(r"\s+", " ", t or "").strip()
+                for t in separate_openings]
+    if any(r.search(t) for t in lines + openings
+           for r in _EN_BANC_REFUSED_RES):
+        return False
+    for t in lines:
+        if len(t) > 300:
+            continue            # the opinion's prose, not its front matter
+        if any(r.search(t) for r in _EN_BANC_HEARD_RES):
+            return True
+        if _BENCH_LINE_RE.match(t) and _BENCH_EN_BANC_RE.search(t):
+            return True
+        if panel_court and re.fullmatch(_EN_BANC_WORDS + r"\.?", t,
+                                        re.IGNORECASE):
+            return True
+    return panel_court and any(bench_size(t) > 3 for t in lines)

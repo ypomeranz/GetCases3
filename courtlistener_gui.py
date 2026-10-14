@@ -1227,7 +1227,7 @@ from bluebook_names import (
     split_relator,
     strip_related_case_note,
 )
-from bluebook_parentheticals import join_parentheticals
+from bluebook_parentheticals import decided_en_banc, join_parentheticals
 from citation_overrides import (
     citation_identity_keys,
     clean_base_citation,
@@ -32139,6 +32139,31 @@ class _ScholarTextWindow:
             "_ejectment": ejectment,
         }
 
+    def _decided_en_banc(self) -> bool:
+        """Whether this opinion was its court's decision en banc, which its
+        citation says: "(7th Cir. 2010) (en banc)" (rule 10.6.1(a)).  Read
+        off the front matter of the parts on show (see decided_en_banc),
+        once for each set of them.  Never the Supreme Court's: it always
+        sits as one."""
+        if getattr(self, "_is_scotus", False):
+            return False
+        parts = (getattr(self, "_rendered_parts", None)
+                 or getattr(self, "_parts", None) or [])
+        key = tuple(id(p) for p in parts)
+        known = getattr(self, "_en_banc_known", None)
+        if known is not None and known[0] == key:
+            return known[1]
+        header = [b for p in parts if p.kind == "header" for b in p.blocks]
+        lead = next((p for p in parts if p.kind == "majority"), None)
+        front = [b.text() for b in header + (lead.blocks[:3] if lead else [])]
+        openings = [p.blocks[0].text() for p in parts
+                    if p.kind not in ("header", "majority") and p.blocks]
+        found = decided_en_banc(
+            front, openings,
+            panel_court=self._bb.get("court_id", "") in _CIRCUIT_COURTS)
+        self._en_banc_known = (key, found)
+        return found
+
     def _writer_parenthetical(self, part) -> str:
         """
         Bluebook writer parenthetical for a separate opinion (rule 10.6.1):
@@ -32680,7 +32705,8 @@ class _ScholarTextWindow:
             )
             if paren_inner:
                 rest += f" ({paren_inner})"
-            rest += join_parentheticals((writer, *extra_parens))
+            en_banc = "en banc" if self._decided_en_banc() else ""
+            rest += join_parentheticals((en_banc, writer, *extra_parens))
             history = ""
         # Bluebook abbreviations ("Ass'n", "Int'l", "Dep't", "F. App'x"),
         # possessives, and names like O'Connor take a typographic apostrophe

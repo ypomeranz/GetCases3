@@ -23,6 +23,8 @@ from bluebook_names import (
     refine_caption_case,
 )
 from bluebook_parentheticals import (
+    bench_size,
+    decided_en_banc,
     join_parentheticals,
     order_parentheticals,
     split_trailing_parentheticals,
@@ -2427,6 +2429,99 @@ class ParentheticalOrderTests(unittest.TestCase):
     def test_split_without_a_date_parenthetical_leaves_it_whole(self):
         base = "State v. Prado, 2021 WI 64, 397 Wis. 2d 719, 960 N.W.2d 869"
         self.assertEqual(split_trailing_parentheticals(base), (base, [], ""))
+
+
+class EnBancTests(unittest.TestCase):
+    """A decision of the full court is cited "(en banc)" (rule 10.6.1(a));
+    the opinions that only mention rehearing en banc — a panel's whose
+    rehearing was denied, the order denying it — are not."""
+
+    SEVENTH = "United States Court of Appeals, Seventh Circuit."
+
+    def test_the_front_matter_says_the_full_court_heard_it(self):
+        for line in ("Reargued En Banc May 22, 2007.",
+                     "Argued and Submitted En Banc June 24, 2013.",
+                     "Argued En Banc on February 15, 2023.",
+                     "ON REHEARING EN BANC",
+                     "UPON A REHEARING EN BANC",
+                     "Before BAZELON, Chief Judge, and WRIGHT, McGOWAN, "
+                     "LEVENTHAL, ROBINSON, MacKINNON and WILKEY, Circuit "
+                     "Judges, sitting en banc.",
+                     "Before STEELE, Chief Justice, HOLLAND, BERGER, JACOBS, "
+                     "and RIDGELY, Justices, constituting the court en banc.",
+                     "Before the court en banc."):
+            with self.subTest(line=line):
+                self.assertTrue(decided_en_banc([self.SEVENTH, line]))
+
+    def test_or_its_bench_is_the_whole_court_of_appeals(self):
+        # Scholar prints Skoien's "Argued En Banc" as "Argued".
+        bench = ("Before EASTERBROOK, Chief Judge, and BAUER, POSNER, FLAUM, "
+                 "KANNE, ROVNER, WOOD, WILLIAMS, SYKES, TINDER, and HAMILTON, "
+                 "Circuit Judges.")
+        front = [self.SEVENTH, "Argued May 20, 2010.", bench]
+        self.assertTrue(decided_en_banc(front, panel_court=True))
+        # A court that sits whole in any case says nothing by it.
+        self.assertFalse(decided_en_banc(front, panel_court=False))
+
+    def test_a_bench_of_three_is_a_panel(self):
+        for bench, judges in (
+                ("Before CANBY, JR., NOONAN, and THOMAS, Circuit Judges.", 3),
+                ("Before: Park, Robinson, and Pérez, Circuit Judges.", 3),
+                ("Before MIKVA and D.H. GINSBURG, Circuit Judges, and MAX "
+                 "ROSENN,[*] U.S. Senior Circuit Judge for the Third "
+                 "Circuit.", 3),
+                ("Before TAMM and ROBINSON, Circuit Judges and GERHARD A. "
+                 "GESELL[*], United States District Judge for the United "
+                 "States District Court for the District of Columbia.", 3),
+                ("Before the court is the Department of Homeland Security’s "
+                 "request to stay the district court’s vacatur.", 0)):
+            with self.subTest(bench=bench):
+                self.assertEqual(bench_size(bench), judges)
+                self.assertFalse(decided_en_banc([bench], panel_court=True))
+
+    def test_not_a_rehearing_en_banc_denied_nor_granted(self):
+        whole = ("Before WOOD, Chief Judge, and EASTERBROOK, ROVNER, SYKES, "
+                 "HAMILTON, BRENNAN, SCUDDER, ST. EVE, KIRSCH, and "
+                 "JACKSON-AKIWUMI, Circuit Judges.")
+        for front, openings in (
+                (["Argued May 1, 1987.", "Decided August 27, 1987.",
+                  "Rehearing and Rehearing En Banc Denied November 16, "
+                  "1987."], ()),
+                (["As Amended on Denial of Rehearing and Rehearing En Banc "
+                  "June 13, 2012."], ()),
+                (["Rehearing and Suggestion for Rehearing En Banc Denied "
+                  "April 25, 1996."], ()),
+                # The order denying it, with the whole court on its bench.
+                (["On Petition for Rehearing and Rehearing En Banc.", whole],
+                 ()),
+                ([whole, "ORDER"],
+                 ("WOOD, Circuit Judge, with whom ROVNER, HAMILTON, ST. EVE "
+                  "and JACKSON-AKIWUMI, Circuit Judges, join, dissenting "
+                  "from the denial of rehearing en banc.",)),
+                # A panel opinion later vacated for rehearing en banc says
+                # nothing of its own hearing.
+                (["Argued May 5, 2023.", "Rehearing En Banc Granted, "
+                  "Opinion Vacated July 1, 2023.",
+                  "Before SMITH, JONES, and DUNCAN, Circuit Judges."], ())):
+            with self.subTest(front=front[0][:40]):
+                self.assertFalse(
+                    decided_en_banc(front, openings, panel_court=True))
+
+    def test_nor_a_court_named_en_banc(self):
+        # Washington's and Colorado's supreme courts sit en banc in every
+        # case, and say so in their name.
+        for front in (["The Supreme Court of Washington, En Banc."],
+                      ["Supreme Court of Colorado.", "En banc."]):
+            with self.subTest(front=front):
+                self.assertFalse(decided_en_banc(front))
+
+    def test_nor_an_opinion_that_only_discusses_one(self):
+        prose = ("Rahimi filed a petition for rehearing en banc; while that "
+                 "petition was pending, the Supreme Court decided Bruen. The "
+                 "prior panel withdrew its opinion. " * 4)
+        self.assertFalse(decided_en_banc(
+            ["Before JONES, HO, and WILSON, Circuit Judges.", prose],
+            panel_court=True))
 
 
 class ReporterAndDecisionDateTests(unittest.TestCase):
@@ -4918,6 +5013,27 @@ class CitationParentheticalOrderTests(unittest.TestCase):
             "omit_parenthetical": "", "pin_kind": "page",
         }
         return win
+
+    def test_en_banc_comes_first(self):
+        win = self._window()
+        win._bb.update({"name": "United States v. Skoien",
+                        "cite": "614 F.3d 638", "display_cite": "614 F.3d 638",
+                        "court": "7th Cir.", "year": "2010",
+                        "court_id": "ca7"})
+        line = SimpleNamespace(text=lambda: "Argued En Banc May 20, 2010.")
+        win._parts = [SimpleNamespace(kind="header", blocks=[line])]
+        plain, _rtf = win._bluebook_citation(
+            "640", "Sykes, J., dissenting", ("footnote omitted",))
+        self.assertEqual(
+            plain,
+            "United States v. Skoien, 614 F.3d 638, 640 (7th Cir. 2010) "
+            "(en banc) (Sykes, J., dissenting) (footnote omitted).")
+        # An edited citation is the user's own: nothing is added to it.
+        win._base_citation_override = (
+            "United States v. Skoien, 614 F.3d 638 (7th Cir. 2010)")
+        self.assertEqual(win._bluebook_citation(None)[0],
+                         "United States v. Skoien, 614 F.3d 638 "
+                         "(7th Cir. 2010).")
 
     def test_writer_then_omission(self):
         plain, rtf = self._window()._bluebook_citation(
