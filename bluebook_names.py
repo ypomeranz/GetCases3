@@ -3121,6 +3121,34 @@ def collective_case_name(caption: str) -> str | None:
     return name
 
 
+# A caption that names one party, as the petitioner or the applicant, and no
+# adversary — "NIELSEN, Petitioner." (131 U.S. 176) — is that party's
+# petition or application, which rule 10.2.1(b) cites "In re" ("petition
+# of", "application of" and similar expressions): In re Nielsen, 131 U.S.
+# 176 (1889), as Brown v. Ohio, 432 U.S. 161, 168 (1977), cites it.
+_LONE_PETITIONER_RE = re.compile(
+    r"^(?P<party>[^,].*?),?\s+(?:petitioners?|applicants?)\b[.,;:]?"
+    r"(?:\s*(?:on|for\s+(?:a\s+)?writ\s+of)\s+habeas\s+corpus\b\.?)?\s*$",
+    re.IGNORECASE)
+
+
+def in_re_for_petition(caption: str) -> str | None:
+    """*caption* as the "In re" matter it is when it names a lone
+    petitioner or applicant and no adversary — "NIELSEN, Petitioner." is
+    "In re NIELSEN, Petitioner." — for the procedural-caption reading to
+    finish; or None for any other caption."""
+    text = re.sub(r"\s+", " ", caption or "").strip()
+    if (not text or _V_SPLIT_RE.search(text)
+            or re.search(r"\b(?:versus|against|respondents?|appellees?|"
+                         r"defendants?)\b", text, re.IGNORECASE)
+            or _PROCEDURAL_PREFIX_RE.match(text)):
+        return None
+    m = _LONE_PETITIONER_RE.match(text)
+    if not m or not re.search(r"[^\W\d_]{2}", m.group("party")):
+        return None
+    return "In re " + text
+
+
 # Where the one party a procedural caption is cited by ends (rule 10.2.1(a),
 # (b)): at an appositive describing it — "a Pennsylvania Corporation", "an
 # Infant" — or its role in the proceeding, "Bankrupt", "Debtor", after which a
@@ -3966,6 +3994,7 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
     collective = collective_case_name(name)
     if collective:
         return _finish_case_name(collective)
+    name = in_re_for_petition(name) or name
     # An ejectment party is cited as the caption puts it — "Den ex dem.
     # Murray", "Lessee of Livingston", "Hunter's Lessee" — until the citing
     # opinions say otherwise (see ejectment_case_names).
