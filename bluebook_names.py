@@ -1785,9 +1785,14 @@ def _reliable_caption_spelling(
         if len(core) > 4 and not (_defined_acronym(best, body_text)
                                   or _caps_in_running_prose(best, body_text)):
             return ""
+        # Fewer times than that will do when the prose writes it no other
+        # way and names it in a parenthesis — "Opposition to Application in
+        # No. 24A884 (CASA)", the only places Trump v. CASA, Inc., 145 S. Ct.
+        # 2540 (2025), names CASA — or in the run of a sentence.
         if unanchored and (votes[best] < 3 or votes[best] <= 2 * cur) and not (
                 cur == 0 and len(votes) == 1
-                and _initialism_in_prose(best, body_text)):
+                and (_defined_acronym(best, body_text)
+                     or _initialism_in_prose(best, body_text))):
             return ""
         # One occurrence is enough when an adjacent caption word anchors it
         # in ordinary mixed-case prose ("GMAC Mortgage").  The stricter

@@ -1414,6 +1414,24 @@ class AcronymCaseTests(unittest.TestCase):
         self.assertEqual(
             refine_caption_case("Nifla v. Becerra", body), "NIFLA v. Becerra")
 
+    def test_a_short_one_the_prose_names_in_a_parenthesis(self):
+        # Trump v. CASA, Inc., 145 S. Ct. 2540 (2025): CASA appears twice,
+        # each time labelling the party's papers — too few for capitals set
+        # bare in the prose, and "Casa" is a surname in the Census files.
+        body = ("See Opposition to Application in No. 24A884 (CASA), pp. "
+                "30-31; see also Brief for Professor Mila Sohoni as Amica "
+                "Curiae 6-8.\nSee Opposition to Application in No. 24A884 "
+                "(CASA), at 22-25; Opposition to Application in No. 24A885 "
+                "(Washington), pp. 28-32.")
+        self.assertEqual(refine_caption_case("Trump v. Casa, Inc.", body),
+                         "Trump v. CASA, Inc.")
+        # The prose writing it in ordinary case as well settles it the
+        # other way.
+        self.assertEqual(
+            refine_caption_case("Trump v. Casa, Inc.",
+                                body + "\nThen Casa sued."),
+            "Trump v. Casa, Inc.")
+
     def test_a_long_acronym_the_prose_writes_in_capitals(self):
         # CBOCS West, Inc. v. Humphries, 553 U.S. 442 (2008): the opinion
         # never defines "(CBOCS)", but writes it in capitals in its
