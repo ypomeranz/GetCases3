@@ -3978,6 +3978,11 @@ def _clean_caption(name: str) -> str:
     # (THE "SCOTLAND.", 105 U.S. 24) — the quotes are the reporter's
     # typography, never part of the Bluebook name.
     name = re.sub(r"[“”\"]", "", name)
+    # The New York reports set "agt." (against) where others set "v." —
+    # "Lowber agt. Wells", 13 How. Pr. 454 — and the Bluebook writes "v."
+    # (rule 10.2.1).  Lowercase only: a capitalized "Agt." is an agent's
+    # ("Smith, Gen. Agt.").
+    name = re.sub(r"\s+ags?t\.\s+", " v. ", name)
     # A bracket closed by a brace, or a brace by a bracket, is a scan's
     # garbling, never a name's: "CHIRAC and Others {VV] against REINICKER."
     # (24 U.S. 280).

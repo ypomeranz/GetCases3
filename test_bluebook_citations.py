@@ -6017,6 +6017,50 @@ class CollectiveCaseNameTests(unittest.TestCase):
                 self.assertEqual(abbreviate_case_name(name), cited)
 
 
+class SpelledOutSeparatorTests(unittest.TestCase):
+    """The New York reports set "agt." where others set "v." — Lowber agt.
+    Wells, 13 How. Pr. 454, was cited "Lowber agt. Wells" — and the Bluebook
+    writes "v."  An organization's own "Against" is no separator: "MOTHERS
+    AGAINST DRUNK DRIVING, Appellant." had been cited "Mothers v. Drunk
+    Driving"."""
+
+    def _cited(self, caption: str, cite_line: str = "13 How. Pr. 454 (1856)"):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(cite_line, caption))
+        return abbreviate_case_name(_scholar_caption_name(blocks))
+
+    def test_agt_is_v(self):
+        for caption in ("LOWBER agt. WELLS.",
+                        "WILLIAM LOWBER agt. HENRY WELLS and others.",
+                        "LOWBER agst. WELLS."):
+            with self.subTest(caption=caption):
+                self.assertEqual(self._cited(caption), "Lowber v. Wells")
+        # A name from CourtListener or the opinion database, too.
+        self.assertEqual(abbreviate_case_name("Lowber agt. Wells"),
+                         "Lowber v. Wells")
+
+    def test_but_an_agent_is_no_separator(self):
+        self.assertEqual(abbreviate_case_name("Smith, Gen. Agt. v. Jones"),
+                         "Smith, Gen. Agt. v. Jones")
+
+    def test_the_earliest_reports_against_still_is(self):
+        self.assertEqual(
+            self._cited("CHIRAC and Others against REINICKER.",
+                        "24 U.S. 280 (1826)"), "Chirac v. Reinicker")
+
+    def test_an_organization_s_against_is_its_name(self):
+        for caption, cited in (
+                ("MOTHERS AGAINST DRUNK DRIVING, Appellant.",
+                 "Mothers Against Drunk Driving"),
+                ("CITIZENS AGAINST RENT CONTROL, Petitioner.",
+                 "Citizens Against Rent Control"),
+                ("WARD ET AL.<br/>v.<br/>ROCK AGAINST RACISM.",
+                 "Ward v. Rock Against Racism")):
+            with self.subTest(caption=caption):
+                self.assertEqual(self._cited(caption, "123 F.3d 1 (1997)"),
+                                 cited)
+
+
 class FirmInitialsCaptionTests(unittest.TestCase):
     """A firm keeps the initials in its name (rule 10.2.1(g)).  In Scholar's
     all-caps "S. H. KRESS & CO." the initials had read as a person's given
