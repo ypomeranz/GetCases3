@@ -5765,6 +5765,35 @@ class InReCapitalsCaptionTests(unittest.TestCase):
                          "In re J.C. Penney Co.")
 
 
+class InitialedPartyTests(unittest.TestCase):
+    """A person a caption names by initials alone is a party like any
+    other: J.K.J. v. Polk County, 960 F.3d 367 (7th Cir. 2020) (en banc),
+    whose plaintiffs are "J.K.J. and M.J.J.", had been cited "J.K.J. &
+    M.J.J. v. Polk County" (rule 10.2.1(a) keeps the first alone)."""
+
+    def test_the_first_listed_is_cited(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "960 F.3d 367 (2020)",
+            "J.K.J. and M.J.J., Plaintiffs-Appellees, v. POLK COUNTY and "
+            "Darryl L. Christensen, Defendants-Appellants."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "J.K.J. v. Polk County")
+        for name, cited in (
+                ("J.K.J. & M.J.J. v. Polk County", "J.K.J. v. Polk County"),
+                ("A.B. & C.D. v. Smith", "A.B. v. Smith"),
+                ("J. K. J. & Jane Doe v. Smith", "J.K.J. v. Smith")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_but_not_a_place_s_or_a_firm_s_initials(self):
+        for name in ("N.Y. & N.E. R.R. Co. v. Smith",
+                     "C. & O. Ry. v. Smith",
+                     "S.H. Kress & Co. v. Smith"):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), name)
+
+
 class LonePetitionerTests(unittest.TestCase):
     """A caption naming one party, as petitioner or applicant, and no
     adversary is that party's petition: In re Nielsen, 131 U.S. 176 (1889),

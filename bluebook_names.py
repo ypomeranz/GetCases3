@@ -2445,6 +2445,21 @@ def _first_listed_party(side: str) -> str:
     return re.sub(r"\s+(?:&|and)$", "", side.strip(" ,—–-")).strip(" ,")
 
 
+def _anonymized_initials(p: str) -> str | None:
+    """*p* closed up when it is a person a caption names by initials alone —
+    a minor, a victim: "J.K.J." in "J.K.J. and M.J.J., Plaintiffs-
+    Appellees" (J.K.J. v. Polk County, 960 F.3d 367 (7th Cir. 2020) (en
+    banc)) — or None.  Two letters at least, and no table abbreviation
+    ("N.Y.", "R.R."), which is a place's or a firm's."""
+    p = p.strip(" ,;")
+    if not re.fullmatch(r"(?:[A-Z]\.\s?){2,}", p + " "):
+        return None
+    closed = re.sub(r"\s+", "", p)
+    if _word_key(closed) in _TABLE_ABBREVIATIONS:
+        return None
+    return closed
+
+
 def _strip_given_names(p: str, *, person: bool = False,
                        names: _OpinionNames | None = None,
                        relaxed: bool = True) -> str | None:
@@ -3436,7 +3451,8 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
             return _abbreviate_party(segs[0].strip(" ,;"),
                                      recognize_initials=recognize_initials,
                                      court_state=court_state, names=names)
-        surnames = [_strip_given_names(s, names=names) for s in segs]
+        surnames = [_strip_given_names(s, names=names)
+                    or _anonymized_initials(s) for s in segs]
         if all(surnames):
             return surnames[0]
 
@@ -4137,6 +4153,9 @@ if __name__ == "__main__":
          "Ward v. Zelikovsky"),
         ("Charles Ward and Mary Ward v. Johanan Zelikovsky",
          "Ward v. Zelikovsky"),
+        # …and a person named by initials alone is one too.
+        ("J.K.J. and M.J.J. v. Polk County and Darryl L. Christensen",
+         "J.K.J. v. Polk County"),
         ("John Smith & Acme Corp. v. Jane Doe",
          "John Smith & Acme Corp. v. Doe"),
         ("United States v. Carolene Products Company",
