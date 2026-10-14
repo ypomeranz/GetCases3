@@ -29172,32 +29172,14 @@ class _ScholarTextWindow:
         except (KeyError, ValueError, tk.TclError):
             pass
 
+    # A link shows itself by the hand the pointer becomes over it, not by an
+    # underline: one drawn under the citation the pointer happened to rest
+    # on only flickered across the opinion as it was read.
     def _on_link_enter(self, _event=None) -> None:
-        txt = self._text
-        txt.config(cursor="hand2")
-        self._underline_link(next(
-            (t for t in txt.tag_names("current") if t.startswith("lnk")),
-            None))
+        self._text.config(cursor="hand2")
 
     def _on_link_leave(self, _event=None) -> None:
         self._text.config(cursor="")
-        self._underline_link(None)
-
-    def _underline_link(self, tag: Optional[str]) -> None:
-        """Underline the link the pointer is on, and only while it is."""
-        was = getattr(self, "_hover_link", None)
-        if was == tag:
-            return
-        self._hover_link = tag
-        try:
-            if was:
-                # Unset rather than off, so a link the opinion itself
-                # underlines keeps its underline.
-                self._text.tag_configure(was, underline="")
-            if tag:
-                self._text.tag_configure(tag, underline=True)
-        except tk.TclError:
-            pass
 
     # ------------------------------------------------------------------
     # Rendering
