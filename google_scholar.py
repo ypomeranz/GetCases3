@@ -1202,7 +1202,14 @@ _SEP_HEADER_RE = re.compile(
     # tails and trailing footnote markers).  Prose that merely *mentions*
     # someone concurring ("Justice Frankfurter prefaced his concurring
     # opinion in Youngstown…") runs on past it and must not match.
-    r"[^.:]{0,80}[.:]?\s*(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
+    # Or after the judges joining it, when they are named after the role
+    # — a list that can run long and note what each joins: "FLAUM, Circuit
+    # Judge, concurring, joined by CUMMINGS, BAUER (in No. 96-1361), CUDAHY
+    # (in 95-3128), KANNE (in part), and EVANS, Circuit Judges." (Jansen v.
+    # Packaging Corp. of Am., 123 F.3d 490).
+    r"(?:[^.:]{0,80}"
+    r"|,?\s*joined\s+by\s+(?:[^.:()]|\([^()]{0,40}\)){1,300})"
+    r"[.:]?\s*(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
     re.IGNORECASE | re.DOTALL,
 )
 # Syllabus disposition lines ("BLACKMUN, J., delivered the opinion…;

@@ -24,6 +24,42 @@ class JoinedSeparateOpinionTests(unittest.TestCase):
         self.assertIn("BLACKMUN", parts[1].label)
         self.assertTrue(parts[1].blocks[0].text().startswith("MR. JUSTICE BLACKMUN"))
 
+    def test_judges_joining_after_the_role_still_open_the_opinion(self):
+        # Jansen v. Packaging Corp. of Am., 123 F.3d 490 (7th Cir. 1997)
+        # (en banc): Flaum's concurrence names its joiners after the role,
+        # with the docket each joins in, and ran on as the per curiam's.
+        parts = segment_blocks([
+            _block("PER CURIAM."),
+            _block("The judgments are affirmed."),
+            _block(
+                "FLAUM, Circuit Judge, concurring, joined by CUMMINGS, BAUER "
+                "(in No. 96-1361), CUDAHY (in 95-3128), KANNE (in part), and "
+                "EVANS, Circuit Judges."
+            ),
+            _block("Title VII makes it unlawful for any employer to "
+                   "discriminate."),
+            _block("The question is when an employer is liable."),
+            _block("I would answer it so."),
+            _block("CUDAHY, Circuit Judge, concurring."),
+            _block("I participated in this en banc rehearing."),
+        ])
+
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence", "concurrence"])
+        self.assertTrue(parts[1].label.startswith("FLAUM"))
+
+    def test_a_sentence_after_the_role_opens_nothing(self):
+        parts = segment_blocks([
+            _block("PER CURIAM."),
+            _block("The judgments are affirmed."),
+            _block(
+                "FLAUM, Circuit Judge, concurring, joined the court's "
+                "opinion. He wrote separately to say more."
+            ),
+        ])
+
+        self.assertEqual([part.kind for part in parts], ["majority"])
+
     def test_joined_byline_can_start_concurrence(self):
         parts = segment_blocks([
             _block("MR. JUSTICE SMITH delivered the opinion of the Court."),
