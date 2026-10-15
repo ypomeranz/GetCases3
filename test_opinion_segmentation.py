@@ -92,6 +92,34 @@ class JoinedSeparateOpinionTests(unittest.TestCase):
         self.assertEqual([part.kind for part in parts],
                          ["majority", "concurrence"])
 
+    def test_a_line_up_after_the_opinion_opens_nothing(self):
+        # In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016): Scholar
+        # sets the court's line-up after Sutton's opinion, which had been
+        # read as the header, the line-up alone as the majority.
+        parts = segment_blocks([
+            Block(kind="center", spans=[Span(text="836 F.3d 584 (2016)")]),
+            _block("Before: COLE, Chief Judge, and SILER and SUTTON, "
+                   "Circuit Judges."),
+            _block("SUTTON, Circuit Judge."),
+            _block("A revealing difficulty with this matter is what to "
+                   "name it."),
+            _block("For these reasons, we vacate the district court's "
+                   "preliminary injunction."),
+            _block("SUTTON, J., delivered the opinion of the court in which "
+                   "SILER, J., joined, and COLE, C.J., joined in part. COLE, "
+                   "C.J., (pp. 8-10), delivered a separate opinion concurring "
+                   "in part and dissenting in part."),
+            _block("COLE, Chief Judge, concurring in part and dissenting in "
+                   "part."),
+            _block("Ohioans went to the polls on March 15, 2016."),
+            _block("For these reasons, I concur in part and dissent in "
+                   "part."),
+        ])
+
+        self.assertEqual([part.kind for part in parts],
+                         ["header", "majority", "dissent"])
+        self.assertEqual(parts[1].blocks[0].text(), "SUTTON, Circuit Judge.")
+
     def test_joined_byline_can_start_concurrence(self):
         parts = segment_blocks([
             _block("MR. JUSTICE SMITH delivered the opinion of the Court."),

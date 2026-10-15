@@ -1886,6 +1886,22 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
             maj_author_idx = i
     first_sep = boundaries[0][0] if boundaries else len(blocks)
     phrase_before = [i for i in maj_phrase_all if i < first_sep]
+    if maj_author_idx is not None:
+        # The Sixth Circuit's line-up — "SUTTON, J., delivered the opinion
+        # of the court in which SILER, J., joined …" — heads its opinions,
+        # but Scholar can set it at the opinion's end, after the author's own
+        # line ("SUTTON, Circuit Judge.") has opened it (In re 2016 Primary
+        # Election, 836 F.3d 584): the whole majority then read as header.
+        # A line-up naming the judge whose line came first opens nothing.
+        author = re.split(r"[,\s]", _content_text(blocks[maj_author_idx])
+                          .strip())[0]
+        maj_phrase_all = [
+            i for i in maj_phrase_all
+            if not (i > maj_author_idx and len(author) > 1
+                    and re.match(re.escape(author) + r",\s*(?:C\.\s*)?J\.,?\s+"
+                                 r"delivered\b", _content_text(blocks[i]),
+                                 re.IGNORECASE))]
+        phrase_before = [i for i in phrase_before if i in maj_phrase_all]
     maj_phrase_idx: Optional[int] = None
     if phrase_before:
         # Keep the LAST candidate: the syllabus disposition line ("BLACKMUN,
