@@ -93,6 +93,9 @@ _PARTY_DESIGNATION_RE = re.compile(
     # same segment ("Appellant. United States of America")
     + _ROLE_WORD + r"\.\s+.*|"
     r"in\s+error|successors?\b.*|"
+    # the capacity partners sue or are sued in, which names no firm:
+    # "RUSSELL ET AL., CO-PARTNERS," (309 U.S. 280) is Russell
+    r"(?:co-?)?partners?(?:\s+(?:doing|trading|carrying\s+on)\b.*)?|"
     # a bare state name qualifying a governmental party ("Humboldt County,
     # California"; "City of Milwaukee, Wisconsin")
     r"(?:" + _US_STATE_NAMES + r")|"
@@ -402,17 +405,20 @@ def scholar_caption_name(blocks) -> str:
         # Google Scholar renders the party separator in lowercase ("… v. …")
         # even for ALL-CAPS captions ("MERCY HOSPITAL, INC. v. JACKSON"), so
         # a lowercase "v."/"vs." — or the earliest reports' spelled-out
-        # "versus"/"against" — is the reliable separator and never collides
-        # with an uppercase middle initial like the "V." in "Francis V.
-        # Lorenzo" or a party's own "AGAINST".  Only fall back to a
-        # case-insensitive split (for a caption that happens to capitalize
-        # the separator) when no lowercase one is found.
-        sides = re.split(r"\s+(?:vs?\.|versus|against)\s+", t, maxsplit=1)
+        # "versus"/"against", or the New York reports' "agt." ("LOWBER agt.
+        # WELLS", 13 How. Pr. 454) — is the reliable separator and never
+        # collides with an uppercase middle initial like the "V." in
+        # "Francis V. Lorenzo" or a party's own "AGAINST".  Only fall back
+        # to a case-insensitive split (for a caption that happens to
+        # capitalize the separator) when no lowercase one is found — and
+        # never on a capitalized "Against", which is an organization's
+        # ("MOTHERS AGAINST DRUNK DRIVING, Appellant."), not a separator.
+        sides = re.split(r"\s+(?:vs?\.|versus|against|agt\.|agst\.)\s+", t,
+                         maxsplit=1)
         if len(sides) != 2:
             sides = re.split(r"\s+[vV]s?\.\s+", t, maxsplit=1)
         if len(sides) != 2:
-            sides = re.split(
-                r"\s+(?:VERSUS|Versus|AGAINST|Against)\s+", t, maxsplit=1)
+            sides = re.split(r"\s+(?:VERSUS|Versus)\s+", t, maxsplit=1)
         if len(sides) == 2:
             sides[1] = _cut_companion_cases(sides[1])
             left, right = caption_party(sides[0]), caption_party(sides[1])

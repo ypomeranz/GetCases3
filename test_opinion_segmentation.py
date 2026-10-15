@@ -24,6 +24,102 @@ class JoinedSeparateOpinionTests(unittest.TestCase):
         self.assertIn("BLACKMUN", parts[1].label)
         self.assertTrue(parts[1].blocks[0].text().startswith("MR. JUSTICE BLACKMUN"))
 
+    def test_judges_joining_after_the_role_still_open_the_opinion(self):
+        # Jansen v. Packaging Corp. of Am., 123 F.3d 490 (7th Cir. 1997)
+        # (en banc): Flaum's concurrence names its joiners after the role,
+        # with the docket each joins in, and ran on as the per curiam's.
+        parts = segment_blocks([
+            _block("PER CURIAM."),
+            _block("The judgments are affirmed."),
+            _block(
+                "FLAUM, Circuit Judge, concurring, joined by CUMMINGS, BAUER "
+                "(in No. 96-1361), CUDAHY (in 95-3128), KANNE (in part), and "
+                "EVANS, Circuit Judges."
+            ),
+            _block("Title VII makes it unlawful for any employer to "
+                   "discriminate."),
+            _block("The question is when an employer is liable."),
+            _block("I would answer it so."),
+            _block("CUDAHY, Circuit Judge, concurring."),
+            _block("I participated in this en banc rehearing."),
+        ])
+
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence", "concurrence"])
+        self.assertTrue(parts[1].label.startswith("FLAUM"))
+
+    def test_a_sentence_after_the_role_opens_nothing(self):
+        parts = segment_blocks([
+            _block("PER CURIAM."),
+            _block("The judgments are affirmed."),
+            _block(
+                "FLAUM, Circuit Judge, concurring, joined the court's "
+                "opinion. He wrote separately to say more."
+            ),
+        ])
+
+        self.assertEqual([part.kind for part in parts], ["majority"])
+
+    def test_a_sentence_naming_a_justice_s_dissent_opens_nothing(self):
+        # United States v. Leon, 468 U.S. 897 (1984): a sentence of
+        # Brennan's dissent had opened a phantom "In Brinegar" dissent.
+        parts = segment_blocks([
+            _block("JUSTICE WHITE delivered the opinion of the Court."),
+            _block("The judgment is reversed."),
+            _block("JUSTICE BRENNAN, with whom JUSTICE MARSHALL joins, "
+                   "dissenting."),
+            _block("The exclusionary rule is part of the Amendment."),
+            _block(
+                "In Brinegar, Justice Jackson, after observing that "
+                "\u201c[i]ndications are not wanting that Fourth Amendment "
+                "freedoms are tacitly marked as secondary rights,\u201d "
+                "338 U. S., at 180 (dissenting opinion), continued:"
+            ),
+            _block("\u201cCourts can protect the innocent against such "
+                   "invasions only indirectly.\u201d"),
+        ])
+
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "dissent"])
+        # A state court's title with no comma before the role still opens.
+        parts = segment_blocks([
+            _block("OPALA, Justice."),
+            _block("The judgment is affirmed."),
+            _block("KAUGER, Justice concurring in parts I and V."),
+            _block("I join parts I and V."),
+            _block("I write to say more."),
+        ])
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence"])
+
+    def test_a_line_up_after_the_opinion_opens_nothing(self):
+        # In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016): Scholar
+        # sets the court's line-up after Sutton's opinion, which had been
+        # read as the header, the line-up alone as the majority.
+        parts = segment_blocks([
+            Block(kind="center", spans=[Span(text="836 F.3d 584 (2016)")]),
+            _block("Before: COLE, Chief Judge, and SILER and SUTTON, "
+                   "Circuit Judges."),
+            _block("SUTTON, Circuit Judge."),
+            _block("A revealing difficulty with this matter is what to "
+                   "name it."),
+            _block("For these reasons, we vacate the district court's "
+                   "preliminary injunction."),
+            _block("SUTTON, J., delivered the opinion of the court in which "
+                   "SILER, J., joined, and COLE, C.J., joined in part. COLE, "
+                   "C.J., (pp. 8-10), delivered a separate opinion concurring "
+                   "in part and dissenting in part."),
+            _block("COLE, Chief Judge, concurring in part and dissenting in "
+                   "part."),
+            _block("Ohioans went to the polls on March 15, 2016."),
+            _block("For these reasons, I concur in part and dissent in "
+                   "part."),
+        ])
+
+        self.assertEqual([part.kind for part in parts],
+                         ["header", "majority", "dissent"])
+        self.assertEqual(parts[1].blocks[0].text(), "SUTTON, Circuit Judge.")
+
     def test_joined_byline_can_start_concurrence(self):
         parts = segment_blocks([
             _block("MR. JUSTICE SMITH delivered the opinion of the Court."),
@@ -447,6 +543,32 @@ class HistoricalAndSignatureBoundaryTests(unittest.TestCase):
         ])
 
         self.assertEqual([part.kind for part in parts], ["majority", "dissent", "dissent"])
+
+
+    def test_a_list_of_the_writings_opens_none_of_them(self):
+        # PHH Corp. v. CFPB, 881 F.3d 75 (D.C. Cir. 2018) (en banc): the
+        # court's list of who filed what precedes the separate opinions, and
+        # "filed" in it was read as a clerk's filing banner — two phantom
+        # opinions, labelled "filed by Senior Circuit Judge Randolph. Tatel".
+        parts = segment_blocks([
+            _block("PILLARD, Circuit Judge:"),
+            _block("We granted en banc review to consider the statute."),
+            _block("Concurring opinion filed by Circuit Judge Tatel, with "
+                   "whom Circuit Judges Millett and Pillard join."),
+            _block("Dissenting opinion filed by Circuit Judge Kavanaugh, "
+                   "with whom Senior Circuit Judge Randolph joins."),
+            _block("Dissenting opinion filed by Senior Circuit Judge "
+                   "Randolph."),
+            _block("Tatel, Circuit Judge, with whom Circuit Judges Millett "
+                   "and Pillard join, concurring:"),
+            _block("Finding no way to avoid the constitutional question, I "
+                   "concur."),
+            _block("Randolph, Senior Circuit Judge, dissenting:"),
+            _block("The Director is an officer of the United States."),
+        ])
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence", "dissent"])
+        self.assertTrue(parts[1].label.startswith("Tatel"))
 
 
 if __name__ == "__main__":

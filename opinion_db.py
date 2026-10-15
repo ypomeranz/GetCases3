@@ -56,6 +56,7 @@ import citations
 from court_catalog import (
     COURT_BLUEBOOK,
     bluebook_federal_trial_court,
+    circuit_court_id,
     state_of_court,
 )
 from scholar_caption import scholar_caption_name
@@ -63,6 +64,7 @@ from bluebook_names import (
     abbreviate_case_name,
     collective_case_name,
     cut_companion_cases,
+    in_re_caps_name,
     in_re_for_petition,
     normal_case_caption,
     refine_caption_case,
@@ -76,8 +78,9 @@ from bluebook_names import (
 # its caption, a stored opinion saved without a name: a lone petitioner's
 # ("HANS NIELSEN, Petitioner." is In re Nielsen), a group's popular name.
 # v9 reads those it still could not name as the opinion window reads them:
-# an in rem vessel's ("THE ROANOKE."), a caption joined by "versus".
-_SCHEMA_VERSION = 9
+# an in rem vessel's ("THE ROANOKE."), a caption joined by "versus".  v10
+# reads a court of appeals off the header of an opinion stored with no court.
+_SCHEMA_VERSION = 10
 
 # Record field holding the reporter pagination recovered from an official scan
 # (see :meth:`OpinionDB.save_pagination`).  Records written before this field
@@ -520,6 +523,11 @@ def _court_from_header(blocks: list) -> str:
                 or re.match(r"(?:on\s+)?(?:appeal|certiorari|petition|review)"
                             r"\b", t, re.IGNORECASE)):
             continue
+        # A court of appeals is kept too, which an F.3d citation leaves as
+        # unsaid: In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016).
+        circuit = circuit_court_id(t)
+        if circuit:
+            return circuit
         abbr = bluebook_federal_trial_court(t)
         ids = [cid for cid, bb in COURT_BLUEBOOK.items() if bb == abbr]
         return ids[0] if abbr and len(ids) == 1 else ""
@@ -583,6 +591,11 @@ def _caption_name(blocks: list) -> str:
         if re.match(
             r"(?:IN\s+RE|EX\s+PARTE|(?:IN\s+THE\s+)?MATTER\s+OF)\b", t, re.IGNORECASE
         ):
+            # The matter's name in capitals, the rest in ordinary case, as
+            # the opinion window reads it (scholar_caption).
+            named = in_re_caps_name(t)
+            if named:
+                return named
             head, _sep, tail = cut_companion_cases(t).partition(",")
             # The party's own "Inc." after the comma is its name's (rule
             # 10.2.1(h) keeps it where nothing else says it is a business):

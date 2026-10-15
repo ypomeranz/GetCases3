@@ -788,6 +788,31 @@ _LIGATURES = {
     "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ſ": "s",
 }
 
+#: Each character as :func:`_words` reads it — its letters and digits folded
+#: to lowercase ASCII, a space for anything else, nothing for a mark OCR
+#: loses — filled in as characters are met.  Normalizing every character
+#: afresh was most of what reading a long opinion's words cost.
+_FOLDED: dict[str, str] = {}
+
+
+def _folded(ch: str) -> str:
+    """*ch* as :func:`_words` reads it (see _FOLDED)."""
+    out: list[str] = []
+    replacement = _LIGATURES.get(ch, ch)
+    for c in unicodedata.normalize("NFKD", replacement).casefold():
+        if unicodedata.combining(c):
+            continue
+        if c.isascii() and c.isalnum():
+            out.append(c)
+        elif c in "'’.":
+            # OCR commonly loses these; joining is more stable than making
+            # an extra one-letter token ("Court's" -> "courts").
+            continue
+        else:
+            out.append(" ")
+    folded = _FOLDED[ch] = "".join(out)
+    return folded
+
 # What a United States Reports PDF prints about itself.  The running head of
 # every interior recto names the volume and the page the opinion *starts* on
 # ("Cite as: 607 U. S. 7 (2025)   9"), and a preliminary print's cover repeats
@@ -868,20 +893,15 @@ def _words(
             if saw_break and j < len(text) and text[j].isalpha():
                 i = j
                 continue
-        replacement = _LIGATURES.get(ch, ch)
-        replacement = unicodedata.normalize("NFKD", replacement).casefold()
-        for out in replacement:
-            if unicodedata.combining(out):
-                continue
-            if out.isascii() and out.isalnum():
+        reads = _FOLDED.get(ch)
+        if reads is None:
+            reads = _folded(ch)
+        if len(reads) == 1:
+            folded.append(reads)
+            origins.append(i)
+        else:
+            for out in reads:
                 folded.append(out)
-                origins.append(i)
-            elif out in "'’.":
-                # OCR commonly loses these; joining is more stable than making
-                # an extra one-letter token ("Court's" -> "courts").
-                continue
-            else:
-                folded.append(" ")
                 origins.append(i)
         i += 1
     normalized = "".join(folded)
@@ -1047,7 +1067,12 @@ def _align_variant(
     source: _SourceIndex,
     page_words: tuple[_Word, ...],
     hints: Iterable[int] = (),
+    between_tries=None,
 ) -> tuple[float, tuple[tuple[int, int, int], ...]]:
+    """How well *page_words* match the source, and where: the best of the
+    likeliest placements, each tried with a sequence match.
+    *between_tries*, when given, is called before each try (see
+    align_opinion_locations)."""
     if len(source.words) < 2 or len(page_words) < 2:
         return 0.0, ()
     source_values = source.values
@@ -1056,6 +1081,8 @@ def _align_variant(
     best_blocks: tuple[tuple[int, int, int], ...] = ()
     margin = max(12, min(40, len(page_values) // 4))
     for delta in _alignment_candidates(source, page_words, hints):
+        if between_tries is not None:
+            between_tries()
         lo = max(0, delta - margin)
         hi = min(len(source_values), delta + len(page_values) + margin)
         if hi - lo < 2:
@@ -1273,18 +1300,18 @@ def align_opinion_locations(
 ) -> OpinionLocationMap:
     """Align an opinion source with extracted PDF glyph pages.
 
-    *between_pages*, when given, is called before each page is matched: a
-    worker's chance to stand aside while the window is busy (the GUI passes
-    its ``_yield_to_ui``)."""
+    *between_pages*, when given, is called before each page is matched,
+    and every few milliseconds while it is — before each reading of the
+    page, and each placement of a reading tried: a worker's chance to stand
+    aside while the window is busy (the GUI passes its ``_yield_to_ui``)."""
     native_cite = native_cite or source.native_cite
     native = parse_reporter_cite(native_cite)
     us = parse_reporter_cite(us_cite)
     pdf = parse_reporter_cite(pdf_cite) or us
     effective_pdf_cite = pdf.cite if pdf else pdf_cite
-    source_words = _words(
-        source.text,
-        [(None, index) for index in range(len(source.text))],
-    )
+    # No coordinates: a source word has no height on a page, and is indexed
+    # by its own first character — what _words gives without them.
+    source_words = _words(source.text)
     source_index = _SourceIndex(source_words)
 
     exact_by_pdf: dict[int, NativePageAnchor] = {}
@@ -1320,7 +1347,10 @@ def align_opinion_locations(
         best_words: tuple[_Word, ...] = ()
         best_blocks: tuple[tuple[int, int, int], ...] = ()
         for variant in _page_variants(chars):
-            score, blocks = _align_variant(source_index, variant, hints)
+            if between_pages is not None:
+                between_pages()
+            score, blocks = _align_variant(
+                source_index, variant, hints, between_pages)
             if score > best_score:
                 best_score, best_words, best_blocks = score, variant, blocks
         matched = sum(size for _p, _s, size in best_blocks)

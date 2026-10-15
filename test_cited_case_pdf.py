@@ -427,8 +427,9 @@ APP_NS = _load(
      "_extract_pdf_text_and_style": lambda data, **_kw: (
          [[("c", (0, 0, 1, 1))]], []),
      "_yield_to_ui": lambda: None,
-     "_citation_links_from_visible_pdf_text": lambda d, p, i: ({0: ["x"]}, set()),
-     "slip_opinion": mock.Mock(detect_sections=lambda pages: []),
+     "_citation_links_from_visible_pdf_text": lambda d, p, i, **_kw: (
+         {0: ["x"]}, set()),
+     "slip_opinion": mock.Mock(detect_sections=lambda pages, **_kw: []),
      "_normalized_us_cite": _NORMALIZED_US_CITE,
      "_scan_citation_item": SCAN_CITATION_ITEM,
      "_scan_page_for_pin": SCAN_PAGE_FOR_PIN,

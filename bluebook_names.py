@@ -2254,6 +2254,14 @@ def cut_companion_cases(text: str) -> str:
         joined = _JOINED_MATTER_RE.search(text, head.end())
         if joined:
             text = text[:joined.start()]
+        # …and where the parties appealing follow it, each with its own
+        # docket number: "IN RE: 2016 PRIMARY ELECTION. Hamilton County Board
+        # of Elections (16-3350); Ohio Secretary Of State (16-3352); …,
+        # Appellants." is In re 2016 Primary Election, 836 F.3d 584.
+        listed = re.search(r"\.\s+(?=[A-Z][^()]{0,120}\(\d{1,2}-\d{3,6}\))",
+                           text[head.end():])
+        if listed:
+            text = text[:head.end() + listed.start() + 1]
     cuts: list[int] = []
     for cm in re.finditer(
         r"\.\s+(?=[^.]*?\s+vs?\.\s+|SAME\b|IN\s+RE\b|EX\s+PARTE\b"
@@ -2330,7 +2338,10 @@ _ROLE_WORD = (
     r"(?:cross-|counter-|third-party )?"
     r"(?:appell(?:ants?|ees?)|plaintiffs?|defendants?|petitioners?|"
     r"respondents?|relators?|intervenors?|movants?|claimants?|garnishees?|"
-    r"complainants?|libell?ants?|libell?ees?)"
+    r"complainants?|libell?ants?|libell?ees?|"
+    # the capacity partners sue in, which names no firm ("Russell et al.,
+    # Co-Partners")
+    r"(?:co-?)?partners?)"
     r"(?:\s+in\s+error)?"
 )
 _PARTY_ROLE_RE = re.compile(
@@ -3044,6 +3055,9 @@ def in_re_caps_name(caption: str) -> str | None:
                   and len(re.sub(r"[^A-Za-z]", "", t)) >= 2), None)
     if prefix is None or start is None:
         return None
+    # A number can open the name: "IN RE: 2016 PRIMARY ELECTION".
+    while start > 0 and re.fullmatch(r"\d[\d,.\-–/]*", tokens[start - 1]):
+        start -= 1
     end = start
     while end < len(tokens):
         tok = tokens[end]
@@ -3142,6 +3156,40 @@ def collective_case_name(caption: str) -> str | None:
     if any(_caps_run_sentence_end(w) for w in words[:-1]):
         return None
     return name
+
+
+# Groups of cases decided together and cited by the group's name, which a
+# caption source may leave out altogether: Google Scholar heads 109 U.S. 3
+# with the five cases' own captions — "United States v. Stanley. U.S. v.
+# Ryan. U.S. v. Nichols. …" — and the name they are cited by, Civil Rights
+# Cases, 109 U.S. 3 (1883), nowhere.  (A caption that opens with the name
+# is read by collective_case_name.)  Each by every citation of its report.
+_GROUP_CASE_NAMES = {
+    "Civil Rights Cases": ("109 U.S. 3", "3 S. Ct. 18", "27 L. Ed. 835"),
+}
+
+
+def _group_cite_key(cite: str) -> str:
+    """*cite* compared without its spacing, periods or case: "109 U. S. 3"
+    is "109 U.S. 3"."""
+    return re.sub(r"[\s.]+", "", cite or "").lower()
+
+
+_GROUP_CASE_NAME_BY_CITE = {
+    _group_cite_key(cite): name
+    for name, cites in _GROUP_CASE_NAMES.items() for cite in cites
+}
+
+
+def group_case_name(*cites: str) -> str | None:
+    """The name a group of cases reported together is cited by, when one
+    of *cites* is the group's report (see _GROUP_CASE_NAMES) — "Civil
+    Rights Cases" for "109 U.S. 3" — or None."""
+    for cite in cites:
+        name = _GROUP_CASE_NAME_BY_CITE.get(_group_cite_key(str(cite or "")))
+        if name:
+            return name
+    return None
 
 
 # A caption that names one party, as the petitioner or the applicant, and no
@@ -3944,6 +3992,11 @@ def _clean_caption(name: str) -> str:
     # (THE "SCOTLAND.", 105 U.S. 24) — the quotes are the reporter's
     # typography, never part of the Bluebook name.
     name = re.sub(r"[“”\"]", "", name)
+    # The New York reports set "agt." (against) where others set "v." —
+    # "Lowber agt. Wells", 13 How. Pr. 454 — and the Bluebook writes "v."
+    # (rule 10.2.1).  Lowercase only: a capitalized "Agt." is an agent's
+    # ("Smith, Gen. Agt.").
+    name = re.sub(r"\s+ags?t\.\s+", " v. ", name)
     # A bracket closed by a brace, or a brace by a bracket, is a scan's
     # garbling, never a name's: "CHIRAC and Others {VV] against REINICKER."
     # (24 U.S. 280).

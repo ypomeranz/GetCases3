@@ -1196,13 +1196,25 @@ _SEP_HEADER_RE = re.compile(
     r"(?:(?:CHIEF\s+)?JUSTICE\s+\S+|"
     r"[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*){0,3}\s*,\s*"
     r"(?:C\.\s*J\.|JJ?\.|(?:Chief\s+|Senior\s+|Presiding\s+)?"
-    r"(?:Circuit\s+|District\s+|Bankruptcy\s+)?(?:Judge|Justice)))"
+    r"(?:Circuit\s+|District\s+|Bankruptcy\s+)?(?:Judge|Justice))"
+    # A title is the byline's own when nothing names the judge after it:
+    # "JACKSON, Justice, dissenting".  "In Brinegar, Justice Jackson, after
+    # observing … (dissenting opinion), continued:" is a sentence of the
+    # Leon dissent (468 U.S. 897), not another opinion.
+    r"(?!(?-i:\s+[A-Z][a-z])))"
     r".{0,200}?\b(?:concurring|dissenting)"
     # A real header ends right after the role phrase (allowing "in part…"
     # tails and trailing footnote markers).  Prose that merely *mentions*
     # someone concurring ("Justice Frankfurter prefaced his concurring
     # opinion in Youngstown…") runs on past it and must not match.
-    r"[^.:]{0,80}[.:]?\s*(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
+    # Or after the judges joining it, when they are named after the role
+    # — a list that can run long and note what each joins: "FLAUM, Circuit
+    # Judge, concurring, joined by CUMMINGS, BAUER (in No. 96-1361), CUDAHY
+    # (in 95-3128), KANNE (in part), and EVANS, Circuit Judges." (Jansen v.
+    # Packaging Corp. of Am., 123 F.3d 490).
+    r"(?:[^.:]{0,80}"
+    r"|,?\s*joined\s+by\s+(?:[^.:()]|\([^()]{0,40}\)){1,300})"
+    r"[.:]?\s*(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
     re.IGNORECASE | re.DOTALL,
 )
 # Syllabus disposition lines ("BLACKMUN, J., delivered the opinion…;
@@ -1557,9 +1569,14 @@ _INLINE_ROLE_OPEN_RE = re.compile(
     re.IGNORECASE,
 )
 # PDF-to-text extraction sometimes glues a filing banner to the dissent byline:
-# ``6 FILED ... CLERK R. NELSON, Circuit Judge, dissenting:``.
+# ``6 FILED ... CLERK R. NELSON, Circuit Judge, dissenting:``.  The banner
+# is set in capitals; the D.C. Circuit's list of the writings ("Dissenting
+# opinion filed by Circuit Judge Kavanaugh, with whom …") is no banner, and
+# read as one it split PHH Corp. v. CFPB, 881 F.3d 75, into two phantom
+# opinions.
+_FILED_BANNER_WORD_RE = re.compile(r"\b(?:FILED|CLERK)\b")
 _FILED_BANNER_ROLE_RE = re.compile(
-    r"(?:\bFILED\b|\bCLERK\b).{0,400}?"
+    r"(?-i:\bFILED\b|\bCLERK\b).{0,400}?"
     r"(?P<label>[A-Z](?:\.\s*)?[A-Z][A-Z.'’ -]{0,45},\s*"
     r"(?:(?:Chief|Senior)\s+)?(?:Circuit\s+)?Judge,.{0,160}?"
     r"(?P<role>concurring|dissenting)[^:]{0,100}:)",
@@ -1772,8 +1789,7 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
             if _content_text(nb)
         )
         filed_role = (_FILED_BANNER_ROLE_RE.search(joined_text[:4000])
-                      if re.search(r"\b(?:FILED|CLERK)\b", t, re.IGNORECASE)
-                      else None)
+                      if _FILED_BANNER_WORD_RE.search(t) else None)
         public_role = _PUBLIC_ROLE_BYLINE_RE.search(t[:4000])
         inline_role = _INLINE_ROLE_OPEN_RE.match(t[:300])
         joined_role = _JOINED_ROLE_BYLINE_RE.match(joined_text[:700])
@@ -1870,6 +1886,22 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
             maj_author_idx = i
     first_sep = boundaries[0][0] if boundaries else len(blocks)
     phrase_before = [i for i in maj_phrase_all if i < first_sep]
+    if maj_author_idx is not None:
+        # The Sixth Circuit's line-up — "SUTTON, J., delivered the opinion
+        # of the court in which SILER, J., joined …" — heads its opinions,
+        # but Scholar can set it at the opinion's end, after the author's own
+        # line ("SUTTON, Circuit Judge.") has opened it (In re 2016 Primary
+        # Election, 836 F.3d 584): the whole majority then read as header.
+        # A line-up naming the judge whose line came first opens nothing.
+        author = re.split(r"[,\s]", _content_text(blocks[maj_author_idx])
+                          .strip())[0]
+        maj_phrase_all = [
+            i for i in maj_phrase_all
+            if not (i > maj_author_idx and len(author) > 1
+                    and re.match(re.escape(author) + r",\s*(?:C\.\s*)?J\.,?\s+"
+                                 r"delivered\b", _content_text(blocks[i]),
+                                 re.IGNORECASE))]
+        phrase_before = [i for i in phrase_before if i in maj_phrase_all]
     maj_phrase_idx: Optional[int] = None
     if phrase_before:
         # Keep the LAST candidate: the syllabus disposition line ("BLACKMUN,

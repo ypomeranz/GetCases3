@@ -1214,12 +1214,17 @@ from bluebook_names import (
     caption_case_reference_tokens,
     cut_companion_cases,
     ejectment_case_names,
+    group_case_name,
     is_recognized_given_name,
     normal_case_caption,
     refine_caption_case,
     simplify_historical_entity_caption,
 )
-from bluebook_parentheticals import decided_en_banc, join_parentheticals
+from bluebook_parentheticals import (
+    decided_en_banc,
+    join_parentheticals,
+    judges_named,
+)
 from scholar_caption import (
     scholar_body_text as _scholar_body_text,
     scholar_caption_name as _scholar_caption_name,
@@ -2305,6 +2310,10 @@ def _bluebook_display_name(item: dict) -> str:
     if "(" not in citation_str:
         citation_str = _respace_reporter_in_cite(citation_str)
     citation_str = _bluebook_reporter_spelling(citation_str)
+    # Cases reported together under one name are cited by it (see
+    # group_case_name), whatever the parties' captions say.
+    case_name = group_case_name(
+        citation_str, *(item.get("citation") or [])) or case_name
 
     # Year from date filed
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
@@ -14194,14 +14203,15 @@ class CourtListenerGUI:
                 _yield_to_ui()
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
-                        data, pages, italics)
+                        data, pages, italics, between_pages=_yield_to_ui)
                     if state_court:
                         # A state court's "Article I, § 7": its own.
                         links = _federal_constitution_only_pages(links)
                 except Exception as exc:
                     print(f"[cite-pdf] citation scan failed: {exc}")
                 try:
-                    sections = slip_opinion.detect_sections(pages)
+                    sections = slip_opinion.detect_sections(
+                        pages, between_pages=_yield_to_ui)
                 except Exception as exc:
                     print(f"[cite-pdf] section detection failed: {exc}")
             # What the pages call themselves, where they say: a preliminary
@@ -21582,7 +21592,7 @@ def _page_has_scan_background(page) -> bool:
     return False
 
 
-def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
+def _pdf_ocr_scan_pages(pdf_bytes: bytes, between_pages=None) -> set[int]:
     """Page indexes whose OCR geometry is not safe to color.
 
     Some GovInfo U.S. Reports PDFs (including volume 567) are full-page
@@ -21591,14 +21601,23 @@ def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
     letter-spaced (``"C i t e  a s: 5 6 7 U. S."``). The extractor repairs
     that distinctive geometry; those pages can therefore use the ordinary
     blue citation treatment. Other OCR-over-scan pages remain quiet.
+
+    The PDFium lock is taken a page at a time, as in
+    :func:`_extract_pdf_text_and_style`, and ``between_pages`` is called
+    before each page (see _yield_to_ui).
     """
     import pypdfium2 as pdfium
 
     pages: set[int] = set()
     with _PDFIUM_LOCK:
         doc = pdfium.PdfDocument(pdf_bytes)
-        try:
-            for i in range(len(doc)):
+    try:
+        with _PDFIUM_LOCK:
+            n_pages = len(doc)
+        for i in range(n_pages):
+            if between_pages is not None:
+                between_pages()
+            with _PDFIUM_LOCK:
                 page = doc[i]
                 try:
                     if (
@@ -21608,7 +21627,8 @@ def _pdf_ocr_scan_pages(pdf_bytes: bytes) -> set[int]:
                         pages.add(i)
                 finally:
                     page.close()
-        finally:
+    finally:
+        with _PDFIUM_LOCK:
             doc.close()
     return pages
 
@@ -22461,7 +22481,8 @@ def _extract_pdf_text_and_style(
             doc.close()
 
 
-def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) -> dict:
+def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None,
+                               between_pages=None) -> dict:
     """Build the per-page clickable-citation rectangles from extracted page char
     data (see :func:`_extract_pdf_text_pages`).  Pure — no PDFium, no tk — so it
     is cheap to run on the worker right after extraction:
@@ -22471,11 +22492,14 @@ def _citation_links_from_pages(pages: list, italics: "Optional[list]" = None) ->
     Detection runs over the whole document at once (so "Id." and short forms
     resolve against citations anywhere in it); a per-character offset map ties
     each detected span back to its glyph boxes, and a citation that wraps across
-    lines (or pages) becomes one rectangle per line."""
+    lines (or pages) becomes one rectangle per line.  ``between_pages`` is
+    called before each page is read (see _yield_to_ui)."""
     parts: list = []               # global text pieces
     gmap: list = []                # global index -> (page, local) or (None, None)
     slants: list = []              # global index -> is the glyph italic
     for pi, chars in enumerate(pages):
+        if between_pages is not None:
+            between_pages()
         page_italics = italics[pi] if italics and pi < len(italics) else ()
         # A footnote mark is scanned as a space: in front of a record cite it
         # would be a volume ("injury.⁴ Appl. 6" as 4 Appl. 6), after a page
@@ -22542,19 +22566,22 @@ def _detect_pdf_citation_links(pdf_bytes: bytes) -> dict:
 
 def _citation_links_from_visible_pdf_text(
     pdf_bytes: bytes, pages: list, italics: "Optional[list]" = None,
+    between_pages=None,
 ) -> "tuple[dict, set[int]]":
     """Citation rectangles for the whole document, plus the page indexes
     whose OCR glyph geometry remains unsuitable for coloring. The repairable
     zero-height GovInfo layer has already been normalized by extraction; other
     OCR boxes can land imprecisely, so the pane renders those pages' links
     *quietly* — no tint, no recoloring — while keeping them clickable (see
-    :meth:`_PdfPane.set_citation_links`)."""
+    :meth:`_PdfPane.set_citation_links`).  ``between_pages`` is called
+    before each page is read, in both passes (see _yield_to_ui)."""
     try:
-        ocr_pages = _pdf_ocr_scan_pages(pdf_bytes)
+        ocr_pages = _pdf_ocr_scan_pages(pdf_bytes, between_pages)
     except Exception as exc:
         print(f"[pdf-links] OCR scan check failed: {exc}")
         ocr_pages = set()
-    return _citation_links_from_pages(pages, italics), ocr_pages
+    return (_citation_links_from_pages(pages, italics, between_pages),
+            ocr_pages)
 
 
 # ---------------------------------------------------------------------------
@@ -22710,8 +22737,28 @@ def _part_author(label: str, loose: bool = False) -> str:
     m = (re.search(r"\b(?:[Cc]hief\s+)?(?:JUSTICE|Justice)\s+"
                    r"([A-Z][A-Za-z'’.]+)", text)
          or re.search(r"\b([A-Z][A-Za-z'’]{2,}),\s*(?:C\.\s*)?J\.", text)
-         or re.search(r"\(([A-Z][A-Za-z'’.]+)", text)
-         or (re.search(r"\b([A-Z][A-Za-z'’]{2,})\b", text) if loose else None))
+         or re.search(r"\(([A-Z][A-Za-z'’.]+)", text))
+    if not m:
+        # A circuit byline names its judge in full as often as not: "KAREN
+        # LeCRAFT HENDERSON, Circuit Judge, dissenting" is Henderson, and
+        # "ST. EVE, Circuit Judge" St. Eve.
+        judge = re.match(
+            r"(?:\*\d+[A-Za-z]{0,2}\s+)*([A-Z][\w.'’ -]{1,60}?),\s*"
+            r"(?:(?:Chief|Senior|Presiding)\s+)?(?:(?:Circuit|District)\s+)?"
+            r"Judge\b", text)
+        if judge:
+            words = judge.group(1).split()
+            surname = words[-1:]
+            while (len(words) > len(surname)
+                   and words[-len(surname) - 1].rstrip(".").lower() in (
+                       "st", "van", "von", "de", "del", "della", "la", "le",
+                       "da", "di", "du")):
+                surname = words[-len(surname) - 1:]
+            return " ".join(
+                w[:1] + w[1:].lower() if w.isupper() and len(w) > 1 else w
+                for w in surname)
+        if loose:
+            m = re.search(r"\b([A-Z][A-Za-z'’]{2,})\b", text)
     if not m:
         return ""
     name = m.group(1).rstrip(".")
@@ -27378,6 +27425,9 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
                 name, court_state=court_state)
         except Exception:
             pass
+    # Cases reported together under one name are cited by it (see
+    # group_case_name).
+    name = group_case_name(cite, *m_cites) or name
 
     if m_court:
         court = _court_for_paren(cite, "", m_court)
@@ -31648,6 +31698,15 @@ class _ScholarTextWindow:
             if known is not None:
                 name = ejectment.names.get(known, name)
                 ejectment = None
+        # Cases reported together under a name the caption leaves out are
+        # cited by it — Civil Rights Cases, 109 U.S. 3 (1883) — and nothing
+        # about the parties' names is left to settle.
+        group = group_case_name(
+            cite, *header_cites, *(item.get("citation") or []))
+        if group:
+            name = group
+            ejectment = None
+            unresolved_caption_case = ()
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
@@ -31705,6 +31764,26 @@ class _ScholarTextWindow:
             # The forms of an ejectment party still to be asked about.
             "_ejectment": ejectment,
         }
+
+    def _judges_named(self) -> set:
+        """The judges the opinion's front matter names (see judges_named),
+        in lower case, read once."""
+        known = getattr(self, "_judges_named_cache", None)
+        if known is None:
+            parts = (getattr(self, "_rendered_parts", None)
+                     or getattr(self, "_parts", None) or [])
+            header = [b for p in parts if getattr(p, "kind", "") == "header"
+                      for b in p.blocks]
+            lead = next((p for p in parts
+                         if getattr(p, "kind", "") == "majority"), None)
+            try:
+                known = judges_named(
+                    b.text() for b in (header + (lead.blocks[:30]
+                                                 if lead else []))[:60])
+            except Exception:
+                known = set()
+            self._judges_named_cache = known
+        return known
 
     def _decided_en_banc(self) -> bool:
         """Whether this opinion was its court's decision en banc, which its
@@ -31882,8 +31961,20 @@ class _ScholarTextWindow:
             surname = _fix_name_case(
                 author.split(",")[0].split()[-1].replace("’", "'"))
             return f"{surname}, J., {phrase}"
-        phrase = t[m.start():].rstrip(" .:;")
-        phrase = re.sub(r"\s*\[[^\]]{1,6}\]$", "", phrase)  # trailing footnote marker
+        # The byline's own footnote mark goes before its closing colon:
+        # "GRIFFITH, Circuit Judge, concurring in the judgment:[1]".
+        phrase = re.sub(r"\s*\[[^\]]{1,6}\]$", "", t[m.start():].rstrip())
+        # The judges joining it are no part of the writer's parenthetical
+        # (rule 10.6.1), even where the byline names them after the role:
+        # "FLAUM, Circuit Judge, concurring, joined by CUMMINGS, BAUER (in
+        # No. 96-1361), …" is (Flaum, J., concurring).
+        phrase = re.sub(r",?\s+(?:joined\s+by|with\s+whom|in\s+which)\b.*$",
+                        "", phrase, flags=re.IGNORECASE | re.DOTALL)
+        phrase = phrase.rstrip(" .:;")
+        # A role the byline sets in parentheses closes them after it:
+        # "ABRAHAMSON, J. (dissenting)." is (Abrahamson, J., dissenting).
+        if phrase.count(")") > phrase.count("("):
+            phrase = phrase[:phrase.rindex(")")].rstrip(" .:;,")
         head = t[: m.start()].strip().rstrip(", ")
         head = re.sub(r"^(?:MR\.|MRS\.|MS\.)\s+", "", head, flags=re.IGNORECASE)
         # The chief-justice test must look only at the author's own
@@ -31908,10 +31999,39 @@ class _ScholarTextWindow:
         name = _fix_name_case(name)
         # A circuit byline may print the judge's full name ("TOBY HEYTENS,
         # Circuit Judge, …"); the writer parenthetical takes the surname
-        # alone, while disambiguating initials ("R. Nelson") stay.
+        # alone, while disambiguating initials ("R. Nelson") stay.  The
+        # surname is the one the opinion's own bench and list of writings
+        # give the judge, where they do: "KAREN LeCRAFT HENDERSON" sits as
+        # Henderson.  Otherwise only a given name goes — "Yvonne Gonzalez
+        # Rogers" is Gonzalez Rogers.
         tokens = name.split()
-        if len(tokens) > 1 and is_recognized_given_name(tokens[0]):
-            name = " ".join(tokens[1:])
+        known = self._judges_named()
+        listed = next((" ".join(tokens[k:]) for k in range(1, len(tokens))
+                       if " ".join(tokens[k:]).lower() in known), None)
+        # A bench that names its judges by surname, and this one in full,
+        # names the judge so to tell her from another of the name: the
+        # Seventh Circuit's "DIANE P. WOOD" (Judge Harlington Wood sat on it
+        # too), who is cited (Diane P. Wood, J., …).  A bench that prints
+        # every name in full says nothing of the kind.
+        surnamed = sum(1 for k in known if " " not in k)
+        if (len(tokens) > 1 and name.lower() in known
+                and surnamed > len(known) / 2):
+            pass
+        elif listed:
+            name = listed
+        elif len(tokens) > 1 and is_recognized_given_name(tokens[0]):
+            # The given names go, and the initials between them and the
+            # surname: "ROSEMARY S. POOLER" is Pooler, not "S. Pooler".
+            k = 1
+            while k < len(tokens) - 1 and (
+                    re.fullmatch(r"[A-Z]\.", tokens[k])
+                    or is_recognized_given_name(tokens[k])):
+                k += 1
+            name = " ".join(tokens[k:])
+        # A surname of two letters keeps the byline's capitals through the
+        # case fixing, which spares "IN" and "OF": "HO" is Ho.
+        if re.fullmatch(r"[A-Z]{2}", name):
+            name = name[0] + name[1].lower()
         if not name:
             return ""
         return f"{name}, {title}, {phrase}"
@@ -36302,7 +36422,7 @@ class _ScholarTextWindow:
                 _yield_to_ui()
                 try:
                     links, quiet = _citation_links_from_visible_pdf_text(
-                        data, pages, italics
+                        data, pages, italics, between_pages=_yield_to_ui
                     )
                     if state_court:
                         # A state court's "Article I, § 7": its own.
@@ -36310,7 +36430,8 @@ class _ScholarTextWindow:
                 except Exception as exc:
                     print(f"[pdf-links] citation scan failed: {exc}")
                 try:
-                    sections = slip_opinion.detect_sections(pages)
+                    sections = slip_opinion.detect_sections(
+                        pages, between_pages=_yield_to_ui)
                 except Exception as exc:
                     print(f"[pdf-parts] section detection failed: {exc}")
                 if not cite:
@@ -36336,6 +36457,10 @@ class _ScholarTextWindow:
                 "pdf_cite": cite,
                 "url": url,
             }
+            # Taking the result in is Tk work too — a mark in the text for
+            # every anchor found, some tens of milliseconds of a long
+            # opinion's — so it waits for a scroll to finish, as a page does.
+            _yield_to_ui()
             self._post(self._finish_pdf_analysis, key, result)
 
         threading.Thread(target=run, daemon=True).start()
@@ -43646,6 +43771,62 @@ class _CitingOpinionsWindow:
         )
 
 
+# Every collection the cyclic garbage collector makes stops the whole app
+# until it is done, and a full one walks every container object alive: the
+# English Reports index alone is some 300,000 of them, so a full collection
+# took 140 ms and more — a hitch, every five seconds, in any opinion being
+# scrolled.  So the timer below collects only the young generations each
+# second (what was made since the last: milliseconds' work), the whole
+# heap once a minute and only while the reader is still, and nothing while
+# they scroll or a window goes up.  The indexes loaded at start live
+# as long as the app; once they are in, everything then alive is frozen out
+# of later collections' walk (gc.freeze).
+_GC_TICK_MS = 1000
+_GC_RECHECK_MS = 100       # how soon a collection put off for the reader looks again
+_GC_PUT_OFF_MAX_S = 5.0    # longest a young collection waits on the reader
+_GC_FULL_EVERY_S = 60.0
+_GC_FULL_QUIET_S = 1.0     # stillness a full collection waits for
+_GC_FULL_PUT_OFF_MAX_S = 300.0
+
+
+def _start_gc_timer(root: tk.Misc,
+                    warmers: "tuple[threading.Thread, ...]" = ()) -> None:
+    """Collect cyclic garbage on *root*'s (the Tk) thread, out of the
+    reader's way (see above).  *warmers* are the threads loading the
+    long-lived indexes: once they are done — and while no window is open,
+    whose objects die with it — the heap is frozen."""
+    now = time.monotonic()
+    state = {"due": now, "full": now + _GC_FULL_EVERY_S, "freeze": True}
+
+    def tick() -> None:
+        now = time.monotonic()
+        # How long the reader has been still: below zero while a scroll's
+        # hold or a window going up keeps the gate shut (see _ui_busy).
+        quiet = now - _UI_FIRST["until"]
+        freeze = (state["freeze"]
+                  and not any(t.is_alive() for t in warmers)
+                  and not any(isinstance(w, tk.Toplevel)
+                              for w in root.winfo_children()))
+        if (freeze or now >= state["full"]) and (
+                quiet >= _GC_FULL_QUIET_S
+                or now - state["full"] >= _GC_FULL_PUT_OFF_MAX_S):
+            gc.collect()
+            if freeze:
+                gc.freeze()
+                state["freeze"] = False
+            state["full"] = time.monotonic() + _GC_FULL_EVERY_S
+        elif quiet >= 0 or now - state["due"] >= _GC_PUT_OFF_MAX_S:
+            gc.collect(1)
+        else:
+            root.after(_GC_RECHECK_MS, tick)
+            return
+        _flush_tk_image_graveyard()
+        state["due"] = time.monotonic() + _GC_TICK_MS / 1000
+        root.after(_GC_TICK_MS, tick)
+
+    root.after(_GC_TICK_MS, tick)
+
+
 def main() -> None:
     root = tk.Tk()
 
@@ -43655,15 +43836,8 @@ def main() -> None:
     # safe on the main thread; a worker-thread collection can therefore
     # deadlock or abort the process (see the Tk-image lifecycle note above
     # _PdfPane).  Reference counting still frees non-cyclic objects instantly;
-    # only cycle collection is deferred to this timer.
+    # only cycle collection is deferred to the timer (_start_gc_timer).
     gc.disable()
-
-    def _gc_tick() -> None:
-        gc.collect()
-        _flush_tk_image_graveyard()
-        root.after(5000, _gc_tick)
-
-    root.after(5000, _gc_tick)
 
     # Hand the GIL back to the Tk thread sooner.  Workers read scans and
     # opinions in pure Python, and every Tk call the window makes gives the
@@ -43680,8 +43854,11 @@ def main() -> None:
     bridge = app._start_browser_bridge()
     # Windows: the scales in the taskbar, to reach it when nothing is open.
     tray = app._start_tray_icon()
-    eng_rep.warm()  # load the English Reports index in the background
-    sec_decisions.warm()  # and the SEC Decisions and Reports' page index
+    warmers = (
+        eng_rep.warm(),  # load the English Reports index in the background
+        sec_decisions.warm(),  # and the SEC Decisions and Reports' page index
+    )
+    _start_gc_timer(root, warmers)
     # The process that reads opinions' citations off this one's GIL (see
     # scan_process), started once the window has had a moment to come up.
     root.after(1000, scan_process.start)

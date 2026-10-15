@@ -703,7 +703,8 @@ def _finalize(sec: dict) -> SlipSection:
                        sec["start"], start_at)
 
 
-def _merge_heads(heads: list, page_lines: list, pages: list) -> list[dict]:
+def _merge_heads(heads: list, page_lines: list, pages: list,
+                 between_pages=None) -> list[dict]:
     """Group the per-page parsed heads into contiguous sections, absorbing
     OCR variation and gating each new separate opinion on its opening
     attribution — a page whose head garbles into a *new* justice name mid-
@@ -713,6 +714,8 @@ def _merge_heads(heads: list, page_lines: list, pages: list) -> list[dict]:
     cur = None
     used: set = set()   # (page, line) of attributions already consumed
     for pi, h in enumerate(heads):
+        if between_pages is not None:
+            between_pages()
         if h is None or h.kind == "appendix":
             continue  # appendices and unreadable heads inherit the part
         if cur is not None and _continues(cur, h):
@@ -800,7 +803,8 @@ def _west_attribution(lines: list, li: int):
     return kind, _title_name(name.split(" AND ")[0]), role
 
 
-def _sections_from_attributions(pages: list) -> list[dict]:
+def _sections_from_attributions(pages: list,
+                                between_pages=None) -> list[dict]:
     """Sections for reporter page images with *no* running heads at all
     (static.case.law F./F.2d/F.3d and state-report scans): each opinion is
     found by its opening attribution line — "SRINIVASAN, Circuit Judge:",
@@ -808,6 +812,8 @@ def _sections_from_attributions(pages: list) -> list[dict]:
     out: list[dict] = []
     seen: set = set()
     for pi, chars in enumerate(pages):
+        if between_pages is not None:
+            between_pages()
         for lines in _column_line_sets(chars):
             for li, ln in enumerate(lines):
                 att = _line_us_attribution(lines, li)
@@ -847,10 +853,13 @@ def _finalize_attribution(sec: dict) -> SlipSection:
     return SlipSection(f"{sec['name']}, J., {role}", kind, sec["start"])
 
 
-def detect_sections(pages: list) -> list[SlipSection]:
+def detect_sections(pages: list, between_pages=None) -> list[SlipSection]:
     """Split an opinion PDF into its parts.  *pages* is the per-page glyph
     data (see the module docstring).  Returns the parts in document order;
     a single catch-all part when the layout isn't recognizable.
+    *between_pages*, when given, is called before each page is read, in
+    each pass over them: a worker's chance to stand aside while the window
+    is busy (the GUI passes its ``_yield_to_ui``).
 
     Slip opinions and US Reports pages carry a per-page running head naming
     the part; those are matched fuzzily (the scanned volumes' OCR garbles
@@ -858,21 +867,29 @@ def detect_sections(pages: list) -> list[SlipSection]:
     its opening attribution ("MR. JUSTICE BRANDEIS, dissenting.").  Reporter
     scans with no running heads (static.case.law) fall back to finding the
     opening attributions themselves."""
-    page_lines = [group_lines(chars) for chars in pages]
+    def paced(fn, items: list) -> list:
+        out = []
+        for item in items:
+            if between_pages is not None:
+                between_pages()
+            out.append(fn(item))
+        return out
+
+    page_lines = paced(group_lines, pages)
     if not page_lines:
         return []
-    heads = [_page_head(pl) for pl in page_lines]
+    heads = paced(_page_head, page_lines)
 
     # Head-mode needs real running heads (slips, US Reports); a lone parsed
     # "head" in a long document is a body line misread, so fall back to the
     # attribution scan (reporter scans have no heads at all).
     head_pages = sum(1 for h in heads if h is not None)
     if head_pages >= min(2, len(page_lines)):
-        sections = [_finalize(s)
-                    for s in _merge_heads(heads, page_lines, pages)]
+        sections = [_finalize(s) for s in _merge_heads(
+            heads, page_lines, pages, between_pages)]
     else:
-        sections = [_finalize_attribution(s)
-                    for s in _sections_from_attributions(pages)]
+        sections = [_finalize_attribution(s) for s in
+                    _sections_from_attributions(pages, between_pages)]
 
     # Consecutive same-label parts collapse (defensive; merging should
     # already have absorbed them).
