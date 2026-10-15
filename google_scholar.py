@@ -1196,7 +1196,12 @@ _SEP_HEADER_RE = re.compile(
     r"(?:(?:CHIEF\s+)?JUSTICE\s+\S+|"
     r"[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*){0,3}\s*,\s*"
     r"(?:C\.\s*J\.|JJ?\.|(?:Chief\s+|Senior\s+|Presiding\s+)?"
-    r"(?:Circuit\s+|District\s+|Bankruptcy\s+)?(?:Judge|Justice)))"
+    r"(?:Circuit\s+|District\s+|Bankruptcy\s+)?(?:Judge|Justice))"
+    # A title is the byline's own when nothing names the judge after it:
+    # "JACKSON, Justice, dissenting".  "In Brinegar, Justice Jackson, after
+    # observing … (dissenting opinion), continued:" is a sentence of the
+    # Leon dissent (468 U.S. 897), not another opinion.
+    r"(?!(?-i:\s+[A-Z][a-z])))"
     r".{0,200}?\b(?:concurring|dissenting)"
     # A real header ends right after the role phrase (allowing "in part…"
     # tails and trailing footnote markers).  Prose that merely *mentions*

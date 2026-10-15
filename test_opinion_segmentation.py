@@ -60,6 +60,38 @@ class JoinedSeparateOpinionTests(unittest.TestCase):
 
         self.assertEqual([part.kind for part in parts], ["majority"])
 
+    def test_a_sentence_naming_a_justice_s_dissent_opens_nothing(self):
+        # United States v. Leon, 468 U.S. 897 (1984): a sentence of
+        # Brennan's dissent had opened a phantom "In Brinegar" dissent.
+        parts = segment_blocks([
+            _block("JUSTICE WHITE delivered the opinion of the Court."),
+            _block("The judgment is reversed."),
+            _block("JUSTICE BRENNAN, with whom JUSTICE MARSHALL joins, "
+                   "dissenting."),
+            _block("The exclusionary rule is part of the Amendment."),
+            _block(
+                "In Brinegar, Justice Jackson, after observing that "
+                "\u201c[i]ndications are not wanting that Fourth Amendment "
+                "freedoms are tacitly marked as secondary rights,\u201d "
+                "338 U. S., at 180 (dissenting opinion), continued:"
+            ),
+            _block("\u201cCourts can protect the innocent against such "
+                   "invasions only indirectly.\u201d"),
+        ])
+
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "dissent"])
+        # A state court's title with no comma before the role still opens.
+        parts = segment_blocks([
+            _block("OPALA, Justice."),
+            _block("The judgment is affirmed."),
+            _block("KAUGER, Justice concurring in parts I and V."),
+            _block("I join parts I and V."),
+            _block("I write to say more."),
+        ])
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence"])
+
     def test_joined_byline_can_start_concurrence(self):
         parts = segment_blocks([
             _block("MR. JUSTICE SMITH delivered the opinion of the Court."),
