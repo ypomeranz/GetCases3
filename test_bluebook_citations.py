@@ -6391,6 +6391,60 @@ class WriterParentheticalTests(unittest.TestCase):
         self.assertEqual(win._writer_parenthetical(rogers),
                          "Gonzalez Rogers, J., concurring")
 
+    def test_the_judges_joining_are_left_out(self):
+        # Rule 10.6.1 names the writer alone, wherever the byline names
+        # those joining: Jansen v. Packaging Corp. of Am., 123 F.3d 490.
+        for line, cited in (
+                ("FLAUM, Circuit Judge, concurring, joined by CUMMINGS, "
+                 "BAUER (in No. 96-1361), CUDAHY (in 95-3128), KANNE (in "
+                 "part), and EVANS, Circuit Judges.",
+                 "Flaum, J., concurring"),
+                ("SHWARTZ, Circuit Judge, dissenting, with whom RESTREPO, "
+                 "Circuit Judge, joins.", "Shwartz, J., dissenting"),
+                ("SPINA, J. (dissenting, with whom Sosman and Cordy, JJ., "
+                 "join).", "Spina, J., dissenting"),
+                # …nor, with none joining, the parenthesis the role is in.
+                ("SHIRLEY S. ABRAHAMSON, J. (dissenting).",
+                 "Abrahamson, J., dissenting"),
+                ("WILLIAM A. BABLITCH, J. (concurring in part, dissenting "
+                 "in part).",
+                 "Bablitch, J., concurring in part, dissenting in part")):
+            with self.subTest(line=line[:30]):
+                part = self._part("concurrence" if "concurring" in line
+                                  else "dissent", line)
+                self.assertEqual(self._win()._writer_parenthetical(part),
+                                 cited)
+
+    def test_a_judge_the_bench_names_in_full_to_tell_apart(self):
+        # The Seventh Circuit names every judge by surname but Diane P. Wood
+        # (Harlington Wood sat on it too); she had been "P. Wood, J.".
+        win = self._win()
+        header = OpinionPart("Header", "header", [Block("para", [Span(
+            "Before POSNER, Chief Judge, and CUMMINGS, BAUER, CUDAHY, "
+            "COFFEY, FLAUM, EASTERBROOK, MANION, KANNE, ROVNER, DIANE P. "
+            "WOOD, and EVANS, Circuit Judges.")])])
+        wood = self._part(
+            "dissent", "DIANE P. WOOD, Circuit Judge, joined by EASTERBROOK "
+            "and ROVNER, Circuit Judges, concurring and dissenting.")
+        win._parts = [header, wood]
+        self.assertEqual(win._writer_parenthetical(wood),
+                         "Diane P. Wood, J., concurring and dissenting")
+        # A bench that prints every name in full sets none apart, and the
+        # given names go with the initials after them.
+        for line, cited in (
+                ("ROSEMARY S. POOLER, Circuit Judge, concurring.",
+                 "Pooler, J., concurring"),
+                ("DEBRA ANN LIVINGSTON, Circuit Judge, concurring.",
+                 "Livingston, J., concurring")):
+            with self.subTest(line=line):
+                win = self._win()
+                header = OpinionPart("Header", "header", [Block("para", [
+                    Span("Before: ROSEMARY S. POOLER, DEBRA ANN "
+                         "LIVINGSTON, and DENNY CHIN, Circuit Judges.")])])
+                part = self._part("concurrence", line)
+                win._parts = [header, part]
+                self.assertEqual(win._writer_parenthetical(part), cited)
+
     def test_a_byline_s_footnote_mark_takes_no_colon_with_it(self):
         part = self._part(
             "concurrence",

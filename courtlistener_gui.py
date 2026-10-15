@@ -31964,7 +31964,17 @@ class _ScholarTextWindow:
         # The byline's own footnote mark goes before its closing colon:
         # "GRIFFITH, Circuit Judge, concurring in the judgment:[1]".
         phrase = re.sub(r"\s*\[[^\]]{1,6}\]$", "", t[m.start():].rstrip())
+        # The judges joining it are no part of the writer's parenthetical
+        # (rule 10.6.1), even where the byline names them after the role:
+        # "FLAUM, Circuit Judge, concurring, joined by CUMMINGS, BAUER (in
+        # No. 96-1361), …" is (Flaum, J., concurring).
+        phrase = re.sub(r",?\s+(?:joined\s+by|with\s+whom|in\s+which)\b.*$",
+                        "", phrase, flags=re.IGNORECASE | re.DOTALL)
         phrase = phrase.rstrip(" .:;")
+        # A role the byline sets in parentheses closes them after it:
+        # "ABRAHAMSON, J. (dissenting)." is (Abrahamson, J., dissenting).
+        if phrase.count(")") > phrase.count("("):
+            phrase = phrase[:phrase.rindex(")")].rstrip(" .:;,")
         head = t[: m.start()].strip().rstrip(", ")
         head = re.sub(r"^(?:MR\.|MRS\.|MS\.)\s+", "", head, flags=re.IGNORECASE)
         # The chief-justice test must look only at the author's own
@@ -31998,10 +32008,26 @@ class _ScholarTextWindow:
         known = self._judges_named()
         listed = next((" ".join(tokens[k:]) for k in range(1, len(tokens))
                        if " ".join(tokens[k:]).lower() in known), None)
-        if listed:
+        # A bench that names its judges by surname, and this one in full,
+        # names the judge so to tell her from another of the name: the
+        # Seventh Circuit's "DIANE P. WOOD" (Judge Harlington Wood sat on it
+        # too), who is cited (Diane P. Wood, J., …).  A bench that prints
+        # every name in full says nothing of the kind.
+        surnamed = sum(1 for k in known if " " not in k)
+        if (len(tokens) > 1 and name.lower() in known
+                and surnamed > len(known) / 2):
+            pass
+        elif listed:
             name = listed
         elif len(tokens) > 1 and is_recognized_given_name(tokens[0]):
-            name = " ".join(tokens[1:])
+            # The given names go, and the initials between them and the
+            # surname: "ROSEMARY S. POOLER" is Pooler, not "S. Pooler".
+            k = 1
+            while k < len(tokens) - 1 and (
+                    re.fullmatch(r"[A-Z]\.", tokens[k])
+                    or is_recognized_given_name(tokens[k])):
+                k += 1
+            name = " ".join(tokens[k:])
         # A surname of two letters keeps the byline's capitals through the
         # case fixing, which spares "IN" and "OF": "HO" is Ho.
         if re.fullmatch(r"[A-Z]{2}", name):
