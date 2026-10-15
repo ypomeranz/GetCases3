@@ -6246,6 +6246,54 @@ class CapitalizedFirstPartyTests(unittest.TestCase):
             "Diane PLYLER, M.D.")
 
 
+class InstitutionThenPersonTests(unittest.TestCase):
+    """A name with no capitals to read — typed, or from CourtListener —
+    names its first party all the same: a person after an institution's
+    "&" or "and" is the next party (rule 10.2.1(a)), comma or no.
+    "Isabell v. Trustees of Indiana University & Teresa Dobrzykowski" had
+    been cited with Dobrzykowski."""
+
+    def test_the_person_goes(self):
+        for name, cited in (
+                ("Isabell v. Trustees of Indiana University & Teresa "
+                 "Dobrzykowski", "Isabell v. Trs. of Ind. Univ."),
+                ("Isabell v. Trustees of Indiana University and Teresa M. "
+                 "Dobrzykowski", "Isabell v. Trs. of Ind. Univ."),
+                # …as a source abbreviated it.
+                ("Isabell v. Trs. of Ind. Univ. & Teresa Dobrzykowski",
+                 "Isabell v. Trs. of Ind. Univ."),
+                # The institution's own "and" stays.
+                ("Smith v. Department of Health and Human Services and "
+                 "Kathleen Sebelius", "Smith v. Dep't of Health & Hum. "
+                                      "Servs."),
+                ("Smith v. Department of Justice & Eric Holder, Jr.",
+                 "Smith v. Dep't of Just."),
+                ("Smith v. Warner Bros. & Steven Spielberg",
+                 "Smith v. Warner Bros."),
+                ("United Steelworkers of America & John Smith v. Jones",
+                 "United Steelworkers of Am. v. Jones")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_one_party_stays_whole(self):
+        for name in (
+                # Firms named for people open with a name, not an
+                # institution.
+                "Smith v. Booz Allen & Hamilton",
+                "Smith v. Arnold & Porter Kaye Scholer",
+                "Smith v. Kirkland & Ellis LLP",
+                "Smith v. Bill & Melinda Gates Found.",
+                "Smith v. Merrill Lynch, Pierce, Fenner & Smith Inc.",
+                # …and an institution named for one may go on naming them.
+                "Smith v. Law Offs. of John Doe & Jane Roe",
+                # Two institutions are left as they were.
+                "Smith v. Trs. of Ind. Univ. & Ind. Univ. Nw.",
+                "John & Mary Smith v. Jones",
+                "Mr. & Mrs. John Doe v. Jones"):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), name)
+
+
 class FirmInitialsCaptionTests(unittest.TestCase):
     """A firm keeps the initials in its name (rule 10.2.1(g)).  In Scholar's
     all-caps "S. H. KRESS & CO." the initials had read as a person's given

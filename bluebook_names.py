@@ -2441,6 +2441,20 @@ def _first_listed_party(side: str) -> str:
                 and _strip_given_names(nxt, relaxed=False) is not None):
             side = side[:m.start()]
             break
+    # …and so is one after an institution's "&" or "and", comma or no:
+    # "Trustees of Indiana University & Teresa Dobrzykowski" is the Trustees
+    # (Isabell v. Trs. of Ind. Univ., 432 F. Supp. 3d 786).  A firm named
+    # for people opens with a person's name, not an institution's, and
+    # keeps its "&" ("Booz Allen & Hamilton", "Arnold & Porter Kaye
+    # Scholer"); "John & Mary Smith" is one party.
+    for m in re.finditer(r"\s+(?:&|and)\s+(?=[A-Z])", side):
+        head = side[:m.start()]
+        nxt = re.split(r",|\s+(?:&|and)\s+", side[m.end():], maxsplit=1)[0]
+        if (len(nxt.split()) >= 2
+                and _strip_given_names(nxt, relaxed=False) is not None
+                and _names_institution(head)):
+            side = head
+            break
     # A firm's designator closes its name, so a comma or a conjunction after
     # one opens the next party ("Acmat Corp., Laborers' Int'l Union …",
     # "McDonald's USA, LLC, & McDonald's Corp.", "McDonald's Corp. &
@@ -3351,6 +3365,27 @@ _IN_REM_ADVERSARY_PARTIES = {
 }
 
 
+def _institution_word(word: str) -> bool:
+    """Whether *word* is one an institution's name is made of — a T6 word
+    spelled out or abbreviated ("University", "Trs.", "Dep't") or a
+    business's ("Bank", "Studios")."""
+    key = _word_key(word)
+    return (word.replace("’", "'").lower().rstrip(".") in _T6_WORDS
+            or (bool(key) and key in _T6_ABBREVIATION_KEYS)
+            or word.lower() in _ORG_WORDS)
+
+
+def _names_institution(text: str) -> bool:
+    """Whether *text* names an institution, not a person: "Trustees of
+    Indiana University", "Warner Bros." — never "Oliver North", whose T6
+    word is his surname — nor one named for a person, whose name may go on
+    past an "&" ("Law Offices of John Doe & Jane Roe")."""
+    named_for = re.split(r"\s+of\s+", text)[-1]
+    return (any(_institution_word(w) for w in text.split())
+            and _strip_given_names(text, relaxed=False) is None
+            and _strip_given_names(named_for, relaxed=False) is None)
+
+
 def _continues_party(rest: str) -> bool:
     """Whether what follows a party's comma goes on naming that party — a
     department or board of it, "City of L.A., Dep't of Water & Power" —
@@ -3359,10 +3394,7 @@ def _continues_party(rest: str) -> bool:
     words = rest.split(",", 1)[0].split()
     if not words or words[0].lower() in ("a", "an"):
         return False
-    return any(w.replace("’", "'").lower().rstrip(".") in _T6_WORDS
-               or (_word_key(w) and _word_key(w) in _T6_ABBREVIATION_KEYS)
-               or w.lower() in _ORG_WORDS
-               for w in words[:2])
+    return any(_institution_word(w) for w in words[:2])
 
 
 def _municipal_party(p: str) -> str | None:
