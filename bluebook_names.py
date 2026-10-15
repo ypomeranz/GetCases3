@@ -2254,6 +2254,14 @@ def cut_companion_cases(text: str) -> str:
         joined = _JOINED_MATTER_RE.search(text, head.end())
         if joined:
             text = text[:joined.start()]
+        # …and where the parties appealing follow it, each with its own
+        # docket number: "IN RE: 2016 PRIMARY ELECTION. Hamilton County Board
+        # of Elections (16-3350); Ohio Secretary Of State (16-3352); …,
+        # Appellants." is In re 2016 Primary Election, 836 F.3d 584.
+        listed = re.search(r"\.\s+(?=[A-Z][^()]{0,120}\(\d{1,2}-\d{3,6}\))",
+                           text[head.end():])
+        if listed:
+            text = text[:head.end() + listed.start() + 1]
     cuts: list[int] = []
     for cm in re.finditer(
         r"\.\s+(?=[^.]*?\s+vs?\.\s+|SAME\b|IN\s+RE\b|EX\s+PARTE\b"
@@ -3047,6 +3055,9 @@ def in_re_caps_name(caption: str) -> str | None:
                   and len(re.sub(r"[^A-Za-z]", "", t)) >= 2), None)
     if prefix is None or start is None:
         return None
+    # A number can open the name: "IN RE: 2016 PRIMARY ELECTION".
+    while start > 0 and re.fullmatch(r"\d[\d,.\-–/]*", tokens[start - 1]):
+        start -= 1
     end = start
     while end < len(tokens):
         tok = tokens[end]

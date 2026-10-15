@@ -5617,24 +5617,83 @@ class TrialCourtParentheticalTests(unittest.TestCase):
         from opinion_db import _court_from_header
         # Nixon v. Sirica, 487 F.2d 700 (D.C. Cir. 1973), names the district
         # judge in its caption; In re Combustion Engineering, 391 F.3d 190
-        # (3d Cir. 2004), the bankruptcy court.
-        for page in (
-                _scholar_page(
+        # (3d Cir. 2004), the bankruptcy court.  The court of appeals each
+        # header names is the court.
+        for page, court in (
+                (_scholar_page(
                     "487 F.2d 700 (1973)",
                     "Richard M. NIXON, Petitioner, v. The Honorable John J. "
                     "SIRICA, United States District Judge for the District "
                     "of Columbia, Respondent.",
                     "United States Court of Appeals, District of Columbia "
-                    "Circuit."),
-                _scholar_page(
+                    "Circuit."), "cadc"),
+                (_scholar_page(
                     "391 F.3d 190 (2004)",
                     "In re: COMBUSTION ENGINEERING, INC. Certain Claimants, "
                     "filed in the Bankruptcy Court for the District of "
                     "Delaware, Appellants.",
-                    "United States Court of Appeals, Third Circuit.")):
+                    "United States Court of Appeals, Third Circuit."), "ca3")):
             with self.subTest(page=page[60:110]):
                 self.assertEqual(
-                    _court_from_header(parse_opinion_blocks(page)), "")
+                    _court_from_header(parse_opinion_blocks(page)), court)
+
+    def test_a_saved_circuit_opinion_names_its_court(self):
+        # In re 2016 Primary Election, 836 F.3d 584, was saved with no court,
+        # and cited "(2016)" wherever the saved record was cited from.
+        from opinion_db import extract_record
+        record = extract_record(
+            "https://scholar.google.com/scholar_case?case=12", _scholar_page(
+                "836 F.3d 584 (2016)", PRIMARY_ELECTION_CAPTION,
+                "United States Court of Appeals, Sixth Circuit."))
+        self.assertEqual(record["court"], "ca6")
+        self.assertEqual(record["name"], "In re 2016 Primary Election")
+        self.assertEqual(_bluebook_display_name({
+            "caseName": record["name"], "citation": record["cites"],
+            "court_id": record["court"], "dateFiled": "2016-09-06"}),
+            "In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016)")
+        from court_catalog import circuit_court_id
+        for line, court in (
+                ("United States Court of Appeals, Sixth Circuit.", "ca6"),
+                ("United States Court of Appeals for the Ninth Circuit",
+                 "ca9"),
+                ("United States Circuit Court of Appeals, Second Circuit.",
+                 "ca2"),
+                ("United States Court of Appeals, Federal Circuit.", "cafc"),
+                ("United States Court of Appeals, District of Columbia "
+                 "Circuit.", "cadc"),
+                # Not courts of appeals of the United States.
+                ("Court of Appeals of New York.", ""),
+                ("Court of Appeals of the District of Columbia.", "")):
+            with self.subTest(line=line):
+                self.assertEqual(circuit_court_id(line), court)
+
+
+# The Sixth Circuit's caption of a matter with no adversary: the matter in
+# capitals, then the parties appealing, each with its docket number.
+PRIMARY_ELECTION_CAPTION = (
+    "IN RE: 2016 PRIMARY ELECTION.<br/>Hamilton County Board of Elections "
+    "(16-3350); Ohio Secretary Of State (16-3352); Butler County Board of "
+    "Elections (16-3357), Appellants.")
+
+
+class InReMatterNameTests(unittest.TestCase):
+    """In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016), had been
+    cited "In re 2016 Primary Election. Hamilton Cnty. Bd. of Elections
+    (16-3350); Ohio Sec'y of State (16-3352); …": a matter's name can open
+    with a number, and the parties appealing it are no part of it."""
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(
+            _scholar_page("836 F.3d 584 (2016)", PRIMARY_ELECTION_CAPTION))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "In re 2016 Primary Election")
+
+    def test_a_name_stored_with_the_parties(self):
+        self.assertEqual(abbreviate_case_name(
+            "In re 2016 Primary Election. Hamilton Cnty. Bd. of Elections "
+            "(16-3350); Ohio Sec'y of State (16-3352); Butler Cnty. Bd. of "
+            "Elections (16-3357)"), "In re 2016 Primary Election")
 
 
 class PeriodicalWordsInPartyNamesTests(unittest.TestCase):

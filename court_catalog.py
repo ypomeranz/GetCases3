@@ -49,6 +49,32 @@ _CIRCUIT_LABELS: list[tuple[str, str]] = [
     ("cafc", "Federal Circuit"),
 ]
 
+# A court of appeals as its opinions' headers name it: "United States Court
+# of Appeals, Sixth Circuit.", "… for the District of Columbia Circuit", and
+# before 1948 "United States Circuit Court of Appeals, Ninth Circuit."
+_CIRCUIT_LINE_RE = re.compile(
+    r"\bcourt\s+of\s+appeals,?\s+(?:for\s+the\s+)?"
+    r"(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+    r"eleventh|federal|district\s+of\s+columbia|d\.\s?c\.)\s+circuit\b",
+    re.IGNORECASE)
+_CIRCUIT_LINE_IDS = {
+    label.split()[0].lower(): cid for cid, label in _CIRCUIT_LABELS
+    if cid not in ("cadc",)
+}
+
+
+def circuit_court_id(name: str) -> str:
+    """The id of the federal court of appeals a court line names —
+    "United States Court of Appeals, Sixth Circuit." is "ca6" — or ""."""
+    m = _CIRCUIT_LINE_RE.search(re.sub(r"\s+", " ", name or ""))
+    if not m:
+        return ""
+    word = m.group(1).lower()
+    if word.startswith(("district", "d.")):
+        return "cadc"
+    return _CIRCUIT_LINE_IDS.get(word, "")
+
+
 # --- Federal district courts ------------------------------------------------
 
 DISTRICT_COURTS: dict[str, str] = {
