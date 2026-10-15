@@ -64,6 +64,7 @@ from bluebook_names import (
     abbreviate_case_name,
     collective_case_name,
     cut_companion_cases,
+    first_party_in_capitals,
     in_re_caps_name,
     in_re_for_petition,
     normal_case_caption,
@@ -585,8 +586,13 @@ def _caption_name(blocks: list) -> str:
             # (rule 10.2.1(b)): "… v. LUXSHARE, LTD. AlixPartners, LLP, et
             # al., Petitioners v. The Fund …" ends at "LTD."
             right = cut_companion_cases(sides[1])
-            if right != sides[1]:
-                return f"{sides[0]} v. {right}".strip()
+            # …and only the first-listed party on each side, which the
+            # caption sets in capitals ahead of the others in ordinary case
+            # ("The TRUSTEES OF INDIANA UNIVERSITY and Teresa Dobrzykowski").
+            left = first_party_in_capitals(sides[0])
+            right = first_party_in_capitals(right)
+            if (left, right) != (sides[0], sides[1]):
+                return f"{left} v. {right}".strip()
             return t
         if re.match(
             r"(?:IN\s+RE|EX\s+PARTE|(?:IN\s+THE\s+)?MATTER\s+OF)\b", t, re.IGNORECASE

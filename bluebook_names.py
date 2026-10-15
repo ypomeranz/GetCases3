@@ -2441,6 +2441,20 @@ def _first_listed_party(side: str) -> str:
                 and _strip_given_names(nxt, relaxed=False) is not None):
             side = side[:m.start()]
             break
+    # …and so is one after an institution's "&" or "and", comma or no:
+    # "Trustees of Indiana University & Teresa Dobrzykowski" is the Trustees
+    # (Isabell v. Trs. of Ind. Univ., 432 F. Supp. 3d 786).  A firm named
+    # for people opens with a person's name, not an institution's, and
+    # keeps its "&" ("Booz Allen & Hamilton", "Arnold & Porter Kaye
+    # Scholer"); "John & Mary Smith" is one party.
+    for m in re.finditer(r"\s+(?:&|and)\s+(?=[A-Z])", side):
+        head = side[:m.start()]
+        nxt = re.split(r",|\s+(?:&|and)\s+", side[m.end():], maxsplit=1)[0]
+        if (len(nxt.split()) >= 2
+                and _strip_given_names(nxt, relaxed=False) is not None
+                and _names_institution(head)):
+            side = head
+            break
     # A firm's designator closes its name, so a comma or a conjunction after
     # one opens the next party ("Acmat Corp., Laborers' Int'l Union …",
     # "McDonald's USA, LLC, & McDonald's Corp.", "McDonald's Corp. &
@@ -3105,6 +3119,57 @@ def in_re_caps_name(caption: str) -> str | None:
     return f"{prefix} {lead}{name}" if name else None
 
 
+# A lowercase "and" or "&" opening a party in ordinary case: "… UNIVERSITY
+# and Teresa Dobrzykowski", "… COLLEGE and Lexington Insurance Company".
+# One in capitals ("SECURITIES AND EXCHANGE COMMISSION") is inside a name.
+_CAPS_PARTY_LIST_BREAK_RE = re.compile(
+    r",?\s+(?:and|&)\s+(?=(?:the\s+)?[A-Z][a-z])")
+
+
+def _caps_name_word(token: str) -> bool:
+    """Whether *token* names someone in capitals — "BECK", "GILL", "DOE" —
+    rather than being a firm's legal form ("INC."), a suffix ("III") or
+    initials ("M.D.", "U.S."), which ordinary case sets in capitals too."""
+    core = token.strip("()[]\"'“”‘’,.;:")
+    return (_caps_run_word(token) and "." not in core
+            and len(re.sub(r"[^A-Za-z]", "", core)) >= 3
+            and not _CAPS_ENTITY_SUFFIX_RE.fullmatch(core)
+            and not re.fullmatch(r"[IVX]+", core))
+
+
+def first_party_in_capitals(side: str) -> str:
+    """One side of a caption, cut where the party set in capitals ends and
+    the parties listed after it in ordinary case begin (rule 10.2.1(a)).
+
+    The reporter sets the party a case is named by in capitals — a firm's
+    or an institution's whole name, a person's surname — and the rest of the
+    caption in ordinary case: "The TRUSTEES OF INDIANA UNIVERSITY and Teresa
+    Dobrzykowski, Defendants." is the Trustees alone (Isabell v. Trs. of
+    Ind. Univ., 432 F. Supp. 3d 786, had been cited "… & Teresa
+    Dobrzykowski"), "CARTHAGE COLLEGE and Lexington Insurance Company" is
+    Carthage College, and "Noah BANK and Edward Shin" is Bank.
+
+    *side* is returned whole when it says nothing so plain: a caption in
+    one case throughout, a firm's own "& Co." after its capitals ("MORGAN
+    STANLEY & Co."), a name in capitals again after the "and" (persons,
+    "Robert SMITH and Mary SMITH", whom other rules read, or a consolidated
+    caption), or an in-re matter, whose capitals are the matter's
+    (:func:`in_re_caps_name`)."""
+    if _IN_RE_CAPS_PREFIX_RE.match(side):
+        return side
+    for m in _CAPS_PARTY_LIST_BREAK_RE.finditer(side):
+        head = side[:m.start()].split()
+        if (not head or not _caps_run_word(head[-1])
+                or len(re.sub(r"[^A-Za-z]", "", head[-1])) < 2):
+            continue
+        rest = side[m.end():].split()
+        if (re.sub(r"[^a-z]", "", rest[0].lower()) in _APPOSITIVE_ENTITY_TERMS
+                or any(_caps_name_word(t) for t in rest)):
+            return side
+        return side[:m.start()]
+    return side
+
+
 # A group of cases decided together that the reporter heads with a popular
 # name — "SLAUGHTER-HOUSE CASES.", "CIVIL RIGHTS CASES.", "LEGAL TENDER
 # CASES." — is cited by that name alone, not by the first of the captions
@@ -3300,6 +3365,27 @@ _IN_REM_ADVERSARY_PARTIES = {
 }
 
 
+def _institution_word(word: str) -> bool:
+    """Whether *word* is one an institution's name is made of — a T6 word
+    spelled out or abbreviated ("University", "Trs.", "Dep't") or a
+    business's ("Bank", "Studios")."""
+    key = _word_key(word)
+    return (word.replace("’", "'").lower().rstrip(".") in _T6_WORDS
+            or (bool(key) and key in _T6_ABBREVIATION_KEYS)
+            or word.lower() in _ORG_WORDS)
+
+
+def _names_institution(text: str) -> bool:
+    """Whether *text* names an institution, not a person: "Trustees of
+    Indiana University", "Warner Bros." — never "Oliver North", whose T6
+    word is his surname — nor one named for a person, whose name may go on
+    past an "&" ("Law Offices of John Doe & Jane Roe")."""
+    named_for = re.split(r"\s+of\s+", text)[-1]
+    return (any(_institution_word(w) for w in text.split())
+            and _strip_given_names(text, relaxed=False) is None
+            and _strip_given_names(named_for, relaxed=False) is None)
+
+
 def _continues_party(rest: str) -> bool:
     """Whether what follows a party's comma goes on naming that party — a
     department or board of it, "City of L.A., Dep't of Water & Power" —
@@ -3308,10 +3394,7 @@ def _continues_party(rest: str) -> bool:
     words = rest.split(",", 1)[0].split()
     if not words or words[0].lower() in ("a", "an"):
         return False
-    return any(w.replace("’", "'").lower().rstrip(".") in _T6_WORDS
-               or (_word_key(w) and _word_key(w) in _T6_ABBREVIATION_KEYS)
-               or w.lower() in _ORG_WORDS
-               for w in words[:2])
+    return any(_institution_word(w) for w in words[:2])
 
 
 def _municipal_party(p: str) -> str | None:
