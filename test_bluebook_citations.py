@@ -6151,6 +6151,101 @@ class PartnersCapacityTests(unittest.TestCase):
                 self.assertEqual(abbreviate_case_name(name), name)
 
 
+class CapitalizedFirstPartyTests(unittest.TestCase):
+    """The reporter sets the party a case is named by in capitals and the
+    parties listed after it in ordinary case (rule 10.2.1(a)).  "The
+    TRUSTEES OF INDIANA UNIVERSITY and Teresa Dobrzykowski" (432 F. Supp. 3d
+    786) had been cited "Isabell v. Trs. of Ind. Univ. & Teresa
+    Dobrzykowski": no comma parted them, and an institution and a person
+    are no pair any other rule splits."""
+
+    ISABELL = _scholar_page(
+        "432 F.Supp.3d 786 (2020)",
+        "Cynthia ISABELL, Plaintiff,<br/>v.<br/>The TRUSTEES OF INDIANA "
+        "UNIVERSITY and Teresa Dobrzykowski, Defendants.",
+        "CAUSE NO. 3:18cv364 DRL-MGG.",
+        "United States District Court, N.D. Indiana, South Bend Division.",
+        "January 13, 2020.")
+
+    @staticmethod
+    def _names(page: str) -> tuple[str, str]:
+        """The case's name as the opinion window and as the opinion
+        database read it."""
+        from google_scholar import parse_opinion_blocks
+        from opinion_db import extract_record
+        return (
+            abbreviate_case_name(
+                _scholar_caption_name(parse_opinion_blocks(page))),
+            extract_record("https://scholar.google.com/scholar_case?case=1",
+                           page)["name"])
+
+    def test_isabell(self):
+        from google_scholar import parse_opinion_blocks
+        self.assertEqual(
+            _bluebook_display_name(_scholar_item_from_blocks(
+                parse_opinion_blocks(self.ISABELL))),
+            "Isabell v. Trs. of Ind. Univ., 432 F. Supp. 3d 786 (N.D. Ind. "
+            "2020)")
+        self.assertEqual(self._names(self.ISABELL),
+                         ("Isabell v. Trs. of Ind. Univ.",) * 2)
+
+    def test_the_parties_in_ordinary_case_go(self):
+        for cite_line, caption, cited in (
+                # A second institution, which no rule of persons drops.
+                ("714 F.3d 516 (2013)",
+                 "Katherine LEES, Plaintiff-Appellant,<br/>v.<br/>CARTHAGE "
+                 "COLLEGE and Lexington Insurance Company, "
+                 "Defendants-Appellees.",
+                 "Lees v. Carthage Coll."),
+                ("586 F.2d 695 (1978)",
+                 "Ahssem RIFAI, Petitioner-Appellant,<br/>v.<br/>UNITED "
+                 "STATES PAROLE COMMISSION and Warden, United States "
+                 "Penitentiary, McNeil Island, Washington, "
+                 "Respondents-Appellees.",
+                 "Rifai v. U.S. Parole Comm'n"),
+                # A person, the capitals the surname: "Bank" is no bank.
+                ("334 A.3d 1258 (2025)",
+                 "Noah BANK and Edward Shin, Plaintiffs-Respondents,<br/>v."
+                 "<br/>Marie LEE, Defendant-Appellant.",
+                 "Bank v. Lee"),
+                ("735 F.3d 588 (2013)",
+                 "Christian SERINO, Plaintiff-Appellant,<br/>v.<br/>Alec "
+                 "HENSLEY and City of Oakland City, Indiana, "
+                 "Defendants-Appellees.",
+                 "Serino v. Hensley")):
+            with self.subTest(cited=cited):
+                window, database = self._names(_scholar_page(cite_line,
+                                                             caption))
+                self.assertEqual(window, cited)
+                # The database reads no capitals for a surname, so it can
+                # keep a given name no list knows ("Ahssem Rifai") — but
+                # not the parties after the first.
+                self.assertTrue(database.endswith(cited), database)
+
+    def test_one_party_stays_whole(self):
+        from bluebook_names import first_party_in_capitals
+        for side in (
+                # A firm's own "& Co." after its capitals.
+                "MORGAN STANLEY & Co., Defendant.",
+                # A conjunction in capitals is inside the name.
+                "SECURITIES AND EXCHANGE COMMISSION, Appellee,",
+                "SID & MARTY KROFFT TELEVISION PRODUCTIONS, INC.",
+                # Capitals again after it: persons, for the rules of
+                # persons to read, or a caption the capitals don't settle.
+                "Robert SMITH and Mary SMITH, Plaintiffs,",
+                "In re Scott Jay GILL & Jane Phyllis Gill, Debtors. BECK "
+                "MOTORS, INC., Plaintiff,",
+                # One case throughout says nothing.
+                "Trustees of Indiana University and Teresa Dobrzykowski",
+                "TRUSTEES OF INDIANA UNIVERSITY AND TERESA DOBRZYKOWSKI"):
+            with self.subTest(side=side):
+                self.assertEqual(first_party_in_capitals(side), side)
+        # Initials and a firm's legal form are capitals ordinary case keeps.
+        self.assertEqual(first_party_in_capitals(
+            "Diane PLYLER, M.D., and Mt. Hope Family Practice, Inc."),
+            "Diane PLYLER, M.D.")
+
+
 class FirmInitialsCaptionTests(unittest.TestCase):
     """A firm keeps the initials in its name (rule 10.2.1(g)).  In Scholar's
     all-caps "S. H. KRESS & CO." the initials had read as a person's given

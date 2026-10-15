@@ -16,6 +16,7 @@ from bluebook_names import (
     cut_companion_cases as _cut_companion_cases,
     described_person_surname,
     ejectment_party_caption,
+    first_party_in_capitals,
     in_re_caps_name,
     in_re_for_petition,
     name_persons_by_surname,
@@ -190,6 +191,10 @@ def caption_party(s: str) -> str:
             out = re.sub(r"(?<=\s)v\.(?=\s)", "V.", out)
         return out
 
+    # The party in capitals ends where the co-parties in ordinary case begin:
+    # "The TRUSTEES OF INDIANA UNIVERSITY and Teresa Dobrzykowski" is the
+    # Trustees, though no comma parts them.
+    s = first_party_in_capitals(s)
     raw = [clean_seg(p) for p in re.split(r"[,;]", s)]
     segs = [p for p in raw if p]
     description = ""
