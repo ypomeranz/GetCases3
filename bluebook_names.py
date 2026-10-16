@@ -4417,10 +4417,14 @@ def _close_up_initials(name: str) -> str:
     """Close up adjacent single capitals (rule 6.1(a)): "Home Depot U. S.
     A., Inc." -> "U.S.A.", "Purdue Pharma L. P." -> "L.P." — unless a
     longer abbreviation follows the run, as in "S. S. N. Am." (the steamship
-    North America), where the initials may belong to it."""
+    North America), where the initials may belong to it.  A firm's legal
+    form ends its name and is no such abbreviation: "Chevron U. S. A. Inc."
+    is Chevron U.S.A. Inc. (467 U.S. 837)."""
     def close(m: re.Match) -> str:
         after = name[m.end():]
-        if re.match(r"\s+[A-Z][a-z]+\.", after):
+        if (re.match(r"\s+[A-Z][a-z]+\.", after)
+                and not re.match(r"\s+(?:Inc|Co|Cos|Corp|Ltd|Bros)\.",
+                                 after)):
             return m.group(0)
         return re.sub(r"\s+", "", m.group(0))
     return re.sub(r"(?<![\w.])[A-Z]\.(?:\s+[A-Z]\.)+(?![\w])", close, name)

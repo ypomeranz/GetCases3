@@ -1355,6 +1355,13 @@ class AcronymCaseTests(unittest.TestCase):
                  "T.M. v. Univ. of Md. Med. Sys. Corp."),
                 ("Home Depot U. S. A., Inc. v. Jackson",
                  "Home Depot U.S.A., Inc. v. Jackson"),
+                # A firm's legal form after the initials is no abbreviation
+                # they belong to (467 U.S. 837)…
+                ("Chevron U. S. A. Inc. v. Natural Resources Defense "
+                 "Council, Inc.",
+                 "Chevron U.S.A. Inc. v. Nat. Res. Def. Council, Inc."),
+                # …as the steamship North America's "Am." may be.
+                ("City of Erie v. S. S. N. Am.", "City of Erie v. S. S. N. Am."),
                 ("Lohan v. Take-two Interactive Software, Inc.",
                  "Lohan v. Take-Two Interactive Software, Inc."),
                 # A word stays a word.
