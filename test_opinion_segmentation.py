@@ -319,6 +319,82 @@ class GluedDispositionBylineTests(unittest.TestCase):
         self.assertTrue(parts[1].blocks[0].text().startswith("JUSTICE BREYER"))
 
 
+class VoteLineHeadingTests(unittest.TestCase):
+    """The old reports note a justice's vote on a line of its own — "Mr.
+    Justice DANIEL dissented." — and set the same line as the heading of the
+    justice's opinion, when there is one: Mitchell v. Harmony, 54 U.S. 115
+    (1852), had read as a majority opinion alone."""
+
+    @staticmethod
+    def _opinion(*tail):
+        return [
+            _block("54 U.S. 115 (1852)"),
+            Block(kind="para", spans=[
+                Span(text="*128", pagenum=True),
+                Span(text=" Mr. Chief Justice TANEY delivered the opinion of "
+                          "the court.")]),
+            _block("The defendant took the plaintiff's property in Mexico."),
+            _block("The judgment must be affirmed with costs."),
+            *tail,
+        ]
+
+    def test_a_vote_heading_its_voters_opinion(self):
+        parts = segment_blocks(self._opinion(
+            Block(kind="para", spans=[
+                Span(text="*138", pagenum=True),
+                Span(text=" Mr. Justice DANIEL dissented.")]),
+            _block("In this case I find myself constrained to disagree with "
+                   "the opinion of the court just pronounced."),
+            _block("The instructions took the facts from the jury."),
+        ))
+        self.assertEqual([p.kind for p in parts],
+                         ["header", "majority", "dissent"])
+        self.assertEqual(parts[2].label, "Mr. Justice DANIEL dissented.")
+        self.assertEqual(len(parts[2].blocks), 3)
+
+    def test_a_vote_with_no_opinion_of_its_own(self):
+        for tail in (
+                # The court's order follows (the Amistad, 40 U.S. 518).
+                [_block("Mr. Justice BALDWIN dissented."),
+                 _block("This cause came on to be heard on the transcript of "
+                        "the record from the Circuit Court.")],
+                # Two votes, their opinions headed apart (Dred Scott).
+                [_block("Mr. Justice McLEAN and Mr. Justice CURTIS "
+                        "dissented."),
+                 _block("I am unable to agree with the court.")],
+                # Another opinion's own byline.
+                [_block("MR. JUSTICE RUTLEDGE dissents."),
+                 _block("MR. JUSTICE MURPHY, dissenting."),
+                 _block("I would reverse the judgment below.")],
+                # A quotation the court sets out.
+                [_block("Mr. Justice STORY dissented."),
+                 _block("“I cannot concur,” he wrote, “in the judgment.”")]):
+            with self.subTest(vote=tail[0].text()):
+                kinds = [p.kind for p in segment_blocks(self._opinion(*tail))]
+                self.assertNotIn(tail[0].text(), [
+                    p.label for p in segment_blocks(self._opinion(*tail))])
+                self.assertEqual(kinds.count("dissent"),
+                                 1 if "MURPHY" in tail[1].text() else 0)
+
+    def test_an_unsigned_opinion_and_a_vote_under_it(self):
+        # State v. Ramos, 231 So. 3d 44 (La. Ct. App. 2017): no line names
+        # the opinion's author, and the concurrence is headed by its vote.
+        parts = segment_blocks([
+            Block(kind="center", spans=[Span(text="STATE OF LOUISIANA v. "
+                                                  "EVANGELISTO RAMOS")]),
+            _block("The defendant appeals his conviction. " * 12),
+            _block("For the above stated reasons, we affirm defendant's "
+                   "conviction and sentence."),
+            _block("AFFIRMED"),
+            _block("LOBRANO, J., CONCURS IN THE RESULTS."),
+            _block("I respectfully concur in the results of the majority "
+                   "opinion."),
+        ])
+        self.assertEqual([p.kind for p in parts][-1], "concurrence")
+        self.assertEqual(parts[-1].label,
+                         "LOBRANO, J., CONCURS IN THE RESULTS.")
+
+
 class HistoricalAndSignatureBoundaryTests(unittest.TestCase):
     def test_myers_definite_article_separate_opinion_heading(self):
         # Myers v. United States, 272 U.S. 52, 178 (1926): Scholar includes

@@ -31944,6 +31944,29 @@ class _ScholarTextWindow:
             "dissenting" if part.kind == "dissent" else "concurring")
         t = block_text(part.blocks[0])
         m = re.search(r"\b(?:concurring|dissenting)\b", t, re.IGNORECASE)
+        # A vote set as the heading of the voter's opinion (see
+        # google_scholar._VOTE_LINE_RE): "Mr. Justice DANIEL dissented." is
+        # (Daniel, J., dissenting); "LOBRANO, J., CONCURS IN THE RESULTS."
+        # (Lobrano, J., concurring in the result); "Nolan, P. J., dissents
+        # and votes to affirm, with the following memorandum:" (Nolan, P.J.,
+        # dissenting).
+        vm = None if m else re.match(
+            r"(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
+            r"(?:(CHIEF\s+)?JUSTICE\s+([A-Z][\w.'’-]+)"
+            r"|([A-Z][\w.'’-]+),\s*(?:(C\.|P\.)\s*)?JJ?\.)"
+            r",?\s+(?:also\s+)?(dissent|concur)(?:ed|red|s)\b"
+            r"(?:\s+(in\s+the\s+(?:result|judgment)|in\s+part))?",
+            t, re.IGNORECASE)
+        if vm:
+            title = ("C.J." if vm.group(1) or (vm.group(4) or "").upper() == "C."
+                     else "P.J." if (vm.group(4) or "").upper() == "P."
+                     else "J.")
+            surname = _fix_name_case(
+                (vm.group(2) or vm.group(3)).replace("’", "'"))
+            role = "dissenting" if vm.group(5).lower() == "dissent" else "concurring"
+            if vm.group(6):
+                role += " " + re.sub(r"\s+", " ", vm.group(6)).lower()
+            return f"{surname}, {title}, {role}"
         if not m:
             # A CourtListener sub-opinion part: the opinion body has no byline
             # to parse — the type and author live in the label the assembler

@@ -6808,10 +6808,18 @@ class WriterParentheticalTests(unittest.TestCase):
                  "Abrahamson, J., dissenting"),
                 ("WILLIAM A. BABLITCH, J. (concurring in part, dissenting "
                  "in part).",
-                 "Bablitch, J., concurring in part, dissenting in part")):
+                 "Bablitch, J., concurring in part, dissenting in part"),
+                # A vote heading the voter's opinion (Mitchell v. Harmony,
+                # 54 U.S. 115; State v. Ramos, 231 So. 3d 44; City of New
+                # York v. Chapman Docks Co., 1 A.D.2d 895).
+                ("Mr. Justice DANIEL dissented.", "Daniel, J., dissenting"),
+                ("LOBRANO, J., CONCURS IN THE RESULTS.",
+                 "Lobrano, J., concurring in the result"),
+                ("Nolan, P. J., dissents and votes to affirm, with the "
+                 "following memorandum:", "Nolan, P.J., dissenting")):
             with self.subTest(line=line[:30]):
                 part = self._part("concurrence" if "concurring" in line
-                                  else "dissent", line)
+                                  or "CONCURS" in line else "dissent", line)
                 self.assertEqual(self._win()._writer_parenthetical(part),
                                  cited)
 
