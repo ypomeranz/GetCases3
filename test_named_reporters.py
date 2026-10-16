@@ -369,5 +369,55 @@ class PageInsideCaseTests(unittest.TestCase):
             "Roe v. Wade, 410 U.S. 113", "411 U.S. 113"), "")
 
 
+
+class PeriodlessReporterTests(unittest.TestCase):
+    """A court that drops a reporter's periods — Michigan's own style, New
+    York's — still cites it.  "People v Roberts, 211 Mich 187; 178 NW 690
+    (1920)" in People v. Kevorkian, 447 Mich. 436, 445, was no citation the
+    reader could open."""
+
+    def _links(self, text):
+        return [(text[s:e], a) for s, e, a in citations.detect_links(text)]
+
+    def test_read_and_given_their_periods(self):
+        self.assertEqual(
+            self._links("In the murder case, People v Roberts, 211 Mich 187; "
+                        "178 NW 690 (1920), is overruled.  Id. at 190."),
+            [("Roberts, 211 Mich 187", ("cite", "211 Mich. 187")),
+             ("178 NW 690 (1920)", ("cite", "178 N.W. 690")),
+             ("Id. at 190", ("cite", "211 Mich. 187@190"))])
+        for text, cite in (
+                ("Hobbins v Attorney General, 205 Mich App 1; 518 NW2d 487",
+                 "205 Mich. App. 1"),
+                ("Palsgraf v Long Is. R.R. Co., 248 NY 339, 344 [1928]",
+                 "248 N.Y. 339@344"),
+                ("see Paterno v Laser Spine Inst., 24 NY3d 370, 377 [2014]",
+                 "24 N.Y.3d 370@377"),
+                ("Friedman v Gearrity, 33 AD2d 1044", "33 A.D.2d 1044"),
+                ("Roe v Wade, 410 US 113, 153", "410 U.S. 113@153"),
+                ("People v Smith, 93 Cal App 4th 1", "93 Cal. App. 4th 1")):
+            with self.subTest(text=text):
+                self.assertEqual(self._links(text)[0][1], ("cite", cite))
+        self.assertEqual(citations.canonical_reporter("NW2d"), "N.W.2d")
+
+    def test_only_where_a_citation_stands(self):
+        for text in ("In 410 US 113 the Court held",
+                     "about 211 Mich 187 people",
+                     "the 1600 NW 690 building",
+                     # A lone letter, a word, or a series a state never had.
+                     "Smith v Jones, 5 A 10",
+                     "Halpern v Attorney Gen. of Can., 65 OR3d 161",
+                     # A year where the volume stands: a public-domain
+                     # citation, a session law.
+                     "Rose v. United Equitable Ins. Co., 2001 ND 154, ¶ 10",
+                     "See, e.g., 1993 PA 3, which was enacted"):
+            with self.subTest(text=text):
+                self.assertEqual(self._links(text), [])
+        # The state names cited bare as ever are read anywhere still.
+        self.assertEqual(
+            self._links("administrators. 93 Idaho 511, 465 P. 2d 635.")[0],
+            ("93 Idaho 511", ("cite", "93 Idaho 511")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -863,7 +863,10 @@
     for (const m of matchAll("broadCite", text)) {
       const s = m.index, e = s + m[0].length;
       if (!validCaseReporter(m[2]) || taken(s, e)) continue;
-      if (bareWordReporter(m[2]) && !atCitationStart(text, s)) continue;
+      // A bare-word or period-less reporter: where a citation's volume
+      // stands, and never with a year for its volume ("2001 ND 154").
+      if (bareWordReporter(m[2])
+          && (!atCitationStart(text, s) || Number(m[1]) >= 1000)) continue;
       if (stateLexisReporter(m[2])) { claimed.push([s, e]); continue; }   // a state court's, by LEXIS number
       cases.push({ start: s, end: e, m });
     }
