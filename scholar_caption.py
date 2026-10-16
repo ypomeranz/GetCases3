@@ -339,6 +339,44 @@ def trim_procedural_caption(text: str) -> str:
     return text.strip().rstrip(",")
 
 
+# What heads an admiralty case as its res: "THE SADIE." on a line to itself,
+# in capitals, its period closing it (a footnote mark may follow).
+_RES_HEADING_RE = re.compile(
+    r"(THE\s+[A-Z0-9][A-Z0-9'’&.\- ]{0,60}?)\.(?:\[[^\]\s]{1,6}\]|[*†‡])?")
+# …and what is a party, never a res: a sovereign, a public body, a firm, a
+# group of cases cited by its name ("THE PRIZE CASES.").
+_NOT_A_RES_RE = re.compile(
+    r"\b(?:PEOPLE|STATE|STATES|COMMONWEALTH|KING|QUEEN|TERRITORY|CITY|COUNTY|"
+    r"TOWN|MAYOR|BOARD|TRUSTEES|PRESIDENT|COMPANY|CORPORATION|INC|CO|CORP|"
+    r"BANK|RAILROAD|RAILWAY|CASES?)\b\.?$"
+    r"|\b(?:PEOPLE|STATE|COMMONWEALTH|ET\s+AL|AND\s+OTHERS)\b")
+_CAPTION_V_RE = re.compile(r"(?:^|\s)vs?\.(?:\s|$)")
+
+
+def res_heading(text: str) -> str:
+    """The res an admiralty case's caption heads it with, above the parties'
+    own caption — "THE SADIE" for "THE SADIE. / NEW YORK & CUBA MAIL S. S.
+    CO. / v. / FULTON LIGHTERAGE CO., Inc." (57 F.2d 908), "THE SCOTLAND"
+    for "THE SCOTLAND. / DYER & Others / v. / NATIONAL STEAM NAVIGATION
+    COMPANY." (118 U.S. 507) — which the case is cited by, The Sadie and
+    The Scotland; "" for any other caption.  *text* is the caption's lines,
+    a line to each "\\n" (see caption_text).  A party set on its own line
+    ("THE PEOPLE, / v. / …") has the separator next, or a comma; the res
+    has a party of the case's under it, and only then a "v."."""
+    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return ""
+    m = _RES_HEADING_RE.fullmatch(lines[0])
+    if not m or _NOT_A_RES_RE.search(m.group(1)):
+        return ""
+    under = lines[1:]
+    if re.fullmatch(r"(?i)vs?\.?|versus|against|ags?t\.", under[0]):
+        return ""
+    if not any(_CAPTION_V_RE.search(ln) for ln in under):
+        return ""
+    return re.sub(r"\s+", " ", m.group(1))
+
+
 def caption_text(block) -> str:
     """A caption block's text without the reporter's star pages — and
     without a case decided with it that Scholar links to its own page:
@@ -434,6 +472,11 @@ def scholar_caption_name(blocks) -> str:
         collective = collective_case_name(t)
         if collective:
             return refine(_titlecase_caps(collective))
+        # An admiralty case the reporter heads with its res, above the
+        # parties' caption, is cited by the res: "The Sadie".
+        res = res_heading(caption_text(b))
+        if res:
+            return refine(_titlecase_caps(res))
         # Google Scholar renders the party separator in lowercase ("… v. …")
         # even for ALL-CAPS captions ("MERCY HOSPITAL, INC. v. JACKSON"), so
         # a lowercase "v."/"vs." — or the earliest reports' spelled-out

@@ -59,7 +59,7 @@ from court_catalog import (
     circuit_court_id,
     state_of_court,
 )
-from scholar_caption import caption_text, scholar_caption_name
+from scholar_caption import caption_text, res_heading, scholar_caption_name
 from bluebook_names import (
     abbreviate_case_name,
     collective_case_name,
@@ -576,6 +576,11 @@ def _caption_name(blocks: list) -> str:
         collective = collective_case_name(t)
         if collective:
             return collective
+        # An admiralty case its reporter heads with the res ("THE SADIE.")
+        # above the parties' caption is cited by the res.
+        res = res_heading(caption_text(b))
+        if res:
+            return res
         # …and a lone petitioner's caption is an in-re matter.
         t = in_re_for_petition(t) or t
         sides = re.split(r"\s+vs?\.\s+", t, maxsplit=1)

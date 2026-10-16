@@ -1810,6 +1810,46 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
             "The Paquete Habana",
         )
 
+    def test_a_vessel_heading_the_parties_caption_names_the_case(self):
+        # The Sadie, 57 F.2d 908 (S.D.N.Y. 1932), had been cited "Sadie. N.Y.
+        # & Cuba Mail S.S. Co. v. Fulton Lighterage Co.": the reports head
+        # an admiralty case with the res, on a line to itself, above the
+        # parties' own caption — and cite it by the res.
+        from opinion_db import _caption_name
+        from scholar_caption import res_heading
+
+        def blocks(*lines):
+            spans = []
+            for text in lines:
+                spans += [Span(text), Span("\n")]
+            return [Block("center", [Span("57 F.2d 908 (1932)")]),
+                    Block("center", spans[:-1]),
+                    Block("center", [Span("District Court, S. D. New York.")])]
+
+        for lines, want in (
+                (("THE SADIE.", "NEW YORK & CUBA MAIL S. S. CO.", "v.",
+                  "FULTON LIGHTERAGE CO., Inc."), "The Sadie"),
+                # The Scotland, 118 U.S. 507 (1886).
+                (("THE SCOTLAND.", "DYER & Others", "v.",
+                  "NATIONAL STEAM NAVIGATION COMPANY."), "The Scotland")):
+            with self.subTest(want=want):
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks(*lines))),
+                    want)
+                self.assertEqual(abbreviate_case_name(normal_case_caption(
+                    _caption_name(blocks(*lines)))), want)
+        # A party set on a line to itself is no res: the separator comes
+        # next, or the line is a sovereign's, a firm's, or a party's
+        # with others.
+        for caption in ("THE PEOPLE.\nv.\nSMITH",
+                        "THE UNITED STATES.\nSMITH\nv.\nJONES",
+                        "THE ACME COMPANY.\nSMITH\nv.\nJONES",
+                        "THE SMITHS ET AL.\nSMITH\nv.\nJONES",
+                        "THE PRIZE CASES.\nTHE AMY WARWICK\nv.\nUNITED STATES",
+                        "THE PAQUETE HABANA.\nTHE LOLA."):
+            with self.subTest(caption=caption):
+                self.assertEqual(res_heading(caption), "")
+
     def test_the_in_rem_companion_cut_leaves_one_ship_alone(self):
         cut = _cut_companion_cases
         # Both ships, however the source cases them.
