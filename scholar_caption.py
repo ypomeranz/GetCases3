@@ -20,6 +20,7 @@ from bluebook_names import (
     first_party_in_capitals,
     in_re_caps_name,
     in_re_for_petition,
+    middle_initial_v,
     name_persons_by_surname,
     normal_case_caption as _titlecase_caps,
     refine_caption_case,
@@ -358,8 +359,12 @@ def caption_text(block) -> str:
             break
         links.add(s.link)
         out.append(s.text)
+    # The Michigan reports' "v" without its period ("PEOPLE v KEVORKIAN",
+    # as CAP prints 447 Mich 436) is the separator every reader looks for.
+    text = re.sub(r"(?:^|(?<=\s))(vs?)(?=\s|$)", r"\1.", "".join(out),
+                  flags=re.MULTILINE)
     # …nor, where nothing but a line break sets it apart, a case under it.
-    return first_case_lines("".join(out))
+    return first_case_lines(text)
 
 
 def scholar_caption_name(blocks) -> str:
@@ -443,7 +448,13 @@ def scholar_caption_name(blocks) -> str:
         sides = re.split(r"\s+(?:vs?\.|versus|against|agt\.|agst\.)\s+", t,
                          maxsplit=1)
         if len(sides) != 2:
-            sides = re.split(r"\s+[vV]s?\.\s+", t, maxsplit=1)
+            # …past a capital "V." that is a middle initial ("FRANCIS V.
+            # LORENZO, PETITIONER, V. SECURITIES AND EXCHANGE COMMISSION").
+            sides = next(
+                ([t[:m.start()], t[m.end():]]
+                 for m in re.finditer(r"\s+[vV]s?\.\s+", t)
+                 if m.group().strip() != "V."
+                 or not middle_initial_v(t[:m.start()])), [t])
         if len(sides) != 2:
             sides = re.split(r"\s+(?:VERSUS|Versus)\s+", t, maxsplit=1)
         if len(sides) == 2:

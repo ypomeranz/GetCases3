@@ -2238,6 +2238,7 @@ _CAPTION_SEPARATOR_RE = re.compile(
     r"(?:^|(?<=\s))(?:vs?\.|ags?t\.)(?=\s|$)")
 _CAPTION_SEPARATOR_LINE_RE = re.compile(
     r"(?i:vs?\.|versus|against|ags?t\.)|vs?")
+_CAPS_SEPARATOR_RE = re.compile(r"(?<=\s)VS?\.(?=\s)")
 _PARTY_RUNS_ON_RE = re.compile(
     r"(?:[,;&(\-–—]|\b(?:and|of|the|for|et|de|del|la|von|van))\s*$",
     re.IGNORECASE)
@@ -2247,6 +2248,18 @@ _PARTY_CARRIED_RE = re.compile(
     r"(?i:(?:cross[- ])?(?:plaintiffs?|defendants?|appell(?:ants?|ees?)|"
     r"petitioners?|respondents?|intervenors?|claimants?|relators?|"
     r"movants?|garnishees?|libell?ants?|libell?ees?|complainants?)\b))")
+
+
+def middle_initial_v(before: str) -> bool:
+    """Whether a capital "V." after *before* (its line up to the "V.") is
+    a middle initial: the word ahead of it a given name or an initial, with
+    no comma to end a party there."""
+    words = before.split()
+    if not words or words[-1].endswith(","):
+        return False
+    word = words[-1]
+    return (bool(re.fullmatch(r"[A-Z]\.", word))
+            or word.rstrip(".").lower() in _GIVEN_NAMES)
 
 
 def first_case_lines(text: str) -> str:
@@ -2266,6 +2279,15 @@ def first_case_lines(text: str) -> str:
     seps += [(i, 0, len(ln)) for i, ln in enumerate(lines)
              if _CAPTION_SEPARATOR_LINE_RE.fullmatch(ln)
              and (i, 0, len(ln)) not in seps]
+    if not seps:
+        # A source that capitalizes its separators ("JOHN DOE, PLAINTIFF,
+        # V. RICHARD ROE"), unless the "V." is a middle initial — after a
+        # given name or another initial: "Francis V. LORENZO", "LAW OFFICES
+        # OF CURTIS V. TRINKO" (540 U.S. 398), "J. V. SMITH".  Scholar sets
+        # its separators lowercase, so there a capital "V." is an initial.
+        seps = [(i, m.start(), m.end()) for i, ln in enumerate(lines)
+                for m in _CAPS_SEPARATOR_RE.finditer(ln)
+                if m.group() == "VS." or not middle_initial_v(ln[:m.start()])]
     seps.sort()
     if len(seps) < 2:
         return text
@@ -4145,6 +4167,9 @@ def _clean_caption(name: str) -> str:
     # (rule 10.2.1).  Lowercase only: a capitalized "Agt." is an agent's
     # ("Smith, Gen. Agt.").
     name = re.sub(r"\s+ags?t\.\s+", " v. ", name)
+    # …and the Michigan reports a "v" without its period ("People v
+    # Kevorkian", 447 Mich 436), as CAP prints them.
+    name = re.sub(r"(?<=\S)\s+vs?\s+(?=\S)", " v. ", name)
     # A bracket closed by a brace, or a brace by a bracket, is a scan's
     # garbling, never a name's: "CHIRAC and Others {VV] against REINICKER."
     # (24 U.S. 280).

@@ -5794,6 +5794,30 @@ class LineBreakCompanionCaptionTests(unittest.TestCase):
                 "SMITH\nv.\nJONES.\nBROWN\nv.\nGREEN."):
             self.assertEqual(first_case_lines(caption), caption)
 
+    def test_a_capital_v_that_is_an_initial(self):
+        from bluebook_names import first_case_lines
+        # Scholar's own separators are lowercase: there a capital "V." is a
+        # middle initial, never a second case ("Mark V. Chapin", 505 F.
+        # Supp. 3d 879).
+        caption = ("JOHN DOE,\nv.\nHENNEPIN COUNTY and Mark V. Chapin,\n"
+                   "Auditor-Treasurer, Defendants")
+        self.assertEqual(first_case_lines(caption), caption)
+        # A source that capitalizes its separators is parted at the second.
+        self.assertEqual(
+            first_case_lines("JOHN DOE, PLAINTIFF, V. RICHARD ROE\n"
+                             "MARY MAJOR, PLAINTIFF, V. RICHARD ROE"),
+            "JOHN DOE, PLAINTIFF, V. RICHARD ROE")
+        self.assertEqual(
+            first_case_lines("LAW OFFICES OF CURTIS V. TRINKO\n"
+                             "JOHN DOE V. RICHARD ROE"),
+            "LAW OFFICES OF CURTIS V. TRINKO\nJOHN DOE V. RICHARD ROE")
+
+    def test_a_name_with_a_v_without_its_period(self):
+        self.assertEqual(abbreviate_case_name("People v Kevorkian"),
+                         "People v. Kevorkian")
+        self.assertEqual(abbreviate_case_name("Smith vs Jones"),
+                         "Smith v. Jones")
+
     def test_the_old_reports_against(self):
         # Alone on its line, as the earliest reports set it ("CHIRAC and
         # Others against REINICKER", 24 U.S. 280) — within one, a lowercase
