@@ -18,6 +18,7 @@ safely pass through twice.
 
 from __future__ import annotations
 
+import contextvars
 import gzip
 import os
 import re
@@ -2146,6 +2147,17 @@ _PHRASE_RE = re.compile(
 )
 _PHRASE_MAP = {p: a for p, a in _PHRASES + _T10_CITY_PHRASES}
 
+# A case name in a textual sentence abbreviates only widely known acronyms
+# (rule 6.1(b)) and these eight words (rule 10.2.1(c)); tables T6 and T10 are
+# for citations alone (rule 10.2.2).  "Corporate", "Companies" and the like
+# are written out.  Set while abbreviate_case_name(…, textual=True) runs.
+_TEXTUAL_WORD_MAP = {
+    "and": "&", "association": "Ass'n", "brothers": "Bros.",
+    "company": "Co.", "corporation": "Corp.", "incorporated": "Inc.",
+    "limited": "Ltd.", "number": "No.",
+}
+_TEXTUAL = contextvars.ContextVar("bluebook_textual", default=False)
+
 _ET_AL_RE = re.compile(r",?\s+et\s+als?\.?\s*$", re.IGNORECASE)
 _V_SPLIT_RE = re.compile(r"\s+vs?\.\s+")
 
@@ -2224,6 +2236,85 @@ _JOINED_MATTER_RE = re.compile(
     r"\s*(?:[;,]\s*(?:(?:and|&)\s+)?|\s+(?:and|&)\s+)"
     r"(?=(?:ex\s+parte|in\s+re|(?:in\s+the\s+)?matter\s+of)\b)",
     re.IGNORECASE)
+
+
+# A caption's party separator as Scholar sets it — a lowercase "v." or
+# "agt." within a line, or a line to itself in any case, where alone a
+# "versus" or "against" can be nothing else ("Citizens against Rent Control
+# v. Berkeley" is one case) — and the lines that carry on the party above
+# them rather than begin another: a line after a comma, an "and" or an "&",
+# and one opening with its own lowercase word, an "&", a word that ties it
+# to the name above ("OF THE CITY OF NEW YORK", "d/b/a …") or the party's
+# role.
+_CAPTION_SEPARATOR_RE = re.compile(
+    r"(?:^|(?<=\s))(?:vs?\.|ags?t\.)(?=\s|$)")
+_CAPTION_SEPARATOR_LINE_RE = re.compile(
+    r"(?i:vs?\.|versus|against|ags?t\.)|vs?")
+_CAPS_SEPARATOR_RE = re.compile(r"(?<=\s)VS?\.(?=\s)")
+_PARTY_RUNS_ON_RE = re.compile(
+    r"(?:[,;&(\-–—]|\b(?:and|of|the|for|et|de|del|la|von|van))\s*$",
+    re.IGNORECASE)
+_PARTY_CARRIED_RE = re.compile(
+    r"(?:[a-z&(]|(?i:and|et\s+al|jr|sr|inc|ltd|llc|co|corp|of|for|as|"
+    r"[adfn]/k/a|d/?b/?a|formerly|individually)\b|"
+    r"(?i:(?:cross[- ])?(?:plaintiffs?|defendants?|appell(?:ants?|ees?)|"
+    r"petitioners?|respondents?|intervenors?|claimants?|relators?|"
+    r"movants?|garnishees?|libell?ants?|libell?ees?|complainants?)\b))")
+
+
+def middle_initial_v(before: str) -> bool:
+    """Whether a capital "V." after *before* (its line up to the "V.") is
+    a middle initial: the word ahead of it a given name or an initial, with
+    no comma to end a party there."""
+    words = before.split()
+    if not words or words[-1].endswith(","):
+        return False
+    word = words[-1]
+    return (bool(re.fullmatch(r"[A-Z]\.", word))
+            or word.rstrip(".").lower() in _GIVEN_NAMES)
+
+
+def first_case_lines(text: str) -> str:
+    """A caption's lines (*text*, a line to each "\\n"), cut to its first case
+    where it heads more than one with no period between them for
+    :func:`cut_companion_cases` to cut at.  The second case begins at the
+    first line after the first case's opponent that carries on no party
+    above it: "HOBBINS / v. / ATTORNEY GENERAL / PEOPLE / v. / KEVORKIAN NO
+    2" (205 Mich. App. 194) is Hobbins v. Attorney General.  Where no line
+    begins one — "ALUMNI ASSOCIATION … / v. / Van Kingsley SULLIVAN … / v.
+    / KAPPA CHAPTER …", a third party's claim joined to the case (535 A.2d
+    1095) — it ends at the second separator: only the first party on each
+    side of the first is cited (rule 10.2.1(a))."""
+    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    seps = [(i, m.start(), m.end()) for i, ln in enumerate(lines)
+            for m in _CAPTION_SEPARATOR_RE.finditer(ln)]
+    seps += [(i, 0, len(ln)) for i, ln in enumerate(lines)
+             if _CAPTION_SEPARATOR_LINE_RE.fullmatch(ln)
+             and (i, 0, len(ln)) not in seps]
+    if not seps:
+        # A source that capitalizes its separators ("JOHN DOE, PLAINTIFF,
+        # V. RICHARD ROE"), unless the "V." is a middle initial — after a
+        # given name or another initial: "Francis V. LORENZO", "LAW OFFICES
+        # OF CURTIS V. TRINKO" (540 U.S. 398), "J. V. SMITH".  Scholar sets
+        # its separators lowercase, so there a capital "V." is an initial.
+        seps = [(i, m.start(), m.end()) for i, ln in enumerate(lines)
+                for m in _CAPS_SEPARATOR_RE.finditer(ln)
+                if m.group() == "VS." or not middle_initial_v(ln[:m.start()])]
+    seps.sort()
+    if len(seps) < 2:
+        return text
+    joined = " ".join(lines)
+    if cut_companion_cases(joined) != joined:
+        return text           # a period marks where the second case begins
+    (l1, _s1, e1), (l2, s2, _e2) = seps[0], seps[1]
+    first_right = l1 if lines[l1][e1:].strip() else l1 + 1
+    last_left = l2 if lines[l2][:s2].strip() else l2 - 1
+    for k in range(first_right + 1, last_left + 1):
+        if not (_PARTY_RUNS_ON_RE.search(lines[k - 1])
+                or _PARTY_CARRIED_RE.match(lines[k])):
+            return "\n".join(lines[:k])
+    head = lines[l2][:s2].rstrip()
+    return "\n".join(lines[:l2] + ([head] if head else []))
 
 
 def cut_companion_cases(text: str) -> str:
@@ -2314,14 +2405,22 @@ def cut_companion_cases(text: str) -> str:
     # second name opening the way the first did, with the "The" rule 10.2.1(d)
     # keeps on a vessel — so the cut is offered only for a caption that itself
     # begins that way, and never at an abbreviation's period, which would read
-    # a single ship's "The Wm. The Fourth" as two of them.
+    # a single ship's "The Wm. The Fourth" as two of them.  Nor is a claimant
+    # any more of the name than a second ship: "THE JOSEFA SEGUNDA. ROBERTS
+    # and others, Claimants." (23 U.S. (10 Wheat.) 312) is The Josefa Segunda
+    # — had been "The Josefa Segunda. Roberts" — so with no party to the
+    # case, whatever sentence follows the res ends it.
     if (re.match(r"\s*(?:THE|The)\s+\S", text)
             and not re.search(r"\s+(?:vs?\.|versus|against)\s+", text,
                               re.IGNORECASE)):
-        for c3 in re.finditer(r"\.\s+(?=(?:THE|The)\s+[A-Z])", text):
+        for c3 in re.finditer(r"\.\s+(?=[A-Z])", text):
             wm = re.search(r"([A-Za-z]+)$", text[: c3.start()])
             word = (wm.group(1) if wm else "").lower()
-            if len(word) > 1 and word not in _CUT_NEVER_ENDS:
+            # (An abbreviation's period ends nothing — a relator's "ex rel."
+            # least of all: "THE STATE OF KANSAS EX REL. COLEMAN".)
+            if (len(word) > 1 and word not in _CUT_NEVER_ENDS
+                    and word not in _TABLE_ABBREVIATIONS
+                    and word != "rel"):
                 cuts.append(c3.start())
                 break
     if cuts:
@@ -3257,6 +3356,59 @@ def group_case_name(*cites: str) -> str | None:
     return None
 
 
+# Ejectment cases whose claimant the courts settled on citing by a form
+# of its party the caption does not set (see ejectment_case_names), and
+# settled so plainly that the count of citing opinions is not asked: Scholar
+# captions 59 U.S. 272 "JOHN DEN, ex dem. JAMES B. MURRAY …" and the case is
+# Murray's Lessee v. Hoboken Land & Improvement Co., 59 U.S. (18 How.) 272
+# (1856).  The first party each is cited by, by every citation of its
+# report.
+_SETTLED_FIRST_PARTIES = {
+    "Murray's Lessee": ("59 U.S. 272", "18 How. 272", "15 L. Ed. 372"),
+}
+_SETTLED_FIRST_PARTY_BY_CITE = {
+    _group_cite_key(cite): party
+    for party, cites in _SETTLED_FIRST_PARTIES.items() for cite in cites
+}
+
+
+def settled_case_name(name: str, *cites: str) -> str | None:
+    """*name*, a case name in any of its forms, with the first party the
+    courts cite it by when one of *cites* is the report of a case in
+    _SETTLED_FIRST_PARTIES — "Den v. Hoboken Land & Improvement Co." at
+    "59 U.S. 272" is "Murray's Lessee v. Hoboken Land & Improvement Co."
+    — or None."""
+    for cite in cites:
+        party = _SETTLED_FIRST_PARTY_BY_CITE.get(
+            _group_cite_key(str(cite or "")))
+        if party:
+            sides = _V_SPLIT_RE.split(name or "", maxsplit=1)
+            return f"{party} v. {sides[1]}" if len(sides) == 2 else None
+    return None
+
+
+# Cases a source dates by the term of court they were decided in, where the
+# year of decision is what is cited (rule 10.5): Scholar heads 59 U.S. 272
+# "(1855)", its December Term, and Murray's Lessee was decided in 1856.  By
+# every citation of the report.
+_DECISION_YEAR_BY_CITE = {
+    _group_cite_key(cite): year
+    for cites, year in (
+        (("59 U.S. 272", "18 How. 272", "15 L. Ed. 372"), "1856"),
+    ) for cite in cites
+}
+
+
+def settled_year(*cites: str) -> str | None:
+    """The year a case was decided, when one of *cites* is the report of a
+    case its source dates otherwise (see _DECISION_YEAR_BY_CITE), or None."""
+    for cite in cites:
+        year = _DECISION_YEAR_BY_CITE.get(_group_cite_key(str(cite or "")))
+        if year:
+            return year
+    return None
+
+
 # A caption that names one party, as the petitioner or the applicant, and no
 # adversary — "NIELSEN, Petitioner." (131 U.S. 176) — is that party's
 # petition or application, which rule 10.2.1(b) cites "In re" ("petition
@@ -3618,9 +3770,12 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
             and _word_key(word) not in _ONE_WORD_PARTIES_ABBREVIATED):
         return word
 
-    p = _PHRASE_RE.sub(
-        lambda m: _PHRASE_MAP[re.sub(r"\s+", " ", m.group(0).lower())], p
-    )
+    textual = _TEXTUAL.get()
+    word_map = _TEXTUAL_WORD_MAP if textual else _WORD_MAP
+    if not textual:
+        p = _PHRASE_RE.sub(
+            lambda m: _PHRASE_MAP[re.sub(r"\s+", " ", m.group(0).lower())], p
+        )
 
     # A state or city right after a given name is part of a person's name,
     # not a geographic unit: "George Washington University" keeps
@@ -3643,14 +3798,14 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
         if m.start() in protected:
             return m.group(0)
         word = m.group(0).replace("’", "'").lower()
-        abbr = _WORD_MAP.get(word)
+        abbr = word_map.get(word)
         if (abbr is None and m.end() == len(p) and word.endswith(".")
                 and "." not in word[:-1]):
             # A caption's closing period rides on its last word ("Dallas
             # County.", "Magnavox Co. of Tennessee.") and would otherwise
             # keep the word from its abbreviation until a second pass,
             # once the period is gone.
-            abbr = _WORD_MAP.get(word[:-1])
+            abbr = word_map.get(word[:-1])
         return m.group(0) if abbr is None else abbr
 
     return _TOKEN_RE.sub(_sub, p)
@@ -3671,10 +3826,16 @@ def _add_initials_variants() -> None:
     if _INITIALS_VARIANTS_ADDED:
         return
     _INITIALS_VARIANTS_ADDED = True
-    for acr, long_names in _WIDELY_RECOGNIZED_INITIALS_RAW.items():
-        for long_name in long_names:
-            abbr = _abbreviate_party(long_name, recognize_initials=False)
-            _WIDELY_RECOGNIZED_INITIALS.setdefault(_initials_key(abbr), acr)
+    # The citation forms, however the first caller is abbreviating.
+    citation_form = _TEXTUAL.set(False)
+    try:
+        for acr, long_names in _WIDELY_RECOGNIZED_INITIALS_RAW.items():
+            for long_name in long_names:
+                abbr = _abbreviate_party(long_name, recognize_initials=False)
+                _WIDELY_RECOGNIZED_INITIALS.setdefault(
+                    _initials_key(abbr), acr)
+    finally:
+        _TEXTUAL.reset(citation_form)
 
 
 # Rule 10.2.1(h): omit "Inc.", "Ltd.", "L.L.C.", "L.L.P.", "N.A.", "F.S.B.",
@@ -4038,11 +4199,19 @@ def ejectment_party_caption(side: str) -> str:
 
 
 def ejectment_case_names(name: str, *, court_state: str = "",
-                         body_text: str = "") -> EjectmentNames | None:
+                         body_text: str = "",
+                         textual: bool = False) -> EjectmentNames | None:
     """The forms a caption's ejectment party may be cited in, for a caller
     that will ask which the courts use (see case_name_usage), or None when
     *name* names no ejectment party.  :func:`abbreviate_case_name` gives
     the caption's own form, ``names[default]``; the arguments are its."""
+    if textual != _TEXTUAL.get():
+        mode = _TEXTUAL.set(textual)
+        try:
+            return ejectment_case_names(name, court_state=court_state,
+                                        body_text=body_text, textual=textual)
+        finally:
+            _TEXTUAL.reset(mode)
     name = _clean_caption(name)
     return _ejectment_names(name, court_state, body_text) if name else None
 
@@ -4080,6 +4249,9 @@ def _clean_caption(name: str) -> str:
     # (rule 10.2.1).  Lowercase only: a capitalized "Agt." is an agent's
     # ("Smith, Gen. Agt.").
     name = re.sub(r"\s+ags?t\.\s+", " v. ", name)
+    # …and the Michigan reports a "v" without its period ("People v
+    # Kevorkian", 447 Mich 436), as CAP prints them.
+    name = re.sub(r"(?<=\S)\s+vs?\s+(?=\S)", " v. ", name)
     # A bracket closed by a brace, or a brace by a bracket, is a scan's
     # garbling, never a name's: "CHIRAC and Others {VV] against REINICKER."
     # (24 U.S. 280).
@@ -4132,11 +4304,20 @@ def _clean_caption(name: str) -> str:
 
 
 def abbreviate_case_name(name: str, *, court_state: str = "",
-                         body_text: str = "") -> str:
+                         body_text: str = "", textual: bool = False) -> str:
     """Abbreviate a case name for use in a citation or filename per
     Bluebook rule 10.2.2 (= Indigo Book R8.3), dropping given names of
     individuals (rule 10.2.1(g)) and "State of" prefixes (10.2.1(f)).
     Safe to call twice.
+
+    *textual* names the case as a textual sentence does (rule 10.2.1(c)):
+    every rule of 10.2.1 applies, but only widely known acronyms and eight
+    words are abbreviated — "&", "Ass'n", "Bros.", "Co.", "Corp.", "Inc.",
+    "Ltd.", "No." — so "Guaranty Trust Company of New York v. York" is
+    "Guaranty Trust Co. v. York", not "Guar. Tr. Co. v. York".  Give it the
+    name as the caption has it: a name already abbreviated keeps its
+    abbreviations, which cannot all be read back ("Tr." is Trust or
+    Trustee).
 
     *court_state* is the state whose own courts decided the case (any
     spelling: "new york", "N.Y."), which rule 10.2.1(f) needs to finish the
@@ -4152,6 +4333,13 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
     prose settles a personal name the given-name lists don't know — the
     party it calls "Iqbal" is Javaid Iqbal's surname (rule 10.2.1(g)).
     Without it, those names fall back to the Census name files."""
+    if textual != _TEXTUAL.get():
+        mode = _TEXTUAL.set(textual)
+        try:
+            return abbreviate_case_name(name, court_state=court_state,
+                                        body_text=body_text, textual=textual)
+        finally:
+            _TEXTUAL.reset(mode)
     name = _clean_caption(name)
     if not name:
         return name
@@ -4229,10 +4417,14 @@ def _close_up_initials(name: str) -> str:
     """Close up adjacent single capitals (rule 6.1(a)): "Home Depot U. S.
     A., Inc." -> "U.S.A.", "Purdue Pharma L. P." -> "L.P." — unless a
     longer abbreviation follows the run, as in "S. S. N. Am." (the steamship
-    North America), where the initials may belong to it."""
+    North America), where the initials may belong to it.  A firm's legal
+    form ends its name and is no such abbreviation: "Chevron U. S. A. Inc."
+    is Chevron U.S.A. Inc. (467 U.S. 837)."""
     def close(m: re.Match) -> str:
         after = name[m.end():]
-        if re.match(r"\s+[A-Z][a-z]+\.", after):
+        if (re.match(r"\s+[A-Z][a-z]+\.", after)
+                and not re.match(r"\s+(?:Inc|Co|Cos|Corp|Ltd|Bros)\.",
+                                 after)):
             return m.group(0)
         return re.sub(r"\s+", "", m.group(0))
     return re.sub(r"(?<![\w.])[A-Z]\.(?:\s+[A-Z]\.)+(?![\w])", close, name)

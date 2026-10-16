@@ -1355,6 +1355,13 @@ class AcronymCaseTests(unittest.TestCase):
                  "T.M. v. Univ. of Md. Med. Sys. Corp."),
                 ("Home Depot U. S. A., Inc. v. Jackson",
                  "Home Depot U.S.A., Inc. v. Jackson"),
+                # A firm's legal form after the initials is no abbreviation
+                # they belong to (467 U.S. 837)…
+                ("Chevron U. S. A. Inc. v. Natural Resources Defense "
+                 "Council, Inc.",
+                 "Chevron U.S.A. Inc. v. Nat. Res. Def. Council, Inc."),
+                # …as the steamship North America's "Am." may be.
+                ("City of Erie v. S. S. N. Am.", "City of Erie v. S. S. N. Am."),
                 ("Lohan v. Take-two Interactive Software, Inc.",
                  "Lohan v. Take-Two Interactive Software, Inc."),
                 # A word stays a word.
@@ -1803,6 +1810,46 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
             "The Paquete Habana",
         )
 
+    def test_a_vessel_heading_the_parties_caption_names_the_case(self):
+        # The Sadie, 57 F.2d 908 (S.D.N.Y. 1932), had been cited "Sadie. N.Y.
+        # & Cuba Mail S.S. Co. v. Fulton Lighterage Co.": the reports head
+        # an admiralty case with the res, on a line to itself, above the
+        # parties' own caption — and cite it by the res.
+        from opinion_db import _caption_name
+        from scholar_caption import res_heading
+
+        def blocks(*lines):
+            spans = []
+            for text in lines:
+                spans += [Span(text), Span("\n")]
+            return [Block("center", [Span("57 F.2d 908 (1932)")]),
+                    Block("center", spans[:-1]),
+                    Block("center", [Span("District Court, S. D. New York.")])]
+
+        for lines, want in (
+                (("THE SADIE.", "NEW YORK & CUBA MAIL S. S. CO.", "v.",
+                  "FULTON LIGHTERAGE CO., Inc."), "The Sadie"),
+                # The Scotland, 118 U.S. 507 (1886).
+                (("THE SCOTLAND.", "DYER & Others", "v.",
+                  "NATIONAL STEAM NAVIGATION COMPANY."), "The Scotland")):
+            with self.subTest(want=want):
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks(*lines))),
+                    want)
+                self.assertEqual(abbreviate_case_name(normal_case_caption(
+                    _caption_name(blocks(*lines)))), want)
+        # A party set on a line to itself is no res: the separator comes
+        # next, or the line is a sovereign's, a firm's, or a party's
+        # with others.
+        for caption in ("THE PEOPLE.\nv.\nSMITH",
+                        "THE UNITED STATES.\nSMITH\nv.\nJONES",
+                        "THE ACME COMPANY.\nSMITH\nv.\nJONES",
+                        "THE SMITHS ET AL.\nSMITH\nv.\nJONES",
+                        "THE PRIZE CASES.\nTHE AMY WARWICK\nv.\nUNITED STATES",
+                        "THE PAQUETE HABANA.\nTHE LOLA."):
+            with self.subTest(caption=caption):
+                self.assertEqual(res_heading(caption), "")
+
     def test_the_in_rem_companion_cut_leaves_one_ship_alone(self):
         cut = _cut_companion_cases
         # Both ships, however the source cases them.
@@ -1824,6 +1871,26 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
         for caption in ("THE STEAMSHIP CO. v. The Lola.",
                         "THE ACME V. THE LOLA.", "THE ACME VS. THE LOLA."):
             self.assertEqual(cut(caption), caption)
+
+    def test_a_claimant_is_no_more_of_the_name_than_a_second_ship(self):
+        # The Josefa Segunda, 23 U.S. (10 Wheat.) 312 (1825), had been cited
+        # "The Josefa Segunda. Roberts"; the Barge Sadie (62 F.2d 1076)
+        # carried "Fulton Lighterage Co." with it.
+        cut = _cut_companion_cases
+        self.assertEqual(
+            cut("THE JOSEFA SEGUNDA. ROBERTS and others, Claimants."),
+            "THE JOSEFA SEGUNDA.")
+        self.assertEqual(
+            cut("THE Barge SADIE. Fulton Lighterage Company, Inc., "
+                "Appellant."), "THE Barge SADIE.")
+        # A name stored without its claimant's role, too.
+        self.assertEqual(abbreviate_case_name("The Josefa Segunda. Roberts"),
+                         "The Josefa Segunda")
+        # A relator is the party's own, and an abbreviation ends nothing.
+        for caption in ("THE STATE OF KANSAS EX REL. COLEMAN, ATTORNEY "
+                        "GENERAL.", "THE ST. JAGO DE CUBA."):
+            with self.subTest(caption=caption):
+                self.assertEqual(cut(caption), caption)
 
     def test_a_doubled_initial_survives_the_repeated_abbreviation_collapse(self):
         # A.A.R.P. v. Trump, 605 U.S. 246 (2025): the applicants are
@@ -5676,6 +5743,137 @@ PRIMARY_ELECTION_CAPTION = (
     "Elections (16-3357), Appellants.")
 
 
+class LinkedCompanionCaptionTests(unittest.TestCase):
+    """People v. Kevorkian, 447 Mich. 436 (1994), had been cited "People v.
+    Kevorkian Hobbins v. Att'y Gen.": Scholar sets the case decided with it
+    under its caption, line by line with no period between them, as a link
+    to that case's own page."""
+
+    LINK = "https://scholar.google.com/scholar_case?case=1757080233558204307"
+
+    def _caption(self, link_first=False):
+        def span(text, linked):
+            return Span(text, bold=True, link=self.LINK if linked else "")
+        lines = [("PEOPLE", link_first), ("v.", link_first),
+                 ("KEVORKIAN", link_first), ("HOBBINS", True), ("v.", True),
+                 ("ATTORNEY GENERAL", True)]
+        spans = []
+        for text, linked in lines:
+            spans += [span(text, linked), Span("\n")]
+        return [Block("center", [Span("447 Mich. 436 (1994)")]),
+                Block("center", spans[:-1])]
+
+    def test_the_linked_case_is_another(self):
+        from opinion_db import _caption_name
+        blocks = self._caption()
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "People v. Kevorkian")
+        self.assertEqual(abbreviate_case_name(
+            normal_case_caption(_caption_name(blocks))), "People v. Kevorkian")
+
+    def test_a_caption_linked_throughout_is_its_own(self):
+        from scholar_caption import caption_text
+        spans = []
+        for text in ("PEOPLE OF THE STATE OF MICHIGAN,", "v.",
+                     "JACK KEVORKIAN,", "Defendant-Appellee."):
+            spans += [Span(text, link=self.LINK), Span("\n")]
+        self.assertIn("Defendant-Appellee",
+                      caption_text(Block("center", spans[:-1])))
+        self.assertNotIn("HOBBINS", caption_text(self._caption()[1]))
+
+    def test_unlinked_the_line_break_parts_them(self):
+        blocks = self._caption(link_first=True)
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "People v. Kevorkian")
+
+
+class LineBreakCompanionCaptionTests(unittest.TestCase):
+    """Hobbins v. Attorney General, 205 Mich. App. 194 (1994), had been cited
+    "Hobbins v. Att'y Gen. People v. Kevorkian No 2": its caption sets the
+    case decided with it on the lines below, unlinked, with no period
+    between the two — only a line break."""
+
+    @staticmethod
+    def _blocks(*lines):
+        spans = []
+        for text in lines:
+            spans += [Span(text, bold=True), Span("\n")]
+        return [Block("center", [Span("205 Mich. App. 194 (1994)")]),
+                Block("center", spans[:-1])]
+
+    def _name(self, *lines):
+        return abbreviate_case_name(_scholar_caption_name(self._blocks(*lines)))
+
+    def test_the_second_case_is_dropped(self):
+        from opinion_db import _caption_name
+        blocks = self._blocks("HOBBINS", "v.", "ATTORNEY GENERAL", "PEOPLE",
+                              "v.", "KEVORKIAN NO 2")
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Hobbins v. Att'y Gen.")
+        self.assertEqual(abbreviate_case_name(
+            normal_case_caption(_caption_name(blocks))),
+            "Hobbins v. Att'y Gen.")
+
+    def test_a_third_party_chain_ends_at_its_second_v(self):
+        # Fitzmaurice v. Calmar S.S. Corp., 198 F. Supp. 304: "John
+        # FITZMAURICE / v. / CALMAR STEAMSHIP CORPORATION / v. / NACIREMA
+        # OPERATING COMPANY." — the impleaded third party is no part of it.
+        self.assertEqual(
+            self._name("John FITZMAURICE", "v.", "CALMAR STEAMSHIP CORPORATION",
+                       "v.", "NACIREMA OPERATING COMPANY."),
+            "Fitzmaurice v. Calmar S.S. Corp.")
+
+    def test_lines_that_carry_on_a_party(self):
+        from bluebook_names import first_case_lines
+        caption = "\n".join([
+            "JOHN DOE,", "v.", "BOARD OF EDUCATION", "OF THE CITY OF NEW YORK",
+            "and Richard Roe,", "Defendants-Appellees", "MARY MAJOR", "v.",
+            "BOARD OF EDUCATION"])
+        self.assertEqual(first_case_lines(caption).split("\n")[-1],
+                         "Defendants-Appellees")
+
+    def test_one_case_is_left_whole(self):
+        from bluebook_names import first_case_lines
+        for caption in (
+                "Jason WOLFORD; Alison Wolford,\nPlaintiffs-Appellees,\nv.\n"
+                "Anne E. LOPEZ,\nDefendant-Appellant.\nAARP,\nAmicus Curiae.",
+                "CITIZENS against RENT CONTROL\nv.\nCITY OF BERKELEY",
+                "SMITH\nv.\nJONES.\nBROWN\nv.\nGREEN."):
+            self.assertEqual(first_case_lines(caption), caption)
+
+    def test_a_capital_v_that_is_an_initial(self):
+        from bluebook_names import first_case_lines
+        # Scholar's own separators are lowercase: there a capital "V." is a
+        # middle initial, never a second case ("Mark V. Chapin", 505 F.
+        # Supp. 3d 879).
+        caption = ("JOHN DOE,\nv.\nHENNEPIN COUNTY and Mark V. Chapin,\n"
+                   "Auditor-Treasurer, Defendants")
+        self.assertEqual(first_case_lines(caption), caption)
+        # A source that capitalizes its separators is parted at the second.
+        self.assertEqual(
+            first_case_lines("JOHN DOE, PLAINTIFF, V. RICHARD ROE\n"
+                             "MARY MAJOR, PLAINTIFF, V. RICHARD ROE"),
+            "JOHN DOE, PLAINTIFF, V. RICHARD ROE")
+        self.assertEqual(
+            first_case_lines("LAW OFFICES OF CURTIS V. TRINKO\n"
+                             "JOHN DOE V. RICHARD ROE"),
+            "LAW OFFICES OF CURTIS V. TRINKO\nJOHN DOE V. RICHARD ROE")
+
+    def test_a_name_with_a_v_without_its_period(self):
+        self.assertEqual(abbreviate_case_name("People v Kevorkian"),
+                         "People v. Kevorkian")
+        self.assertEqual(abbreviate_case_name("Smith vs Jones"),
+                         "Smith v. Jones")
+
+    def test_the_old_reports_against(self):
+        # Alone on its line, as the earliest reports set it ("CHIRAC and
+        # Others against REINICKER", 24 U.S. 280) — within one, a lowercase
+        # "against" may be a party's own.
+        self.assertEqual(self._name("HOBBINS", "against", "ATTORNEY GENERAL",
+                                    "PEOPLE", "against", "KEVORKIAN"),
+                         "Hobbins v. Att'y Gen.")
+
+
 class InReMatterNameTests(unittest.TestCase):
     """In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016), had been
     cited "In re 2016 Primary Election. Hamilton Cnty. Bd. of Elections
@@ -6610,10 +6808,18 @@ class WriterParentheticalTests(unittest.TestCase):
                  "Abrahamson, J., dissenting"),
                 ("WILLIAM A. BABLITCH, J. (concurring in part, dissenting "
                  "in part).",
-                 "Bablitch, J., concurring in part, dissenting in part")):
+                 "Bablitch, J., concurring in part, dissenting in part"),
+                # A vote heading the voter's opinion (Mitchell v. Harmony,
+                # 54 U.S. 115; State v. Ramos, 231 So. 3d 44; City of New
+                # York v. Chapman Docks Co., 1 A.D.2d 895).
+                ("Mr. Justice DANIEL dissented.", "Daniel, J., dissenting"),
+                ("LOBRANO, J., CONCURS IN THE RESULTS.",
+                 "Lobrano, J., concurring in the result"),
+                ("Nolan, P. J., dissents and votes to affirm, with the "
+                 "following memorandum:", "Nolan, P.J., dissenting")):
             with self.subTest(line=line[:30]):
                 part = self._part("concurrence" if "concurring" in line
-                                  else "dissent", line)
+                                  or "CONCURS" in line else "dissent", line)
                 self.assertEqual(self._win()._writer_parenthetical(part),
                                  cited)
 

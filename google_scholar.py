@@ -1301,6 +1301,41 @@ _SEP_OF_RE = re.compile(
 )
 
 
+# A justice's vote, noted on a line of its own — "Mr. Justice DANIEL
+# dissented." (Mitchell v. Harmony, 54 U.S. 115), "LOBRANO, J., CONCURS IN
+# THE RESULTS." — which the old reports, and some courts still, also set as
+# the heading of the justice's own opinion.  One justice: a line naming
+# several ("Mr. Justice McLEAN and Mr. Justice CURTIS dissented.") records
+# their votes, their opinions headed apart.  It opens an opinion only where
+# that opinion follows it (see _opens_own_writing).
+_VOTE_LINE_RE = re.compile(
+    r"^\s*(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
+    r"(?:(?:CHIEF\s+)?JUSTICE\s+[A-Z][\w.'’-]+"
+    r"|[A-Z][\w.'’-]+,\s*(?:(?:C\.|P\.)\s*)?JJ?\.)"
+    r",?\s+(?:also\s+)?(?:dissent(?:ed|s)|concur(?:red|s))\b"
+    r"[^.:;]{0,100}[.:]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _opens_own_writing(blocks: list, i: int) -> bool:
+    """Whether the writing after a vote line (see _VOTE_LINE_RE) is the
+    voter's own — the next paragraph speaking in the first person: "In
+    this case I find myself constrained to disagree with the opinion of the
+    court…" after "Mr. Justice DANIEL dissented."  The court's order
+    ("This cause came on to be heard…" after Baldwin's vote in the
+    Amistad), another byline, a footnote or a quotation is not."""
+    for b in blocks[i + 1: i + 3]:
+        t = _content_text(b)
+        if not t:
+            continue
+        if t[:1] in "“\"‘'[":
+            return False
+        return bool(re.search(r"\bI(?:\s+[a-z]|['’][a-z])|\b(?i:my|myself)\b",
+                              t[:400]))
+    return False
+
+
 def _peek_sep_kind_evidence(
     blocks: list, i: int, default: str = "concurrence"
 ) -> tuple[str, bool]:
@@ -1778,6 +1813,8 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
     # short runs of vote signatures without discarding substantial old-style
     # opinions whose bylines omit "concurring" or "dissenting."
     bare_headers: list[tuple[int, str, str, bool]] = []
+    # Votes set as the heading of the voter's own opinion (_VOTE_LINE_RE).
+    vote_headers: list[tuple[int, str, str, bool]] = []
     maj_phrase_all: list[int] = []
     maj_author_idx: Optional[int] = None
     for i, b in enumerate(blocks):
@@ -1868,6 +1905,16 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
                     kind = "separate"
                 bare_headers.append((i, kind, t, evidenced))
             continue
+        if (len(t) <= 160 and _VOTE_LINE_RE.match(t)
+                and _opens_own_writing(blocks, i)):
+            # A vote set as the heading of the voter's own opinion.  Like
+            # the other bylines without a role phrase, it counts only once
+            # the majority has begun.
+            kind = ("dissent" if re.search(r"dissent", t, re.IGNORECASE)
+                    else "concurrence")
+            vote_headers.append((i, kind, t if len(t) <= 90 else t[:87] + "…",
+                                 True))
+            continue
         if len(t) <= 260 and _JOINED_SEP_HEADER_RE.match(t):
             label = t if len(t) <= 90 else t[:87] + "…"
             kind, _evidenced = _peek_sep_kind_evidence(blocks, i)
@@ -1923,8 +1970,19 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
     # separate opinion — has begun; earlier ones would be the majority byline.
     anchor = maj_idx if maj_idx is not None else (
         boundaries[0][0] if boundaries else None)
-    if anchor is not None:
-        candidates = [bd for bd in bare_headers if bd[0] > anchor]
+    # A vote heading its voter's opinion needs the opinion it follows to
+    # have begun, too — where nothing attributes that opinion, at its first
+    # paragraph of any length ("LOBRANO, J., CONCURS IN THE RESULTS." after
+    # an unsigned Louisiana opinion, 231 So. 3d 44).
+    vote_anchor = anchor if anchor is not None else next(
+        (k for k, b in enumerate(blocks)
+         if b.kind == "para" and len(_content_text(b)) >= 300), None)
+    if anchor is not None or vote_anchor is not None:
+        candidates = sorted(
+            [bd for bd in bare_headers
+             if anchor is not None and bd[0] > anchor]
+            + [bd for bd in vote_headers
+               if vote_anchor is not None and bd[0] > vote_anchor])
         all_candidate_indexes = sorted(
             [bd[0] for bd in boundaries] + [bd[0] for bd in candidates]
         )

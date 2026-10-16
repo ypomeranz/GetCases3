@@ -584,6 +584,11 @@ def _build_copy_menu(master: tk.Misc, reader) -> "Optional[tk.Menu]":
         label="Copy citation to clipboard",
         command=reader._copy_citation_to_clipboard,
     )
+    # …and as a textual sentence names it (rule 10.2.1(c)).
+    copy_menu.add_command(
+        label="Copy citation for use in text",
+        command=reader._copy_text_citation_to_clipboard,
+    )
     copy_menu.add_separator()
     for value, label in COPY_MODE_LABELS:
         copy_menu.add_radiobutton(
@@ -1218,6 +1223,8 @@ from bluebook_names import (
     is_recognized_given_name,
     normal_case_caption,
     refine_caption_case,
+    settled_case_name,
+    settled_year,
     simplify_historical_entity_caption,
 )
 from bluebook_parentheticals import (
@@ -1244,6 +1251,8 @@ from case_law_parse import (
 from cl_parse import parse_cl_html as _parse_cl_html
 import case_name_usage
 import citing_cases
+import decision_year
+from decision_year import known_decision_year
 import courtlistener as cl_api
 from courtlistener import CourtListenerClient, CourtListenerError
 import constitution
@@ -2311,13 +2320,17 @@ def _bluebook_display_name(item: dict) -> str:
         citation_str = _respace_reporter_in_cite(citation_str)
     citation_str = _bluebook_reporter_spelling(citation_str)
     # Cases reported together under one name are cited by it (see
-    # group_case_name), whatever the parties' captions say.
-    case_name = group_case_name(
-        citation_str, *(item.get("citation") or [])) or case_name
+    # group_case_name), whatever the parties' captions say — and an old
+    # ejectment case by the party the courts settled on (settled_case_name).
+    cites = (citation_str, *(item.get("citation") or []))
+    case_name = (group_case_name(*cites)
+                 or settled_case_name(case_name, *cites) or case_name)
 
-    # Year from date filed
+    # Year from date filed — or the year a case its source dates by its
+    # term was decided, where that is known (see decision_year).
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
     year = date_filed[:4] if len(date_filed) >= 4 else ""
+    year = known_decision_year(year, *cites) or year
 
     # Court abbreviation — omitted when SCOTUS or conveyed by the reporter
     court_id = str(item.get("court_id") or item.get("court") or "").strip().lower()
@@ -5149,6 +5162,29 @@ def _ejectment_usage_form(client, cite: str, item: dict, names,
     return form
 
 
+def _citing_decision_year(client, cite: str, item: dict, case_name: str,
+                          given: str, court: str) -> tuple[str, dict]:
+    """``(year, counts)``: the decision year the opinions of *court* citing
+    its case give it, where the year its source gives (*given*) may be its
+    term's (see decision_year.citing_sample_year), and how many gave each
+    candidate year.  ("", {}) when they settle none, or CourtListener
+    cannot find the case or fails.  Worker thread."""
+    if not court:
+        return "", {}
+    try:
+        ids = _cited_opinion_ids(client, item, case_name, cite)
+        if not ids:
+            return "", {}
+        year, counts = decision_year.citing_sample_year(
+            client, cite, ids, given, court=court)
+    except Exception as exc:
+        print(f"[decision-year] citing opinions for {cite!r} failed: {exc}")
+        return "", {}
+    print(f"[decision-year] {cite}: citing opinions {counts} -> "
+          f"{year or 'unsettled'}")
+    return year, counts
+
+
 def _target_name_near_citation(
     text: str, cite_start: int, case_name: str,
 ) -> bool:
@@ -7783,13 +7819,18 @@ def _scholar_decision_year(fetcher, cites, name: str = "",
     return ""
 
 
-def _case_law_decision_year(cites) -> str:
+def _case_law_decision_year(cites, full_date: bool = False) -> str:
     """The year of the Caselaw Access Project's decision date for the case
-    at any of *cites* (its first four).  Worker thread; "" when CAP has
-    none."""
+    at any of *cites* (its first four).  With *full_date*, only a date given
+    to the day: for the early U.S. Reports CAP gives the month the case's
+    term opened — "1876-10" for McCready v. Virginia, 94 U.S. 391, decided
+    April 30, 1877 — the term's year, not the decision's.  Worker thread;
+    "" when CAP has none."""
     for cite in _plain_cites(cites)[:4]:
         cap = _case_law_metadata(cite)
         decided = str((cap or {}).get("decision_date") or "")
+        if full_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", decided):
+            continue
         if len(decided) >= 4 and decided[:4].isdigit():
             return decided[:4]
     return ""
@@ -27426,8 +27467,10 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
         except Exception:
             pass
     # Cases reported together under one name are cited by it (see
-    # group_case_name).
-    name = group_case_name(cite, *m_cites) or name
+    # group_case_name), an old ejectment case by its settled party.
+    name = (group_case_name(cite, *m_cites)
+            or settled_case_name(name, cite, *m_cites) or name)
+    year = known_decision_year(year, cite, *m_cites) or year
 
     if m_court:
         court = _court_for_paren(cite, "", m_court)
@@ -31682,6 +31725,10 @@ class _ScholarTextWindow:
         # State of …" party: its own state's courts cite it as "People v.
         # Zackowitz", everyone else's as "New York v. Zackowitz".
         court_state = _state_of_court(court_id, str(item.get("court") or ""))
+        # The name before it is abbreviated, for a textual sentence's form
+        # of it (see _text_case_name): abbreviations cannot all be read
+        # back ("Tr." is Trust or Trustee).
+        caption_name = name
         # An ejectment party ("John Den, ex dem. James B. Murray") is cited
         # the way the opinions citing the case cite it — "Murray's Lessee",
         # but "Doe" in Doe v. Considine.  An answer had before is used now;
@@ -31707,6 +31754,30 @@ class _ScholarTextWindow:
             name = group
             ejectment = None
             unresolved_caption_case = ()
+        # …and an ejectment case the courts settled on citing by one form
+        # of its party is cited by it, without asking the citing opinions:
+        # Murray's Lessee v. Hoboken Land & Improvement Co.
+        settled = settled_case_name(
+            name, cite, *header_cites, *(item.get("citation") or []))
+        if settled:
+            name = settled
+            ejectment = None
+        # …and a case its source dates by its term is cited by the year it
+        # was decided: 59 U.S. 272 "(1855)" is Murray's Lessee (1856).  A
+        # year known already is used now.  One the page gives that may be
+        # its term's — no decision date printed, a term that ran into the
+        # next year — is asked about by _enrich_citation (decision_year).
+        all_cites = (cite, *header_cites, *(item.get("citation") or []))
+        term_year = ""
+        if settled_year(*all_cites):
+            year = settled_year(*all_cites)
+        elif (year and year == header_year
+              and decision_year.term_year_uncertain(
+                  self._blocks, year, is_scotus=is_scotus)):
+            term_year = year
+            found = decision_year.remembered_decision_year(year, *all_cites)
+            if found:
+                year, term_year = found, ""
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
@@ -31754,6 +31825,12 @@ class _ScholarTextWindow:
         return {
             "name": name, "cite": cite, "display_cite": display_cite,
             "court": court_abbr, "year": year,
+            # A year the page gives that may be its term's, for
+            # _enrich_citation to settle; "" when there is no doubt.
+            "_term_year": term_year,
+            # The caption's name unabbreviated, and the state whose courts
+            # decided the case, for the textual form (_text_case_name).
+            "_caption_name": caption_name, "_court_state": court_state,
             # The court "court" was abbreviated from, for a title cited to
             # another reporter, whose parenthetical may need less of it
             # (see _with_citation_facts); "" where there was no id.
@@ -31867,6 +31944,29 @@ class _ScholarTextWindow:
             "dissenting" if part.kind == "dissent" else "concurring")
         t = block_text(part.blocks[0])
         m = re.search(r"\b(?:concurring|dissenting)\b", t, re.IGNORECASE)
+        # A vote set as the heading of the voter's opinion (see
+        # google_scholar._VOTE_LINE_RE): "Mr. Justice DANIEL dissented." is
+        # (Daniel, J., dissenting); "LOBRANO, J., CONCURS IN THE RESULTS."
+        # (Lobrano, J., concurring in the result); "Nolan, P. J., dissents
+        # and votes to affirm, with the following memorandum:" (Nolan, P.J.,
+        # dissenting).
+        vm = None if m else re.match(
+            r"(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
+            r"(?:(CHIEF\s+)?JUSTICE\s+([A-Z][\w.'’-]+)"
+            r"|([A-Z][\w.'’-]+),\s*(?:(C\.|P\.)\s*)?JJ?\.)"
+            r",?\s+(?:also\s+)?(dissent|concur)(?:ed|red|s)\b"
+            r"(?:\s+(in\s+the\s+(?:result|judgment)|in\s+part))?",
+            t, re.IGNORECASE)
+        if vm:
+            title = ("C.J." if vm.group(1) or (vm.group(4) or "").upper() == "C."
+                     else "P.J." if (vm.group(4) or "").upper() == "P."
+                     else "J.")
+            surname = _fix_name_case(
+                (vm.group(2) or vm.group(3)).replace("’", "'"))
+            role = "dissenting" if vm.group(5).lower() == "dissent" else "concurring"
+            if vm.group(6):
+                role += " " + re.sub(r"\s+", " ", vm.group(6)).lower()
+            return f"{surname}, {title}, {role}"
         if not m:
             # A CourtListener sub-opinion part: the opinion body has no byline
             # to parse — the type and author live in the label the assembler
@@ -32182,7 +32282,13 @@ class _ScholarTextWindow:
             ejectment is not None
             and not getattr(self, "_base_citation_override", "")
         )
-        if not (need_year or need_court or need_caption_case or need_usage):
+        # A year that may be the term's rather than the decision's (see
+        # decision_year.term_year_uncertain).
+        term_year = "" if need_year else str(bb.get("_term_year") or "")
+        need_decision_year = bool(
+            term_year and not getattr(self, "_base_citation_override", ""))
+        if not (need_year or need_court or need_caption_case or need_usage
+                or need_decision_year):
             return
 
         cite = bb["cite"]
@@ -32190,7 +32296,7 @@ class _ScholarTextWindow:
         item = dict(self._item)
         candidate_cites = [cite, *self._header_cites, *(item.get("citation") or [])]
         client = fetcher = None
-        if need_year or need_court or need_usage:
+        if need_year or need_court or need_usage or need_decision_year:
             try:
                 if self._app is not None and self._app._token_var.get().strip():
                     client = self._app._get_client()
@@ -32216,16 +32322,45 @@ class _ScholarTextWindow:
             year = (_scholar_decision_year(
                 fetcher, candidate_cites, case_name, scholar_url)
                 if need_year else "")
-            court_id = ""
-            if client is not None and (need_court or (need_year and not year)):
+            court_id = cl_year = ""
+            if client is not None and (need_court or (need_year and not year)
+                                       or need_decision_year):
                 try:
                     court_id, cl_year = self._cl_court_and_year(
-                        client, cite, item, name=case_name)
+                        client, cite, item, name=case_name,
+                        exact_year=need_decision_year)
                     year = year or (cl_year if need_year else "")
                 except Exception as exc:
                     print(f"[bb-enrich] CourtListener lookup failed: {exc}")
             if need_year and not year:
                 year = _case_law_decision_year(candidate_cites)
+            if need_decision_year:
+                # The year the case was decided, where the page's may be
+                # its term's: first as the deciding court's own later
+                # opinions cite it, then CourtListener's date, then the
+                # Caselaw Access Project's (to the day only: its month-only
+                # dates are the term's).  Each only if it is the page's
+                # year or the next.
+                own_court = (_SCOTUS_COURT_ID if self._is_scotus
+                             else str(bb.get("court_id") or ""))
+                found, counts = (_citing_decision_year(
+                    client, cite, item, case_name, term_year, own_court)
+                    if client is not None else ("", {}))
+                source = "citing" if found else ""
+                if not found and decision_year.plausible_year(term_year,
+                                                              cl_year):
+                    found, source = cl_year, "courtlistener"
+                if not found:
+                    cap_year = _case_law_decision_year(candidate_cites,
+                                                       full_date=True)
+                    if decision_year.plausible_year(term_year, cap_year):
+                        found, source = cap_year, "caselaw"
+                if found:
+                    print(f"[decision-year] {cite}: {term_year} -> {found} "
+                          f"({source})")
+                    decision_year.remember_year(cite, found, source,
+                                                counts=counts)
+                    year = found
             new_court = bb.get("court", "")
             if need_court and court_id:
                 new_court = _court_for_paren(
@@ -32258,19 +32393,26 @@ class _ScholarTextWindow:
 
     @staticmethod
     def _cl_court_and_year(client, cite: str, item: dict,
-                           name: str = "") -> tuple[str, str]:
+                           name: str = "", exact_year: bool = False
+                           ) -> tuple[str, str]:
         """(court_id, year) for the case from CourtListener — the cluster's
         date and its docket's court — locating the cluster by id or, failing
         that, by the reporter citation (disambiguated by ``name`` when the
-        citation is ambiguous, e.g. "1 Cranch 299")."""
+        citation is ambiguous, e.g. "1 Cranch 299").  With ``exact_year``,
+        a date CourtListener marks approximate gives no year: it may be the
+        term's (see decision_year)."""
         cluster_id = item.get("cluster_id") or item.get("id")
         if not cluster_id:
             t = _cl_item_for_citation(client, cite, name=name)
             cluster_id = (t or {}).get("cluster_id")
         if not cluster_id:
             return "", ""
-        cl = client.get_cluster(int(cluster_id), fields="date_filed,docket")
+        cl = client.get_cluster(int(cluster_id),
+                                fields="date_filed,date_filed_is_approximate,"
+                                       "docket")
         year = (cl.get("date_filed") or "")[:4]
+        if exact_year and cl.get("date_filed_is_approximate"):
+            year = ""
         court_id = ""
         docket_url = cl.get("docket")
         if docket_url:
@@ -32334,18 +32476,19 @@ class _ScholarTextWindow:
     @staticmethod
     def _citation_rtf(
         name: str, rest: str, inline: bool,
-        explanatory_rtf: str = "", history: str = "",
+        explanatory_rtf: str = "", history: str = "", end: str = ".",
     ) -> str:
         """The RTF for a citation, as its own paragraph or run on from the
         text.  ``inline`` is the quotation style: the citation follows the
         closing quote after a single space, the way a brief sets it.
         ``explanatory_rtf`` (already RTF) is set in a parenthetical after
-        ``rest`` and before ``history``, which closes the citation."""
+        ``rest`` and before ``history``, which closes the citation, and
+        ``end`` after that: "" for one a sentence goes on around."""
         italic = "{\\i " + _rtf_escape(name) + "}" if name else ""
         body = italic + _rtf_escape(rest)
         if explanatory_rtf:
             body += (" (" if body else "(") + explanatory_rtf + ")"
-        body += _rtf_escape(history + ".")
+        body += _rtf_escape(history + end)
         if inline:
             return " " + body
         return "\\par\\pard\\sa120 " + body + "\\par\n"
@@ -32356,6 +32499,7 @@ class _ScholarTextWindow:
         inline: bool = False,
         cite_override: str = "",
         explanatory: tuple[str, str] = ("", ""),
+        textual: bool = False,
     ) -> tuple[str, str]:
         """Return (plain, rtf-fragment) forms of the Bluebook citation.
         The writer parenthetical and `extra_parens` — e.g. "footnote
@@ -32364,14 +32508,16 @@ class _ScholarTextWindow:
         ``explanatory`` is an explanatory parenthetical's contents as
         (plain, rtf), set after all of them and before any subsequent
         history.  ``inline`` runs the citation on from the quotation instead
-        of giving it a paragraph of its own."""
+        of giving it a paragraph of its own.  ``textual`` gives the case
+        the name a textual sentence gives it (see _text_case_name), and no
+        closing period: the sentence goes on around it."""
         edited = getattr(self, "_base_citation_override", "")
         if edited:
             name, rest, history = edited_citation_parts(
                 edited, pin, (writer, *extra_parens))
         else:
             bb = self._bb
-            name = bb["name"]
+            name = self._text_case_name() if textual else bb["name"]
             cite = cite_override or bb.get("display_cite") or bb["cite"]
             court, year = bb["court"], bb["year"]
             if not cite and bb.get("docket_cite"):
@@ -32412,9 +32558,49 @@ class _ScholarTextWindow:
             explanatory_plain = (
                 f" ({explanatory_plain})" if name or rest
                 else f"({explanatory_plain})")
-        plain = f"{name}{rest}{explanatory_plain}{history}."
+        end = "" if textual else "."
+        plain = f"{name}{rest}{explanatory_plain}{history}{end}"
         return plain, self._citation_rtf(
-            name, rest, inline, explanatory_rtf, history)
+            name, rest, inline, explanatory_rtf, history, end)
+
+    def _text_case_name(self) -> str:
+        """The case's name as a textual sentence gives it (rule 10.2.1(c)):
+        the citation's name, but with only widely known acronyms and eight
+        words abbreviated — "Guaranty Trust Co. v. York", not "Guar. Tr.
+        Co. v. York".  Read from the caption's own words, not undone from
+        the citation's abbreviations, which cannot all be read back ("Tr."
+        is Trust or Trustee); the citation settled the rest — which case of
+        a group, which form of an ejectment party, a word's capitals."""
+        bb = self._bb
+        cited = bb.get("name", "")
+        caption = bb.get("_caption_name") or ""
+        if not caption:
+            return cited
+        cites = (bb.get("cite", ""), *getattr(self, "_header_cites", ()),
+                 *(self._item.get("citation") or []))
+        group = group_case_name(*cites)
+        if group:
+            return group
+        court_state = bb.get("_court_state", "")
+        body = _scholar_body_text(self._blocks)
+        name = abbreviate_case_name(caption, court_state=court_state,
+                                    body_text=body, textual=True)
+        # The ejectment party in the form the citation has settled on.
+        forms = ejectment_case_names(caption, court_state=court_state,
+                                     body_text=body)
+        if forms is not None:
+            form = next((f for f, n in forms.names.items() if n == cited),
+                        None)
+            if form is not None:
+                name = ejectment_case_names(
+                    caption, court_state=court_state, body_text=body,
+                    textual=True).names.get(form, name)
+        name = settled_case_name(name, *cites) or name
+        # A word's capitals as the citation has them ("NBCUniversal").
+        cased = {w.lower(): w for w in re.findall(r"[\w'’.&-]+", cited)}
+        return re.sub(r"[\w'’.&-]+",
+                      lambda m: cased.get(m.group(0).lower(), m.group(0)),
+                      name)
 
     @staticmethod
     def _page_num_from(s: str) -> Optional[int]:
@@ -32615,6 +32801,24 @@ class _ScholarTextWindow:
         self._status_var.set(f"Copied the case citation as {how}.")
         self._show_copy_preview(
             rtf, self._copy_preview_caption(how, "Case citation"))
+
+    def _copy_text_citation_to_clipboard(self) -> None:
+        """Copy this case's citation as a textual sentence sets it — the
+        name with only "&", "Ass'n", "Bros.", "Co.", "Corp.", "Inc.",
+        "Ltd.", "No." and well-known acronyms abbreviated (rule 10.2.1(c)),
+        and no closing period — independent of selection."""
+        plain, fragment = self._bluebook_citation(
+            None, inline=True, textual=True)
+        if not plain:
+            self._status_var.set("No case citation is available to copy.")
+            return
+        fragment = fragment[1:] if fragment.startswith(" ") else fragment
+        rtf = _rtf_document("\\pard\\sa120 " + fragment + "\\par\n")
+        how = _copy_rich_clipboard(self._win, rtf, plain)
+        self._status_var.set(f"Copied the case citation for use in text as "
+                             f"{how}.")
+        self._show_copy_preview(
+            rtf, self._copy_preview_caption(how, "Case citation for text"))
 
     def _copy_preview_caption(self, how: str, label: str = "") -> str:
         """The preview's one-line heading: which copy style produced it, and

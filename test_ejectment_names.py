@@ -197,6 +197,17 @@ class UsageQueryTests(unittest.TestCase):
 
 
 class TextViewTests(unittest.TestCase):
+    # Murray's Lessee is the courts' settled form (see SettledPartyTests);
+    # these show how a case no one has settled is asked about.
+    def setUp(self):
+        for table in ("_SETTLED_FIRST_PARTY_BY_CITE", "_DECISION_YEAR_BY_CITE"):
+            unsettled = patch.dict(f"bluebook_names.{table}", clear=True)
+            unsettled.start()
+            self.addCleanup(unsettled.stop)
+        found = patch("decision_year.remembered_year", return_value="")
+        found.start()
+        self.addCleanup(found.stop)
+
     @staticmethod
     def _window():
         win = object.__new__(_ScholarTextWindow)
@@ -247,6 +258,13 @@ class TextViewTests(unittest.TestCase):
                   return_value=[87010]),
             patch("case_name_usage.remembered_form", return_value=None),
             patch("case_name_usage.remember_form") as remember,
+            # The page's 1855 may be its term's (see test_decision_year);
+            # nothing outside answers here.
+            patch("courtlistener_gui._citing_decision_year",
+                  return_value=("", {})),
+            patch("courtlistener_gui._case_law_decision_year",
+                  return_value=""),
+            patch("decision_year.remember_year"),
         ):
             win._enrich_citation()
         return remember
@@ -280,6 +298,42 @@ class TextViewTests(unittest.TestCase):
 
         client.search.assert_not_called()
         win._post.assert_not_called()
+
+
+class SettledPartyTests(unittest.TestCase):
+    """Murray's Lessee v. Hoboken Land & Improvement Co., 59 U.S. (18 How.)
+    272 (1856), is cited by its claimant's lessee whatever the citing
+    opinions are counted to say."""
+
+    LESSEE = "Murray's Lessee v. Hoboken Land & Improvement Co."
+
+    def test_the_window_cites_it_without_asking(self):
+        win = TextViewTests._window()
+        with patch("case_name_usage.remembered_form", return_value="nominal"):
+            bb = win._compute_bluebook_parts()
+        self.assertEqual(bb["name"], self.LESSEE)
+        self.assertIsNone(bb["_ejectment"])
+        # Scholar's "(1855)" is its December Term; it was decided in 1856.
+        self.assertEqual(bb["year"], "1856")
+
+    def test_any_form_of_its_name(self):
+        from bluebook_names import settled_case_name
+        for name in ("Den v. Hoboken Land & Improvement Co.",
+                     "Den ex dem. Murray v. Hoboken Land & Improvement Co.",
+                     "Murray v. Hoboken Land & Improvement Co."):
+            self.assertEqual(settled_case_name(name, "18 How. 272"),
+                             self.LESSEE)
+        self.assertIsNone(settled_case_name(
+            "Den v. Hoboken Land & Improvement Co.", "59 U.S. 273"))
+
+    def test_a_search_results_citation(self):
+        from courtlistener_gui import _bluebook_display_name
+        line = _bluebook_display_name({
+            "caseName": "Den v. Hoboken Land & Improvement Co.",
+            "citation": ["59 U.S. 272"], "dateFiled": "1855-12-01",
+            "court_id": "scotus"})
+        self.assertTrue(line.startswith(self.LESSEE + ", 59 U.S."), line)
+        self.assertTrue(line.endswith("(1856)"), line)
 
 
 if __name__ == "__main__":

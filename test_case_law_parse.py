@@ -326,5 +326,42 @@ class JsonFallbackTests(unittest.TestCase):
                          ([], []))
 
 
+class CaptionNameTests(unittest.TestCase):
+    """A CAP caption named as Scholar's is: the Michigan reports' "v"
+    without its period, and a case decided with it on the lines below."""
+
+    @staticmethod
+    def _name(parties: str) -> str:
+        from bluebook_names import abbreviate_case_name
+        from scholar_caption import scholar_caption_name
+        parts, _ = parse_case_law_html(
+            '<section class="casebody"><section class="head-matter">'
+            + parties + '<p class="court">Supreme Court of Michigan</p>'
+            '</section><article class="opinion" data-type="majority">'
+            '<p>These cases concern assisted suicide.</p></article></section>')
+        return abbreviate_case_name(scholar_caption_name(
+            [b for part in parts for b in part.blocks]))
+
+    def test_a_v_without_its_period(self):
+        self.assertEqual(self._name('<h4 class="parties">People v Roberts</h4>'),
+                         "People v. Roberts")
+
+    def test_a_case_on_the_lines_below(self):
+        for parties in (
+                '<h4 class="parties">PEOPLE v KEVORKIAN<br>'
+                'HOBBINS v ATTORNEY GENERAL</h4>',
+                '<h4 class="parties">PEOPLE<br>v<br>KEVORKIAN<br>HOBBINS<br>v'
+                '<br>ATTORNEY GENERAL</h4>',
+                '<h4 class="parties">PEOPLE v KEVORKIAN</h4>'
+                '<p class="parties">HOBBINS v ATTORNEY GENERAL</p>'):
+            self.assertEqual(self._name(parties), "People v. Kevorkian")
+
+    def test_a_capital_v_that_is_an_initial(self):
+        self.assertEqual(self._name(
+            '<h4 class="parties">FRANCIS V. LORENZO, PETITIONER, V. SECURITIES'
+            ' AND EXCHANGE COMMISSION<br>JOHN DOE, PETITIONER, V. SECURITIES '
+            'AND EXCHANGE COMMISSION</h4>'), "Lorenzo v. SEC")
+
+
 if __name__ == "__main__":
     unittest.main()

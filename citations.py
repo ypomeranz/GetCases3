@@ -1372,15 +1372,57 @@ for _full, _abbr in _STATE_REPORTER_NAMES.items():
         _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_abbr)] = _family
     _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_full)] = _family
 
+def _punctuated_reporters() -> "list[str]":
+    """The reporters a court may write without their periods: the federal
+    and national series, and each state's reports (Bluebook table T1) with
+    their appellate and numbered series."""
+    out = (
+        "U.S.|S. Ct.|L. Ed.|L. Ed. 2d|F.2d|F.3d|F.4th|F. Supp.|F. Supp. 2d|"
+        "F. Supp. 3d|F. App'x|F.R.D.|B.R.|Fed. Cl.|Ct. Cl.|Cl. Ct.|"
+        "Vet. App.|M.J.|T.C.|B.T.A.|F. Cas.|A.2d|A.3d|N.E.|N.E.2d|N.E.3d|"
+        "N.W.|N.W.2d|P.2d|P.3d|S.E.|S.E.2d|S.W.|S.W.2d|S.W.3d|So. 2d|"
+        "So. 3d|Cal. Rptr.|Cal. Rptr. 2d|Cal. Rptr. 3d|N.Y.S.|N.Y.S.2d|"
+        "N.Y.S.3d|N.Y.2d|N.Y.3d|A.D.|A.D.2d|A.D.3d|App. Div.|Misc.|"
+        "Misc. 2d|Misc. 3d|Ohio St.|Ohio St. 2d|Ohio St. 3d|Ohio Misc.|"
+        "N.J. Super.|N.J. Eq.|Pa. Super.|Pa. Commw.|Mass. App. Ct.|"
+        "Tex. Civ. App.|Tex. Crim.|Tenn. Crim. App.|Ill. Dec.|Conn. Supp.|"
+        "Del. Ch.|Okla. Crim."
+    ).split("|")
+    for state in _STATE_REPORTER_NAMES.values():
+        out += [state, f"{state} App."]
+    # The numbered series the states' own reports have run to.
+    for reps, series in ((("Cal.", "Cal. App."), ("2d", "3d", "4th", "5th")),
+                         (("Ill. App.", "Ohio App."), ("2d", "3d")),
+                         (("Ill.", "Utah", "Wash.", "Wis.", "Kan. App."),
+                          ("2d",))):
+        out += [f"{rep} {n}" for rep in reps for n in series]
+    return out
+
+
+#: The reporters above, by the letters and digits a court that drops their
+#: periods writes them in — "211 Mich 187; 178 NW 690" (Michigan's own
+#: style), "93 Cal App 4th 1" — each with the form the Bluebook prints.
+#: Read as a reporter only where a citation's volume stands, like a word
+#: reporter (see _bare_word_reporter).  Not one a word is spelled like, or a
+#: lone letter: a bare "A", "P", "F" or "So", Maine's "Me", Oregon's "Or";
+#: nor those read anywhere already ("Idaho", "Ohio", …).
+_PERIODLESS_REPORTERS = {
+    _loose_reporter_key(rep): rep for rep in _punctuated_reporters()
+    if _loose_reporter_key(rep) not in ("a", "p", "f", "so", "me", "or")
+    and _loose_reporter_key(rep) not in _PLAIN_CASE_REPORTERS
+}
+
 #: Reporters named by a word or two with no period to mark them — a state's
 #: name in full ("northcarolina"), a reporter's own name ("sawyer", "paige",
 #: "harrismchenry") — as reporter keys: accepted as a reporter in running
 #: text, but only where a citation's volume stands (see _iter_case_cites) —
-#: "about 3 Texas 12 counties" is prose.
+#: "about 3 Texas 12 counties" is prose — and the abbreviations a court
+#: writes without their periods (_PERIODLESS_REPORTERS).
 _WORD_REPORTER_KEYS = frozenset(
     [_loose_reporter_key(name) for name in _STATE_REPORTER_NAMES]
     + [_loose_reporter_key(form) for family in _REPORTER_FAMILIES
-       for form in (family.canonical, *family.aliases) if "." not in form])
+       for form in (family.canonical, *family.aliases) if "." not in form]
+    + list(_PERIODLESS_REPORTERS))
 
 
 def reporter_family(rep: str) -> "_ReporterFamily | None":
@@ -1389,10 +1431,16 @@ def reporter_family(rep: str) -> "_ReporterFamily | None":
 
 
 def canonical_reporter(rep: str) -> str:
-    """Preferred display spelling for *rep*, preserving unknown reporters."""
+    """Preferred display spelling for *rep*, preserving unknown reporters
+    — and giving one written without its periods them back: "NW2d" is
+    "N.W.2d" (see _PERIODLESS_REPORTERS)."""
     family = reporter_family(rep)
     if family is not None:
         return family.canonical
+    if rep and "." not in rep:
+        punctuated = _PERIODLESS_REPORTERS.get(_loose_reporter_key(rep))
+        if punctuated:
+            return punctuated
     return re.sub(r"\s+", " ", (rep or "").replace("’", "'")).strip()
 
 
@@ -1432,6 +1480,20 @@ def typed_reporter(rep: str, *, loose: bool = False) -> str:
     if loose and len(key) < 4 and not re.search(r"\d", key):
         return ""
     return family.canonical
+
+
+def punctuated_reporter(written: str) -> str:
+    """*written* as the reporter it names is printed, when written without
+    its periods — "Mich" is "Mich.", "S Ct" "S. Ct.", "NW2d" "N.W.2d" (see
+    _PERIODLESS_REPORTERS) — and otherwise as written, spacing aside."""
+    written = re.sub(r"\s+", " ", written or "").strip()
+    if written and "." not in written:
+        key = _loose_reporter_key(written)
+        if key in _PERIODLESS_REPORTERS:
+            family = reporter_family(written)
+            return (family.canonical if family is not None
+                    else _PERIODLESS_REPORTERS[key])
+    return written
 
 
 def canonical_norm_reporter(rep: str) -> str:
@@ -1554,6 +1616,12 @@ def case_match_text(m: re.Match) -> str:
     ("18 Pick. R., 210" -> "18 Pick. 210")."""
     if canonical_reporter(m.group(2)) == "Johns. Ch.":
         return f"{m.group(1)} Johns. Ch. {m.group(3)}"
+    # A reporter written without its periods, given them: "211 Mich 187" is
+    # 211 Mich. 187 (see punctuated_reporter).
+    written = re.sub(r"\s+", " ", m.group(2) or "").strip()
+    if written and "." not in written and (
+            _loose_reporter_key(written) in _PERIODLESS_REPORTERS):
+        return f"{m.group(1)} {punctuated_reporter(written)} {m.group(3)}"
     if m.re in (US_NOMINATIVE_PARALLEL_RE, STATE_NOMINATIVE_PARALLEL_RE):
         # The official cite the parallel form leads with, with or without
         # the parentheses round the nominative one: "93 Mass. 11 Allen 196"
@@ -1947,10 +2015,14 @@ def _iter_case_cites(text: str) -> list[re.Match]:
         if any(m.start() < km.end() and km.start() < m.end() for km in matches):
             continue
         # A reporter named by a bare word — a state's name in full, a
-        # reporter's own ("Sawyer", "Paige") — reads as one only where a
-        # citation's volume stands, after the comma closing a case name.
-        if (_bare_word_reporter(m.group(2))
-                and not _at_citation_start(text, m.start())):
+        # reporter's own ("Sawyer", "Paige"), an abbreviation written without
+        # its periods ("Mich", "NW2d") — reads as one only where a
+        # citation's volume stands, after the comma closing a case name; and
+        # never with a year for its volume, which a public-domain citation
+        # ("2001 ND 154") or a session law ("1993 PA 3") has there.
+        if _bare_word_reporter(m.group(2)) and (
+                not _at_citation_start(text, m.start())
+                or int(m.group(1)) >= 1000):
             continue
         matches.append(m)
     # The older comma form, "138 Massachusetts, 165" (COMMA_CITE_CAPTURE_RE),
@@ -3034,7 +3106,7 @@ def detect_links(
         pin = int(m.group(3))
         below = [p for p in pages if p <= pin]
         first = max(below) if below else pages[0]
-        rep = re.sub(r"\s+", " ", m.group(2)).strip().replace("U. S.", "U.S.")
+        rep = punctuated_reporter(m.group(2)).replace("U. S.", "U.S.")
         cite = f"{m.group(1)} {rep} {first}"
         notes, _end = note_pin_after_page(text, m.end())
         if pin != first or notes:
@@ -3081,8 +3153,7 @@ def detect_links(
                          if kind == "cite" and not isinstance(m, str) else None)
         if at_less_first is not None:
             # "Wilcox, 145 S. Ct. 1417": the page is a pin into the case.
-            rep = re.sub(r"\s+", " ", m.group(2)).strip().replace(
-                "U. S.", "U.S.")
+            rep = punctuated_reporter(m.group(2)).replace("U. S.", "U.S.")
             cite_base = f"{m.group(1)} {rep} {at_less_first}"
             notes, _end = note_pin_after_page(text, end)
             action = ("cite",

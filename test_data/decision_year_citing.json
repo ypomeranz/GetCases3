@@ -1,0 +1,1211 @@
+{
+ "_about": "Live CourtListener and Caselaw Access Project responses, 2026-10-16, for test_decision_year.  Searches are trimmed to the fields read. Decision dates are the Supreme Court Database's.",
+ "85 U.S. 163": {
+  "name": "Ex Parte Lange",
+  "given": "1873",
+  "decided": "January 30, 1874",
+  "scdb_id": "1873-105-01",
+  "opinion_ids": [
+   9416939,
+   9416940,
+   88804
+  ],
+  "scotus": {
+   "query": "(cites:9416939 OR cites:9416940 OR cites:88804) AND (\"85 U.S. 163\" OR \"18 Wall. 163\")",
+   "court": "scotus",
+   "response": {
+    "count": 101,
+    "results": [
+     {
+      "caseName": "Brown v. Davenport",
+      "dateFiled": "2022-04-21",
+      "cluster_id": 6461473,
+      "opinions": [
+       {
+        "id": 6333584,
+        "snippet": "Siebold, 100 U. S. 371 (1880); Ex parte Lange, <mark>18 Wall.\n163</mark> (1874); Bator 465–474).\n10                 "
+       }
+      ]
+     },
+     {
+      "caseName": "Gamble v. United States",
+      "dateFiled": "2019-07-19",
+      "cluster_id": 4641200,
+      "opinions": [
+       {
+        "id": 4418453,
+        "snippet": "Crown\n368 (1762) (Hawkins).\n  7 Ex parte Lange, <mark>18 Wall. 163</mark>, 170 (1874). See also Benton v. Mary-\n\nland"
+       }
+      ]
+     },
+     {
+      "caseName": "Gamble v. United States",
+      "dateFiled": "2019-06-17",
+      "cluster_id": 4630268,
+      "opinions": [
+       {
+        "id": 4407521,
+        "snippet": "Crown\n368 (1762) (Hawkins).\n  7 Ex parte Lange, <mark>18 Wall. 163</mark>, 170 (1874). See also Benton v. Mary-\n\nland"
+       }
+      ]
+     },
+     {
+      "caseName": "Gamble v. United States",
+      "dateFiled": "2019-06-17",
+      "cluster_id": 4630267,
+      "opinions": [
+       {
+        "id": 4407520,
+        "snippet": "Crown\n368 (1762) (Hawkins).\n  7 Ex parte Lange, <mark>18 Wall. 163</mark>, 170 (1874). See also Benton v. Mary-\n\nland"
+       }
+      ]
+     },
+     {
+      "caseName": "Gamble v. United States",
+      "dateFiled": "2019-06-17",
+      "cluster_id": 4630088,
+      "opinions": [
+       {
+        "id": 4407341,
+        "snippet": "Crown\n368 (1762) (Hawkins).\n  7 Ex parte Lange, <mark>18 Wall. 163</mark>, 170 (1874). See also Benton v. Mary-\n\nland"
+       }
+      ]
+     },
+     {
+      "caseName": "Montgomery v. Louisiana",
+      "dateFiled": "2016-01-27",
+      "cluster_id": 3177217,
+      "opinions": [
+       {
+        "id": 3177199,
+        "snippet": "regarded for different pur-\nposes.” Ex parte Lange, <mark>18 Wall. 163</mark>, 175–176 (1874).\n   The lack of any limiting"
+       }
+      ]
+     },
+     {
+      "caseName": "Montgomery v. Louisiana",
+      "dateFiled": "2016-01-25",
+      "cluster_id": 3177218,
+      "opinions": [
+       {
+        "id": 3177200,
+        "snippet": "regarded for different pur-\nposes.” Ex parte Lange, <mark>18 Wall. 163</mark>, 175–176 (1874).\n   The lack of any limiting"
+       }
+      ]
+     },
+     {
+      "caseName": "Montgomery v. Louisiana",
+      "dateFiled": "2016-01-25",
+      "cluster_id": 3171724,
+      "opinions": [
+       {
+        "id": 3171724,
+        "snippet": "regarded for different pur-\nposes.” Ex parte Lange, <mark>18 Wall. 163</mark>, 175–176 (1874).\n   The lack of any limiting"
+       }
+      ]
+     },
+     {
+      "caseName": "Blueford v. Arkansas",
+      "dateFiled": "2012-05-24",
+      "cluster_id": 800858,
+      "opinions": [
+       {
+        "id": 800858,
+        "snippet": "conviction should satisfy the law.’ ” Ex\nparte Lange, <mark>18 Wall. 163</mark>, 171 (1874) (quoting Common-\nwealth v. Olds"
+       }
+      ]
+     },
+     {
+      "caseName": "Yeager v. United States",
+      "dateFiled": "2009-06-18",
+      "cluster_id": 145859,
+      "opinions": [
+       {
+        "id": 145859,
+        "snippet": "lan\nguage of [the] amendment.” Ex parte Lange, <mark>18 Wall. 163</mark>,\n170 (1874). As we explained, “[i]t is very"
+       }
+      ]
+     },
+     {
+      "caseName": "Danforth v. Minnesota",
+      "dateFiled": "2008-02-20",
+      "cluster_id": 145832,
+      "opinions": [
+       {
+        "id": 145832,
+        "snippet": "Pet. 193, 7 L.Ed. 650 (1830); Ex parte Lange, <mark>18 Wall. 163</mark>, 176, 21 L.Ed. 872 (1874); Ex parte Siebold"
+       }
+      ]
+     },
+     {
+      "caseName": "Rutledge v. United States",
+      "dateFiled": "1996-03-27",
+      "cluster_id": 118013,
+      "opinions": [
+       {
+        "id": 118013,
+        "snippet": "constitutional jurisprudence, see Ex parte Lange, <mark>18 Wall. 163</mark>, 168-170 (1874), we presume that \"where two"
+       }
+      ]
+     },
+     {
+      "caseName": "Libretti v. United States",
+      "dateFiled": "1995-11-07",
+      "cluster_id": 117979,
+      "opinions": [
+       {
+        "id": 117979,
+        "snippet": " at 351. In a similar vein, Ex parte Lange, <mark>18 Wall. 163</mark> (1874), concluded that a judgment imposing punishment"
+       }
+      ]
+     },
+     {
+      "caseName": "Witte v. United States",
+      "dateFiled": "1995-06-14",
+      "cluster_id": 117954,
+      "opinions": [
+       {
+        "id": 117954,
+        "snippet": "from being twice tried for it,\" Ex parte Lange, <mark>18 Wall. 163</mark>, 173 (1874). See also Schiro v. Farley, 510"
+       }
+      ]
+     },
+     {
+      "caseName": "Department of Revenue of Mont. v. Kurth Ranch",
+      "dateFiled": "1994-06-06",
+      "cluster_id": 1087946,
+      "opinions": [
+       {
+        "id": 1087946,
+        "snippet": "Jeopardy Clause can be traced to Ex parte Lange, <mark>18 Wall. 163</mark> (1874). In that case, the lower court sentenced"
+       }
+      ]
+     },
+     {
+      "caseName": "Withrow v. Williams",
+      "dateFiled": "1993-06-28",
+      "cluster_id": 112847,
+      "opinions": [
+       {
+        "id": 112847,
+        "snippet": "of jurisdiction. See, e. g., Ex parte Lange, <mark>18 Wall. 163</mark>, 176 (1874) (no jurisdiction to impose second"
+       }
+      ]
+     },
+     {
+      "caseName": "Wright v. West",
+      "dateFiled": "1992-06-19",
+      "cluster_id": 112771,
+      "opinions": [
+       {
+        "id": 112771,
+        "snippet": "under unconstitutional statute); Ex parte Lange, <mark>18 Wall. 163</mark>, 176 (1874) (court without jurisdiction to impose"
+       }
+      ]
+     },
+     {
+      "caseName": "McCleskey v. Zant",
+      "dateFiled": "1991-04-16",
+      "cluster_id": 112573,
+      "opinions": [
+       {
+        "id": 112573,
+        "snippet": "without statutory authorization, Ex parte Lange, <mark>18 Wall. 163</mark>, 176 (1874), and convictions obtained under"
+       }
+      ]
+     },
+     {
+      "caseName": "Grady v. Corbin",
+      "dateFiled": "1990-05-29",
+      "cluster_id": 112432,
+      "opinions": [
+       {
+        "id": 112432,
+        "snippet": "467 U. S. 493, 498-499 (1984); Ex parte Lange, <mark>18 Wall. 163</mark>, 169 (1874).\n[10]  The State recognizes that"
+       }
+      ]
+     },
+     {
+      "caseName": "Jones v. Thomas",
+      "dateFiled": "1989-08-11",
+      "cluster_id": 112303,
+      "opinions": [
+       {
+        "id": 112303,
+        "snippet": "under this Court's decisions in Ex parte Lange, <mark>18 Wall. 163</mark> (1874), and In re Bradley, 318 U. S. 50 (1943)"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "all_courts": {
+   "query": "(cites:9416939 OR cites:9416940 OR cites:88804) AND (\"85 U.S. 163\" OR \"18 Wall. 163\")",
+   "court": "",
+   "response": {
+    "count": 621,
+    "results": [
+     {
+      "caseName": "Mast v. A.A.",
+      "dateFiled": "2026-02-12",
+      "cluster_id": 10789956,
+      "opinions": [
+       {
+        "id": 11256597,
+        "snippet": "original)\n(quoting Ex parte Lange, 85 U.S. (<mark>18 Wall.) 163</mark>, 176 (1873))).\n\n\n                          "
+       }
+      ]
+     },
+     {
+      "caseName": "Daniel Lee East v. the State of Texas",
+      "dateFiled": "2026-01-29",
+      "cluster_id": 10781757,
+      "opinions": [
+       {
+        "id": 11248381,
+        "snippet": "sentence has been served. See Ex\n\nparte Lange, <mark>85 U.S. 163</mark>, 174, 21 L.Ed. 872 (1874); Turner v. State, 31"
+       }
+      ]
+     },
+     {
+      "caseName": "Commonwealth of Kentucky v. Darrell Strunk",
+      "dateFiled": "2025-08-14",
+      "cluster_id": 10653849,
+      "opinions": [
+       {
+        "id": 11120436,
+        "snippet": "S.W.2d 341, 342 (1932), and Ex parte Lange, <mark>85 U.S. 163</mark>,\n178 (1873), which both involved illegal sentences"
+       }
+      ]
+     },
+     {
+      "caseName": "Jason Bell v. J. Streeval",
+      "dateFiled": "2025-08-06",
+      "cluster_id": 10649805,
+      "opinions": [
+       {
+        "id": 11116392,
+        "snippet": "charged only one); Ex parte\n\n        Lange, <mark>85 U.S. 163</mark>, 176 (1874) (granting habeas where the court"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Deangelus Thomas",
+      "dateFiled": "2025-07-02",
+      "cluster_id": 10622133,
+      "opinions": [
+       {
+        "id": 11088721,
+        "snippet": "(collecting cases); see also Ex Parte Lange, <mark>85 U.S. 163</mark>, 169–70 (1873) (discussing\nthe common law origins"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. James Little",
+      "dateFiled": "2024-12-20",
+      "cluster_id": 10306308,
+      "opinions": [
+       {
+        "id": 10772896,
+        "snippet": "Supreme Court\ncases — Ex parte Lange, 85 U.S. (<mark>18 Wall.) 163</mark> (1873), and In\nre Bradley, 318 U.S. 50 (1943)"
+       }
+      ]
+     },
+     {
+      "caseName": "State of Missouri v. Solowmenn James Warren",
+      "dateFiled": "2024-11-05",
+      "cluster_id": 10631462,
+      "opinions": [
+       {
+        "id": 11098049,
+        "snippet": "                                    8\nLange, <mark>85 U.S 163</mark> (1874)). Consistent with this settled principle"
+       }
+      ]
+     },
+     {
+      "caseName": "State v. Thomas",
+      "dateFiled": "2024-08-29",
+      "cluster_id": 10613685,
+      "opinions": [
+       {
+        "id": 11080273,
+        "snippet": "imposed upon\n\na conviction.”); Ex parte Lange, <mark>85 U.S. 163</mark>, 173 (1873).\n\n       Additionally, the five-year"
+       }
+      ]
+     },
+     {
+      "caseName": "State v. Thomas",
+      "dateFiled": "2024-08-29",
+      "cluster_id": 10098713,
+      "opinions": [
+       {
+        "id": 10565313,
+        "snippet": "imposed upon\n\na conviction.”); Ex parte Lange, <mark>85 U.S. 163</mark>, 173 (1873).\n\n       Additionally, the five-year"
+       }
+      ]
+     },
+     {
+      "caseName": "Rapozo v. State",
+      "dateFiled": "2024-05-21",
+      "cluster_id": 9506086,
+      "opinions": [
+       {
+        "id": 9972699,
+        "snippet": "Discharge of\n\nMovant Pursuant to Ex Parte Lange, <mark>85 U.S. 163</mark> (1874) in effect\n\nMay 16, 1979” (Motion), filed"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Pryer",
+      "dateFiled": "2024-03-11",
+      "cluster_id": 9482948,
+      "opinions": [
+       {
+        "id": 9949561,
+        "snippet": "double jeopardy principles under Ex Parte Lange, <mark>85 U.S. 163</mark> (1873). Id.\n\nat *6 (citing United States v. Fogel"
+       }
+      ]
+     },
+     {
+      "caseName": "Eric Robert Rudolph v. United States",
+      "dateFiled": "2024-02-12",
+      "cluster_id": 9474440,
+      "opinions": [
+       {
+        "id": 9939866,
+        "snippet": "21-12828\n\n        also Ex parte Lange, 85 U.S. (<mark>18 Wall.) 163</mark>, 178 (1873) (writ granted\n        because sentence"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Dasilva",
+      "dateFiled": "2024-02-08",
+      "cluster_id": 9473680,
+      "opinions": [
+       {
+        "id": 9931518,
+        "snippet": "first\n\nmade, is undeniable.” Ex parte Lange, <mark>85 U.S. 163</mark>, 167 (1873). 3\n\n       Although the concept of"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Pryer",
+      "dateFiled": "2024-02-02",
+      "cluster_id": 9471592,
+      "opinions": [
+       {
+        "id": 9929430,
+        "snippet": "Magistrate Judge Faruqui read Ex parte Lange, <mark>85 U.S. 163</mark> (1873) and In re Bradley, 318 U.S. 50 (1943)"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Little",
+      "dateFiled": "2024-01-17",
+      "cluster_id": 9461404,
+      "opinions": [
+       {
+        "id": 9919229,
+        "snippet": "Supreme Court’s decision\n\nin Ex Parte Lange, <mark>85 U.S. 163</mark> (1873). In that case, the defendant’s single"
+       }
+      ]
+     },
+     {
+      "caseName": "Crawford v. Cain",
+      "dateFiled": "2023-05-19",
+      "cluster_id": 9400792,
+      "opinions": [
+       {
+        "id": 9396268,
+        "snippet": "US. 371 (1879);\n   Ex parte Lange, 85 U.S. (<mark>18 Wall.) 163</mark> (1873)). Only such legal errors, deeply rooted"
+       }
+      ]
+     },
+     {
+      "caseName": "State v. Canosa.",
+      "dateFiled": "2023-01-17",
+      "cluster_id": 9368447,
+      "opinions": [
+       {
+        "id": 9363923,
+        "snippet": "jeopardy claims, and relied on Ex parte Lange, <mark>85\n\nU.S. 163</mark> (1873), for the proposition that because Canosa"
+       }
+      ]
+     },
+     {
+      "caseName": "State v. Frantz",
+      "dateFiled": "2022-12-30",
+      "cluster_id": 9367487,
+      "opinions": [
+       {
+        "id": 9362963,
+        "snippet": "                        49\nLange, 85 U.S. (<mark>18 Wall.) 163</mark>, 168, 21 L. Ed. 872 (1873) (&quot;If there is"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Perry",
+      "dateFiled": "2022-09-16",
+      "cluster_id": 8241748,
+      "opinions": [
+       {
+        "id": 8207011,
+        "snippet": "396 (1995) (quoting Ex parte Lange,\n85 U.S. (<mark>18 Wall.) 163</mark>, 173 (1874)). Perry&#x27;s case (as he himself"
+       }
+      ]
+     },
+     {
+      "caseName": "State of Louisiana in the Interest of J.K..",
+      "dateFiled": "2022-07-13",
+      "cluster_id": 10611670,
+      "opinions": [
+       {
+        "id": 11078258,
+        "snippet": "for the same offense, Ex parte Lange, <mark>85 U.S. 163</mark>, <mark>18 Wall. 163</mark>, 21\n\nL.Ed. 872 (1873).” State v. Frank"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "48 U.S. 1": {
+  "name": "Luther v. Borden",
+  "given": "1849",
+  "decided": "January 03, 1849",
+  "scdb_id": "1849-003-01",
+  "opinion_ids": [
+   9416470,
+   9416471,
+   86466
+  ],
+  "scotus": {
+   "query": "(cites:9416470 OR cites:9416471 OR cites:86466) AND (\"48 U.S. 1\" OR \"7 How. 1\")",
+   "court": "scotus",
+   "response": {
+    "count": 26,
+    "results": [
+     {
+      "caseName": "Zivotofsky Ex Rel. Zivotofsky v. Clinton",
+      "dateFiled": "2012-03-26",
+      "cluster_id": 626209,
+      "opinions": [
+       {
+        "id": 626209,
+        "snippet": "argument of\nDaniel Webster in Luther v. Borden, <mark>7 How. 1</mark>, 29 (1849)).\nBecause of the respect due to a coequal"
+       }
+      ]
+     },
+     {
+      "caseName": "Massachusetts v. Environmental Protection Agency",
+      "dateFiled": "2007-04-02",
+      "cluster_id": 145749,
+      "opinions": [
+       {
+        "id": 145749,
+        "snippet": "adjudication of a political question, Luther v. Borden, <mark>7 How. 1</mark>, 12 L.Ed. 581 (1849), when they ask for an advisory"
+       }
+      ]
+     },
+     {
+      "caseName": "Hamdi v. Rumsfeld",
+      "dateFiled": "2004-06-28",
+      "cluster_id": 137001,
+      "opinions": [
+       {
+        "id": 137001,
+        "snippet": "not an exceptional case. In Luther v. Borden, <mark>7 How. 1</mark> (1849), the Court discussed the President's constitutional"
+       }
+      ]
+     },
+     {
+      "caseName": "Bush v. Gore",
+      "dateFiled": "2000-12-12",
+      "cluster_id": 118395,
+      "opinions": [
+       {
+        "id": 118395,
+        "snippet": "legislature violates Art. I, § 4);Luther v. Borden, <mark>7 How. 1</mark>, 42 (1849).\n[3]  \"[B]ecause the Framers recognized"
+       }
+      ]
+     },
+     {
+      "caseName": "California Democratic Party v. Jones",
+      "dateFiled": "2000-06-26",
+      "cluster_id": 118382,
+      "opinions": [
+       {
+        "id": 118382,
+        "snippet": "Tashjian, 479 U. S., at 222 223; Luther v. Borden, <mark>7 How. 1</mark>, 40-42 (1849). That choice belongs to the people"
+       }
+      ]
+     },
+     {
+      "caseName": "Clinton v. Jones",
+      "dateFiled": "1997-05-27",
+      "cluster_id": 118115,
+      "opinions": [
+       {
+        "id": 118115,
+        "snippet": "resolve such matters. See, e. g., Luther v. Borden, <mark>7 How. 1</mark> (1849). As we explained in Nixon v. United States"
+       }
+      ]
+     },
+     {
+      "caseName": "New York v. United States",
+      "dateFiled": "1992-06-19",
+      "cluster_id": 112768,
+      "opinions": [
+       {
+        "id": 112768,
+        "snippet": "questions has its origin in Luther v. Borden, <mark>7 How. 1</mark> (1849), in which the Court was asked to decide"
+       }
+      ]
+     },
+     {
+      "caseName": "Gregory v. Ashcroft",
+      "dateFiled": "1991-06-20",
+      "cluster_id": 112632,
+      "opinions": [
+       {
+        "id": 112632,
+        "snippet": "143 U. S. 135, 161 (1892). See Luther v. Borden, <mark>7 How. 1</mark>, 41 (1849); Pope v. Williams, 193 U. S. 621, 632-633"
+       }
+      ]
+     },
+     {
+      "caseName": "Board of Estimate of City of New York v. Morris",
+      "dateFiled": "1989-03-22",
+      "cluster_id": 112221,
+      "opinions": [
+       {
+        "id": 112221,
+        "snippet": "portion of sovereign power.\" Luther v. Borden, <mark>7 How. 1</mark>, 30 (1849) (statement of counsel). Electoral systems"
+       }
+      ]
+     },
+     {
+      "caseName": "Rogers v. Lodge",
+      "dateFiled": "1982-10-04",
+      "cluster_id": 110790,
+      "opinions": [
+       {
+        "id": 110790,
+        "snippet": "369 U. S., at 210, 211, 214. Luther v. Borden, <mark>7 How. 1</mark>, was distinguished, in part, because that case"
+       }
+      ]
+     },
+     {
+      "caseName": "Washington v. Seattle School District No. 1",
+      "dateFiled": "1982-06-30",
+      "cluster_id": 110784,
+      "opinions": [
+       {
+        "id": 110784,
+        "snippet": "government at their own pleasure.\" Luther v. Borden, <mark>7 How. 1</mark>, 47 (1849). See Community Communications Co. v"
+       }
+      ]
+     },
+     {
+      "caseName": "Cabell v. Chavez-Salido",
+      "dateFiled": "1982-01-12",
+      "cluster_id": 110598,
+      "opinions": [
+       {
+        "id": 110598,
+        "snippet": "143 U. S. 135, 161 (1892). See Luther v. Borden, <mark>7 How. 1</mark>, 41 (1849); Pope v. Williams, 193 U. S. 621, 632-623"
+       }
+      ]
+     },
+     {
+      "caseName": "Goldwater Et Al. v. Carter, President of the United States, Et Al.",
+      "dateFiled": "1979-12-13",
+      "cluster_id": 110198,
+      "opinions": [
+       {
+        "id": 110198,
+        "snippet": "2440, 37 L.Ed.2d 407 (1973);  Luther v. Borden, <mark>7 How. 1</mark>, 42, 12 L.Ed. 581 (1849).\n    \n    \n      4\n "
+       }
+      ]
+     },
+     {
+      "caseName": "Sugarman v. Dougall",
+      "dateFiled": "1973-06-25",
+      "cluster_id": 108859,
+      "opinions": [
+       {
+        "id": 108859,
+        "snippet": "143 U. S. 135, 161 (1892). See Luther v. Borden, <mark>7 How. 1</mark>, 41 (1849); Pope v. Williams, 193 U. S. 621, 632-633"
+       }
+      ]
+     },
+     {
+      "caseName": "The Republican State Central Committee of Arizona v. The Ripon Society Inc. No. A-179",
+      "dateFiled": "1972-08-16",
+      "cluster_id": 108701,
+      "opinions": [
+       {
+        "id": 108701,
+        "snippet": "nature. Cf.\n  \n   Luther\n  \n  v.\n  \n   Borden,\n  \n  <mark>7 How. 1</mark> (1849). Judicial intervention in this area traditionally"
+       }
+      ]
+     },
+     {
+      "caseName": "O'BRIEN v. Brown",
+      "dateFiled": "1972-07-07",
+      "cluster_id": 108620,
+      "opinions": [
+       {
+        "id": 108620,
+        "snippet": "essentially political in nature. Cf. Luther v. Borden, <mark>7 How. 1</mark> (1849). Judicial intervention in this area traditionally"
+       }
+      ]
+     },
+     {
+      "caseName": "Sierra Club v. Morton",
+      "dateFiled": "1972-04-19",
+      "cluster_id": 108502,
+      "opinions": [
+       {
+        "id": 108502,
+        "snippet": "resolve \"political questions,\" Luther v. Borden, <mark>7 How. 1</mark>, because suits of this character are inconsistent"
+       }
+      ]
+     },
+     {
+      "caseName": "Massachusetts v. Laird, Secretary of Defense",
+      "dateFiled": "1970-11-09",
+      "cluster_id": 108247,
+      "opinions": [
+       {
+        "id": 108247,
+        "snippet": "political questions case is Luther v. Borden, <mark>7 How. 1</mark>, 12 L.Ed. 581, growing out of the Dorr Rebellion"
+       }
+      ]
+     },
+     {
+      "caseName": "Flast v. Cohen",
+      "dateFiled": "1968-06-10",
+      "cluster_id": 107731,
+      "opinions": [
+       {
+        "id": 107731,
+        "snippet": "Miller, 262 U. S. 51 (1923); Luther v. Borden, <mark>7 How. 1</mark> (1849).\n[11]  See, e. g., United States v. Fruehauf"
+       }
+      ]
+     },
+     {
+      "caseName": "Baker v. Carr",
+      "dateFiled": "1962-03-26",
+      "cluster_id": 106366,
+      "opinions": [
+       {
+        "id": 106366,
+        "snippet": "Republican form of government: Luther v. Borden, <mark>7 How. 1</mark>, though in form simply an action for damages for"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "94 U.S. 391": {
+  "name": "McCready v. Virginia",
+  "given": "1876",
+  "decided": "April 30, 1877",
+  "scdb_id": "1876-193-01",
+  "opinion_ids": [
+   89479
+  ],
+  "scotus": {
+   "query": "(cites:89479) AND (\"94 U.S. 391\" OR \"4 Otto 391\")",
+   "court": "scotus",
+   "response": {
+    "count": 28,
+    "results": [
+     {
+      "caseName": "Phillips Petroleum Co. v. Mississippi",
+      "dateFiled": "1988-05-16",
+      "cluster_id": 111988,
+      "opinions": [
+       {
+        "id": 111988,
+        "snippet": "there have been upheld. McCready v. Virginia, <mark>94 U. S. 391</mark>, 395-397 (1877).[5] It would be odd to acknowledge"
+       }
+      ]
+     },
+     {
+      "caseName": "Hughes v. Oklahoma",
+      "dateFiled": "1979-04-24",
+      "cluster_id": 110063,
+      "opinions": [
+       {
+        "id": 9427543,
+        "snippet": "139 U. S. 240 (1891); McCready v. Virginia, <mark>94 U. S. 391</mark> (1877); Smith v. Maryland, 18 How. 71 (1855)"
+       },
+       {
+        "id": 110063,
+        "snippet": "139 U. S. 240 (1891); McCready v. Virginia, <mark>94 U. S. 391</mark> (1877); Smith v. Maryland, 18 How. 71 (1855)"
+       }
+      ]
+     },
+     {
+      "caseName": "Ambach v. Norwick",
+      "dateFiled": "1979-04-17",
+      "cluster_id": 110055,
+      "opinions": [
+       {
+        "id": 110055,
+        "snippet": "232 U. S. 138 (1914); McCready v. Virginia, <mark>94 U. S. 391</mark> (1877); *73 or maintaining an inherently dangerous"
+       }
+      ]
+     },
+     {
+      "caseName": "Hicklin v. Orbeck",
+      "dateFiled": "1978-06-22",
+      "cluster_id": 109911,
+      "opinions": [
+       {
+        "id": 109911,
+        "snippet": "clearly is not.\nRelying on McCready v. Virginia, <mark>94 U. S. 391</mark> (1877), however, Alaska contends that because"
+       }
+      ]
+     },
+     {
+      "caseName": "Baldwin v. Fish and Game Comm'n of Mont.",
+      "dateFiled": "1978-05-23",
+      "cluster_id": 109868,
+      "opinions": [
+       {
+        "id": 109868,
+        "snippet": "the 19th century. E. g., McCready v. Virginia, <mark>94 U. S. 391</mark> (1877); Geer v. Connecticut, 161 U. S. 519 (1896)"
+       }
+      ]
+     },
+     {
+      "caseName": "Douglas v. Seacoast Products, Inc.",
+      "dateFiled": "1977-05-23",
+      "cluster_id": 109662,
+      "opinions": [
+       {
+        "id": 109662,
+        "snippet": "139 U. S. 240 (1891); McCready v. Virginia, <mark>94 U. S. 391</mark> (1877); Smith v. Maryland, 18 How. 71 (1855);"
+       }
+      ]
+     },
+     {
+      "caseName": "Examining Bd. of Engineers, Architects and Surveyors v. Flores De Otero",
+      "dateFiled": "1976-06-17",
+      "cluster_id": 109490,
+      "opinions": [
+       {
+        "id": 109490,
+        "snippet": "public resources, compare McCready v. Virginia, <mark>94 U. S. 391</mark> (1877), and Patsone v. Pennsylvania, 232 U."
+       }
+      ]
+     },
+     {
+      "caseName": "Sugarman v. Dougall",
+      "dateFiled": "1973-06-25",
+      "cluster_id": 108859,
+      "opinions": [
+       {
+        "id": 108859,
+        "snippet": "State's natural resources, McCready v. Virginia, <mark>94 U. S. 391</mark> (1877), Patsone v. Pennsylvania, 232 U. S. 138"
+       }
+      ]
+     },
+     {
+      "caseName": "Graham v. Richardson",
+      "dateFiled": "1971-06-14",
+      "cluster_id": 108373,
+      "opinions": [
+       {
+        "id": 108373,
+        "snippet": "497, 499 (1954).\n[7]  McCready v. Virginia, <mark>94 U. S. 391</mark> (1877); Patsone v. Pennsylvania, 232 U. S. 138"
+       }
+      ]
+     },
+     {
+      "caseName": "Toomer v. Witsell",
+      "dateFiled": "1948-10-11",
+      "cluster_id": 104563,
+      "opinions": [
+       {
+        "id": 104563,
+        "snippet": "But in only one case, McCready v. Virginia, <mark>94 U.S. 391</mark> (1876), has the Court actually upheld State action"
+       }
+      ]
+     },
+     {
+      "caseName": "Takahashi v. Fish & Game Commission",
+      "dateFiled": "1948-06-07",
+      "cluster_id": 104564,
+      "opinions": [
+       {
+        "id": 104564,
+        "snippet": "ownership while running.\" McCready v. Virginia, <mark>94 U.S. 391</mark>, 394. Cf. United States v. California, 332 U"
+       }
+      ]
+     },
+     {
+      "caseName": "Wampler v. Lecompte",
+      "dateFiled": "1930-12-08",
+      "cluster_id": 101628,
+      "opinions": [
+       {
+        "id": 101628,
+        "snippet": "Maryland, 18 How. 71; McCready v. Virginia, <mark>94 U.S. 391</mark>; Manchester v. Massachusetts, 139 U.S. 240; Lawton"
+       }
+      ]
+     },
+     {
+      "caseName": "Ohio Ex Rel. Clarke v. Deckebach",
+      "dateFiled": "1927-05-16",
+      "cluster_id": 101100,
+      "opinions": [
+       {
+        "id": 101100,
+        "snippet": "California, 268 U.S. 258; cf. McCready v. Virginia, <mark>94 U.S. 391</mark>.\nThe admitted allegations of the answer set up"
+       }
+      ]
+     },
+     {
+      "caseName": "Truax v. Raich",
+      "dateFiled": "1915-11-01",
+      "cluster_id": 98542,
+      "opinions": [
+       {
+        "id": 98542,
+        "snippet": "other States. Thus in McCready v. Virginia, <mark>94 U.S. 391</mark>, 396, the restriction to the citizens of Virginia"
+       }
+      ]
+     },
+     {
+      "caseName": "The Abby Dodge",
+      "dateFiled": "1912-02-19",
+      "cluster_id": 97540,
+      "opinions": [
+       {
+        "id": 97540,
+        "snippet": "of this court. In *174 McCready v. Virginia, <mark>94 U.S. 391</mark>, the question for decision was whether the State"
+       }
+      ]
+     },
+     {
+      "caseName": "Lee v. New Jersey",
+      "dateFiled": "1907-10-28",
+      "cluster_id": 96708,
+      "opinions": [
+       {
+        "id": 96708,
+        "snippet": "Maryland, 18 How. 71; McCready v. Virginia, <mark>94 U.S. 391</mark>; Manchester v. Massachusetts, 139 U.S. 240.\nThe"
+       }
+      ]
+     },
+     {
+      "caseName": "Louisiana v. Mississippi",
+      "dateFiled": "1906-03-05",
+      "cluster_id": 96457,
+      "opinions": [
+       {
+        "id": 96457,
+        "snippet": "Massachusetts, 139 U.S. 240; McCready v. Virginia, <mark>94 U.S. 391</mark>.\nIn Manchester v. Massachusetts, the court said:"
+       }
+      ]
+     },
+     {
+      "caseName": "Maxwell v. Dow",
+      "dateFiled": "1900-03-12",
+      "cluster_id": 95204,
+      "opinions": [
+       {
+        "id": 95204,
+        "snippet": "oyster planting case, McCready v. Virginia, <mark>94 U.S. 391</mark>, that the right which the people of that State"
+       }
+      ]
+     },
+     {
+      "caseName": "Niles v. Cedar Point Club",
+      "dateFiled": "1899-12-04",
+      "cluster_id": 95125,
+      "opinions": [
+       {
+        "id": 95125,
+        "snippet": "Commissioners, 18 Wall. 57; McCready v. Virginia, <mark>94 U.S. 391</mark>, or under a pond or other similar body of non-navigable"
+       }
+      ]
+     },
+     {
+      "caseName": "Blake v. McClung",
+      "dateFiled": "1898-12-12",
+      "cluster_id": 94954,
+      "opinions": [
+       {
+        "id": 94954,
+        "snippet": "rests the decision in McCready v. Virginia, <mark>94 U.S. 391</mark>, 395, sustaining a statute of Virginia prohibiting"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "70 U.S. 334": {
+  "name": "Buck v. Colbath",
+  "given": "1865",
+  "decided": "April 03, 1866",
+  "scdb_id": "1865-067-01",
+  "opinion_ids": [
+   87715
+  ],
+  "scotus": {
+   "query": "(cites:87715) AND (\"70 U.S. 334\" OR \"3 Wall. 334\")",
+   "court": "scotus",
+   "response": {
+    "count": 37,
+    "results": [
+     {
+      "caseName": "Tanzin v. Tanvir",
+      "dateFiled": "2020-12-10",
+      "cluster_id": 4837663,
+      "opinions": [
+       {
+        "id": 4641442,
+        "snippet": "Harmony, 13 How. 115 (1852); Buck v. Colbath, <mark>3\nWall. 334</mark> (1866); Belknap v. Schild, 161 U. S. 10 (1896);"
+       }
+      ]
+     },
+     {
+      "caseName": "Wheeldin v. Wheeler",
+      "dateFiled": "1963-06-03",
+      "cluster_id": 106628,
+      "opinions": [
+       {
+        "id": 106628,
+        "snippet": "Mitchell v. Harmony, 13 How. 115; Buck v. Colbath, <mark>3 Wall. 334</mark>; Bates v. Clark, 95 U. S. 204; Kilbourn v. Thompson"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Klein",
+      "dateFiled": "1938-02-28",
+      "cluster_id": 102975,
+      "opinions": [
+       {
+        "id": 102975,
+        "snippet": "Co., 112 U.S. 294, 304; cf. Buck v. Colbath, <mark>3 Wall. 334</mark>, 342; Riehle v. Margolies, 279 U.S. 218. Similarly"
+       }
+      ]
+     },
+     {
+      "caseName": "United States v. Bank of New York & Trust Co.",
+      "dateFiled": "1936-01-06",
+      "cluster_id": 102533,
+      "opinions": [
+       {
+        "id": 102533,
+        "snippet": " Jenness, 7 How. 612, 625; Buck v. Colbath, <mark>3 Wall. 334</mark>, 341; Wabash R. Co. v. Adelbert College, 208"
+       }
+      ]
+     },
+     {
+      "caseName": "Penn Central Casualty Co. v. Pennsylvania Ex Rel. Schnader",
+      "dateFiled": "1935-02-04",
+      "cluster_id": 102380,
+      "opinions": [
+       {
+        "id": 102380,
+        "snippet": "order of the federal court. Buck v. Colbath, <mark>3 Wall. 334</mark>, 340; Crescent City Live Stock Co. v. Butchers'"
+       }
+      ]
+     },
+     {
+      "caseName": "Gross v. Irving Trust Co.",
+      "dateFiled": "1933-05-08",
+      "cluster_id": 102093,
+      "opinions": [
+       {
+        "id": 102093,
+        "snippet": "appointed by the other court. In Buck v. Colbath, <mark>3 Wall. 334</mark>, 341, the rule is stated to be that \"whenever"
+       }
+      ]
+     },
+     {
+      "caseName": "Pacific Live Stock Co. v. Lewis",
+      "dateFiled": "1916-06-05",
+      "cluster_id": 98759,
+      "opinions": [
+       {
+        "id": 98759,
+        "snippet": "and in the purposes sought. Buck v. Colbath, <mark>3 Wall. 334</mark>, 345; Watson v. Jones, 13 Wall. 679, 715; Rickey"
+       }
+      ]
+     },
+     {
+      "caseName": "Hall v. Burr",
+      "dateFiled": "1914-06-22",
+      "cluster_id": 98261,
+      "opinions": [
+       {
+        "id": 98261,
+        "snippet": "Paul Co., 2 Wall. 609, 633; Buck v. Colbath, <mark>3 Wall. 334</mark>, *721 345; Christmas v. Russell, 14 Wall. 69"
+       }
+      ]
+     },
+     {
+      "caseName": "Wabash Railroad v. Adelbert College of Western Reserve University",
+      "dateFiled": "1908-01-06",
+      "cluster_id": 96754,
+      "opinions": [
+       {
+        "id": 96754,
+        "snippet": "Freeman v. Howe, 24 How. 450; Buck v. Colbath, <mark>3 Wall. 334</mark>; Yonley v. Lavender, 21 Wall. 276; People's Bank"
+       }
+      ]
+     },
+     {
+      "caseName": "Put-In-Bay Waterworks Co. v. Ryan",
+      "dateFiled": "1901-05-13",
+      "cluster_id": 95481,
+      "opinions": [
+       {
+        "id": 95481,
+        "snippet": "that is in custody of the law. Buck v. Colbath, <mark>3 Wall. 334</mark>; Hagan v. Lucas, 10 Pet. 400. And when, in the"
+       }
+      ]
+     },
+     {
+      "caseName": "Avery v. Popper",
+      "dateFiled": "1900-12-03",
+      "cluster_id": 95360,
+      "opinions": [
+       {
+        "id": 95360,
+        "snippet": "Freeman v. Howe, 24 How. 450; Bock v. Colbath, <mark>3 Wall. 334</mark>; Etheridge v. Sperry, 139 U.S. 266, and Bock"
+       }
+      ]
+     },
+     {
+      "caseName": "White v. Schloerb",
+      "dateFiled": "1900-05-21",
+      "cluster_id": 95324,
+      "opinions": [
+       {
+        "id": 95324,
+        "snippet": " Jenness, 7 How. 612, 625; Buck v. Colbath, <mark>3 Wall. 334</mark>, 341; Covell v. Heyman, 111 U.S. 176, 182.\nThe"
+       }
+      ]
+     },
+     {
+      "caseName": "Telluride Power Transmission Co. v. Rio Grande Western Railway Co.",
+      "dateFiled": "1900-01-08",
+      "cluster_id": 95148,
+      "opinions": [
+       {
+        "id": 95148,
+        "snippet": "Sharpe v. Doyle, 102 U.S. 686; Buck v. Colbath, <mark>3 Wall. 334</mark>. The use of the word \"authority\" in the third"
+       }
+      ]
+     },
+     {
+      "caseName": "Sonnentheil v. Christian Moerlein Brewing Co.",
+      "dateFiled": "1899-01-03",
+      "cluster_id": 94968,
+      "opinions": [
+       {
+        "id": 94968,
+        "snippet": "Bock v. Perkins, 139 U.S. 628; Buck v. Colbath, <mark>3 Wall. 334</mark>; Texas & Pacific Railway v. Cox, 145 U.S. 593"
+       }
+      ]
+     },
+     {
+      "caseName": "Harkrader v. Wadley",
+      "dateFiled": "1898-12-05",
+      "cluster_id": 94949,
+      "opinions": [
+       {
+        "id": 94949,
+        "snippet": "Freeman v. Howe, 24 How. 450; Buck v. Colbath, <mark>3 Wall. 334</mark>; Taylor v. Taintor, 16 Wall. 366; Ex parte Crouch"
+       }
+      ]
+     },
+     {
+      "caseName": "Central National Bank v. Stevens",
+      "dateFiled": "1898-02-21",
+      "cluster_id": 94832,
+      "opinions": [
+       {
+        "id": 94832,
+        "snippet": "Freeman v. Howe, 24 How. 450; Buck v. Colbath, <mark>3 Wall. 334</mark>; Rio Grande Railroad v. Gomila, 132 U.S. 478"
+       }
+      ]
+     },
+     {
+      "caseName": "Stanley v. Schwalby",
+      "dateFiled": "1896-03-23",
+      "cluster_id": 94421,
+      "opinions": [
+       {
+        "id": 94421,
+        "snippet": "or upon general principles. Buck v. Colbath, <mark>3 Wall. 334</mark>; Etheridge v. Sperry, 139 U.S. 266; Bock v. Perkins"
+       }
+      ]
+     },
+     {
+      "caseName": "Moran v. Sturges",
+      "dateFiled": "1894-05-26",
+      "cluster_id": 93944,
+      "opinions": [
+       {
+        "id": 93944,
+        "snippet": "v. Sabin, 149 U.S. 473.\nIn Buck v. Colbath, <mark>3 Wall. 334</mark>, 341, 345, the same rule was referred to as settled"
+       }
+      ]
+     },
+     {
+      "caseName": "Byers v. McAuley",
+      "dateFiled": "1893-05-10",
+      "cluster_id": 93657,
+      "opinions": [
+       {
+        "id": 93657,
+        "snippet": "Freeman v. Howe, 24 How. 450, and Buck v. Colbath, <mark>3 Wall. 334</mark>. In the former of these cases this court held"
+       }
+      ]
+     },
+     {
+      "caseName": "Texas & Pacific Railway Co. v. Cox",
+      "dateFiled": "1892-05-16",
+      "cluster_id": 93410,
+      "opinions": [
+       {
+        "id": 93410,
+        "snippet": "harmony with previous decisions. Buck v. Colbath, <mark>3 Wall. 334</mark>; Feibelman v. Packard, 109 U.S. 421; Bock v."
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "courtlistener_clusters": {
+  "109 U.S. 3": {
+   "id": 7890904,
+   "case_name": "United States v. Stanley",
+   "date_filed": "1883-10-15",
+   "date_filed_is_approximate": true
+  },
+  "94 U.S. 391": {
+   "id": 89479,
+   "case_name": "McCready v. Virginia",
+   "date_filed": "1877-04-30",
+   "date_filed_is_approximate": false
+  }
+ },
+ "caselaw_decision_dates": {
+  "94 U.S. 391": "1876-10",
+  "48 U.S. 1": "1849-01",
+  "110 U.S. 516": "1884-03-03"
+ }
+}

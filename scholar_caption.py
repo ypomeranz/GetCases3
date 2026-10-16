@@ -16,9 +16,11 @@ from bluebook_names import (
     cut_companion_cases as _cut_companion_cases,
     described_person_surname,
     ejectment_party_caption,
+    first_case_lines,
     first_party_in_capitals,
     in_re_caps_name,
     in_re_for_petition,
+    middle_initial_v,
     name_persons_by_surname,
     normal_case_caption as _titlecase_caps,
     refine_caption_case,
@@ -337,6 +339,72 @@ def trim_procedural_caption(text: str) -> str:
     return text.strip().rstrip(",")
 
 
+# What heads an admiralty case as its res: "THE SADIE." on a line to itself,
+# in capitals, its period closing it (a footnote mark may follow).
+_RES_HEADING_RE = re.compile(
+    r"(THE\s+[A-Z0-9][A-Z0-9'’&.\- ]{0,60}?)\.(?:\[[^\]\s]{1,6}\]|[*†‡])?")
+# …and what is a party, never a res: a sovereign, a public body, a firm, a
+# group of cases cited by its name ("THE PRIZE CASES.").
+_NOT_A_RES_RE = re.compile(
+    r"\b(?:PEOPLE|STATE|STATES|COMMONWEALTH|KING|QUEEN|TERRITORY|CITY|COUNTY|"
+    r"TOWN|MAYOR|BOARD|TRUSTEES|PRESIDENT|COMPANY|CORPORATION|INC|CO|CORP|"
+    r"BANK|RAILROAD|RAILWAY|CASES?)\b\.?$"
+    r"|\b(?:PEOPLE|STATE|COMMONWEALTH|ET\s+AL|AND\s+OTHERS)\b")
+_CAPTION_V_RE = re.compile(r"(?:^|\s)vs?\.(?:\s|$)")
+
+
+def res_heading(text: str) -> str:
+    """The res an admiralty case's caption heads it with, above the parties'
+    own caption — "THE SADIE" for "THE SADIE. / NEW YORK & CUBA MAIL S. S.
+    CO. / v. / FULTON LIGHTERAGE CO., Inc." (57 F.2d 908), "THE SCOTLAND"
+    for "THE SCOTLAND. / DYER & Others / v. / NATIONAL STEAM NAVIGATION
+    COMPANY." (118 U.S. 507) — which the case is cited by, The Sadie and
+    The Scotland; "" for any other caption.  *text* is the caption's lines,
+    a line to each "\\n" (see caption_text).  A party set on its own line
+    ("THE PEOPLE, / v. / …") has the separator next, or a comma; the res
+    has a party of the case's under it, and only then a "v."."""
+    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return ""
+    m = _RES_HEADING_RE.fullmatch(lines[0])
+    if not m or _NOT_A_RES_RE.search(m.group(1)):
+        return ""
+    under = lines[1:]
+    if re.fullmatch(r"(?i)vs?\.?|versus|against|ags?t\.", under[0]):
+        return ""
+    if not any(_CAPTION_V_RE.search(ln) for ln in under):
+        return ""
+    return re.sub(r"\s+", " ", m.group(1))
+
+
+def caption_text(block) -> str:
+    """A caption block's text without the reporter's star pages — and
+    without a case decided with it that Scholar links to its own page:
+    447 Mich. 436 is headed "PEOPLE v. KEVORKIAN" and, linked, "HOBBINS v.
+    ATTORNEY GENERAL", line by line and with no period between the two, and
+    had been cited "People v. Kevorkian Hobbins v. Att'y Gen.".  Only a
+    link that opens after the case's own "v.": a caption linked throughout
+    is its own.  A case set under it unlinked, with only a line break
+    between the two, goes too (see first_case_lines)."""
+    out: list[str] = []
+    links: set = set()
+    for s in block.spans:
+        if s.pagenum:
+            continue
+        if (s.link and "scholar_case" in s.link and s.link not in links
+                and re.search(r"(?:^|\s)vs?\.\s+\S", "".join(out),
+                              re.IGNORECASE)):
+            break
+        links.add(s.link)
+        out.append(s.text)
+    # The Michigan reports' "v" without its period ("PEOPLE v KEVORKIAN",
+    # as CAP prints 447 Mich 436) is the separator every reader looks for.
+    text = re.sub(r"(?:^|(?<=\s))(vs?)(?=\s|$)", r"\1.", "".join(out),
+                  flags=re.MULTILINE)
+    # …nor, where nothing but a line break sets it apart, a case under it.
+    return first_case_lines(text)
+
+
 def scholar_caption_name(blocks) -> str:
     """Bluebook case name derived from the Scholar page's party caption."""
 
@@ -357,10 +425,7 @@ def scholar_caption_name(blocks) -> str:
         # stray one.
         # A reporter star-page can occur in the middle of a long, wrapped
         # caption.  It is pagination metadata, not part of the case name.
-        t = re.sub(
-            r"\s+", " ",
-            "".join(s.text for s in b.spans if not s.pagenum),
-        ).strip()
+        t = re.sub(r"\s+", " ", caption_text(b)).strip()
         # The reporter's annotation mark a caption can carry — "*Jones v.
         # The Commonwealth." (72 Va. 582), its note below — is no part of
         # the name.
@@ -407,6 +472,11 @@ def scholar_caption_name(blocks) -> str:
         collective = collective_case_name(t)
         if collective:
             return refine(_titlecase_caps(collective))
+        # An admiralty case the reporter heads with its res, above the
+        # parties' caption, is cited by the res: "The Sadie".
+        res = res_heading(caption_text(b))
+        if res:
+            return refine(_titlecase_caps(res))
         # Google Scholar renders the party separator in lowercase ("… v. …")
         # even for ALL-CAPS captions ("MERCY HOSPITAL, INC. v. JACKSON"), so
         # a lowercase "v."/"vs." — or the earliest reports' spelled-out
@@ -421,7 +491,13 @@ def scholar_caption_name(blocks) -> str:
         sides = re.split(r"\s+(?:vs?\.|versus|against|agt\.|agst\.)\s+", t,
                          maxsplit=1)
         if len(sides) != 2:
-            sides = re.split(r"\s+[vV]s?\.\s+", t, maxsplit=1)
+            # …past a capital "V." that is a middle initial ("FRANCIS V.
+            # LORENZO, PETITIONER, V. SECURITIES AND EXCHANGE COMMISSION").
+            sides = next(
+                ([t[:m.start()], t[m.end():]]
+                 for m in re.finditer(r"\s+[vV]s?\.\s+", t)
+                 if m.group().strip() != "V."
+                 or not middle_initial_v(t[:m.start()])), [t])
         if len(sides) != 2:
             sides = re.split(r"\s+(?:VERSUS|Versus)\s+", t, maxsplit=1)
         if len(sides) == 2:
