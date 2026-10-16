@@ -5162,6 +5162,29 @@ def _ejectment_usage_form(client, cite: str, item: dict, names,
     return form
 
 
+def _citing_decision_year(client, cite: str, item: dict, case_name: str,
+                          given: str, court: str) -> tuple[str, dict]:
+    """``(year, counts)``: the decision year the opinions of *court* citing
+    its case give it, where the year its source gives (*given*) may be its
+    term's (see decision_year.citing_sample_year), and how many gave each
+    candidate year.  ("", {}) when they settle none, or CourtListener
+    cannot find the case or fails.  Worker thread."""
+    if not court:
+        return "", {}
+    try:
+        ids = _cited_opinion_ids(client, item, case_name, cite)
+        if not ids:
+            return "", {}
+        year, counts = decision_year.citing_sample_year(
+            client, cite, ids, given, court=court)
+    except Exception as exc:
+        print(f"[decision-year] citing opinions for {cite!r} failed: {exc}")
+        return "", {}
+    print(f"[decision-year] {cite}: citing opinions {counts} -> "
+          f"{year or 'unsettled'}")
+    return year, counts
+
+
 def _target_name_near_citation(
     text: str, cite_start: int, case_name: str,
 ) -> bool:
@@ -7796,13 +7819,18 @@ def _scholar_decision_year(fetcher, cites, name: str = "",
     return ""
 
 
-def _case_law_decision_year(cites) -> str:
+def _case_law_decision_year(cites, full_date: bool = False) -> str:
     """The year of the Caselaw Access Project's decision date for the case
-    at any of *cites* (its first four).  Worker thread; "" when CAP has
-    none."""
+    at any of *cites* (its first four).  With *full_date*, only a date given
+    to the day: for the early U.S. Reports CAP gives the month the case's
+    term opened — "1876-10" for McCready v. Virginia, 94 U.S. 391, decided
+    April 30, 1877 — the term's year, not the decision's.  Worker thread;
+    "" when CAP has none."""
     for cite in _plain_cites(cites)[:4]:
         cap = _case_law_metadata(cite)
         decided = str((cap or {}).get("decision_date") or "")
+        if full_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", decided):
+            continue
         if len(decided) >= 4 and decided[:4].isdigit():
             return decided[:4]
     return ""
@@ -32276,7 +32304,8 @@ class _ScholarTextWindow:
                                        or need_decision_year):
                 try:
                     court_id, cl_year = self._cl_court_and_year(
-                        client, cite, item, name=case_name)
+                        client, cite, item, name=case_name,
+                        exact_year=need_decision_year)
                     year = year or (cl_year if need_year else "")
                 except Exception as exc:
                     print(f"[bb-enrich] CourtListener lookup failed: {exc}")
@@ -32284,21 +32313,30 @@ class _ScholarTextWindow:
                 year = _case_law_decision_year(candidate_cites)
             if need_decision_year:
                 # The year the case was decided, where the page's may be
-                # its term's: first from a sample of the opinions citing it
-                # (still to be built — see HANDOFF_decision_years.md), then
-                # CourtListener's date, then the Caselaw Access Project's.
-                # Each only if it is the page's year or the next.
-                found = source = ""
-                if decision_year.plausible_year(term_year, cl_year):
+                # its term's: first as the deciding court's own later
+                # opinions cite it, then CourtListener's date, then the
+                # Caselaw Access Project's (to the day only: its month-only
+                # dates are the term's).  Each only if it is the page's
+                # year or the next.
+                own_court = (_SCOTUS_COURT_ID if self._is_scotus
+                             else str(bb.get("court_id") or ""))
+                found, counts = (_citing_decision_year(
+                    client, cite, item, case_name, term_year, own_court)
+                    if client is not None else ("", {}))
+                source = "citing" if found else ""
+                if not found and decision_year.plausible_year(term_year,
+                                                              cl_year):
                     found, source = cl_year, "courtlistener"
-                else:
-                    cap_year = _case_law_decision_year(candidate_cites)
+                if not found:
+                    cap_year = _case_law_decision_year(candidate_cites,
+                                                       full_date=True)
                     if decision_year.plausible_year(term_year, cap_year):
                         found, source = cap_year, "caselaw"
                 if found:
                     print(f"[decision-year] {cite}: {term_year} -> {found} "
                           f"({source})")
-                    decision_year.remember_year(cite, found, source)
+                    decision_year.remember_year(cite, found, source,
+                                                counts=counts)
                     year = found
             new_court = bb.get("court", "")
             if need_court and court_id:
@@ -32332,19 +32370,26 @@ class _ScholarTextWindow:
 
     @staticmethod
     def _cl_court_and_year(client, cite: str, item: dict,
-                           name: str = "") -> tuple[str, str]:
+                           name: str = "", exact_year: bool = False
+                           ) -> tuple[str, str]:
         """(court_id, year) for the case from CourtListener — the cluster's
         date and its docket's court — locating the cluster by id or, failing
         that, by the reporter citation (disambiguated by ``name`` when the
-        citation is ambiguous, e.g. "1 Cranch 299")."""
+        citation is ambiguous, e.g. "1 Cranch 299").  With ``exact_year``,
+        a date CourtListener marks approximate gives no year: it may be the
+        term's (see decision_year)."""
         cluster_id = item.get("cluster_id") or item.get("id")
         if not cluster_id:
             t = _cl_item_for_citation(client, cite, name=name)
             cluster_id = (t or {}).get("cluster_id")
         if not cluster_id:
             return "", ""
-        cl = client.get_cluster(int(cluster_id), fields="date_filed,docket")
+        cl = client.get_cluster(int(cluster_id),
+                                fields="date_filed,date_filed_is_approximate,"
+                                       "docket")
         year = (cl.get("date_filed") or "")[:4]
+        if exact_year and cl.get("date_filed_is_approximate"):
+            year = ""
         court_id = ""
         docket_url = cl.get("docket")
         if docket_url:

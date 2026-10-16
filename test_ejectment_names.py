@@ -260,6 +260,8 @@ class TextViewTests(unittest.TestCase):
             patch("case_name_usage.remember_form") as remember,
             # The page's 1855 may be its term's (see test_decision_year);
             # nothing outside answers here.
+            patch("courtlistener_gui._citing_decision_year",
+                  return_value=("", {})),
             patch("courtlistener_gui._case_law_decision_year",
                   return_value=""),
             patch("decision_year.remember_year"),
