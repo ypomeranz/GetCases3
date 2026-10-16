@@ -1246,6 +1246,8 @@ from case_law_parse import (
 from cl_parse import parse_cl_html as _parse_cl_html
 import case_name_usage
 import citing_cases
+import decision_year
+from decision_year import known_decision_year
 import courtlistener as cl_api
 from courtlistener import CourtListenerClient, CourtListenerError
 import constitution
@@ -2320,10 +2322,10 @@ def _bluebook_display_name(item: dict) -> str:
                  or settled_case_name(case_name, *cites) or case_name)
 
     # Year from date filed — or the year a case its source dates by its
-    # term was decided (see settled_year).
+    # term was decided, where that is known (see decision_year).
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
-    year = settled_year(*cites) or (
-        date_filed[:4] if len(date_filed) >= 4 else "")
+    year = date_filed[:4] if len(date_filed) >= 4 else ""
+    year = known_decision_year(year, *cites) or year
 
     # Court abbreviation — omitted when SCOTUS or conveyed by the reporter
     court_id = str(item.get("court_id") or item.get("court") or "").strip().lower()
@@ -27435,7 +27437,7 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
     # group_case_name), an old ejectment case by its settled party.
     name = (group_case_name(cite, *m_cites)
             or settled_case_name(name, cite, *m_cites) or name)
-    year = settled_year(cite, *m_cites) or year
+    year = known_decision_year(year, cite, *m_cites) or year
 
     if m_court:
         court = _court_for_paren(cite, "", m_court)
@@ -31724,9 +31726,21 @@ class _ScholarTextWindow:
             name = settled
             ejectment = None
         # …and a case its source dates by its term is cited by the year it
-        # was decided: 59 U.S. 272 "(1855)" is Murray's Lessee (1856).
-        year = settled_year(
-            cite, *header_cites, *(item.get("citation") or [])) or year
+        # was decided: 59 U.S. 272 "(1855)" is Murray's Lessee (1856).  A
+        # year known already is used now.  One the page gives that may be
+        # its term's — no decision date printed, a term that ran into the
+        # next year — is asked about by _enrich_citation (decision_year).
+        all_cites = (cite, *header_cites, *(item.get("citation") or []))
+        term_year = ""
+        if settled_year(*all_cites):
+            year = settled_year(*all_cites)
+        elif (year and year == header_year
+              and decision_year.term_year_uncertain(
+                  self._blocks, year, is_scotus=is_scotus)):
+            term_year = year
+            found = decision_year.remembered_decision_year(year, *all_cites)
+            if found:
+                year, term_year = found, ""
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
@@ -31774,6 +31788,9 @@ class _ScholarTextWindow:
         return {
             "name": name, "cite": cite, "display_cite": display_cite,
             "court": court_abbr, "year": year,
+            # A year the page gives that may be its term's, for
+            # _enrich_citation to settle; "" when there is no doubt.
+            "_term_year": term_year,
             # The court "court" was abbreviated from, for a title cited to
             # another reporter, whose parenthetical may need less of it
             # (see _with_citation_facts); "" where there was no id.
@@ -32202,7 +32219,13 @@ class _ScholarTextWindow:
             ejectment is not None
             and not getattr(self, "_base_citation_override", "")
         )
-        if not (need_year or need_court or need_caption_case or need_usage):
+        # A year that may be the term's rather than the decision's (see
+        # decision_year.term_year_uncertain).
+        term_year = "" if need_year else str(bb.get("_term_year") or "")
+        need_decision_year = bool(
+            term_year and not getattr(self, "_base_citation_override", ""))
+        if not (need_year or need_court or need_caption_case or need_usage
+                or need_decision_year):
             return
 
         cite = bb["cite"]
@@ -32210,7 +32233,7 @@ class _ScholarTextWindow:
         item = dict(self._item)
         candidate_cites = [cite, *self._header_cites, *(item.get("citation") or [])]
         client = fetcher = None
-        if need_year or need_court or need_usage:
+        if need_year or need_court or need_usage or need_decision_year:
             try:
                 if self._app is not None and self._app._token_var.get().strip():
                     client = self._app._get_client()
@@ -32236,8 +32259,9 @@ class _ScholarTextWindow:
             year = (_scholar_decision_year(
                 fetcher, candidate_cites, case_name, scholar_url)
                 if need_year else "")
-            court_id = ""
-            if client is not None and (need_court or (need_year and not year)):
+            court_id = cl_year = ""
+            if client is not None and (need_court or (need_year and not year)
+                                       or need_decision_year):
                 try:
                     court_id, cl_year = self._cl_court_and_year(
                         client, cite, item, name=case_name)
@@ -32246,6 +32270,24 @@ class _ScholarTextWindow:
                     print(f"[bb-enrich] CourtListener lookup failed: {exc}")
             if need_year and not year:
                 year = _case_law_decision_year(candidate_cites)
+            if need_decision_year:
+                # The year the case was decided, where the page's may be
+                # its term's: first from a sample of the opinions citing it
+                # (still to be built — see HANDOFF_decision_years.md), then
+                # CourtListener's date, then the Caselaw Access Project's.
+                # Each only if it is the page's year or the next.
+                found = source = ""
+                if decision_year.plausible_year(term_year, cl_year):
+                    found, source = cl_year, "courtlistener"
+                else:
+                    cap_year = _case_law_decision_year(candidate_cites)
+                    if decision_year.plausible_year(term_year, cap_year):
+                        found, source = cap_year, "caselaw"
+                if found:
+                    print(f"[decision-year] {cite}: {term_year} -> {found} "
+                          f"({source})")
+                    decision_year.remember_year(cite, found, source)
+                    year = found
             new_court = bb.get("court", "")
             if need_court and court_id:
                 new_court = _court_for_paren(

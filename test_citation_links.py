@@ -1383,7 +1383,7 @@ def _load_filename_builder():
           "abbreviate_case_name": lambda n, **_kw: n,
           "group_case_name": lambda *_cites: None,
           "settled_case_name": lambda _name, *_cites: None,
-          "settled_year": lambda *_cites: None,
+          "known_decision_year": lambda *_cites: "",
           "_state_of_court": lambda *_a, **_kw: "",
           "_court_for_paren": lambda cite, court_id, court: "",
           # Reporter spacing is the respacer's own (tested) business.

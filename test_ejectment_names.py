@@ -204,6 +204,9 @@ class TextViewTests(unittest.TestCase):
             unsettled = patch.dict(f"bluebook_names.{table}", clear=True)
             unsettled.start()
             self.addCleanup(unsettled.stop)
+        found = patch("decision_year.remembered_year", return_value="")
+        found.start()
+        self.addCleanup(found.stop)
 
     @staticmethod
     def _window():
@@ -255,6 +258,11 @@ class TextViewTests(unittest.TestCase):
                   return_value=[87010]),
             patch("case_name_usage.remembered_form", return_value=None),
             patch("case_name_usage.remember_form") as remember,
+            # The page's 1855 may be its term's (see test_decision_year);
+            # nothing outside answers here.
+            patch("courtlistener_gui._case_law_decision_year",
+                  return_value=""),
+            patch("decision_year.remember_year"),
         ):
             win._enrich_citation()
         return remember
