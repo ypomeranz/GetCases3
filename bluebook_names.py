@@ -2314,14 +2314,22 @@ def cut_companion_cases(text: str) -> str:
     # second name opening the way the first did, with the "The" rule 10.2.1(d)
     # keeps on a vessel — so the cut is offered only for a caption that itself
     # begins that way, and never at an abbreviation's period, which would read
-    # a single ship's "The Wm. The Fourth" as two of them.
+    # a single ship's "The Wm. The Fourth" as two of them.  Nor is a claimant
+    # any more of the name than a second ship: "THE JOSEFA SEGUNDA. ROBERTS
+    # and others, Claimants." (23 U.S. (10 Wheat.) 312) is The Josefa Segunda
+    # — had been "The Josefa Segunda. Roberts" — so with no party to the
+    # case, whatever sentence follows the res ends it.
     if (re.match(r"\s*(?:THE|The)\s+\S", text)
             and not re.search(r"\s+(?:vs?\.|versus|against)\s+", text,
                               re.IGNORECASE)):
-        for c3 in re.finditer(r"\.\s+(?=(?:THE|The)\s+[A-Z])", text):
+        for c3 in re.finditer(r"\.\s+(?=[A-Z])", text):
             wm = re.search(r"([A-Za-z]+)$", text[: c3.start()])
             word = (wm.group(1) if wm else "").lower()
-            if len(word) > 1 and word not in _CUT_NEVER_ENDS:
+            # (An abbreviation's period ends nothing — a relator's "ex rel."
+            # least of all: "THE STATE OF KANSAS EX REL. COLEMAN".)
+            if (len(word) > 1 and word not in _CUT_NEVER_ENDS
+                    and word not in _TABLE_ABBREVIATIONS
+                    and word != "rel"):
                 cuts.append(c3.start())
                 break
     if cuts:

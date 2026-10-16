@@ -1825,6 +1825,26 @@ class ConsolidatedAndSinglePartyCaptionTests(unittest.TestCase):
                         "THE ACME V. THE LOLA.", "THE ACME VS. THE LOLA."):
             self.assertEqual(cut(caption), caption)
 
+    def test_a_claimant_is_no_more_of_the_name_than_a_second_ship(self):
+        # The Josefa Segunda, 23 U.S. (10 Wheat.) 312 (1825), had been cited
+        # "The Josefa Segunda. Roberts"; the Barge Sadie (62 F.2d 1076)
+        # carried "Fulton Lighterage Co." with it.
+        cut = _cut_companion_cases
+        self.assertEqual(
+            cut("THE JOSEFA SEGUNDA. ROBERTS and others, Claimants."),
+            "THE JOSEFA SEGUNDA.")
+        self.assertEqual(
+            cut("THE Barge SADIE. Fulton Lighterage Company, Inc., "
+                "Appellant."), "THE Barge SADIE.")
+        # A name stored without its claimant's role, too.
+        self.assertEqual(abbreviate_case_name("The Josefa Segunda. Roberts"),
+                         "The Josefa Segunda")
+        # A relator is the party's own, and an abbreviation ends nothing.
+        for caption in ("THE STATE OF KANSAS EX REL. COLEMAN, ATTORNEY "
+                        "GENERAL.", "THE ST. JAGO DE CUBA."):
+            with self.subTest(caption=caption):
+                self.assertEqual(cut(caption), caption)
+
     def test_a_doubled_initial_survives_the_repeated_abbreviation_collapse(self):
         # A.A.R.P. v. Trump, 605 U.S. 246 (2025): the applicants are
         # anonymized to initials, and the reporter spaces them out.  The
