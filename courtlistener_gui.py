@@ -1219,6 +1219,7 @@ from bluebook_names import (
     normal_case_caption,
     refine_caption_case,
     settled_case_name,
+    settled_year,
     simplify_historical_entity_caption,
 )
 from bluebook_parentheticals import (
@@ -2318,9 +2319,11 @@ def _bluebook_display_name(item: dict) -> str:
     case_name = (group_case_name(*cites)
                  or settled_case_name(case_name, *cites) or case_name)
 
-    # Year from date filed
+    # Year from date filed — or the year a case its source dates by its
+    # term was decided (see settled_year).
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
-    year = date_filed[:4] if len(date_filed) >= 4 else ""
+    year = settled_year(*cites) or (
+        date_filed[:4] if len(date_filed) >= 4 else "")
 
     # Court abbreviation — omitted when SCOTUS or conveyed by the reporter
     court_id = str(item.get("court_id") or item.get("court") or "").strip().lower()
@@ -27432,6 +27435,7 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
     # group_case_name), an old ejectment case by its settled party.
     name = (group_case_name(cite, *m_cites)
             or settled_case_name(name, cite, *m_cites) or name)
+    year = settled_year(cite, *m_cites) or year
 
     if m_court:
         court = _court_for_paren(cite, "", m_court)
@@ -31719,6 +31723,10 @@ class _ScholarTextWindow:
         if settled:
             name = settled
             ejectment = None
+        # …and a case its source dates by its term is cited by the year it
+        # was decided: 59 U.S. 272 "(1855)" is Murray's Lessee (1856).
+        year = settled_year(
+            cite, *header_cites, *(item.get("citation") or [])) or year
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""

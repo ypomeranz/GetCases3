@@ -3375,6 +3375,28 @@ def settled_case_name(name: str, *cites: str) -> str | None:
     return None
 
 
+# Cases a source dates by the term of court they were decided in, where the
+# year of decision is what is cited (rule 10.5): Scholar heads 59 U.S. 272
+# "(1855)", its December Term, and Murray's Lessee was decided in 1856.  By
+# every citation of the report.
+_DECISION_YEAR_BY_CITE = {
+    _group_cite_key(cite): year
+    for cites, year in (
+        (("59 U.S. 272", "18 How. 272", "15 L. Ed. 372"), "1856"),
+    ) for cite in cites
+}
+
+
+def settled_year(*cites: str) -> str | None:
+    """The year a case was decided, when one of *cites* is the report of a
+    case its source dates otherwise (see _DECISION_YEAR_BY_CITE), or None."""
+    for cite in cites:
+        year = _DECISION_YEAR_BY_CITE.get(_group_cite_key(str(cite or "")))
+        if year:
+            return year
+    return None
+
+
 # A caption that names one party, as the petitioner or the applicant, and no
 # adversary — "NIELSEN, Petitioner." (131 U.S. 176) — is that party's
 # petition or application, which rule 10.2.1(b) cites "In re" ("petition
