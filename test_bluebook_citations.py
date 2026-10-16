@@ -5696,6 +5696,41 @@ PRIMARY_ELECTION_CAPTION = (
     "Elections (16-3357), Appellants.")
 
 
+class LinkedCompanionCaptionTests(unittest.TestCase):
+    """People v. Kevorkian, 447 Mich. 436 (1994), had been cited "People v.
+    Kevorkian Hobbins v. Att'y Gen.": Scholar sets the case decided with it
+    under its caption, line by line with no period between them, as a link
+    to that case's own page."""
+
+    LINK = "https://scholar.google.com/scholar_case?case=1757080233558204307"
+
+    def _caption(self, link_first=False):
+        def span(text, linked):
+            return Span(text, bold=True, link=self.LINK if linked else "")
+        lines = [("PEOPLE", link_first), ("v.", link_first),
+                 ("KEVORKIAN", link_first), ("HOBBINS", True), ("v.", True),
+                 ("ATTORNEY GENERAL", True)]
+        spans = []
+        for text, linked in lines:
+            spans += [span(text, linked), Span("\n")]
+        return [Block("center", [Span("447 Mich. 436 (1994)")]),
+                Block("center", spans[:-1])]
+
+    def test_the_linked_case_is_another(self):
+        from opinion_db import _caption_name
+        blocks = self._caption()
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "People v. Kevorkian")
+        self.assertEqual(abbreviate_case_name(
+            normal_case_caption(_caption_name(blocks))), "People v. Kevorkian")
+
+    def test_a_caption_linked_throughout_is_its_own(self):
+        from scholar_caption import caption_text
+        block = self._caption(link_first=True)[1]
+        self.assertIn("ATTORNEY GENERAL", caption_text(block))
+        self.assertNotIn("HOBBINS", caption_text(self._caption()[1]))
+
+
 class InReMatterNameTests(unittest.TestCase):
     """In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016), had been
     cited "In re 2016 Primary Election. Hamilton Cnty. Bd. of Elections

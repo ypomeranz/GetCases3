@@ -337,6 +337,28 @@ def trim_procedural_caption(text: str) -> str:
     return text.strip().rstrip(",")
 
 
+def caption_text(block) -> str:
+    """A caption block's text without the reporter's star pages — and
+    without a case decided with it that Scholar links to its own page:
+    447 Mich. 436 is headed "PEOPLE v. KEVORKIAN" and, linked, "HOBBINS v.
+    ATTORNEY GENERAL", line by line and with no period between the two, and
+    had been cited "People v. Kevorkian Hobbins v. Att'y Gen.".  Only a
+    link that opens after the case's own "v.": a caption linked throughout
+    is its own."""
+    out: list[str] = []
+    links: set = set()
+    for s in block.spans:
+        if s.pagenum:
+            continue
+        if (s.link and "scholar_case" in s.link and s.link not in links
+                and re.search(r"(?:^|\s)vs?\.\s+\S", "".join(out),
+                              re.IGNORECASE)):
+            break
+        links.add(s.link)
+        out.append(s.text)
+    return "".join(out)
+
+
 def scholar_caption_name(blocks) -> str:
     """Bluebook case name derived from the Scholar page's party caption."""
 
@@ -357,10 +379,7 @@ def scholar_caption_name(blocks) -> str:
         # stray one.
         # A reporter star-page can occur in the middle of a long, wrapped
         # caption.  It is pagination metadata, not part of the case name.
-        t = re.sub(
-            r"\s+", " ",
-            "".join(s.text for s in b.spans if not s.pagenum),
-        ).strip()
+        t = re.sub(r"\s+", " ", caption_text(b)).strip()
         # The reporter's annotation mark a caption can carry — "*Jones v.
         # The Commonwealth." (72 Va. 582), its note below — is no part of
         # the name.

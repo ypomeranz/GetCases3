@@ -59,7 +59,7 @@ from court_catalog import (
     circuit_court_id,
     state_of_court,
 )
-from scholar_caption import scholar_caption_name
+from scholar_caption import caption_text, scholar_caption_name
 from bluebook_names import (
     abbreviate_case_name,
     collective_case_name,
@@ -563,7 +563,7 @@ def _caption_name(blocks: list) -> str:
     for b in blocks[:10]:
         if getattr(b, "kind", None) not in ("center", "heading"):
             continue
-        t = re.sub(r"\s+", " ", b.text()).strip()
+        t = re.sub(r"\s+", " ", caption_text(b)).strip()
         # An Alabama-style "(Re <underlying case>)" cross-reference carries
         # its own " v. " and would masquerade as this case's caption.
         t = strip_related_case_note(t)
