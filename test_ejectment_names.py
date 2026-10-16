@@ -197,6 +197,14 @@ class UsageQueryTests(unittest.TestCase):
 
 
 class TextViewTests(unittest.TestCase):
+    # Murray's Lessee is the courts' settled form (see SettledPartyTests);
+    # these show how a case no one has settled is asked about.
+    def setUp(self):
+        unsettled = patch.dict(
+            "bluebook_names._SETTLED_FIRST_PARTY_BY_CITE", clear=True)
+        unsettled.start()
+        self.addCleanup(unsettled.stop)
+
     @staticmethod
     def _window():
         win = object.__new__(_ScholarTextWindow)
@@ -280,6 +288,39 @@ class TextViewTests(unittest.TestCase):
 
         client.search.assert_not_called()
         win._post.assert_not_called()
+
+
+class SettledPartyTests(unittest.TestCase):
+    """Murray's Lessee v. Hoboken Land & Improvement Co., 59 U.S. (18 How.)
+    272 (1856), is cited by its claimant's lessee whatever the citing
+    opinions are counted to say."""
+
+    LESSEE = "Murray's Lessee v. Hoboken Land & Improvement Co."
+
+    def test_the_window_cites_it_without_asking(self):
+        win = TextViewTests._window()
+        with patch("case_name_usage.remembered_form", return_value="nominal"):
+            bb = win._compute_bluebook_parts()
+        self.assertEqual(bb["name"], self.LESSEE)
+        self.assertIsNone(bb["_ejectment"])
+
+    def test_any_form_of_its_name(self):
+        from bluebook_names import settled_case_name
+        for name in ("Den v. Hoboken Land & Improvement Co.",
+                     "Den ex dem. Murray v. Hoboken Land & Improvement Co.",
+                     "Murray v. Hoboken Land & Improvement Co."):
+            self.assertEqual(settled_case_name(name, "18 How. 272"),
+                             self.LESSEE)
+        self.assertIsNone(settled_case_name(
+            "Den v. Hoboken Land & Improvement Co.", "59 U.S. 273"))
+
+    def test_a_search_results_citation(self):
+        from courtlistener_gui import _bluebook_display_name
+        line = _bluebook_display_name({
+            "caseName": "Den v. Hoboken Land & Improvement Co.",
+            "citation": ["59 U.S. 272"], "dateFiled": "1856-02-19",
+            "court_id": "scotus"})
+        self.assertTrue(line.startswith(self.LESSEE + ", 59 U.S."), line)
 
 
 if __name__ == "__main__":

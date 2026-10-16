@@ -3344,6 +3344,37 @@ def group_case_name(*cites: str) -> str | None:
     return None
 
 
+# Ejectment cases whose claimant the courts settled on citing by a form
+# of its party the caption does not set (see ejectment_case_names), and
+# settled so plainly that the count of citing opinions is not asked: Scholar
+# captions 59 U.S. 272 "JOHN DEN, ex dem. JAMES B. MURRAY …" and the case is
+# Murray's Lessee v. Hoboken Land & Improvement Co., 59 U.S. (18 How.) 272
+# (1856).  The first party each is cited by, by every citation of its
+# report.
+_SETTLED_FIRST_PARTIES = {
+    "Murray's Lessee": ("59 U.S. 272", "18 How. 272", "15 L. Ed. 372"),
+}
+_SETTLED_FIRST_PARTY_BY_CITE = {
+    _group_cite_key(cite): party
+    for party, cites in _SETTLED_FIRST_PARTIES.items() for cite in cites
+}
+
+
+def settled_case_name(name: str, *cites: str) -> str | None:
+    """*name*, a case name in any of its forms, with the first party the
+    courts cite it by when one of *cites* is the report of a case in
+    _SETTLED_FIRST_PARTIES — "Den v. Hoboken Land & Improvement Co." at
+    "59 U.S. 272" is "Murray's Lessee v. Hoboken Land & Improvement Co."
+    — or None."""
+    for cite in cites:
+        party = _SETTLED_FIRST_PARTY_BY_CITE.get(
+            _group_cite_key(str(cite or "")))
+        if party:
+            sides = _V_SPLIT_RE.split(name or "", maxsplit=1)
+            return f"{party} v. {sides[1]}" if len(sides) == 2 else None
+    return None
+
+
 # A caption that names one party, as the petitioner or the applicant, and no
 # adversary — "NIELSEN, Petitioner." (131 U.S. 176) — is that party's
 # petition or application, which rule 10.2.1(b) cites "In re" ("petition

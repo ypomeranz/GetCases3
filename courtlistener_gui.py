@@ -1218,6 +1218,7 @@ from bluebook_names import (
     is_recognized_given_name,
     normal_case_caption,
     refine_caption_case,
+    settled_case_name,
     simplify_historical_entity_caption,
 )
 from bluebook_parentheticals import (
@@ -2311,9 +2312,11 @@ def _bluebook_display_name(item: dict) -> str:
         citation_str = _respace_reporter_in_cite(citation_str)
     citation_str = _bluebook_reporter_spelling(citation_str)
     # Cases reported together under one name are cited by it (see
-    # group_case_name), whatever the parties' captions say.
-    case_name = group_case_name(
-        citation_str, *(item.get("citation") or [])) or case_name
+    # group_case_name), whatever the parties' captions say — and an old
+    # ejectment case by the party the courts settled on (settled_case_name).
+    cites = (citation_str, *(item.get("citation") or []))
+    case_name = (group_case_name(*cites)
+                 or settled_case_name(case_name, *cites) or case_name)
 
     # Year from date filed
     date_filed = item.get("dateFiled") or item.get("date_filed") or ""
@@ -27426,8 +27429,9 @@ def _case_law_print_citation(pdf_bytes: bytes, url: str, title: str = "",
         except Exception:
             pass
     # Cases reported together under one name are cited by it (see
-    # group_case_name).
-    name = group_case_name(cite, *m_cites) or name
+    # group_case_name), an old ejectment case by its settled party.
+    name = (group_case_name(cite, *m_cites)
+            or settled_case_name(name, cite, *m_cites) or name)
 
     if m_court:
         court = _court_for_paren(cite, "", m_court)
@@ -31707,6 +31711,14 @@ class _ScholarTextWindow:
             name = group
             ejectment = None
             unresolved_caption_case = ()
+        # …and an ejectment case the courts settled on citing by one form
+        # of its party is cited by it, without asking the citing opinions:
+        # Murray's Lessee v. Hoboken Land & Improvement Co.
+        settled = settled_case_name(
+            name, cite, *header_cites, *(item.get("citation") or []))
+        if settled:
+            name = settled
+            ejectment = None
         cite = _respace_reporter_in_cite(cite)
         display_cite = cite
         omit_parenthetical = ""
