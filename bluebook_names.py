@@ -18,6 +18,7 @@ safely pass through twice.
 
 from __future__ import annotations
 
+import contextvars
 import gzip
 import os
 import re
@@ -2146,6 +2147,17 @@ _PHRASE_RE = re.compile(
 )
 _PHRASE_MAP = {p: a for p, a in _PHRASES + _T10_CITY_PHRASES}
 
+# A case name in a textual sentence abbreviates only widely known acronyms
+# (rule 6.1(b)) and these eight words (rule 10.2.1(c)); tables T6 and T10 are
+# for citations alone (rule 10.2.2).  "Corporate", "Companies" and the like
+# are written out.  Set while abbreviate_case_name(…, textual=True) runs.
+_TEXTUAL_WORD_MAP = {
+    "and": "&", "association": "Ass'n", "brothers": "Bros.",
+    "company": "Co.", "corporation": "Corp.", "incorporated": "Inc.",
+    "limited": "Ltd.", "number": "No.",
+}
+_TEXTUAL = contextvars.ContextVar("bluebook_textual", default=False)
+
 _ET_AL_RE = re.compile(r",?\s+et\s+als?\.?\s*$", re.IGNORECASE)
 _V_SPLIT_RE = re.compile(r"\s+vs?\.\s+")
 
@@ -3758,9 +3770,12 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
             and _word_key(word) not in _ONE_WORD_PARTIES_ABBREVIATED):
         return word
 
-    p = _PHRASE_RE.sub(
-        lambda m: _PHRASE_MAP[re.sub(r"\s+", " ", m.group(0).lower())], p
-    )
+    textual = _TEXTUAL.get()
+    word_map = _TEXTUAL_WORD_MAP if textual else _WORD_MAP
+    if not textual:
+        p = _PHRASE_RE.sub(
+            lambda m: _PHRASE_MAP[re.sub(r"\s+", " ", m.group(0).lower())], p
+        )
 
     # A state or city right after a given name is part of a person's name,
     # not a geographic unit: "George Washington University" keeps
@@ -3783,14 +3798,14 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
         if m.start() in protected:
             return m.group(0)
         word = m.group(0).replace("’", "'").lower()
-        abbr = _WORD_MAP.get(word)
+        abbr = word_map.get(word)
         if (abbr is None and m.end() == len(p) and word.endswith(".")
                 and "." not in word[:-1]):
             # A caption's closing period rides on its last word ("Dallas
             # County.", "Magnavox Co. of Tennessee.") and would otherwise
             # keep the word from its abbreviation until a second pass,
             # once the period is gone.
-            abbr = _WORD_MAP.get(word[:-1])
+            abbr = word_map.get(word[:-1])
         return m.group(0) if abbr is None else abbr
 
     return _TOKEN_RE.sub(_sub, p)
@@ -3811,10 +3826,16 @@ def _add_initials_variants() -> None:
     if _INITIALS_VARIANTS_ADDED:
         return
     _INITIALS_VARIANTS_ADDED = True
-    for acr, long_names in _WIDELY_RECOGNIZED_INITIALS_RAW.items():
-        for long_name in long_names:
-            abbr = _abbreviate_party(long_name, recognize_initials=False)
-            _WIDELY_RECOGNIZED_INITIALS.setdefault(_initials_key(abbr), acr)
+    # The citation forms, however the first caller is abbreviating.
+    citation_form = _TEXTUAL.set(False)
+    try:
+        for acr, long_names in _WIDELY_RECOGNIZED_INITIALS_RAW.items():
+            for long_name in long_names:
+                abbr = _abbreviate_party(long_name, recognize_initials=False)
+                _WIDELY_RECOGNIZED_INITIALS.setdefault(
+                    _initials_key(abbr), acr)
+    finally:
+        _TEXTUAL.reset(citation_form)
 
 
 # Rule 10.2.1(h): omit "Inc.", "Ltd.", "L.L.C.", "L.L.P.", "N.A.", "F.S.B.",
@@ -4178,11 +4199,19 @@ def ejectment_party_caption(side: str) -> str:
 
 
 def ejectment_case_names(name: str, *, court_state: str = "",
-                         body_text: str = "") -> EjectmentNames | None:
+                         body_text: str = "",
+                         textual: bool = False) -> EjectmentNames | None:
     """The forms a caption's ejectment party may be cited in, for a caller
     that will ask which the courts use (see case_name_usage), or None when
     *name* names no ejectment party.  :func:`abbreviate_case_name` gives
     the caption's own form, ``names[default]``; the arguments are its."""
+    if textual != _TEXTUAL.get():
+        mode = _TEXTUAL.set(textual)
+        try:
+            return ejectment_case_names(name, court_state=court_state,
+                                        body_text=body_text, textual=textual)
+        finally:
+            _TEXTUAL.reset(mode)
     name = _clean_caption(name)
     return _ejectment_names(name, court_state, body_text) if name else None
 
@@ -4275,11 +4304,20 @@ def _clean_caption(name: str) -> str:
 
 
 def abbreviate_case_name(name: str, *, court_state: str = "",
-                         body_text: str = "") -> str:
+                         body_text: str = "", textual: bool = False) -> str:
     """Abbreviate a case name for use in a citation or filename per
     Bluebook rule 10.2.2 (= Indigo Book R8.3), dropping given names of
     individuals (rule 10.2.1(g)) and "State of" prefixes (10.2.1(f)).
     Safe to call twice.
+
+    *textual* names the case as a textual sentence does (rule 10.2.1(c)):
+    every rule of 10.2.1 applies, but only widely known acronyms and eight
+    words are abbreviated — "&", "Ass'n", "Bros.", "Co.", "Corp.", "Inc.",
+    "Ltd.", "No." — so "Guaranty Trust Company of New York v. York" is
+    "Guaranty Trust Co. v. York", not "Guar. Tr. Co. v. York".  Give it the
+    name as the caption has it: a name already abbreviated keeps its
+    abbreviations, which cannot all be read back ("Tr." is Trust or
+    Trustee).
 
     *court_state* is the state whose own courts decided the case (any
     spelling: "new york", "N.Y."), which rule 10.2.1(f) needs to finish the
@@ -4295,6 +4333,13 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
     prose settles a personal name the given-name lists don't know — the
     party it calls "Iqbal" is Javaid Iqbal's surname (rule 10.2.1(g)).
     Without it, those names fall back to the Census name files."""
+    if textual != _TEXTUAL.get():
+        mode = _TEXTUAL.set(textual)
+        try:
+            return abbreviate_case_name(name, court_state=court_state,
+                                        body_text=body_text, textual=textual)
+        finally:
+            _TEXTUAL.reset(mode)
     name = _clean_caption(name)
     if not name:
         return name

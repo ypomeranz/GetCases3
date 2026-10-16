@@ -630,7 +630,8 @@ class CopyMenuTests(unittest.TestCase):
         menu = ns["_build_copy_menu"](None, reader)
         self.assertEqual(
             menu.labels(),
-            ["Edit citation…", None, "Copy citation to clipboard", None,
+            ["Edit citation…", None, "Copy citation to clipboard",
+             "Copy citation for use in text", None,
              "Plain", "With citation", None, "Preview what was copied",
              None, "Copy now \tCtrl+C"],
         )

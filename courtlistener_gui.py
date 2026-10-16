@@ -584,6 +584,11 @@ def _build_copy_menu(master: tk.Misc, reader) -> "Optional[tk.Menu]":
         label="Copy citation to clipboard",
         command=reader._copy_citation_to_clipboard,
     )
+    # …and as a textual sentence names it (rule 10.2.1(c)).
+    copy_menu.add_command(
+        label="Copy citation for use in text",
+        command=reader._copy_text_citation_to_clipboard,
+    )
     copy_menu.add_separator()
     for value, label in COPY_MODE_LABELS:
         copy_menu.add_radiobutton(
@@ -31692,6 +31697,10 @@ class _ScholarTextWindow:
         # State of …" party: its own state's courts cite it as "People v.
         # Zackowitz", everyone else's as "New York v. Zackowitz".
         court_state = _state_of_court(court_id, str(item.get("court") or ""))
+        # The name before it is abbreviated, for a textual sentence's form
+        # of it (see _text_case_name): abbreviations cannot all be read
+        # back ("Tr." is Trust or Trustee).
+        caption_name = name
         # An ejectment party ("John Den, ex dem. James B. Murray") is cited
         # the way the opinions citing the case cite it — "Murray's Lessee",
         # but "Doe" in Doe v. Considine.  An answer had before is used now;
@@ -31791,6 +31800,9 @@ class _ScholarTextWindow:
             # A year the page gives that may be its term's, for
             # _enrich_citation to settle; "" when there is no doubt.
             "_term_year": term_year,
+            # The caption's name unabbreviated, and the state whose courts
+            # decided the case, for the textual form (_text_case_name).
+            "_caption_name": caption_name, "_court_state": court_state,
             # The court "court" was abbreviated from, for a title cited to
             # another reporter, whose parenthetical may need less of it
             # (see _with_citation_facts); "" where there was no id.
@@ -32396,18 +32408,19 @@ class _ScholarTextWindow:
     @staticmethod
     def _citation_rtf(
         name: str, rest: str, inline: bool,
-        explanatory_rtf: str = "", history: str = "",
+        explanatory_rtf: str = "", history: str = "", end: str = ".",
     ) -> str:
         """The RTF for a citation, as its own paragraph or run on from the
         text.  ``inline`` is the quotation style: the citation follows the
         closing quote after a single space, the way a brief sets it.
         ``explanatory_rtf`` (already RTF) is set in a parenthetical after
-        ``rest`` and before ``history``, which closes the citation."""
+        ``rest`` and before ``history``, which closes the citation, and
+        ``end`` after that: "" for one a sentence goes on around."""
         italic = "{\\i " + _rtf_escape(name) + "}" if name else ""
         body = italic + _rtf_escape(rest)
         if explanatory_rtf:
             body += (" (" if body else "(") + explanatory_rtf + ")"
-        body += _rtf_escape(history + ".")
+        body += _rtf_escape(history + end)
         if inline:
             return " " + body
         return "\\par\\pard\\sa120 " + body + "\\par\n"
@@ -32418,6 +32431,7 @@ class _ScholarTextWindow:
         inline: bool = False,
         cite_override: str = "",
         explanatory: tuple[str, str] = ("", ""),
+        textual: bool = False,
     ) -> tuple[str, str]:
         """Return (plain, rtf-fragment) forms of the Bluebook citation.
         The writer parenthetical and `extra_parens` — e.g. "footnote
@@ -32426,14 +32440,16 @@ class _ScholarTextWindow:
         ``explanatory`` is an explanatory parenthetical's contents as
         (plain, rtf), set after all of them and before any subsequent
         history.  ``inline`` runs the citation on from the quotation instead
-        of giving it a paragraph of its own."""
+        of giving it a paragraph of its own.  ``textual`` gives the case
+        the name a textual sentence gives it (see _text_case_name), and no
+        closing period: the sentence goes on around it."""
         edited = getattr(self, "_base_citation_override", "")
         if edited:
             name, rest, history = edited_citation_parts(
                 edited, pin, (writer, *extra_parens))
         else:
             bb = self._bb
-            name = bb["name"]
+            name = self._text_case_name() if textual else bb["name"]
             cite = cite_override or bb.get("display_cite") or bb["cite"]
             court, year = bb["court"], bb["year"]
             if not cite and bb.get("docket_cite"):
@@ -32474,9 +32490,49 @@ class _ScholarTextWindow:
             explanatory_plain = (
                 f" ({explanatory_plain})" if name or rest
                 else f"({explanatory_plain})")
-        plain = f"{name}{rest}{explanatory_plain}{history}."
+        end = "" if textual else "."
+        plain = f"{name}{rest}{explanatory_plain}{history}{end}"
         return plain, self._citation_rtf(
-            name, rest, inline, explanatory_rtf, history)
+            name, rest, inline, explanatory_rtf, history, end)
+
+    def _text_case_name(self) -> str:
+        """The case's name as a textual sentence gives it (rule 10.2.1(c)):
+        the citation's name, but with only widely known acronyms and eight
+        words abbreviated — "Guaranty Trust Co. v. York", not "Guar. Tr.
+        Co. v. York".  Read from the caption's own words, not undone from
+        the citation's abbreviations, which cannot all be read back ("Tr."
+        is Trust or Trustee); the citation settled the rest — which case of
+        a group, which form of an ejectment party, a word's capitals."""
+        bb = self._bb
+        cited = bb.get("name", "")
+        caption = bb.get("_caption_name") or ""
+        if not caption:
+            return cited
+        cites = (bb.get("cite", ""), *getattr(self, "_header_cites", ()),
+                 *(self._item.get("citation") or []))
+        group = group_case_name(*cites)
+        if group:
+            return group
+        court_state = bb.get("_court_state", "")
+        body = _scholar_body_text(self._blocks)
+        name = abbreviate_case_name(caption, court_state=court_state,
+                                    body_text=body, textual=True)
+        # The ejectment party in the form the citation has settled on.
+        forms = ejectment_case_names(caption, court_state=court_state,
+                                     body_text=body)
+        if forms is not None:
+            form = next((f for f, n in forms.names.items() if n == cited),
+                        None)
+            if form is not None:
+                name = ejectment_case_names(
+                    caption, court_state=court_state, body_text=body,
+                    textual=True).names.get(form, name)
+        name = settled_case_name(name, *cites) or name
+        # A word's capitals as the citation has them ("NBCUniversal").
+        cased = {w.lower(): w for w in re.findall(r"[\w'’.&-]+", cited)}
+        return re.sub(r"[\w'’.&-]+",
+                      lambda m: cased.get(m.group(0).lower(), m.group(0)),
+                      name)
 
     @staticmethod
     def _page_num_from(s: str) -> Optional[int]:
@@ -32677,6 +32733,24 @@ class _ScholarTextWindow:
         self._status_var.set(f"Copied the case citation as {how}.")
         self._show_copy_preview(
             rtf, self._copy_preview_caption(how, "Case citation"))
+
+    def _copy_text_citation_to_clipboard(self) -> None:
+        """Copy this case's citation as a textual sentence sets it — the
+        name with only "&", "Ass'n", "Bros.", "Co.", "Corp.", "Inc.",
+        "Ltd.", "No." and well-known acronyms abbreviated (rule 10.2.1(c)),
+        and no closing period — independent of selection."""
+        plain, fragment = self._bluebook_citation(
+            None, inline=True, textual=True)
+        if not plain:
+            self._status_var.set("No case citation is available to copy.")
+            return
+        fragment = fragment[1:] if fragment.startswith(" ") else fragment
+        rtf = _rtf_document("\\pard\\sa120 " + fragment + "\\par\n")
+        how = _copy_rich_clipboard(self._win, rtf, plain)
+        self._status_var.set(f"Copied the case citation for use in text as "
+                             f"{how}.")
+        self._show_copy_preview(
+            rtf, self._copy_preview_caption(how, "Case citation for text"))
 
     def _copy_preview_caption(self, how: str, label: str = "") -> str:
         """The preview's one-line heading: which copy style produced it, and
