@@ -2226,6 +2226,63 @@ _JOINED_MATTER_RE = re.compile(
     re.IGNORECASE)
 
 
+# A caption's party separator as Scholar sets it — a lowercase "v." or
+# "agt." within a line, or a line to itself in any case, where alone a
+# "versus" or "against" can be nothing else ("Citizens against Rent Control
+# v. Berkeley" is one case) — and the lines that carry on the party above
+# them rather than begin another: a line after a comma, an "and" or an "&",
+# and one opening with its own lowercase word, an "&", a word that ties it
+# to the name above ("OF THE CITY OF NEW YORK", "d/b/a …") or the party's
+# role.
+_CAPTION_SEPARATOR_RE = re.compile(
+    r"(?:^|(?<=\s))(?:vs?\.|ags?t\.)(?=\s|$)")
+_CAPTION_SEPARATOR_LINE_RE = re.compile(
+    r"(?i:vs?\.|versus|against|ags?t\.)|vs?")
+_PARTY_RUNS_ON_RE = re.compile(
+    r"(?:[,;&(\-–—]|\b(?:and|of|the|for|et|de|del|la|von|van))\s*$",
+    re.IGNORECASE)
+_PARTY_CARRIED_RE = re.compile(
+    r"(?:[a-z&(]|(?i:and|et\s+al|jr|sr|inc|ltd|llc|co|corp|of|for|as|"
+    r"[adfn]/k/a|d/?b/?a|formerly|individually)\b|"
+    r"(?i:(?:cross[- ])?(?:plaintiffs?|defendants?|appell(?:ants?|ees?)|"
+    r"petitioners?|respondents?|intervenors?|claimants?|relators?|"
+    r"movants?|garnishees?|libell?ants?|libell?ees?|complainants?)\b))")
+
+
+def first_case_lines(text: str) -> str:
+    """A caption's lines (*text*, a line to each "\\n"), cut to its first case
+    where it heads more than one with no period between them for
+    :func:`cut_companion_cases` to cut at.  The second case begins at the
+    first line after the first case's opponent that carries on no party
+    above it: "HOBBINS / v. / ATTORNEY GENERAL / PEOPLE / v. / KEVORKIAN NO
+    2" (205 Mich. App. 194) is Hobbins v. Attorney General.  Where no line
+    begins one — "ALUMNI ASSOCIATION … / v. / Van Kingsley SULLIVAN … / v.
+    / KAPPA CHAPTER …", a third party's claim joined to the case (535 A.2d
+    1095) — it ends at the second separator: only the first party on each
+    side of the first is cited (rule 10.2.1(a))."""
+    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    seps = [(i, m.start(), m.end()) for i, ln in enumerate(lines)
+            for m in _CAPTION_SEPARATOR_RE.finditer(ln)]
+    seps += [(i, 0, len(ln)) for i, ln in enumerate(lines)
+             if _CAPTION_SEPARATOR_LINE_RE.fullmatch(ln)
+             and (i, 0, len(ln)) not in seps]
+    seps.sort()
+    if len(seps) < 2:
+        return text
+    joined = " ".join(lines)
+    if cut_companion_cases(joined) != joined:
+        return text           # a period marks where the second case begins
+    (l1, _s1, e1), (l2, s2, _e2) = seps[0], seps[1]
+    first_right = l1 if lines[l1][e1:].strip() else l1 + 1
+    last_left = l2 if lines[l2][:s2].strip() else l2 - 1
+    for k in range(first_right + 1, last_left + 1):
+        if not (_PARTY_RUNS_ON_RE.search(lines[k - 1])
+                or _PARTY_CARRIED_RE.match(lines[k])):
+            return "\n".join(lines[:k])
+    head = lines[l2][:s2].rstrip()
+    return "\n".join(lines[:l2] + ([head] if head else []))
+
+
 def cut_companion_cases(text: str) -> str:
     """Keep only the first-listed case of a consolidated caption (Bluebook
     rule 10.2.1(b)).

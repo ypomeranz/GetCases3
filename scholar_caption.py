@@ -16,6 +16,7 @@ from bluebook_names import (
     cut_companion_cases as _cut_companion_cases,
     described_person_surname,
     ejectment_party_caption,
+    first_case_lines,
     first_party_in_capitals,
     in_re_caps_name,
     in_re_for_petition,
@@ -344,7 +345,8 @@ def caption_text(block) -> str:
     ATTORNEY GENERAL", line by line and with no period between the two, and
     had been cited "People v. Kevorkian Hobbins v. Att'y Gen.".  Only a
     link that opens after the case's own "v.": a caption linked throughout
-    is its own."""
+    is its own.  A case set under it unlinked, with only a line break
+    between the two, goes too (see first_case_lines)."""
     out: list[str] = []
     links: set = set()
     for s in block.spans:
@@ -356,7 +358,8 @@ def caption_text(block) -> str:
             break
         links.add(s.link)
         out.append(s.text)
-    return "".join(out)
+    # …nor, where nothing but a line break sets it apart, a case under it.
+    return first_case_lines("".join(out))
 
 
 def scholar_caption_name(blocks) -> str:
