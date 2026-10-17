@@ -373,6 +373,54 @@ class RecoveredCitationPersistenceTests(unittest.TestCase):
                 db.close()
 
 
+class HarvardScanTests(unittest.TestCase):
+    """Pierson v. Post, 3 Cai. R. 175 (N.Y. Sup. Ct. 1805): "CourtListener
+    has no PDF", though its site links one.  The opinion record has neither
+    a local_path nor a download_url; the scan is the cluster's — its
+    filepath_pdf_harvard, harvard_pdf/5618666.pdf."""
+
+    class Client:
+        def __init__(self, harvard):
+            self.harvard = harvard
+            self.heads = []
+            self._session = SimpleNamespace(
+                headers={}, head=lambda url, **kw: self.heads.append(url)
+                or SimpleNamespace(status_code=200, headers={
+                    "Content-Type": "application/pdf"}))
+
+        def get_cluster(self, _cluster_id, fields=None):
+            self.fields = fields
+            return {"sub_opinions": [
+                "https://www.courtlistener.com/api/rest/v4/opinions/5463621/"],
+                "filepath_pdf_harvard": self.harvard}
+
+        def _get_url(self, _url, _params=None):
+            return {"local_path": None, "download_url": None}
+
+    def _resolve(self, client):
+        app = object.__new__(gui.CourtListenerGUI)
+        app._get_scholar = lambda: None
+        item = {"cluster_id": 5618666, "caseName": "Pierson v. Post",
+                "citation": ["3 Cai. Cas. 175"], "court_id": "nysupct"}
+        with (
+            mock.patch.object(gui, "_gather_all_citations",
+                              return_value=["3 Cai. Cas. 175"]),
+            mock.patch.object(gui, "_case_law_pdf_choices_for_cites",
+                              return_value=[]),
+        ):
+            return gui.CourtListenerGUI._resolve_pdf_url(app, client, item)
+
+    def test_the_cluster_s_harvard_scan(self):
+        client = self.Client("harvard_pdf/5618666.pdf")
+        self.assertEqual(
+            self._resolve(client),
+            "https://storage.courtlistener.com/harvard_pdf/5618666.pdf")
+        self.assertIn("filepath_pdf_harvard", client.fields)
+
+    def test_none_without_one(self):
+        self.assertIsNone(self._resolve(self.Client(None)))
+
+
 class ResolverIntegrationTests(unittest.TestCase):
     class Session:
         headers = {}

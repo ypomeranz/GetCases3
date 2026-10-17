@@ -2266,17 +2266,38 @@ def _court_for_paren(citation: str, court_id: str, fallback: str = "") -> str:
     return abbr
 
 
-def _bluebook_reporter_spelling(cite: str) -> str:
+#: Reporters whose Bluebook abbreviation (table T1) is not the spelling the
+#: app files them under: Caines' Reports is "Cai. R." — kept apart from
+#: Caines' Cases, "Cai. Cas." — though static.case.law calls it "Cai.".
+_BLUEBOOK_REPORTER_SPELLING = {"Cai.": "Cai. R."}
+
+#: The N.Y. Supreme Court of Judicature, which Caines' Reports reported.
+_CAINES_REPORTS_COURTS = frozenset({"nysupct"})
+
+
+def _bluebook_reporter_spelling(cite: str, court_id: str = "") -> str:
     """*cite* with its reporter spelled the Bluebook way where the app knows
     that reporter by another name: Washington's courts, and Google Scholar
     after them, write "104 Wn.2d 677", which the Bluebook cites as "104 Wash.
     2d 677" — and, being that state's official reporter, without the court in
-    the parenthetical.  Reporters with no such alias pass through as given."""
+    the parenthetical.  Reporters with no such alias pass through as given.
+
+    CourtListener files Caines' Reports under Caines' Cases: the reporters
+    database it reads takes static.case.law's "Cai." for "Cai. Cas.", so
+    Pierson v. Post, 3 Cai. R. 175 (N.Y. Sup. Ct. 1805), is "3 Cai. Cas. 175"
+    there.  A "Cai. Cas." from the Supreme Court (*court_id*), or in a third
+    volume — Caines' Cases ran to two — is Caines' Reports."""
     m = re.fullmatch(r"\s*(\d{1,4})\s+(.+?)\s+(\d{1,6})\s*", cite or "")
+    if m and re.sub(r"[^a-z]", "", m.group(2).lower()) == "caicas" and (
+            int(m.group(1)) >= 3
+            or str(court_id or "").strip().lower() in _CAINES_REPORTS_COURTS):
+        return f"{m.group(1)} Cai. R. {m.group(3)}"
     family = _reporter_family(m.group(2)) if m else None
     if family is None:
         return cite
-    return f"{m.group(1)} {family.canonical} {m.group(3)}"
+    spelled = _BLUEBOOK_REPORTER_SPELLING.get(family.canonical,
+                                              family.canonical)
+    return f"{m.group(1)} {spelled} {m.group(3)}"
 
 
 def _bluebook_display_name(item: dict) -> str:
@@ -2318,7 +2339,8 @@ def _bluebook_display_name(item: dict) -> str:
     # drop.
     if "(" not in citation_str:
         citation_str = _respace_reporter_in_cite(citation_str)
-    citation_str = _bluebook_reporter_spelling(citation_str)
+    citation_str = _bluebook_reporter_spelling(
+        citation_str, str(item.get("court_id") or ""))
     # Cases reported together under one name are cited by it (see
     # group_case_name), whatever the parties' captions say — and an old
     # ejectment case by the party the courts settled on (settled_case_name).
@@ -16429,7 +16451,8 @@ class CourtListenerGUI:
                 print(f"[resolve] fetching cluster {cluster_id}")
                 _load_step("Going through CourtListener's record of the "
                            "case…")
-                cluster = client.get_cluster(int(cluster_id), fields="sub_opinions")
+                cluster = client.get_cluster(
+                    int(cluster_id), fields="sub_opinions,filepath_pdf_harvard")
                 print(f"[resolve] sub_opinions = {cluster.get('sub_opinions')!r}")
                 for op_url in cluster.get("sub_opinions", []):
                     print(f"[resolve] fetching sub-opinion {op_url}")
@@ -16444,6 +16467,20 @@ class CourtListenerGUI:
                     if dl:
                         if _head_ok(dl, "download_url (sub-opinion)"):
                             return dl
+                # The case's Harvard scan, which CourtListener keeps on the
+                # cluster rather than on an opinion — what its site's PDF
+                # link serves.  Pierson v. Post's opinion has neither path;
+                # its cluster's filepath_pdf_harvard is harvard_pdf/5618666.pdf.
+                # (static.case.law, step 0.5, holds the same scan, but under
+                # its own name for the reporter: CourtListener files Pierson
+                # as "3 Cai. Cas. 175", which static.case.law has as 3 Cai.)
+                harvard = cluster.get("filepath_pdf_harvard") or ""
+                if harvard:
+                    url = storage_base + harvard.lstrip("/")
+                    if _head_ok(url, "Harvard scan (cluster)"):
+                        print(f"[resolve] using the cluster's Harvard scan: "
+                              f"{harvard}")
+                        return url
             except Exception as exc:
                 print(f"[resolve] cluster walk failed: {exc}")
 
@@ -20961,6 +20998,8 @@ def _resolve_step_text(label: str, url: str) -> str:
         return "Checking static.case.law's scan…"
     if label.startswith("local_path"):
         return "Checking CourtListener's stored copy…"
+    if label.startswith("Harvard"):
+        return "Checking CourtListener's copy of the Harvard scan…"
     if label.startswith("download_url"):
         return f"Checking the court's own copy ({_source_name(url)})…"
     return f"Checking {_source_name(url)}…"
@@ -31808,7 +31847,7 @@ class _ScholarTextWindow:
         # The reporter as the Bluebook spells it, as every other line the app
         # writes has it: "154 App. Div. 413" where the page prints the courts'
         # "154 A.D. 413", "104 Wash. 2d 677" for "104 Wn.2d 677".
-        display_cite = _bluebook_reporter_spelling(display_cite)
+        display_cite = _bluebook_reporter_spelling(display_cite, court_id)
         if court_id in ("wis", "wisctapp") or court_id.startswith("wis"):
             wi_cite = _wisconsin_display_cite(known_cites)
             if wi_cite:
@@ -32237,7 +32276,10 @@ class _ScholarTextWindow:
             # reporter with a parenthetical qualifier ("Media L. Rep. (BNA)")
             # alone — re-spacing would drop the parentheses.
             if "(" not in c:
-                c = _bluebook_reporter_spelling(_respace_reporter_in_cite(c))
+                c = _bluebook_reporter_spelling(
+                    _respace_reporter_in_cite(c),
+                    str(bb.get("court_id") or (self._item or {}).get(
+                        "court_id") or ""))
             key = re.sub(r"\s+", "", c).lower()
             identity_key = re.sub(r"[^a-z0-9]", "", c.lower())
             if pos and (key in display_key
