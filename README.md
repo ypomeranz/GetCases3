@@ -157,6 +157,13 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
 
 - A **case** citation opens that case's scan. A pin cite (`410 U.S. at 153`)
   opens at that page, and a footnote pin (`200 U.S. 12, 13 n.4`) at that note.
+- Opinions before 1900 often cite a case by the page they draw on rather than
+  its first page (Corfield v. Coryell's "8 Johns. 435"). Where no case begins
+  on that page, the case the reporter volume's list (static.case.law's) shows
+  running over it opens at the page: Putnam v. Wyley, 8 Johns. 432, at 435.
+  English Reports citations are already read this way. The old treatises
+  cited beside the cases in the same shape (`1 Chit. Pl. 166`, `2 Bl. Comm.
+  389`, `1 Bac. Abr. 123`) are not linked: there is no case to open.
 - A **statute, regulation, court rule or the Constitution** opens in a statute
   viewer. A U.S. Code or C.F.R. section, or a federal rule, shows where it
   sits ("Fed. R. Civ. P. › Title III › Rule 12"); click a level, or press

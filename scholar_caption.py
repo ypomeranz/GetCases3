@@ -23,6 +23,7 @@ from bluebook_names import (
     middle_initial_v,
     name_persons_by_surname,
     normal_case_caption as _titlecase_caps,
+    normalize_et_al,
     refine_caption_case,
     simplify_historical_entity_caption,
     split_relator,
@@ -124,9 +125,11 @@ _PARTY_DESIGNATION_RE = re.compile(
 )
 
 # A comma segment that is a business-entity suffix continuing the previous
-# segment ("Socony-Vacuum Oil Co., Inc." — one party, two segments).
+# segment ("Socony-Vacuum Oil Co., Inc." — one party, two segments), spelled
+# out as the old reports print it too: "CANADIAN AVIATOR, LIMITED" (324 U.S.
+# 215) is Canadian Aviator, Ltd., which lost its "Limited" as a co-party.
 _ENTITY_SUFFIX_RE = re.compile(
-    r"(?:inc|incorporated|l\.?l\.?c|l\.?l\.?p|l\.?p|ltd|ltda|p\.?l\.?c|"
+    r"(?:inc|incorporated|l\.?l\.?c|l\.?l\.?p|l\.?p|ltd|limited|ltda|p\.?l\.?c|"
     r"p\.?c|s\.?a|s\.?p\.?a|a\.?g|n\.?v|s\.?l|gmbh|co|corp|n\.?a)\.?",
     re.IGNORECASE,
 )
@@ -139,7 +142,7 @@ _ORG_TAIL_RE = re.compile(
     r"r\.?r\.?|union|association|ass'n|brotherhood|workers|helpers|"
     r"america|bank|trust|society|club|university|college|institute|"
     r"partners(?:hip)?|group|bros\.?|brothers|sons|"
-    r"inc\.?|llc|llp|ltd\.?|plc)\s*\.?\s*$",
+    r"inc\.?|llc|llp|ltd\.?|limited|plc)\s*\.?\s*$",
     re.IGNORECASE,
 )
 
@@ -167,6 +170,15 @@ def caption_party(s: str) -> str:
         p = re.sub(r"\s*\[[^\]]{1,4}\]\s*$", "", p.strip())  # footnote marker
         p = re.sub(r"[:]+$", "", p).strip()
         return re.sub(r"\s+et\s+als?\.?$", "", p, flags=re.IGNORECASE).strip()
+
+    # The early reports' "JOHN GLASS AND AL." is "et al." (see
+    # bluebook_names.normalize_et_al).
+    s = normalize_et_al(s)
+    # The comma a reporter sets inside a closing quote — "The “ATLANTIC
+    # SUN,” Her Engines, Boilers, etc." — closes the vessel's name, not a
+    # segment of it: the quotes stay together (see abbreviate_case_name's
+    # in rem res).
+    s = re.sub(r"([,;])([”\"])", r"\2\1", s)
 
     # A relator clause is the party's, not a co-party to cut away (rule
     # 10.2.1(b)): "THE UNITED STATES, ON THE RELATION OF WILLIAM B. STOKES

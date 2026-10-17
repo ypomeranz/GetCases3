@@ -96,6 +96,47 @@ def pretty_number(no: str) -> str:
     return f"{int(m.group(1)):,}{m.group(2)}"
 
 
+def bluebook_number(no: str) -> str:
+    """A case number as a citation prints it — "(No. 9487)", "(No. 15,612)":
+    a comma only in a number of five or more digits (rule 6.2(a))."""
+    m = re.fullmatch(r"(\d+)([a-z]?)", str(no or ""))
+    if not m:
+        return str(no or "")
+    n = int(m.group(1))
+    return f"{n:,}{m.group(2)}" if n >= 10000 else f"{n}{m.group(2)}"
+
+
+def case_number_in(text: str, volume: "str | int") -> str:
+    """The case number a Federal Cases report heads itself with ("Case No.
+    15,612." above the caption), read off the start of its *text* and
+    checked against the *volume* the case is in: the normalized number
+    ("15612"), or "" when none is printed there or it can't be squared
+    with the volume.
+
+    The texts are OCR, and a misread digit is common: the text of United
+    States v. The Little Charles, 26 F. Cas. 979, heads it "Case No.
+    16,612.", a number volume 28 holds.  A number outside its volume's span
+    (see :data:`VOLUME_RANGES`) is repaired when changing exactly one of its
+    digits — and only one such change — puts it inside."""
+    m = _CASE_NO_RE.search((text or "")[:600])
+    if not m:
+        return ""
+    digits = re.sub(r"\D", "", m.group(1))
+    suffix = m.group(2) or ""
+    if not digits:
+        return ""
+    no = str(int(digits)) + suffix
+    if plausible_volume(no, volume):
+        return no
+    repairs = {
+        digits[:i] + d + digits[i + 1:]
+        for i, ch in enumerate(digits) for d in "0123456789"
+        if d != ch and not (i == 0 and d == "0")
+        and plausible_volume(digits[:i] + d + digits[i + 1:] + suffix, volume)
+    }
+    return (repairs.pop() + suffix) if len(repairs) == 1 else ""
+
+
 # ---------------------------------------------------------------------------
 # Detection
 # ---------------------------------------------------------------------------

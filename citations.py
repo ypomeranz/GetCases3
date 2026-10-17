@@ -486,6 +486,20 @@ _NONCASE_REPORTERS = {
     # being linked and left it standing alone.
     "cir", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
     "oct", "nov", "dec",
+    # The treatises the old reports cite by volume and page beside the cases
+    # — "1 Chit. Pl. 166, 67. So as to trover. 1 Chit. Pl. 150; 8 Johns.
+    # 435" (Corfield v. Coryell, 6 F. Cas. 546) — Chitty on Pleading,
+    # Blackstone's and Kent's Commentaries, the abridgments and digests,
+    # Starkie, Phillips and Greenleaf on Evidence, Selwyn's Nisi Prius, the
+    # Pleas of the Crown.  No case is there to open; the reporters named for
+    # the same men ("1 Chit. 123", "2 H. Bl. 123", "1 Saund. 123") are
+    # another key.
+    "chitpl", "chitgenpr", "chitcont", "chitcrimlaw", "chitcrl", "chitbills",
+    "blcomm", "blcom", "blacomm", "blacom", "blackcomm", "blackcom",
+    "kentcomm", "kentcom", "kentscomm", "kentscom",
+    "bacabr", "vinabr", "rollabr", "comdig", "cruisedig",
+    "starkev", "starkieev", "philev", "phillev", "greenlev", "greenlfev",
+    "selwnp", "saundplev", "hawkpc", "halepc", "eastpc",
 }
 _PLAIN_CASE_REPORTERS = {
     "alaska", "idaho", "iowa", "ohio", "utah", "vermont", "wyoming",

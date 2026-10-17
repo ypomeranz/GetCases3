@@ -2266,17 +2266,38 @@ def _court_for_paren(citation: str, court_id: str, fallback: str = "") -> str:
     return abbr
 
 
-def _bluebook_reporter_spelling(cite: str) -> str:
+#: Reporters whose Bluebook abbreviation (table T1) is not the spelling the
+#: app files them under: Caines' Reports is "Cai. R." — kept apart from
+#: Caines' Cases, "Cai. Cas." — though static.case.law calls it "Cai.".
+_BLUEBOOK_REPORTER_SPELLING = {"Cai.": "Cai. R."}
+
+#: The N.Y. Supreme Court of Judicature, which Caines' Reports reported.
+_CAINES_REPORTS_COURTS = frozenset({"nysupct"})
+
+
+def _bluebook_reporter_spelling(cite: str, court_id: str = "") -> str:
     """*cite* with its reporter spelled the Bluebook way where the app knows
     that reporter by another name: Washington's courts, and Google Scholar
     after them, write "104 Wn.2d 677", which the Bluebook cites as "104 Wash.
     2d 677" — and, being that state's official reporter, without the court in
-    the parenthetical.  Reporters with no such alias pass through as given."""
+    the parenthetical.  Reporters with no such alias pass through as given.
+
+    CourtListener files Caines' Reports under Caines' Cases: the reporters
+    database it reads takes static.case.law's "Cai." for "Cai. Cas.", so
+    Pierson v. Post, 3 Cai. R. 175 (N.Y. Sup. Ct. 1805), is "3 Cai. Cas. 175"
+    there.  A "Cai. Cas." from the Supreme Court (*court_id*), or in a third
+    volume — Caines' Cases ran to two — is Caines' Reports."""
     m = re.fullmatch(r"\s*(\d{1,4})\s+(.+?)\s+(\d{1,6})\s*", cite or "")
+    if m and re.sub(r"[^a-z]", "", m.group(2).lower()) == "caicas" and (
+            int(m.group(1)) >= 3
+            or str(court_id or "").strip().lower() in _CAINES_REPORTS_COURTS):
+        return f"{m.group(1)} Cai. R. {m.group(3)}"
     family = _reporter_family(m.group(2)) if m else None
     if family is None:
         return cite
-    return f"{m.group(1)} {family.canonical} {m.group(3)}"
+    spelled = _BLUEBOOK_REPORTER_SPELLING.get(family.canonical,
+                                              family.canonical)
+    return f"{m.group(1)} {spelled} {m.group(3)}"
 
 
 def _bluebook_display_name(item: dict) -> str:
@@ -2318,7 +2339,8 @@ def _bluebook_display_name(item: dict) -> str:
     # drop.
     if "(" not in citation_str:
         citation_str = _respace_reporter_in_cite(citation_str)
-    citation_str = _bluebook_reporter_spelling(citation_str)
+    citation_str = _bluebook_reporter_spelling(
+        citation_str, str(item.get("court_id") or ""))
     # Cases reported together under one name are cited by it (see
     # group_case_name), whatever the parties' captions say — and an old
     # ejectment case by the party the courts settled on (settled_case_name).
@@ -2951,6 +2973,57 @@ def _case_law_named_url(cite: str, url: str, name: str) -> str:
     print(f"[case.law] {cite!r} begins {held!r} in static.case.law's "
           f"printing; {name!r} is its file {named[0]}")
     return f"{m.group(1)}/{named[0]}.{m.group(6)}"
+
+
+#: Opinions this old cite a case by the page they draw on as often as by the
+#: page it begins on (see _case_law_case_containing_page).
+_PAGE_INSIDE_CASE_BEFORE = 1900
+
+
+def _case_law_case_containing_page(
+        cite: str, name: str = "") -> "Optional[tuple[str, str]]":
+    """The case a page cited as though a case began there falls inside, by
+    static.case.law's list of the cases in its volume: ``(the case's own
+    citation, its name)``, or None.
+
+    The old reports cite the page they draw on, not always the page the case
+    begins on: "So as to trover. 1 Chit. Pl. 150; 8 Johns. 435; 7 Johns. 9;
+    … 11 Johns. 385" (Corfield v. Coryell, 6 F. Cas. 546 (C.C.E.D. Pa.
+    1823)) — no case begins at 8 Johns. 435, which is the fourth page of
+    Putnam v. Wyley, 8 Johns. 432–36; 11 Johns. 385 is in Van Brunt v.
+    Schenck, 11 Johns. 377–89.  The case is the last to begin before the page
+    — of several begun on one page, the last of them — so long as it runs on
+    to the page, as far as the list says it runs (or :data:`_PIN_AS_CITE_SPAN`
+    pages, where it says nothing).  None where a case begins at the page
+    (that one is the case), where the volume's list can't be read, and where
+    *name* is given and the case is not the one it names."""
+    base = (cite or "").split("@", 1)[0].strip()
+    cm = _CITE_PARSE_RE.match(base)
+    m = _CASE_LAW_FILE_URL_RE.match(_static_case_law_url(base) or "")
+    if not (cm and m):
+        return None
+    files, names, lengths = _case_law_volume(m.group(2), m.group(3))
+    if not files or _case_law_cite_key(base) in files:
+        return None
+    vol, rep, page = cm.group(1), cm.group(2).strip(), int(cm.group(3))
+    prefix = _case_law_cite_key(f"{vol} {rep} ")
+    begun = sorted(
+        (int(key[len(prefix):]), stem) for key, stems in files.items()
+        if key.startswith(prefix) and key[len(prefix):].isdigit()
+        for stem in stems if int(key[len(prefix):]) < page)
+    if not begun:
+        return None
+    first, stem = begun[-1]
+    length = lengths.get(stem, 0)
+    if page > (first + length - 1 if length > 0
+               else first + _PIN_AS_CITE_SPAN):
+        return None
+    held = names.get(stem, "")
+    name = re.sub(r"<[^>]+>", "", name or "").strip()
+    if name and not _is_the_named_case(name, held):
+        return None
+    print(f"[case.law] {cite!r} is a page of {held!r}, {vol} {rep} {first}")
+    return f"{vol} {rep} {first}", held
 
 
 @dataclass(frozen=True)
@@ -7273,13 +7346,21 @@ def _assemble_case_parts(client, item: dict) -> tuple:
             # that blank lines inside those pre chunks are real paragraphs,
             # which restores the bylines needed by Prado, Duncan, and similar
             # modern slip opinions.
-            if len(cblocks) <= 2 and len(html_text) > 4000:
+            # A text in many pre chunks, a citation link set between each two
+            # (164 F.4th 529, the Sixth Circuit's order denying rehearing en
+            # banc), splits at every link — ", 735–36 (1977). I respect …" —
+            # into hundreds of fragments with no paragraph a byline could open:
+            # its paragraphs are the CL parser's too.
+            pre_chunks = html_text.count('<pre class="inline">') > 1
+            if (len(cblocks) <= 2 or pre_chunks) and len(html_text) > 4000:
                 alt_blocks, cfootnotes = _parse_cl_html(
                     html_text, fn_prefix="combined_"
                 )
-                if len(alt_blocks) > len(cblocks):
+                if len(alt_blocks) > len(cblocks) or (pre_chunks
+                                                      and alt_blocks):
                     cblocks = alt_blocks
-                if (combined.get("plain_text") or "").strip():
+                if ((not pre_chunks or len(cblocks) <= 2)
+                        and (combined.get("plain_text") or "").strip()):
                     # Some lawbox records expose their real paragraph breaks
                     # only in ``plain_text``; both HTML parsers see a pair of
                     # giant centered/pre blocks.  Recover those paragraphs so
@@ -13073,7 +13154,9 @@ class CourtListenerGUI:
                             scholar_url: str = "",
                             known_item: "Optional[dict]" = None,
                             race_fallback=None,
-                            prefer_scan: bool = False) -> bool:
+                            prefer_scan: bool = False,
+                            context_year: str = "",
+                            inside_checked: bool = False) -> bool:
         """Follow a citation clicked *inside a PDF* to the cited case's own
         PDF, in a viewer window of its own.
 
@@ -13118,6 +13201,15 @@ class CourtListenerGUI:
         ``fallback`` if nothing anywhere has the case.  ``prefer_scan``: the
         scan opens wherever there is one, the text only when there is none
         (a citation followed out of a document; see _CaseOpenRace).
+
+        ``context_year``: the year of the opinion the citation was read in.
+        One older than :data:`_PAGE_INSIDE_CASE_BEFORE` may cite a case by a
+        page inside it — Corfield v. Coryell's "8 Johns. 435" is Putnam v.
+        Wyley, 8 Johns. 432 — so where no case begins at the page, the one
+        static.case.law's volume says runs over it opens, at that page (see
+        _case_law_case_containing_page).  The volume's list is read first, on
+        a thread of its own, and the lookup begins again by the case's own
+        citation (``inside_checked``).
         """
         kind, value = action if isinstance(action, tuple) else ("", "")
         if kind != "cite":
@@ -13136,6 +13228,38 @@ class CourtListenerGUI:
                 status(text)
             except tk.TclError:
                 pass
+
+        year_read = str(context_year or "").strip()[:4]
+        if (not inside_checked and year_read.isdigit()
+                and int(year_read) < _PAGE_INSIDE_CASE_BEFORE):
+            def check_page() -> None:
+                onward, onward_name = action, name
+                try:
+                    inside = _case_law_case_containing_page(cite, name)
+                except Exception as exc:
+                    print(f"[cite-pdf] reading {cite!r}'s volume failed: "
+                          f"{exc}")
+                    inside = None
+                if inside:
+                    first, held = inside
+                    page = _CITE_PARSE_RE.match(cite).group(3)
+                    onward = ("cite", f"{first}@{pin or page}")
+                    onward_name = name or held
+
+                def go_on() -> None:
+                    self.open_cited_case_pdf(
+                        parent, onward, snippet, status, fallback,
+                        name=onward_name, context_name=context_name,
+                        ask_orders=ask_orders, race=race, year=year,
+                        scholar_url=scholar_url, known_item=known_item,
+                        race_fallback=race_fallback, prefer_scan=prefer_scan,
+                        inside_checked=True)
+
+                self._post_root(go_on)
+
+            safe_status(f"Opening {name or cite}…")
+            threading.Thread(target=check_page, daemon=True).start()
+            return True
 
         label = name or cite
         # Slow to come, the case gets a window of its own saying what is
@@ -16429,7 +16553,8 @@ class CourtListenerGUI:
                 print(f"[resolve] fetching cluster {cluster_id}")
                 _load_step("Going through CourtListener's record of the "
                            "case…")
-                cluster = client.get_cluster(int(cluster_id), fields="sub_opinions")
+                cluster = client.get_cluster(
+                    int(cluster_id), fields="sub_opinions,filepath_pdf_harvard")
                 print(f"[resolve] sub_opinions = {cluster.get('sub_opinions')!r}")
                 for op_url in cluster.get("sub_opinions", []):
                     print(f"[resolve] fetching sub-opinion {op_url}")
@@ -16444,6 +16569,20 @@ class CourtListenerGUI:
                     if dl:
                         if _head_ok(dl, "download_url (sub-opinion)"):
                             return dl
+                # The case's Harvard scan, which CourtListener keeps on the
+                # cluster rather than on an opinion — what its site's PDF
+                # link serves.  Pierson v. Post's opinion has neither path;
+                # its cluster's filepath_pdf_harvard is harvard_pdf/5618666.pdf.
+                # (static.case.law, step 0.5, holds the same scan, but under
+                # its own name for the reporter: CourtListener files Pierson
+                # as "3 Cai. Cas. 175", which static.case.law has as 3 Cai.)
+                harvard = cluster.get("filepath_pdf_harvard") or ""
+                if harvard:
+                    url = storage_base + harvard.lstrip("/")
+                    if _head_ok(url, "Harvard scan (cluster)"):
+                        print(f"[resolve] using the cluster's Harvard scan: "
+                              f"{harvard}")
+                        return url
             except Exception as exc:
                 print(f"[resolve] cluster walk failed: {exc}")
 
@@ -18482,6 +18621,11 @@ def _scholar_court_id(blocks) -> str:
         t = re.sub(r"\s+", " ", _plain_state_names(b.text())
                    ).strip().rstrip(".").lower()
         if not t or "court" not in t or "district court" in t or "bankruptcy" in t:
+            continue
+        # …and so is a federal circuit court of old, which names its state:
+        # "Circuit Court, D. Virginia." (26 F. Cas. 979) is C.C.D. Va.
+        # (_scholar_trial_court), not Virginia's own courts.
+        if _bluebook_federal_trial_court(re.sub(r"\s+", " ", b.text()).strip()):
             continue
         # The caption is no court line, though its parties may name a state
         # and a "court" — "WP Company LLC, d/b/a The Washington Post" put a
@@ -20956,6 +21100,8 @@ def _resolve_step_text(label: str, url: str) -> str:
         return "Checking static.case.law's scan…"
     if label.startswith("local_path"):
         return "Checking CourtListener's stored copy…"
+    if label.startswith("Harvard"):
+        return "Checking CourtListener's copy of the Harvard scan…"
     if label.startswith("download_url"):
         return f"Checking the court's own copy ({_source_name(url)})…"
     return f"Checking {_source_name(url)}…"
@@ -22833,6 +22979,12 @@ def _part_tip_text(label: str, kind: str, page: object = None) -> str:
     known.  The slim rail that replaces that strip carries no tip — pointing
     at the scrollbar names every writing at once (see _PartNameFlash)."""
     name = _PART_KIND_NAMES.get(kind, "Part")
+    if kind == "majority" and label == "Order":
+        # The unsigned order a court issues (google_scholar.segment_blocks).
+        return f"Order of the court — p. {page}" if page else "Order of the court"
+    if kind == "separate" and re.search(r"^\s*Statement\b|\brespecting\b",
+                                        label or "", re.IGNORECASE):
+        name = "Statement"      # respecting an order: neither concurs nor dissents
     author = _part_author(label, loose=kind in _AUTHORED_PART_KINDS)
     if author and author.lower() == name.lower():
         author = ""     # a heading that is only the word "Dissent" names nobody
@@ -28544,7 +28696,10 @@ class _ScholarTextWindow:
         paren = "" if bb.get("omit_parenthetical") else " ".join(
             p for p in (court, year) if p
         )
-        return f"{value} ({paren})" if value and paren else value
+        value = f"{value} ({paren})" if value and paren else value
+        if bb.get("fedcas_no") and _FED_CAS_CITE_RE.search(cite or ""):
+            value += f" (No. {fed_cas.bluebook_number(bb['fedcas_no'])})"
+        return value
 
     def _set_base_citation_override(self, value: str) -> None:
         """Persist a custom base citation, or restore the automatic one."""
@@ -31336,6 +31491,8 @@ class _ScholarTextWindow:
         if name == "per curiam":
             return "Opinion (per curiam)" if kind == "majority" else "per curiam"
         if kind == "majority":
+            if label == "Order":
+                return "Order"
             return f"Opinion ({name})" if name else "Opinion"
         # Dissent / concurrence: surname alone (colour distinguishes the two).
         name = name or _part_author(label, loose=True)
@@ -31800,7 +31957,7 @@ class _ScholarTextWindow:
         # The reporter as the Bluebook spells it, as every other line the app
         # writes has it: "154 App. Div. 413" where the page prints the courts'
         # "154 A.D. 413", "104 Wash. 2d 677" for "104 Wn.2d 677".
-        display_cite = _bluebook_reporter_spelling(display_cite)
+        display_cite = _bluebook_reporter_spelling(display_cite, court_id)
         if court_id in ("wis", "wisctapp") or court_id.startswith("wis"):
             wi_cite = _wisconsin_display_cite(known_cites)
             if wi_cite:
@@ -31822,9 +31979,19 @@ class _ScholarTextWindow:
                 docket_paren = " ".join(p for p in (court_name, decided) if p)
             else:
                 docket_cite = ""
+        # A Federal Cases citation carries the case's number (table T1):
+        # "Ex parte Merryman, 17 F. Cas. 144 (C.C.D. Md. 1861) (No. 9487)" —
+        # read off the report's head matter, and checked against the volume
+        # (see fed_cas.case_number_in).
+        fedcas_no = ""
+        fm = re.match(r"\s*(\d+)\s+F(?:ed)?\.\s?Cas\.\s", display_cite or cite)
+        if fm:
+            fedcas_no = fed_cas.case_number_in(
+                " ".join(b.text() for b in (self._blocks or [])[:12]),
+                fm.group(1))
         return {
             "name": name, "cite": cite, "display_cite": display_cite,
-            "court": court_abbr, "year": year,
+            "court": court_abbr, "year": year, "fedcas_no": fedcas_no,
             # A year the page gives that may be its term's, for
             # _enrich_citation to settle; "" when there is no doubt.
             "_term_year": term_year,
@@ -31879,7 +32046,13 @@ class _ScholarTextWindow:
         header = [b for p in parts if p.kind == "header" for b in p.blocks]
         lead = next((p for p in parts if p.kind == "majority"), None)
         front = [b.text() for b in header + (lead.blocks[:3] if lead else [])]
-        openings = [p.blocks[0].text() for p in parts
+        # Each byline, under any heading the Sixth Circuit sets between rules
+        # over the writing ("_____ CONCURRENCE _____").
+        openings = [next((b.text() for b in p.blocks[:3]
+                          if not re.fullmatch(r"[\s_]*(?:[A-Z][A-Z ]{0,80})?"
+                                              r"[\s_]*", b.text())),
+                         p.blocks[0].text())
+                    for p in parts
                     if p.kind not in ("header", "majority") and p.blocks]
         # The bench may follow a long list of counsel.
         opening = header + (lead.blocks if lead else [])
@@ -31942,8 +32115,25 @@ class _ScholarTextWindow:
             return ""
         neutral_role = "separate opinion" if part.kind == "separate" else (
             "dissenting" if part.kind == "dissent" else "concurring")
-        t = block_text(part.blocks[0])
-        m = re.search(r"\b(?:concurring|dissenting)\b", t, re.IGNORECASE)
+        # The byline, under the heading the Sixth Circuit sets between rules
+        # over each writing ("CONCURRENCE", "STATEMENT").
+        t = next((bt for bt in map(block_text, part.blocks[:3])
+                  if not re.fullmatch(
+                      r"(?:_{3,}\s*)?(?:(?=[A-Z ]{0,80}(?:CONCUR|DISSENT|"
+                      r"STATEMENT|OPINION|ORDER))[A-Z][A-Z ]{0,80}?\s*"
+                      r"(?:_{3,})?|_{3,})", bt)),
+                 block_text(part.blocks[0]))
+        # A statement respecting an order neither concurs nor dissents:
+        # "JOHN K. BUSH, Circuit Judge, respecting the denial of rehearing en
+        # banc." is (statement of Bush, J., respecting the denial of
+        # rehearing en banc), as the Court cites its own: "(statement of
+        # SOTOMAYOR, J., respecting denial of certiorari)".
+        m = re.search(r"\b(?:concurring|dissenting)\b|\b(?:statement\s+)?"
+                      r"respecting\s+(?:the\s+)?(?:denial|grant|dismissal|"
+                      r"order|vacatur|disposition)\b", t, re.IGNORECASE)
+        statement = bool(m and m.group(0)[:1].lower() in "sr"
+                         and not re.match(r"concurring|dissenting",
+                                          m.group(0), re.IGNORECASE))
         # A vote set as the heading of the voter's opinion (see
         # google_scholar._VOTE_LINE_RE): "Mr. Justice DANIEL dissented." is
         # (Daniel, J., dissenting); "LOBRANO, J., CONCURS IN THE RESULTS."
@@ -32077,6 +32267,16 @@ class _ScholarTextWindow:
             phrase = phrase[:phrase.rindex(")")].rstrip(" .:;,")
         head = t[: m.start()].strip().rstrip(", ")
         head = re.sub(r"^(?:MR\.|MRS\.|MS\.)\s+", "", head, flags=re.IGNORECASE)
+        if statement:
+            phrase = re.sub(r"^statement\s+", "", phrase, flags=re.IGNORECASE)
+            # "Statement of JUSTICE SOTOMAYOR respecting …", "Statement of
+            # Circuit Judge TATEL respecting …".
+            sm = re.match(r"Statement\s+of\s+(?:(?:MR\.|MRS\.|MS\.)\s+)?"
+                          r"(?:(Chief\s+)?(?:Circuit\s+|District\s+)?Judge\s+)?",
+                          head, re.IGNORECASE)
+            if sm and sm.group(0):
+                head = head[sm.end():] + (", Chief Judge" if sm.group(1)
+                                          else "")
         # The chief-justice test must look only at the author's own
         # designation — "JUSTICE THOMAS, with whom THE CHIEF JUSTICE and
         # JUSTICE ALITO join, dissenting" is Thomas, J., not C.J.
@@ -32134,6 +32334,8 @@ class _ScholarTextWindow:
             name = name[0] + name[1].lower()
         if not name:
             return ""
+        if statement:
+            return f"statement of {name}, {title}, {phrase}"
         return f"{name}, {title}, {phrase}"
 
     def _majority_author(self, part) -> str:
@@ -32174,8 +32376,8 @@ class _ScholarTextWindow:
         the "Majority Opinion".  Each type is then followed by its author, the
         way the concurrence and dissent headers already name theirs."""
         maj = next((p for p in parts if p.kind == "majority"), None)
-        if maj is None:
-            return
+        if maj is None or maj.label == "Order":
+            return      # an order the court issued unsigned (segment_blocks)
         has_dissent = any(p.kind == "dissent" for p in parts)
         has_concurrence = any(p.kind == "concurrence" for p in parts)
         has_separate = any(p.kind == "separate" for p in parts)
@@ -32219,7 +32421,10 @@ class _ScholarTextWindow:
             # reporter with a parenthetical qualifier ("Media L. Rep. (BNA)")
             # alone — re-spacing would drop the parentheses.
             if "(" not in c:
-                c = _bluebook_reporter_spelling(_respace_reporter_in_cite(c))
+                c = _bluebook_reporter_spelling(
+                    _respace_reporter_in_cite(c),
+                    str(bb.get("court_id") or (self._item or {}).get(
+                        "court_id") or ""))
             key = re.sub(r"\s+", "", c).lower()
             identity_key = re.sub(r"[^a-z0-9]", "", c.lower())
             if pos and (key in display_key
@@ -32541,6 +32746,9 @@ class _ScholarTextWindow:
             )
             if paren_inner:
                 rest += f" ({paren_inner})"
+            if bb.get("fedcas_no") and _FED_CAS_CITE_RE.search(cite or ""):
+                # The Federal Cases number (table T1), after the date.
+                rest += f" (No. {fed_cas.bluebook_number(bb['fedcas_no'])})"
             en_banc = "en banc" if self._decided_en_banc() else ""
             rest += join_parentheticals((en_banc, writer, *extra_parens))
             history = ""
@@ -34649,7 +34857,11 @@ class _ScholarTextWindow:
                         break
             else:
                 lines.append(("h", "Dissent" if part.kind == "dissent"
-                              else "Concurrence"))
+                              else "Concurrence" if part.kind != "separate"
+                              else "Statement" if re.search(
+                                  r"^Statement\b|\brespecting\b",
+                                  part.label or "", re.IGNORECASE)
+                              else "Separate opinion"))
                 lines.append(("", _fix_name_case(clean(part.label))))
         return lines
 
@@ -35607,6 +35819,8 @@ class _ScholarTextWindow:
                     context_name=(getattr(self, "_bb", None) or {}).get(
                         "name", ""),
                     race=True, prefer_scan=True, scholar_url=scholar_page,
+                    context_year=(getattr(self, "_bb", None) or {}).get(
+                        "year", ""),
                 ):
                     return
             except Exception as exc:
@@ -37885,6 +38099,7 @@ class _ScholarTextWindow:
             context_name=(getattr(self, "_bb", None) or {}).get(
                 "name", ""),
             race=True, prefer_scan=True,
+            context_year=(getattr(self, "_bb", None) or {}).get("year", ""),
         )
         if not opened:      # not a case citation — a statute, a rule, a docket
             _follow_brief_action(self._app, parent, action,

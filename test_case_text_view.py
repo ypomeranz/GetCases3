@@ -713,6 +713,18 @@ class PartMapLabelTests(unittest.TestCase):
         self.assertEqual(self.short("PER CURIAM", "majority"),
                          "Opinion (per curiam)")
 
+    def test_an_order_and_a_statement_respecting_it(self):
+        # 164 F.4th 529 (6th Cir. 2026): the order denying rehearing en banc
+        # and Judge Bush's statement respecting the denial.
+        statement = ("JOHN K. BUSH, Circuit Judge, respecting the denial of "
+                     "rehearing en banc.")
+        self.assertEqual(self.short("Order", "majority"), "Order")
+        self.assertEqual(self.short(statement, "separate"), "Bush")
+        self.assertEqual(PART_TIP_TEXT("Order", "majority"),
+                         "Order of the court")
+        self.assertEqual(PART_TIP_TEXT(statement, "separate", 3),
+                         "Statement — Bush — p. 3")
+
     def test_a_circuit_judge_named_in_full_is_the_surname(self):
         # PHH Corp. v. CFPB, 881 F.3d 75 (D.C. Cir. 2018): the strip had
         # named Judge Henderson "Karen".

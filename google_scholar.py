@@ -1268,8 +1268,17 @@ _OCR_JUSTICE_BYLINE_RE = re.compile(
 # filed opinion, from becoming false boundaries.
 _JOINED_SEP_HEADER_RE = re.compile(
     r"^\s*(?:MR\.\s+|MRS\.\s+|MS\.\s+)?(?:CHIEF\s+)?JUSTICE\s+"
-    r"[A-Z][\w.'’-]+\s*,\s*with\s+whom\s+.{1,180}?\bjoins?\s*[.:]?\s*"
-    r"(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
+    r"[A-Z][\w.'’-]+\s*(?:"
+    r",\s*with\s+whom\s+.{1,180}?\bjoins?\s*[.:]?"
+    # The older reports' forms, the joiner named after the verb: "Mr.
+    # Justice CLIFFORD (with whom concurred Mr. Justice FIELD):" (The China,
+    # 74 U.S. (7 Wall.) 53) — set in parentheses, or after a comma with the
+    # heading's colon closing it.  (A sentence ending "… and Mr. Justice GRAY
+    # dissented." is a vote, no heading.)
+    r"|\(\s*with\s+whom\s+(?=[^()]*\b(?:concur|join|agree)\w*\b)[^()]{1,180}"
+    r"\)\s*[.:]?"
+    r"|,\s*with\s+whom\s+(?:concurred|joined|agreed)\s+[^:]{1,180}:"
+    r")\s*(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -1318,6 +1327,96 @@ _VOTE_LINE_RE = re.compile(
 )
 
 
+# A byline's name and title as the circuits and the Court set them, in
+# capitals: "KETHLEDGE, Circuit Judge", "JOHN K. BUSH, Circuit Judge",
+# "McKEAGUE, J.", "JUSTICE SOTOMAYOR".  The name is case-sensitive (a
+# "Mc"/"De" prefix aside), so a sentence opening "In his statement …, Judge
+# Bush" names nobody.
+_CAPS_NAME = r"(?-i:[A-Z](?:c|ac|e|a|i|o)?[A-Z.'’-]*)"
+_CAPS_BYLINE_NAME = (
+    r"(?:(?:MR\.\s+|MRS\.\s+|MS\.\s+)?(?:CHIEF\s+)?JUSTICE\s+" + _CAPS_NAME
+    + r"|" + _CAPS_NAME + r"(?:\s+" + _CAPS_NAME + r"){0,3}\s*,\s*"
+    r"(?:C\.\s*J\.|JJ?\.|(?:Chief\s+|Senior\s+|Presiding\s+)?"
+    r"(?:Circuit\s+|District\s+|Bankruptcy\s+)?(?:Judge|Justice)))"
+)
+# The judges a byline says join the writing, named before its role: "MURPHY,
+# Circuit Judge, with whom SUTTON, Chief Judge, and KETHLEDGE, Circuit Judge,
+# join, concurring in the denial of rehearing en banc."
+_BYLINE_JOINDER = r"(?:\s*,\s*with\s+whom\s+[^:]{1,240}?\bjoins?\b)?"
+# A writing that neither concurs nor dissents: a statement respecting an
+# order — "JOHN K. BUSH, Circuit Judge, respecting the denial of rehearing en
+# banc." (164 F.4th 529 (6th Cir. 2026)), "Statement of JUSTICE SOTOMAYOR
+# respecting the denial of certiorari."
+_RESPECTING_ROLE = (
+    r"(?:(?:filed\s+a\s+)?statement\s+)?respecting\s+(?:the\s+)?"
+    r"(?:denial|grant|dismissal|order|vacatur|disposition)\b"
+)
+_STATEMENT_HEADER_RE = re.compile(
+    r"^\s*(?:Statement\s+of\s+(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
+    r"(?:(?:CHIEF\s+)?JUSTICE|(?:Chief\s+|Senior\s+)?(?:Circuit\s+|"
+    r"District\s+)?Judge)\s+[A-Z][\w.'’-]+"
+    r"|" + _CAPS_BYLINE_NAME + r")" + _BYLINE_JOINDER
+    + r"\s*,?\s*" + _RESPECTING_ROLE + r"(?:[^.:]|\bNos?\.){0,200}"
+    r"[.:]?\s*(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
+    re.IGNORECASE,
+)
+
+
+def _is_statement_label(label: str) -> bool:
+    """Whether a part's heading opens a statement (see _STATEMENT_HEADER_RE),
+    which stays a "separate" writing: it neither concurs nor dissents."""
+    return bool(re.match(r"\s*Statement\b", label or "", re.IGNORECASE)
+                or re.search(r"\brespecting\s+(?:the\s+)?(?:denial|grant|"
+                             r"dismissal|order|vacatur|disposition)\b",
+                             label or "", re.IGNORECASE))
+
+
+# A byline that runs on into the writing's first sentence, as the Sixth
+# Circuit sets it: "KETHLEDGE, Circuit Judge, concurring. I join the court's
+# opinion…" (155 F.4th 795).  Group "byline" is split onto a block of its own.
+# The byline closes at its first period or colon, and the text after it opens
+# a sentence.  The role takes only what qualifies it — "in part and
+# dissenting in part", "in the denial of rehearing en banc" — and no clause
+# of a sentence: "FLAUM, Circuit Judge, concurring, joined the court's
+# opinion. He wrote…" is prose.
+_RUNON_BYLINE_RE = re.compile(
+    r"^\s*(?P<byline>" + _CAPS_BYLINE_NAME + _BYLINE_JOINDER + r"\s*,\s*"
+    r"(?P<role>(?:concurring|dissenting)"
+    r"(?:\s+(?:in|from|with|as\s+to|and)\b[^.:,]{0,140})?"
+    r"(?:,\s*(?:and\s+)?(?:concurring|dissenting)\b[^.:,]{0,100})?"
+    r"|" + _RESPECTING_ROLE + r"[^.:,]{0,160})"
+    r"(?P<end>[.:]))"
+    r"\s+(?=[“\"‘'(\[]?[A-Z])",
+    re.IGNORECASE,
+)
+
+# A heading the Sixth Circuit sets between rules over each writing —
+# "_________________ CONCURRENCE _________________", "STATEMENT", "ORDER",
+# "OPINION" — or a rule alone.  It goes with the writing it heads.
+_RULED_HEADING_RE = re.compile(
+    r"^\s*(?:_{3,}\s*)?"
+    r"(?:(?-i:(?=[A-Z ]{0,80}(?:CONCUR|DISSENT|STATEMENT|OPINION|ORDER))"
+    r"[A-Z][A-Z ]{0,80}?)\s*(?:_{3,})?|_{3,})\s*$"
+)
+# The heading over a court's order ("ORDER", set between rules), which opens
+# the court's own writing where no byline does.
+_ORDER_HEADING_RE = re.compile(
+    r"^\s*(?:_{3,}\s*)?(?-i:ORDER)\s*(?:\[[^\]\s]{1,6}\]|[*†‡])?\s*"
+    r"(?:_{3,})?\s*$"
+)
+
+
+def _ruled_heading_start(blocks: list, idx: int, floor: int) -> int:
+    """Where the writing whose byline is ``blocks[idx]`` starts: before the
+    ruled heading over it (see _RULED_HEADING_RE), never at or before
+    ``floor``."""
+    j = idx
+    while j - 1 > floor and _RULED_HEADING_RE.match(
+            _content_text(blocks[j - 1])):
+        j -= 1
+    return j
+
+
 def _opens_own_writing(blocks: list, i: int) -> bool:
     """Whether the writing after a vote line (see _VOTE_LINE_RE) is the
     voter's own — the next paragraph speaking in the first person: "In
@@ -1352,6 +1451,7 @@ def _peek_sep_kind_evidence(
                 or _JOINED_SEP_HEADER_RE.match(t)
                 or _SEP_DELIVERED_RE.match(t)
                 or _SEP_OF_RE.match(t)
+                or (len(t) <= 400 and _STATEMENT_HEADER_RE.match(t))
                 or _OCR_JUSTICE_BYLINE_RE.match(t)):
             break
         m = re.search(r"\b(dissent|concur)", t[:300], re.IGNORECASE)
@@ -1470,7 +1570,8 @@ def _resolve_neutral_sep_boundaries(
     lead_disposition = _majority_disposition_before(blocks, boundaries[0][0])
 
     for k, (start, kind, _label) in enumerate(boundaries):
-        if kind != "separate":
+        if kind != "separate" or _is_statement_label(
+                _content_text(blocks[start])):
             continue
         end = boundaries[k + 1][0] if k + 1 < len(boundaries) else len(blocks)
         direct = _neutral_sep_direct_kind(
@@ -1481,7 +1582,9 @@ def _resolve_neutral_sep_boundaries(
     # Work backward so an already-resolved later writing can establish the
     # role of the separate opinion with which it expressly agrees.
     for k in range(len(resolved) - 2, -1, -1):
-        if resolved[k][1] != "separate" or resolved[k + 1][1] == "separate":
+        if (resolved[k][1] != "separate" or resolved[k + 1][1] == "separate"
+                or _is_statement_label(
+                    _content_text(blocks[int(resolved[k][0])]))):
             continue
         next_start = int(resolved[k + 1][0])
         next_end = (int(resolved[k + 2][0])
@@ -1553,9 +1656,28 @@ def _split_inline_sep_headers(blocks: list[Block]) -> list[Block]:
     ``_SEP_HEADER_RE`` ("AFFIRMED. DIAZ, Chief Judge, concurring:" does,
     because the pattern's name run tolerates embedded periods) — otherwise
     the disposition sentence would open the separate opinion and pollute
-    its label and writer parenthetical."""
+    its label and writer parenthetical.
+
+    A byline the writing's first sentence runs on from ("KETHLEDGE, Circuit
+    Judge, concurring. I join…") is split from it the same way.  One closed
+    by a colon is left whole where the other byline patterns read it
+    already, unless it heads a statement."""
     out: list[Block] = []
     for b in blocks:
+        r = (_RUNON_BYLINE_RE.match(b.text()) if b.kind == "para" else None)
+        if (r and (r.group("end") == "."
+                   or not re.match(r"concurring|dissenting", r.group("role"),
+                                   re.IGNORECASE))
+                and not _NOT_SEP_RE.search(r.group("byline"))):
+            head, tail = _split_block_at(b, r.end("byline"))
+            while tail.spans and not tail.spans[0].text.strip():
+                tail.spans.pop(0)
+            if tail.spans:
+                tail.spans[0] = replace(tail.spans[0],
+                                        text=tail.spans[0].text.lstrip())
+                out.append(head)
+                out.append(tail)
+                continue
         m = _INLINE_SEP_HEADER_RE.search(b.text())
         if (
             m
@@ -1591,9 +1713,12 @@ _AUTHOR_LINE_RE = re.compile(
     r"\s*[.:;—-]?\s*$"
 )
 # Authorship can share the first numbered paragraph instead of occupying a
-# standalone line (Wisconsin slip opinions commonly use this form).
+# standalone line (Wisconsin slip opinions commonly use this form).  The name
+# is in capitals: "In his statement respecting the denial of rehearing en
+# banc, Judge Bush finds…" (the concurrence in 164 F.4th 529) names nobody.
 _INLINE_AUTHOR_OPEN_RE = re.compile(
-    r"^\s*[A-Z][A-Z.'’ -]{1,60},\s*(?:C\.?\s*J\.?|J\.|"
+    r"^\s*(?-i:[A-Z](?:c|ac|e|a|i|o)?[A-Z.'’ -]{1,60}),\s*"
+    r"(?:C\.?\s*J\.?|J\.|"
     r"(?:Chief\s+)?(?:Circuit\s+)?Judge)\s+(?=\S)",
     re.IGNORECASE,
 )
@@ -1863,6 +1988,13 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
             # Continuation of a wrapped joined-byline already captured from
             # the filing-banner block, not another opinion.
             continue
+        if (len(t) <= 400 and _STATEMENT_HEADER_RE.match(t)
+                and not _NOT_SEP_RE.search(t)):
+            # A statement respecting an order is a writing of its own that
+            # neither concurs nor dissents: it stays "separate".
+            boundaries.append((i, "separate", t if len(t) <= 90
+                               else t[:87] + "…"))
+            continue
         if (len(t) <= 300 and _SEP_HEADER_RE.match(t) and not _NOT_SEP_RE.search(t)
                 # "*267 BREYER, J., dissenting" opening on a page marker and
                 # ending with no punctuation is a reporter running head swept
@@ -1998,10 +2130,19 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
             boundaries.append((idx, kind, label))
         boundaries.sort(key=lambda bd: bd[0])
     boundaries = _resolve_neutral_sep_boundaries(blocks, boundaries)
+    # A writing starts at the ruled heading over it — the Sixth Circuit's
+    # "CONCURRENCE" set between rules — not at its byline below.
+    floor = maj_idx if maj_idx is not None else 0
+    headed: list[tuple[int, str, str]] = []
+    for idx, kind, label in boundaries:
+        headed.append((_ruled_heading_start(blocks, idx, floor), kind, label))
+        floor = idx
+    boundaries = headed
     first_sep = boundaries[0][0] if boundaries else len(blocks)
 
     parts: list[OpinionPart] = []
     if maj_idx is not None and maj_idx < first_sep:
+        maj_idx = _ruled_heading_start(blocks, maj_idx, 0)
         if maj_idx > 0:
             # SCOTUS-style pages (attribution phrase) carry a syllabus;
             # lower-court pages found via the author line don't.
@@ -2029,15 +2170,25 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
                 j += 1
                 continue
             break
+        # An order no byline signs opens at its heading, "ORDER" (164 F.4th
+        # 529, the Sixth Circuit's order denying rehearing en banc), with
+        # the bench, counsel and line-up before it — so long as nothing
+        # before it reads as the writing itself.
+        lead_label = "Majority Opinion" if boundaries else "Opinion"
+        order_idx = next(
+            (k for k in range(j, min(first_sep, 40))
+             if _ORDER_HEADING_RE.match(_content_text(blocks[k]))), None)
+        if order_idx is not None and maj_idx is None and all(
+                len(_content_text(b)) <= 700
+                or _FRONT_MATTER_RE.search(_content_text(b))
+                for b in blocks[j:order_idx]):
+            j = _ruled_heading_start(blocks, order_idx, j - 1)
+            lead_label = "Order"
         if 0 < j < first_sep:
             parts.append(OpinionPart("Header", "header", list(blocks[:j])))
         if first_sep > j:
             parts.append(
-                OpinionPart(
-                    "Majority Opinion" if boundaries else "Opinion",
-                    "majority",
-                    list(blocks[j:first_sep]),
-                )
+                OpinionPart(lead_label, "majority", list(blocks[j:first_sep]))
             )
     for k, (idx, kind, label) in enumerate(boundaries):
         end = boundaries[k + 1][0] if k + 1 < len(boundaries) else len(blocks)

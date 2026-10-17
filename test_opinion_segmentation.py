@@ -24,6 +24,39 @@ class JoinedSeparateOpinionTests(unittest.TestCase):
         self.assertIn("BLACKMUN", parts[1].label)
         self.assertTrue(parts[1].blocks[0].text().startswith("MR. JUSTICE BLACKMUN"))
 
+    def test_the_older_parenthesized_joinder_heading(self):
+        # The China, 74 U.S. (7 Wall.) 53 (1868): Clifford's concurrence,
+        # headed "Mr. Justice CLIFFORD (with whom concurred Mr. Justice
+        # FIELD):", ran on as the Court's opinion.  Its own first words say
+        # which way it goes.
+        parts = segment_blocks([
+            _block("Mr. Justice SWAYNE delivered the opinion of the court."),
+            _block("This is a case arising out of a collision between the "
+                   "steamship China and the brig Kentucky."),
+            _block("We have been impressed with the importance of its right "
+                   "administration in this case."),
+            _block("Mr. Justice CLIFFORD (with whom concurred Mr. Justice "
+                   "FIELD):"),
+            _block("I concur in the proposition that the pilot laws of New "
+                   "York afford no defence to the appellants in this case."),
+            _block("DECREE AFFIRMED."),
+        ])
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence"])
+        self.assertIn("CLIFFORD", parts[1].label)
+
+    def test_a_vote_with_whom_others_concurred_is_no_heading(self):
+        # The Scotland, 118 U.S. 507 (1886): the dissenters' vote, set as a
+        # sentence, heads no writing of theirs.
+        parts = segment_blocks([
+            _block("Mr. Justice BRADLEY delivered the opinion of the court."),
+            _block("The decree is reversed."),
+            _block("Mr. JUSTICE MATTHEWS, with whom concurred Mr. JUSTICE "
+                   "MILLER, Mr. JUSTICE HARLAN, and Mr. JUSTICE GRAY "
+                   "dissented."),
+        ])
+        self.assertEqual([part.kind for part in parts], ["majority"])
+
     def test_judges_joining_after_the_role_still_open_the_opinion(self):
         # Jansen v. Packaging Corp. of Am., 123 F.3d 490 (7th Cir. 1997)
         # (en banc): Flaum's concurrence names its joiners after the role,
@@ -645,6 +678,141 @@ class HistoricalAndSignatureBoundaryTests(unittest.TestCase):
         self.assertEqual([part.kind for part in parts],
                          ["majority", "concurrence", "dissent"])
         self.assertTrue(parts[1].label.startswith("Tatel"))
+
+
+class EnBancOrderTests(unittest.TestCase):
+    """Acad. of Allergy & Asthma in Primary Care v. Amerigroup Tenn., Inc.,
+    164 F.4th 529 (6th Cir. 2026): the order denying rehearing en banc, a
+    statement respecting the denial and a concurrence in it, each under the
+    heading the Sixth Circuit sets between rules, each byline running on
+    into the writing's first sentence."""
+
+    BLOCKS = [
+        "UNITED STATES COURT OF APPEALS FOR THE SIXTH CIRCUIT",
+        "On Petition for Rehearing En Banc United States District Court for "
+        "the Eastern District of Tennessee at Knoxville.",
+        "Decided and Filed: January 13, 2026",
+        "Before: SUTTON, Chief Judge; KETHLEDGE and MURPHY, Circuit Judges.",
+        "_________________",
+        "COUNSEL",
+        "ON PETITION FOR REHEARING EN BANC and REPLY: Casey Low, PILLSBURY "
+        "WINTHROP SHAW PITTMAN LLP, Austin, Texas, for Appellant.",
+        "The court delivered an ORDER denying the petition for rehearing en "
+        "banc. BUSH, J. (pp. 3–18), delivered a statement respecting the "
+        "denial of the petition for rehearing en banc. MURPHY, J. (pp. "
+        "19–24), also delivered a separate opinion, in which SUTTON, C.J. "
+        "and KETHLEDGE, J., joined.",
+        "_________________",
+        "ORDER _________________",
+        "The court received a petition for rehearing en banc. The original "
+        "panel has reviewed the petition for rehearing.",
+        "The petition was then circulated to the full court. No judge "
+        "requested a vote on the suggestion for rehearing en banc.",
+        "Therefore, the petition is denied.",
+        "__________________",
+        "STATEMENT __________________",
+        "JOHN K. BUSH, Circuit Judge, respecting the denial of rehearing en "
+        "banc. This case involves an alleged conspiracy to restrain trade.",
+        "I respect the panel’s decision, though I would not concur in all of "
+        "it. But I write separately to suggest that this case may warrant "
+        "the Court’s review.",
+        "__________________",
+        "CONCURRENCE __________________",
+        "MURPHY, Circuit Judge, with whom SUTTON, Chief Judge, and "
+        "KETHLEDGE, Circuit Judge, join, concurring in the denial of "
+        "rehearing en banc. Congress has granted a cause of action.",
+        "In his statement respecting the denial of rehearing en banc, Judge "
+        "Bush finds this holding debatable on four fronts.",
+        "First, Judge Bush asserts that Illinois Brick’s rule should apply "
+        "only to a plaintiff who seeks an illegal overcharge.",
+    ]
+
+    def test_the_order_the_statement_and_the_concurrence(self):
+        parts = segment_blocks([_block(t) for t in self.BLOCKS])
+        self.assertEqual([p.kind for p in parts],
+                         ["header", "majority", "separate", "concurrence"])
+        header, order, statement, concurrence = parts
+        # The bench, counsel and line-up are the order's front matter.
+        self.assertEqual(header.blocks[-1].text(), self.BLOCKS[7])
+        self.assertEqual(order.label, "Order")
+        self.assertEqual([b.text() for b in order.blocks[:2]],
+                         ["_________________", "ORDER _________________"])
+        # A statement neither concurs nor dissents, whatever it says of
+        # concurring.
+        self.assertEqual(
+            statement.label,
+            "JOHN K. BUSH, Circuit Judge, respecting the denial of rehearing "
+            "en banc.")
+        self.assertEqual(statement.blocks[1].text(),
+                         "STATEMENT __________________")
+        # The byline stands apart from the sentence it ran on into.
+        self.assertEqual(statement.blocks[2].text(), statement.label)
+        self.assertEqual(statement.blocks[3].text(),
+                         "This case involves an alleged conspiracy to "
+                         "restrain trade.")
+        self.assertTrue(concurrence.label.startswith(
+            "MURPHY, Circuit Judge, with whom SUTTON"))
+        self.assertEqual(concurrence.blocks[1].text(),
+                         "CONCURRENCE __________________")
+        self.assertEqual(concurrence.blocks[3].text(),
+                         "Congress has granted a cause of action.")
+        # "…, Judge Bush finds" names a judge in a sentence: it opens nothing.
+        self.assertIn(self.BLOCKS[-2], [b.text() for b in concurrence.blocks])
+
+    def test_a_panel_opinion_s_run_on_concurrence(self):
+        # The panel's opinion, 155 F.4th 795 (6th Cir. 2025): Judge
+        # Kethledge's concurrence had stayed in the majority.
+        parts = segment_blocks([_block(t) for t in [
+            "Before: SUTTON, Chief Judge; KETHLEDGE and MURPHY, Circuit "
+            "Judges. _________________",
+            "MURPHY, J., delivered the opinion of the court in which SUTTON, "
+            "C.J., and KETHLEDGE, J., concurred. KETHLEDGE, J. (pp. 42–43), "
+            "delivered a separate concurring opinion. _________________",
+            "OPINION _________________",
+            "MURPHY, Circuit Judge. The plaintiff in this case provides "
+            "personnel and supplies to primary-care physicians.",
+            "We affirm.",
+            "__________________",
+            "CONCURRENCE __________________",
+            "KETHLEDGE, Circuit Judge, concurring. I join the court’s "
+            "opinion, which offers a careful synthesis of the caselaw.",
+            "The goal of antitrust law is to advance consumer welfare.",
+        ]])
+        self.assertEqual([p.kind for p in parts][-2:],
+                         ["majority", "concurrence"])
+        self.assertEqual(parts[-1].label,
+                         "KETHLEDGE, Circuit Judge, concurring.")
+        self.assertEqual(parts[-2].blocks[-1].text(), "We affirm.")
+        self.assertEqual(parts[-1].blocks[3].text(),
+                         "I join the court’s opinion, which offers a careful "
+                         "synthesis of the caselaw.")
+
+    def test_the_supreme_court_s_statement_respecting_a_denial(self):
+        parts = segment_blocks([_block(t) for t in [
+            "SUPREME COURT OF THE UNITED STATES",
+            "PER CURIAM.",
+            "The petition for a writ of certiorari is denied.",
+            "Statement of JUSTICE SOTOMAYOR respecting the denial of "
+            "certiorari.",
+            "I concur in the denial, but write to note a troubling "
+            "question that the petition raises.",
+            "JUSTICE THOMAS, dissenting from the denial of certiorari.",
+            "I would grant the petition.",
+        ]])
+        self.assertEqual([p.kind for p in parts][-2:],
+                         ["separate", "dissent"])
+        self.assertTrue(parts[-2].label.startswith("Statement of JUSTICE "
+                                                   "SOTOMAYOR"))
+
+    def test_a_run_on_byline_ending_in_a_colon_stays_whole(self):
+        # The patterns that already read "X, Circuit Judge, concurring:
+        # text" keep it in one block.
+        line = ("WALD, Circuit Judge, concurring: I write separately to "
+                "add a word about the remedy.")
+        parts = segment_blocks([_block(t) for t in [
+            "PER CURIAM:", "The judgment is affirmed.", line, "More."]])
+        self.assertEqual(parts[-1].kind, "concurrence")
+        self.assertEqual(parts[-1].blocks[0].text(), line)
 
 
 if __name__ == "__main__":

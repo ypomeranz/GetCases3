@@ -297,6 +297,8 @@ TITLED: list = []            # every item a window title was built from
 
 
 SAVED_CONFIG: dict = {}    # what _load_config returns
+#: cite -> (the case's own citation, its name) for a page inside a case.
+INSIDE: dict = {}
 HEADER_COURTS: dict = {}   # opinion html -> the court its header names
 
 
@@ -417,6 +419,11 @@ APP_NS = _load(
      "_canonical_reporter_key": citations.reporter_key,
      "_citation_search_variants": lambda cite: (cite,),
      "_case_law_text_for_scan": _case_law_text_for_scan,
+     # The case static.case.law's volume says a page lies inside (see
+     # INSIDE), and the age of opinion that cites so.
+     "_case_law_case_containing_page": lambda cite, name="": INSIDE.get(
+         cite.split("@")[0]),
+     "_PAGE_INSIDE_CASE_BEFORE": 1900,
      "_courtlistener_text_source": COURTLISTENER_TEXT_SOURCE,
      # None of these scans is a Supreme Court slip opinion with its own
      # text to fall back on.
@@ -625,6 +632,52 @@ class _App:
             return (f"https://scholar.test/{cite}", "<html>")
 
         return mock.Mock(fetch_by_citation=fetch)
+
+
+class PageInsideACaseTests(unittest.TestCase):
+    """Corfield v. Coryell, 6 F. Cas. 546 (C.C.E.D. Pa. 1823): "So as to
+    trover. … 8 Johns. 435" cites the fourth page of Putnam v. Wyley, 8
+    Johns. 432, as old opinions do.  No case begins at 435."""
+
+    SCAN = "https://static.case.law/johns/8/case-pdfs/0432-01.pdf"
+
+    def setUp(self):
+        RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
+        TEXT_OPENS.clear(); _FakeViewer.opened.clear(); _Thread.started.clear()
+        INSIDE.clear()
+        INSIDE["8 Johns. 435"] = ("8 Johns. 432", "Putnam v. Wyley")
+        RESOLVED["8 Johns. 432"] = self.SCAN
+        FETCHED[self.SCAN] = (b"%PDF-J", self.SCAN)
+        self.app = _App()
+        self.addCleanup(INSIDE.clear)
+
+    def _click(self, year, cite="8 Johns. 435"):
+        # A bare citation: the link names no case (here, an empty snippet,
+        # which this harness's name reader passes through).
+        return self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", cite), "", lambda _s: None,
+            fallback=lambda: TEXT_OPENS.append(cite), context_year=year)
+
+    def test_the_case_the_page_is_in_opens(self):
+        self.assertTrue(self._click("1823"))
+        self.assertEqual(len(_FakeViewer.opened), 1)
+        self.assertEqual(_FakeViewer.opened[0].data, b"%PDF-J")
+        self.assertIn("Putnam v. Wyley", _FakeViewer.opened[0].title)
+        self.assertIn("8 Johns. 432", _FakeViewer.opened[0].title)
+        self.assertEqual(TEXT_OPENS, [])
+
+    def test_a_modern_opinion_s_citation_is_taken_at_its_word(self):
+        # Opinions cite cases by their first pages now: one that names a page
+        # no case begins on is looked for there, as before.
+        self.assertTrue(self._click("2015"))
+        self.assertEqual(_FakeViewer.opened, [])
+        self.assertEqual(TEXT_OPENS, ["8 Johns. 435"])
+
+    def test_a_page_a_case_begins_on_is_that_case(self):
+        RESOLVED["8 Johns. 436"] = self.SCAN.replace("0432", "0436")
+        FETCHED[RESOLVED["8 Johns. 436"]] = (b"%PDF-K", RESOLVED["8 Johns. 436"])
+        self._click("1823", "8 Johns. 436")
+        self.assertEqual(_FakeViewer.opened[0].data, b"%PDF-K")
 
 
 class CitedCasePdfTests(unittest.TestCase):

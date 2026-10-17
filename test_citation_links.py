@@ -1055,6 +1055,23 @@ class ReporterSweepTests(unittest.TestCase):
         self.assertEqual([a[1] for _t, a in _spans(text) if a[0] == "cite"],
                          ["295 F.2d 583"])
 
+    def test_an_old_treatise_is_not_a_case(self):
+        # Corfield v. Coryell, 6 F. Cas. 546 (C.C.E.D. Pa. 1823): Chitty on
+        # Pleading cited beside the cases, by volume and page as they are.
+        text = ("1 Chit. Pl. 166, 67. So as to trover. 1 Chit. Pl. 150; 8 "
+                "Johns. 435; 7 Johns. 9; 11 Johns. 385; 7 Johns. 535.")
+        self.assertEqual(
+            [a[1] for _t, a in _spans(text) if a[0] == "cite"],
+            ["8 Johns. 435", "7 Johns. 9", "11 Johns. 385", "7 Johns. 535"])
+        for treatise in ("2 Bl. Comm. 389", "1 Bac. Abr. 123",
+                         "2 Kent Com. 123", "1 Stark. Ev. 100",
+                         "2 Selw. N. P. 1000", "1 East P. C. 100"):
+            with self.subTest(treatise=treatise):
+                self.assertEqual(_spans(treatise + "."), [])
+        # The reporters named for the same men still link.
+        self.assertEqual([a for _t, a in _spans("1 Chit. 123.")],
+                         [("cite", "1 Chit. 123")])
+
     def test_a_social_science_study_is_not_a_case(self):
         # N.Y. State Rifle & Pistol Ass'n v. Bruen, 142 S. Ct. 2111, 2166
         # (2022) (Breyer, J., dissenting): the study's journal, "Epidemiologic
@@ -1374,7 +1391,8 @@ def _load_filename_builder():
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)
                 and node.targets[0].id in
-                ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE")):
+                ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE",
+                 "_BLUEBOOK_REPORTER_SPELLING", "_CAINES_REPORTS_COURTS")):
             names[node.targets[0].id] = ast.get_source_segment(src, node)
     ns = {"re": re,
           # Stubs: name abbreviation (with the deciding court rule 10.2.1(f)
@@ -1392,7 +1410,8 @@ def _load_filename_builder():
           "_nominative_display_cite": lambda cite, citations: "",
           "_reporter_family": citations.reporter_family,
           "Optional": None}
-    for key in ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE"):
+    for key in ("_NOISE_CITE_RE", "_CITE_PRIORITY", "_US_CITE_RE",
+                "_BLUEBOOK_REPORTER_SPELLING", "_CAINES_REPORTS_COURTS"):
         exec(names[key], ns)
     for name in wanted:
         exec(found[name], ns)
@@ -1429,6 +1448,25 @@ class UsReportsFilenameTests(unittest.TestCase):
                 "dateFiled": "2021-08-03"}
         # (The reporter comes out in its Bluebook spelling, "F.4th".)
         self.assertEqual(self._name(item), "Quinn v. Smith, 8 F.4th 557 (2021)")
+
+    def test_caines_reports_cited_as_the_bluebook_cites_them(self):
+        # Pierson v. Post: CourtListener files Caines' Reports under
+        # Caines' Cases ("3 Cai. Cas. 175"); the Bluebook cites Caines'
+        # Reports "Cai. R." (table T1).  Caines' Cases, two volumes of the
+        # Court of Errors, keep their name.
+        spell = self.ns["_bluebook_reporter_spelling"]
+        for cite, court, cited in (
+                ("3 Cai. Cas. 175", "nysupct", "3 Cai. R. 175"),
+                ("3 Cai. Cas. 175", "", "3 Cai. R. 175"),
+                ("1 Cai. Cas. 525", "nysupct", "1 Cai. R. 525"),
+                ("2 Cai. Cas. 380", "nycterr", "2 Cai. Cas. 380"),
+                ("3 Cai. 175", "", "3 Cai. R. 175"),
+                ("3 Caines 175", "", "3 Cai. R. 175")):
+            with self.subTest(cite=cite, court=court):
+                self.assertEqual(spell(cite, court), cited)
+        item = {"caseName": "Pierson v. Post", "citation": ["3 Cai. Cas. 175"],
+                "court_id": "nysupct", "dateFiled": "1805-08-01"}
+        self.assertEqual(self._name(item), "Pierson v. Post, 3 Cai. R. 175 (1805)")
 
     def test_normalizer_strips_pincites_and_parallel_cites(self):
         norm = self.ns["_normalized_us_cite"]
