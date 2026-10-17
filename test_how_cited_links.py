@@ -167,9 +167,24 @@ class OlderCommaFormTests(unittest.TestCase):
             [("cite", "138 Massachusetts 165@178"),
              ("cite", "174 Massachusetts 245@252")])
 
+    def test_after_a_signal(self):
+        # The old reports cite Gibbons v. Ogden by the page drawn on, after
+        # a signal as often as after the case's name.
+        for text, cite in (
+            ("See 9 Wheaton, 204.", "9 Wheaton 204"),
+            ("Cf. 4 Cranch, 75.", "4 Cranch 75"),
+            ("See, e.g., 22 Iowa, 75.", "22 Iowa 75"),
+            ("But see 1 Pet., 100.", "1 Pet. 100"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    [a for _s, _e, a in citations.detect_links(text)],
+                    [("cite", cite)])
+
     def test_prose_of_the_same_shape_is_left_alone(self):
         for text in (
             "In 1990, 3 Bush, 5 Clinton appointees sat on the court.",
+            "We see 3 Bush, 5 Clinton appointees on the court.",
             "the jury of 1 Black, 2 Hispanic and 9 white jurors",
             "the venire: 12 white, 1 Black, 2 Hispanic",
             "notice given on 1 Jan., 1990",

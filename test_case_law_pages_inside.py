@@ -79,5 +79,57 @@ class CaseContainingPageTests(unittest.TestCase):
             self.assertIsNone(self.inside("8 Johns. 435"))
 
 
+# 22 U.S. (9 Wheat.), 43 Mass. (2 Met.) and 59 Ky. (2 Met.) as static.case.law
+# lists them (cut down).  It keeps no folder for Wheaton or Metcalf.
+VOLUMES = {
+    ("us", "22"): (
+        {"22us1": ("0001-01",), "9wheat1": ("0001-01",),
+         "22us241": ("0241-01",), "9wheat241": ("0241-01",)},
+        {"0001-01": "Gibbons v. Ogden",
+         "0241-01": "Kirk v. Smith ex dem. Penn"},
+        {"0001-01": 240, "0241-01": 85}),
+    ("mass", "43"): (
+        {"43mass329": ("0329-01",)}, {"0329-01": "Commonwealth v. Hunt"},
+        {"0329-01": 10}),
+    ("ky", "59"): (
+        {"59ky331": ("0331-01",)}, {"0331-01": "Smith v. Jones"},
+        {"0331-01": 10}),
+}
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class AnotherNameTests(unittest.TestCase):
+    """A reporter that goes by another name is looked for in the official
+    series static.case.law files it under: Gibbons v. Ogden is cited "9
+    Wheaton 204" for the page the opinion draws on, in a case that runs 22
+    U.S. 1–240."""
+
+    def setUp(self):
+        patcher = mock.patch.object(
+            gui, "_case_law_volume",
+            side_effect=lambda slug, vol: VOLUMES.get((slug, vol),
+                                                      ({}, {}, {})))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def inside(self, cite, name=""):
+        return gui._case_law_case_containing_page(cite, name)
+
+    def test_the_early_supreme_court_reporters(self):
+        for cite in ("9 Wheaton 204", "9 Wheat. 204", "22 U.S. 204"):
+            with self.subTest(cite=cite):
+                self.assertEqual(self.inside(cite),
+                                 ("22 U.S. 1", "Gibbons v. Ogden"))
+        self.assertIsNone(self.inside("9 Wheat. 1"))
+        self.assertIsNone(self.inside("9 Wheat. 241"))
+
+    def test_a_name_two_states_reporters_go_by(self):
+        # "2 Met." is Metcalf's Massachusetts reports or Metcalfe's
+        # Kentucky ones; a case runs over page 335 in each.
+        self.assertIsNone(self.inside("2 Met. 335"))
+        self.assertEqual(self.inside("2 Met. 335", "Commonwealth v. Hunt"),
+                         ("43 Mass. 329", "Commonwealth v. Hunt"))
+
+
 if __name__ == "__main__":
     unittest.main()

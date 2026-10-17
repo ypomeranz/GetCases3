@@ -161,7 +161,11 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
   its first page (Corfield v. Coryell's "8 Johns. 435"). Where no case begins
   on that page, the case the reporter volume's list (static.case.law's) shows
   running over it opens at the page: Putnam v. Wyley, 8 Johns. 432, at 435.
-  English Reports citations are already read this way. The old treatises
+  A reporter that goes by another name is read in the official series it
+  became: "9 Wheaton, 204" is 22 U.S. 204, inside Gibbons v. Ogden, 22 U.S. 1,
+  which opens at page 204 with its Google Scholar text behind it; "19 Pick."
+  is Massachusetts Reports volume 36. English Reports citations are already
+  read this way. The old treatises
   cited beside the cases in the same shape (`1 Chit. Pl. 166`, `2 Bl. Comm.
   389`, `1 Bac. Abr. 123`) are not linked: there is no case to open.
 - A **statute, regulation, court rule or the Constitution** opens in a statute

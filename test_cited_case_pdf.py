@@ -673,6 +673,21 @@ class PageInsideACaseTests(unittest.TestCase):
         self.assertEqual(_FakeViewer.opened, [])
         self.assertEqual(TEXT_OPENS, ["8 Johns. 435"])
 
+    def test_a_reporter_cited_by_its_own_name_wherever_it_is_read(self):
+        # "1 Cranch 170" is Marbury v. Madison, 5 U.S. 137, at 170, even in a
+        # modern opinion or typed into Spotlight: no one cites the early
+        # reporters by their own names now.
+        INSIDE["1 Cranch 170"] = ("5 U.S. 137", "Marbury v. Madison")
+        RESOLVED["5 U.S. 137"] = "https://loc.test/usrep005137.pdf"
+        FETCHED[RESOLVED["5 U.S. 137"]] = (b"%PDF-M", RESOLVED["5 U.S. 137"])
+        for year in ("2015", ""):
+            with self.subTest(year=year):
+                _FakeViewer.opened.clear()
+                self._click(year, "1 Cranch 170")
+                self.assertEqual(_FakeViewer.opened[0].data, b"%PDF-M")
+                self.assertIn("Marbury v. Madison",
+                              _FakeViewer.opened[0].title)
+
     def test_a_page_a_case_begins_on_is_that_case(self):
         RESOLVED["8 Johns. 436"] = self.SCAN.replace("0432", "0436")
         FETCHED[RESOLVED["8 Johns. 436"]] = (b"%PDF-K", RESOLVED["8 Johns. 436"])

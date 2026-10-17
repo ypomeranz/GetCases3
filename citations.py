@@ -1713,15 +1713,22 @@ def paren_official_cite(m: re.Match) -> str:
 def _at_citation_start(text: str, pos: int) -> bool:
     """Whether *pos* is where a citation's volume stands: the start of the
     text, or just after the comma closing a case name — or a semicolon, an
-    opening parenthesis or bracket, or the year the English style writes
-    first ("In re Ah Yup, (1878) 5 Sawyer, 155") — whitespace aside."""
+    opening parenthesis or bracket, the year the English style writes first
+    ("In re Ah Yup, (1878) 5 Sawyer, 155"), or a signal ("See 9 Wheaton,
+    204", "Cf. 4 Cranch, 75") — whitespace aside."""
     while pos > 0 and text[pos - 1].isspace():
         pos -= 1
     return (pos == 0 or text[pos - 1] in ",;(["
-            or bool(_YEAR_FIRST_RE.search(text, max(0, pos - 8), pos)))
+            or bool(_YEAR_FIRST_RE.search(text, max(0, pos - 8), pos))
+            or bool(_SIGNAL_BEFORE_RE.search(text, max(0, pos - 16), pos)))
 
 
 _YEAR_FIRST_RE = re.compile(r"\(\s*(?:1[5-9]|20)\d{2}\s*\)$")
+# The signals a citation follows (Bluebook rule 1.2), as the old reports
+# write them too.
+_SIGNAL_BEFORE_RE = re.compile(
+    r"(?:^|[\s(;,.])(?:[Ss]ee(?:\s+also)?|[Cc]f\.|[Bb]ut\s+(?:see|cf\.)|"
+    r"[Aa]ccord|[Cc]ontra|[Cc]ompare|[Ee]\.\s?g\.,?)$")
 
 
 # The reporters named in the running-text patterns: the national and federal
