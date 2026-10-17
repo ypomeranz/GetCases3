@@ -24,6 +24,39 @@ class JoinedSeparateOpinionTests(unittest.TestCase):
         self.assertIn("BLACKMUN", parts[1].label)
         self.assertTrue(parts[1].blocks[0].text().startswith("MR. JUSTICE BLACKMUN"))
 
+    def test_the_older_parenthesized_joinder_heading(self):
+        # The China, 74 U.S. (7 Wall.) 53 (1868): Clifford's concurrence,
+        # headed "Mr. Justice CLIFFORD (with whom concurred Mr. Justice
+        # FIELD):", ran on as the Court's opinion.  Its own first words say
+        # which way it goes.
+        parts = segment_blocks([
+            _block("Mr. Justice SWAYNE delivered the opinion of the court."),
+            _block("This is a case arising out of a collision between the "
+                   "steamship China and the brig Kentucky."),
+            _block("We have been impressed with the importance of its right "
+                   "administration in this case."),
+            _block("Mr. Justice CLIFFORD (with whom concurred Mr. Justice "
+                   "FIELD):"),
+            _block("I concur in the proposition that the pilot laws of New "
+                   "York afford no defence to the appellants in this case."),
+            _block("DECREE AFFIRMED."),
+        ])
+        self.assertEqual([part.kind for part in parts],
+                         ["majority", "concurrence"])
+        self.assertIn("CLIFFORD", parts[1].label)
+
+    def test_a_vote_with_whom_others_concurred_is_no_heading(self):
+        # The Scotland, 118 U.S. 507 (1886): the dissenters' vote, set as a
+        # sentence, heads no writing of theirs.
+        parts = segment_blocks([
+            _block("Mr. Justice BRADLEY delivered the opinion of the court."),
+            _block("The decree is reversed."),
+            _block("Mr. JUSTICE MATTHEWS, with whom concurred Mr. JUSTICE "
+                   "MILLER, Mr. JUSTICE HARLAN, and Mr. JUSTICE GRAY "
+                   "dissented."),
+        ])
+        self.assertEqual([part.kind for part in parts], ["majority"])
+
     def test_judges_joining_after_the_role_still_open_the_opinion(self):
         # Jansen v. Packaging Corp. of Am., 123 F.3d 490 (7th Cir. 1997)
         # (en banc): Flaum's concurrence names its joiners after the role,

@@ -18483,6 +18483,11 @@ def _scholar_court_id(blocks) -> str:
                    ).strip().rstrip(".").lower()
         if not t or "court" not in t or "district court" in t or "bankruptcy" in t:
             continue
+        # …and so is a federal circuit court of old, which names its state:
+        # "Circuit Court, D. Virginia." (26 F. Cas. 979) is C.C.D. Va.
+        # (_scholar_trial_court), not Virginia's own courts.
+        if _bluebook_federal_trial_court(re.sub(r"\s+", " ", b.text()).strip()):
+            continue
         # The caption is no court line, though its parties may name a state
         # and a "court" — "WP Company LLC, d/b/a The Washington Post" put a
         # Fourth Circuit case in the Supreme Court of Washington.  A court
@@ -28544,7 +28549,10 @@ class _ScholarTextWindow:
         paren = "" if bb.get("omit_parenthetical") else " ".join(
             p for p in (court, year) if p
         )
-        return f"{value} ({paren})" if value and paren else value
+        value = f"{value} ({paren})" if value and paren else value
+        if bb.get("fedcas_no") and _FED_CAS_CITE_RE.search(cite or ""):
+            value += f" (No. {fed_cas.bluebook_number(bb['fedcas_no'])})"
+        return value
 
     def _set_base_citation_override(self, value: str) -> None:
         """Persist a custom base citation, or restore the automatic one."""
@@ -31822,9 +31830,19 @@ class _ScholarTextWindow:
                 docket_paren = " ".join(p for p in (court_name, decided) if p)
             else:
                 docket_cite = ""
+        # A Federal Cases citation carries the case's number (table T1):
+        # "Ex parte Merryman, 17 F. Cas. 144 (C.C.D. Md. 1861) (No. 9487)" —
+        # read off the report's head matter, and checked against the volume
+        # (see fed_cas.case_number_in).
+        fedcas_no = ""
+        fm = re.match(r"\s*(\d+)\s+F(?:ed)?\.\s?Cas\.\s", display_cite or cite)
+        if fm:
+            fedcas_no = fed_cas.case_number_in(
+                " ".join(b.text() for b in (self._blocks or [])[:12]),
+                fm.group(1))
         return {
             "name": name, "cite": cite, "display_cite": display_cite,
-            "court": court_abbr, "year": year,
+            "court": court_abbr, "year": year, "fedcas_no": fedcas_no,
             # A year the page gives that may be its term's, for
             # _enrich_citation to settle; "" when there is no doubt.
             "_term_year": term_year,
@@ -32541,6 +32559,9 @@ class _ScholarTextWindow:
             )
             if paren_inner:
                 rest += f" ({paren_inner})"
+            if bb.get("fedcas_no") and _FED_CAS_CITE_RE.search(cite or ""):
+                # The Federal Cases number (table T1), after the date.
+                rest += f" (No. {fed_cas.bluebook_number(bb['fedcas_no'])})"
             en_banc = "en banc" if self._decided_en_banc() else ""
             rest += join_parentheticals((en_banc, writer, *extra_parens))
             history = ""

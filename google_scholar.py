@@ -1268,8 +1268,17 @@ _OCR_JUSTICE_BYLINE_RE = re.compile(
 # filed opinion, from becoming false boundaries.
 _JOINED_SEP_HEADER_RE = re.compile(
     r"^\s*(?:MR\.\s+|MRS\.\s+|MS\.\s+)?(?:CHIEF\s+)?JUSTICE\s+"
-    r"[A-Z][\w.'’-]+\s*,\s*with\s+whom\s+.{1,180}?\bjoins?\s*[.:]?\s*"
-    r"(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
+    r"[A-Z][\w.'’-]+\s*(?:"
+    r",\s*with\s+whom\s+.{1,180}?\bjoins?\s*[.:]?"
+    # The older reports' forms, the joiner named after the verb: "Mr.
+    # Justice CLIFFORD (with whom concurred Mr. Justice FIELD):" (The China,
+    # 74 U.S. (7 Wall.) 53) — set in parentheses, or after a comma with the
+    # heading's colon closing it.  (A sentence ending "… and Mr. Justice GRAY
+    # dissented." is a vote, no heading.)
+    r"|\(\s*with\s+whom\s+(?=[^()]*\b(?:concur|join|agree)\w*\b)[^()]{1,180}"
+    r"\)\s*[.:]?"
+    r"|,\s*with\s+whom\s+(?:concurred|joined|agreed)\s+[^:]{1,180}:"
+    r")\s*(?:(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})\s*)*$",
     re.IGNORECASE | re.DOTALL,
 )
 

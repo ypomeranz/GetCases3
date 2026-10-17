@@ -80,6 +80,17 @@ class HeaderCourtTests(unittest.TestCase):
             self.assertEqual(g._scholar_court_id(centers(line)), court, line)
         self.assertEqual(g._scholar_court_id(BROWN_HEADER), "cc")
 
+    def test_an_old_federal_circuit_court_is_no_state_s(self):
+        # United States v. The Little Charles, 26 F. Cas. 979, was cited
+        # "(Va. 1818)": "Circuit Court, D. Virginia." named Virginia.
+        self.assertEqual(g._scholar_court_id(centers(
+            "Circuit Court, D. Virginia.")), "")
+        self.assertEqual(g._scholar_trial_court(centers(
+            "Circuit Court, D. Virginia.")), "C.C.D. Va.")
+        # Virginia's own circuit courts are still Virginia's.
+        self.assertEqual(g._scholar_court_id(centers(
+            "Supreme Court of Virginia.")), "va")
+
     def test_a_line_that_only_mentions_one_is_about_another(self):
         self.assertEqual(g._scholar_court_id(centers(
             "On Appeal from the United States Court of Claims.")), "")
