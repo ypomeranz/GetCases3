@@ -7295,13 +7295,21 @@ def _assemble_case_parts(client, item: dict) -> tuple:
             # that blank lines inside those pre chunks are real paragraphs,
             # which restores the bylines needed by Prado, Duncan, and similar
             # modern slip opinions.
-            if len(cblocks) <= 2 and len(html_text) > 4000:
+            # A text in many pre chunks, a citation link set between each two
+            # (164 F.4th 529, the Sixth Circuit's order denying rehearing en
+            # banc), splits at every link — ", 735–36 (1977). I respect …" —
+            # into hundreds of fragments with no paragraph a byline could open:
+            # its paragraphs are the CL parser's too.
+            pre_chunks = html_text.count('<pre class="inline">') > 1
+            if (len(cblocks) <= 2 or pre_chunks) and len(html_text) > 4000:
                 alt_blocks, cfootnotes = _parse_cl_html(
                     html_text, fn_prefix="combined_"
                 )
-                if len(alt_blocks) > len(cblocks):
+                if len(alt_blocks) > len(cblocks) or (pre_chunks
+                                                      and alt_blocks):
                     cblocks = alt_blocks
-                if (combined.get("plain_text") or "").strip():
+                if ((not pre_chunks or len(cblocks) <= 2)
+                        and (combined.get("plain_text") or "").strip()):
                     # Some lawbox records expose their real paragraph breaks
                     # only in ``plain_text``; both HTML parsers see a pair of
                     # giant centered/pre blocks.  Recover those paragraphs so
@@ -22877,6 +22885,12 @@ def _part_tip_text(label: str, kind: str, page: object = None) -> str:
     known.  The slim rail that replaces that strip carries no tip — pointing
     at the scrollbar names every writing at once (see _PartNameFlash)."""
     name = _PART_KIND_NAMES.get(kind, "Part")
+    if kind == "majority" and label == "Order":
+        # The unsigned order a court issues (google_scholar.segment_blocks).
+        return f"Order of the court — p. {page}" if page else "Order of the court"
+    if kind == "separate" and re.search(r"^\s*Statement\b|\brespecting\b",
+                                        label or "", re.IGNORECASE):
+        name = "Statement"      # respecting an order: neither concurs nor dissents
     author = _part_author(label, loose=kind in _AUTHORED_PART_KINDS)
     if author and author.lower() == name.lower():
         author = ""     # a heading that is only the word "Dissent" names nobody
@@ -31383,6 +31397,8 @@ class _ScholarTextWindow:
         if name == "per curiam":
             return "Opinion (per curiam)" if kind == "majority" else "per curiam"
         if kind == "majority":
+            if label == "Order":
+                return "Order"
             return f"Opinion ({name})" if name else "Opinion"
         # Dissent / concurrence: surname alone (colour distinguishes the two).
         name = name or _part_author(label, loose=True)
@@ -31936,7 +31952,13 @@ class _ScholarTextWindow:
         header = [b for p in parts if p.kind == "header" for b in p.blocks]
         lead = next((p for p in parts if p.kind == "majority"), None)
         front = [b.text() for b in header + (lead.blocks[:3] if lead else [])]
-        openings = [p.blocks[0].text() for p in parts
+        # Each byline, under any heading the Sixth Circuit sets between rules
+        # over the writing ("_____ CONCURRENCE _____").
+        openings = [next((b.text() for b in p.blocks[:3]
+                          if not re.fullmatch(r"[\s_]*(?:[A-Z][A-Z ]{0,80})?"
+                                              r"[\s_]*", b.text())),
+                         p.blocks[0].text())
+                    for p in parts
                     if p.kind not in ("header", "majority") and p.blocks]
         # The bench may follow a long list of counsel.
         opening = header + (lead.blocks if lead else [])
@@ -31999,8 +32021,25 @@ class _ScholarTextWindow:
             return ""
         neutral_role = "separate opinion" if part.kind == "separate" else (
             "dissenting" if part.kind == "dissent" else "concurring")
-        t = block_text(part.blocks[0])
-        m = re.search(r"\b(?:concurring|dissenting)\b", t, re.IGNORECASE)
+        # The byline, under the heading the Sixth Circuit sets between rules
+        # over each writing ("CONCURRENCE", "STATEMENT").
+        t = next((bt for bt in map(block_text, part.blocks[:3])
+                  if not re.fullmatch(
+                      r"(?:_{3,}\s*)?(?:(?=[A-Z ]{0,80}(?:CONCUR|DISSENT|"
+                      r"STATEMENT|OPINION|ORDER))[A-Z][A-Z ]{0,80}?\s*"
+                      r"(?:_{3,})?|_{3,})", bt)),
+                 block_text(part.blocks[0]))
+        # A statement respecting an order neither concurs nor dissents:
+        # "JOHN K. BUSH, Circuit Judge, respecting the denial of rehearing en
+        # banc." is (statement of Bush, J., respecting the denial of
+        # rehearing en banc), as the Court cites its own: "(statement of
+        # SOTOMAYOR, J., respecting denial of certiorari)".
+        m = re.search(r"\b(?:concurring|dissenting)\b|\b(?:statement\s+)?"
+                      r"respecting\s+(?:the\s+)?(?:denial|grant|dismissal|"
+                      r"order|vacatur|disposition)\b", t, re.IGNORECASE)
+        statement = bool(m and m.group(0)[:1].lower() in "sr"
+                         and not re.match(r"concurring|dissenting",
+                                          m.group(0), re.IGNORECASE))
         # A vote set as the heading of the voter's opinion (see
         # google_scholar._VOTE_LINE_RE): "Mr. Justice DANIEL dissented." is
         # (Daniel, J., dissenting); "LOBRANO, J., CONCURS IN THE RESULTS."
@@ -32134,6 +32173,16 @@ class _ScholarTextWindow:
             phrase = phrase[:phrase.rindex(")")].rstrip(" .:;,")
         head = t[: m.start()].strip().rstrip(", ")
         head = re.sub(r"^(?:MR\.|MRS\.|MS\.)\s+", "", head, flags=re.IGNORECASE)
+        if statement:
+            phrase = re.sub(r"^statement\s+", "", phrase, flags=re.IGNORECASE)
+            # "Statement of JUSTICE SOTOMAYOR respecting …", "Statement of
+            # Circuit Judge TATEL respecting …".
+            sm = re.match(r"Statement\s+of\s+(?:(?:MR\.|MRS\.|MS\.)\s+)?"
+                          r"(?:(Chief\s+)?(?:Circuit\s+|District\s+)?Judge\s+)?",
+                          head, re.IGNORECASE)
+            if sm and sm.group(0):
+                head = head[sm.end():] + (", Chief Judge" if sm.group(1)
+                                          else "")
         # The chief-justice test must look only at the author's own
         # designation — "JUSTICE THOMAS, with whom THE CHIEF JUSTICE and
         # JUSTICE ALITO join, dissenting" is Thomas, J., not C.J.
@@ -32191,6 +32240,8 @@ class _ScholarTextWindow:
             name = name[0] + name[1].lower()
         if not name:
             return ""
+        if statement:
+            return f"statement of {name}, {title}, {phrase}"
         return f"{name}, {title}, {phrase}"
 
     def _majority_author(self, part) -> str:
@@ -32231,8 +32282,8 @@ class _ScholarTextWindow:
         the "Majority Opinion".  Each type is then followed by its author, the
         way the concurrence and dissent headers already name theirs."""
         maj = next((p for p in parts if p.kind == "majority"), None)
-        if maj is None:
-            return
+        if maj is None or maj.label == "Order":
+            return      # an order the court issued unsigned (segment_blocks)
         has_dissent = any(p.kind == "dissent" for p in parts)
         has_concurrence = any(p.kind == "concurrence" for p in parts)
         has_separate = any(p.kind == "separate" for p in parts)
@@ -34712,7 +34763,11 @@ class _ScholarTextWindow:
                         break
             else:
                 lines.append(("h", "Dissent" if part.kind == "dissent"
-                              else "Concurrence"))
+                              else "Concurrence" if part.kind != "separate"
+                              else "Statement" if re.search(
+                                  r"^Statement\b|\brespecting\b",
+                                  part.label or "", re.IGNORECASE)
+                              else "Separate opinion"))
                 lines.append(("", _fix_name_case(clean(part.label))))
         return lines
 

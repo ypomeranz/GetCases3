@@ -6181,6 +6181,47 @@ class HyphenatedNumberCaseTests(unittest.TestCase):
                          "Cont'l Grain Co. v. Barge FBL-585")
 
 
+class LetterAndDigitCodeCaseTests(unittest.TestCase):
+    """SD3, LLC v. Black & Decker (U.S.) Inc., 801 F.3d 412 (4th Cir. 2015),
+    was cited "Sd3, LLC v. …": a word of letters and digits was neither an
+    acronym to keep in capitals (those are letters alone) nor a word the
+    opinion's own "SD3" could correct (only letters were weighed)."""
+
+    BODY = ("Even by the majority’s diluted pleading standard, however, "
+            "SD3’s group boycott claim fails. SD3 refused to accept what "
+            "appear to be generous terms. Black & Decker offered SD3 a "
+            "licensing agreement.")
+
+    def test_capitals_keep_a_code(self):
+        for raw, want in (
+                ("SD3, LLC v. BLACK & DECKER", "SD3, LLC v. Black & Decker"),
+                ("3M COMPANY v. JONES", "3M Company v. Jones"),
+                ("WD-40 CO. v. SMITH", "WD-40 Co. v. Smith"),
+                # An ordinal is a number.
+                ("42ND STREET ASSOCS. v. CITY", "42nd Street Assocs. v. City"),
+                ("UNITED STATES v. 1ST NAT. BANK",
+                 "United States v. 1st Nat. Bank")):
+            with self.subTest(raw=raw):
+                self.assertEqual(normal_case_caption(raw), want)
+
+    def test_the_prose_corrects_a_title_cased_code(self):
+        self.assertEqual(
+            refine_caption_case("Sd3, LLC v. Black & Decker (U.S.) Inc.",
+                                self.BODY),
+            "SD3, LLC v. Black & Decker (U.S.) Inc.")
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "801 F.3d 412 (2015)",
+            "SD3, LLC; SAWSTOP LLC, Plaintiffs-Appellants,<br/>v.<br/>BLACK "
+            "&amp; DECKER (U.S.) INC.; Black &amp; Decker Corporation, "
+            "Defendants-Appellees.",
+        ).replace("<p>Opinion.</p>", f"<p>{self.BODY}</p>"))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "SD3, LLC v. Black & Decker (U.S.) Inc.")
+
+
 class FirmPairAndSlashInitialsTests(unittest.TestCase):
     """Novo Nordisk A/S v. Caraco Pharm. Lab'ys, Ltd., 688 F.3d 766 (Fed.
     Cir. 2012), was cited "Novo Nordisk A/s & Novo Nordisk, Inc. v. …": both
@@ -7058,6 +7099,49 @@ class WriterParentheticalTests(unittest.TestCase):
                 part = self._part("concurrence", line)
                 win._parts = [header, part]
                 self.assertEqual(win._writer_parenthetical(part), cited)
+
+    def test_a_statement_respecting_an_order(self):
+        # Acad. of Allergy & Asthma in Primary Care v. Amerigroup Tenn.,
+        # Inc., 164 F.4th 529 (6th Cir. 2026): the bylines sit under the
+        # headings the Sixth Circuit sets between rules.
+        def part(kind, heading, byline):
+            return OpinionPart(byline[:90], kind, [
+                Block("para", [Span("__________________")]),
+                Block("para", [Span(f"{heading} __________________")]),
+                Block("para", [Span(byline)]),
+                Block("para", [Span("I concur in nothing said here.")])])
+        win = self._win()
+        header = OpinionPart("Header", "header", [Block("para", [Span(
+            "Before: SUTTON, Chief Judge; KETHLEDGE and MURPHY, Circuit "
+            "Judges.")])])
+        bush = part("separate", "STATEMENT",
+                    "JOHN K. BUSH, Circuit Judge, respecting the denial of "
+                    "rehearing en banc.")
+        murphy = part("concurrence", "CONCURRENCE",
+                      "MURPHY, Circuit Judge, with whom SUTTON, Chief Judge, "
+                      "and KETHLEDGE, Circuit Judge, join, concurring in the "
+                      "denial of rehearing en banc.")
+        win._parts = [header, bush, murphy]
+        self.assertEqual(
+            win._writer_parenthetical(bush),
+            "statement of Bush, J., respecting the denial of rehearing en "
+            "banc")
+        self.assertEqual(
+            win._writer_parenthetical(murphy),
+            "Murphy, J., concurring in the denial of rehearing en banc")
+        # The Supreme Court's own form.
+        for line, cited in (
+                ("Statement of JUSTICE SOTOMAYOR respecting the denial of "
+                 "certiorari.",
+                 "statement of Sotomayor, J., respecting the denial of "
+                 "certiorari"),
+                ("Statement of JUSTICE KAVANAUGH, with whom JUSTICE GORSUCH "
+                 "joins, respecting the denial of certiorari.",
+                 "statement of Kavanaugh, J., respecting the denial of "
+                 "certiorari")):
+            with self.subTest(line=line[:30]):
+                self.assertEqual(self._win()._writer_parenthetical(
+                    self._part("separate", line)), cited)
 
     def test_a_byline_s_footnote_mark_takes_no_colon_with_it(self):
         part = self._part(

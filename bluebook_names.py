@@ -1483,6 +1483,16 @@ def _is_caps_acronym(part: str, *, dotted: bool = False) -> bool:
     return low not in _NOT_ACRONYMS and low not in _TABLE_ABBREVIATIONS
 
 
+def _is_caps_code(part: str) -> bool:
+    """Whether one word (or a piece of a hyphenated one) set in capitals is a
+    code of letters and digits — "SD3", "3M", "B2B", "H2O" — whose capitals
+    are its spelling, as no word's are.  An ordinal ("42ND", "1ST", "2D") is
+    a number, and title-cases."""
+    return bool(re.fullmatch(r"[A-Z0-9]+", part)
+                and re.search(r"\d", part) and re.search(r"[A-Z]", part)
+                and not re.fullmatch(r"\d+(?:ST|ND|RD|TH|D)", part))
+
+
 def _restore_acronym_case(name: str) -> str:
     """Put back the capitals of acronyms a title-casing pass took away —
     "Reno v. Aclu", "McDonald's Usa, LLC", "Afl-cio", "Cnbc, Llc" — and of
@@ -1504,6 +1514,17 @@ def _restore_acronym_case(name: str) -> str:
 
     name = re.sub(
         r"(?<![\w'’&.-])[A-Za-z]+(?:-[A-Za-z]+)*(?![\w'’&.-])", acronym, name)
+    # A code of letters and digits whose letters spell no word: "Sd3, LLC"
+    # is SD3 (801 F.3d 412), "3m Co." 3M, "B2b" B2B — but "42nd", and "H2o"
+    # whose letters could be a word's.
+    name = re.sub(
+        r"(?<![\w'’&.-])(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]+"
+        r"(?![\w'’&.-])",
+        lambda m: (m.group(0).upper()
+                   if (_is_caps_code(m.group(0).upper())
+                       and not re.search(r"[AEIOUYaeiouy]", m.group(0)))
+                   else m.group(0)),
+        name)
     # A firm's "&" initialism: "A&m Records" is A&M, "At&t" AT&T.
     name = re.sub(r"(?<![\w'’&.-])[A-Z][a-z]?&[A-Za-z]{1,2}(?![\w'’&.-])",
                   lambda m: m.group(0).upper(), name)
@@ -1572,9 +1593,13 @@ def normal_case_caption(text: str) -> str:
                 or (re.fullmatch(r"[A-Z](?:/[A-Z])+", stripped)
                     and stripped.lower() not in _SLASH_CONNECTORS)
                 or re.fullmatch(r"(?:[A-Z]\.)+[A-Z]?", stripped)
-                # A lone letter rides along with an acronym ("R-II").
-                or (any(_is_caps_acronym(p, dotted=dotted) for p in pieces)
+                # A lone letter rides along with an acronym ("R-II"), and a
+                # number too ("WD-40", "FBL-585"); a code of letters and
+                # digits is spelled so ("SD3, LLC", 801 F.3d 412).
+                or (any(_is_caps_acronym(p, dotted=dotted) or _is_caps_code(p)
+                        for p in pieces)
                     and all(_is_caps_acronym(p, dotted=dotted)
+                            or _is_caps_code(p) or p.isdigit()
                             or re.fullmatch(r"[A-Z]", p) for p in pieces))):
             out.append(word)
             continue
@@ -1857,10 +1882,21 @@ def refine_caption_case(name: str, body_text: str) -> str:
             tokens.append(word)
             joins.append(" ")
     cores = [re.sub(r"[^A-Za-z]", "", t) for t in tokens]
+    # A word of letters and digits is weighed whole: "Sd3, LLC" is the
+    # opinion's "SD3" (SD3, LLC v. Black & Decker (U.S.) Inc., 801 F.3d 412
+    # (4th Cir. 2015)), which no prose spells as letters alone.
+    for i, tok in enumerate(tokens):
+        stem = tok.strip(".,;:()'\"“”")
+        if (re.fullmatch(r"[A-Za-z0-9]+", stem) and re.search(r"\d", stem)
+                and re.search(r"[A-Za-z]", stem)
+                and not re.fullmatch(r"\d+(?:st|nd|rd|th|d)", stem,
+                                     re.IGNORECASE)):
+            cores[i] = stem
     for i, tok in enumerate(tokens):
         core = cores[i]
+        stem = tok.strip(".,;:()'\"“”")
         if (len(core) < 2 or core.lower() in ("v", "vs")
-                or not tok.strip(".,;:()'\"“”").isalpha()):
+                or not (stem.isalpha() or stem == core)):
             continue
         # A table abbreviation keeps its own spelling: the prose's "LA" or
         # "INC." never makes "La." or "Inc." capitals.
