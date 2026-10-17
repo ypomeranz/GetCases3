@@ -1055,6 +1055,23 @@ class ReporterSweepTests(unittest.TestCase):
         self.assertEqual([a[1] for _t, a in _spans(text) if a[0] == "cite"],
                          ["295 F.2d 583"])
 
+    def test_an_old_treatise_is_not_a_case(self):
+        # Corfield v. Coryell, 6 F. Cas. 546 (C.C.E.D. Pa. 1823): Chitty on
+        # Pleading cited beside the cases, by volume and page as they are.
+        text = ("1 Chit. Pl. 166, 67. So as to trover. 1 Chit. Pl. 150; 8 "
+                "Johns. 435; 7 Johns. 9; 11 Johns. 385; 7 Johns. 535.")
+        self.assertEqual(
+            [a[1] for _t, a in _spans(text) if a[0] == "cite"],
+            ["8 Johns. 435", "7 Johns. 9", "11 Johns. 385", "7 Johns. 535"])
+        for treatise in ("2 Bl. Comm. 389", "1 Bac. Abr. 123",
+                         "2 Kent Com. 123", "1 Stark. Ev. 100",
+                         "2 Selw. N. P. 1000", "1 East P. C. 100"):
+            with self.subTest(treatise=treatise):
+                self.assertEqual(_spans(treatise + "."), [])
+        # The reporters named for the same men still link.
+        self.assertEqual([a for _t, a in _spans("1 Chit. 123.")],
+                         [("cite", "1 Chit. 123")])
+
     def test_a_social_science_study_is_not_a_case(self):
         # N.Y. State Rifle & Pistol Ass'n v. Bruen, 142 S. Ct. 2111, 2166
         # (2022) (Breyer, J., dissenting): the study's journal, "Epidemiologic

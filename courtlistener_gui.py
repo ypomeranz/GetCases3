@@ -2975,6 +2975,57 @@ def _case_law_named_url(cite: str, url: str, name: str) -> str:
     return f"{m.group(1)}/{named[0]}.{m.group(6)}"
 
 
+#: Opinions this old cite a case by the page they draw on as often as by the
+#: page it begins on (see _case_law_case_containing_page).
+_PAGE_INSIDE_CASE_BEFORE = 1900
+
+
+def _case_law_case_containing_page(
+        cite: str, name: str = "") -> "Optional[tuple[str, str]]":
+    """The case a page cited as though a case began there falls inside, by
+    static.case.law's list of the cases in its volume: ``(the case's own
+    citation, its name)``, or None.
+
+    The old reports cite the page they draw on, not always the page the case
+    begins on: "So as to trover. 1 Chit. Pl. 150; 8 Johns. 435; 7 Johns. 9;
+    … 11 Johns. 385" (Corfield v. Coryell, 6 F. Cas. 546 (C.C.E.D. Pa.
+    1823)) — no case begins at 8 Johns. 435, which is the fourth page of
+    Putnam v. Wyley, 8 Johns. 432–36; 11 Johns. 385 is in Van Brunt v.
+    Schenck, 11 Johns. 377–89.  The case is the last to begin before the page
+    — of several begun on one page, the last of them — so long as it runs on
+    to the page, as far as the list says it runs (or :data:`_PIN_AS_CITE_SPAN`
+    pages, where it says nothing).  None where a case begins at the page
+    (that one is the case), where the volume's list can't be read, and where
+    *name* is given and the case is not the one it names."""
+    base = (cite or "").split("@", 1)[0].strip()
+    cm = _CITE_PARSE_RE.match(base)
+    m = _CASE_LAW_FILE_URL_RE.match(_static_case_law_url(base) or "")
+    if not (cm and m):
+        return None
+    files, names, lengths = _case_law_volume(m.group(2), m.group(3))
+    if not files or _case_law_cite_key(base) in files:
+        return None
+    vol, rep, page = cm.group(1), cm.group(2).strip(), int(cm.group(3))
+    prefix = _case_law_cite_key(f"{vol} {rep} ")
+    begun = sorted(
+        (int(key[len(prefix):]), stem) for key, stems in files.items()
+        if key.startswith(prefix) and key[len(prefix):].isdigit()
+        for stem in stems if int(key[len(prefix):]) < page)
+    if not begun:
+        return None
+    first, stem = begun[-1]
+    length = lengths.get(stem, 0)
+    if page > (first + length - 1 if length > 0
+               else first + _PIN_AS_CITE_SPAN):
+        return None
+    held = names.get(stem, "")
+    name = re.sub(r"<[^>]+>", "", name or "").strip()
+    if name and not _is_the_named_case(name, held):
+        return None
+    print(f"[case.law] {cite!r} is a page of {held!r}, {vol} {rep} {first}")
+    return f"{vol} {rep} {first}", held
+
+
 @dataclass(frozen=True)
 class _CaseLawPdfChoice:
     cite: str
@@ -13103,7 +13154,9 @@ class CourtListenerGUI:
                             scholar_url: str = "",
                             known_item: "Optional[dict]" = None,
                             race_fallback=None,
-                            prefer_scan: bool = False) -> bool:
+                            prefer_scan: bool = False,
+                            context_year: str = "",
+                            inside_checked: bool = False) -> bool:
         """Follow a citation clicked *inside a PDF* to the cited case's own
         PDF, in a viewer window of its own.
 
@@ -13148,6 +13201,15 @@ class CourtListenerGUI:
         ``fallback`` if nothing anywhere has the case.  ``prefer_scan``: the
         scan opens wherever there is one, the text only when there is none
         (a citation followed out of a document; see _CaseOpenRace).
+
+        ``context_year``: the year of the opinion the citation was read in.
+        One older than :data:`_PAGE_INSIDE_CASE_BEFORE` may cite a case by a
+        page inside it — Corfield v. Coryell's "8 Johns. 435" is Putnam v.
+        Wyley, 8 Johns. 432 — so where no case begins at the page, the one
+        static.case.law's volume says runs over it opens, at that page (see
+        _case_law_case_containing_page).  The volume's list is read first, on
+        a thread of its own, and the lookup begins again by the case's own
+        citation (``inside_checked``).
         """
         kind, value = action if isinstance(action, tuple) else ("", "")
         if kind != "cite":
@@ -13166,6 +13228,38 @@ class CourtListenerGUI:
                 status(text)
             except tk.TclError:
                 pass
+
+        year_read = str(context_year or "").strip()[:4]
+        if (not inside_checked and year_read.isdigit()
+                and int(year_read) < _PAGE_INSIDE_CASE_BEFORE):
+            def check_page() -> None:
+                onward, onward_name = action, name
+                try:
+                    inside = _case_law_case_containing_page(cite, name)
+                except Exception as exc:
+                    print(f"[cite-pdf] reading {cite!r}'s volume failed: "
+                          f"{exc}")
+                    inside = None
+                if inside:
+                    first, held = inside
+                    page = _CITE_PARSE_RE.match(cite).group(3)
+                    onward = ("cite", f"{first}@{pin or page}")
+                    onward_name = name or held
+
+                def go_on() -> None:
+                    self.open_cited_case_pdf(
+                        parent, onward, snippet, status, fallback,
+                        name=onward_name, context_name=context_name,
+                        ask_orders=ask_orders, race=race, year=year,
+                        scholar_url=scholar_url, known_item=known_item,
+                        race_fallback=race_fallback, prefer_scan=prefer_scan,
+                        inside_checked=True)
+
+                self._post_root(go_on)
+
+            safe_status(f"Opening {name or cite}…")
+            threading.Thread(target=check_page, daemon=True).start()
+            return True
 
         label = name or cite
         # Slow to come, the case gets a window of its own saying what is
@@ -35725,6 +35819,8 @@ class _ScholarTextWindow:
                     context_name=(getattr(self, "_bb", None) or {}).get(
                         "name", ""),
                     race=True, prefer_scan=True, scholar_url=scholar_page,
+                    context_year=(getattr(self, "_bb", None) or {}).get(
+                        "year", ""),
                 ):
                     return
             except Exception as exc:
@@ -38003,6 +38099,7 @@ class _ScholarTextWindow:
             context_name=(getattr(self, "_bb", None) or {}).get(
                 "name", ""),
             race=True, prefer_scan=True,
+            context_year=(getattr(self, "_bb", None) or {}).get("year", ""),
         )
         if not opened:      # not a case citation — a statute, a rule, a docket
             _follow_brief_action(self._app, parent, action,
