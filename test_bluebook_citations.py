@@ -5975,6 +5975,212 @@ class PeriodicalWordsInPartyNamesTests(unittest.TestCase):
                          "Smith-Jones v. Doe")
 
 
+class LimitedTests(unittest.TestCase):
+    """Canadian Aviator, Ltd. v. United States, 324 U.S. 215 (1945): the
+    report's "CANADIAN AVIATOR, LIMITED" lost its "Limited" as though it
+    were a co-party, and the case was cited "Can. Aviator v. United States".
+    Rule 10.2.1(h) and table T6: "Limited" is "Ltd.", omitted only beside
+    a word that already marks a business firm ("Co.", "Corp.", "Ass'n",
+    "Bros.", "R.R.")."""
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "324 U.S. 215 (1945)",
+            "CANADIAN AVIATOR, LIMITED<br/>v.<br/>UNITED STATES."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Can. Aviator, Ltd. v. United States")
+
+    def test_kept_as_ltd_with_no_other_mark_of_a_firm(self):
+        for name, cited in (
+                ("Canadian Aviator, Limited v. United States",
+                 "Can. Aviator, Ltd. v. United States"),
+                ("Jones v. Barclays Bank Limited",
+                 "Jones v. Barclays Bank Ltd.")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_omitted_beside_one(self):
+        for name, cited in (
+                ("Smith Shipping Co., Limited v. Jones",
+                 "Smith Shipping Co. v. Jones"),
+                ("Acme Association, Limited v. Jones", "Acme Ass'n v. Jones"),
+                ("Great Western Railway, Limited v. Jones",
+                 "Great W. Ry. v. Jones"),
+                ("Jones v. Chesapeake & Ohio Railway, Inc.",
+                 "Jones v. Chesapeake & Ohio Ry.")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_a_limited_partner_is_no_firm(self):
+        from scholar_caption import caption_party
+        self.assertEqual(caption_party("JOHN SMITH, LIMITED PARTNER"),
+                         "John Smith")
+
+
+class InitialedPersonTests(unittest.TestCase):
+    """Manro v. Almeida, 23 U.S. (10 Wheat.) 473 (1825), was cited "J. Manro
+    v. Almeida": initials before a surname were an individual's only with
+    outside evidence (an office), though rule 10.2.1(g) omits "given names
+    or initials of individuals" — a firm named for its founder's initials
+    keeps them."""
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "23 U.S. 473 (____)",
+            "J. MANRO and others<br/>v.<br/>JOSEPH ALMEIDA, and the goods, "
+            "chattels, and credits of the said ALMEIDA."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Manro v. Almeida")
+
+    def test_an_individual_s_initials_go(self):
+        for name, cited in (("J. R. Manro v. Almeida", "Manro v. Almeida"),
+                            ("Manro v. J. Almeida", "Manro v. Almeida"),
+                            ("J. Van Buren v. Jones", "Van Buren v. Jones")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_a_firm_s_stay(self):
+        for name in ("J.C. Penney v. Smith", "J. Crew v. Smith",
+                     "Smith v. J.P. Morgan", "J.C. Penney Co. v. Smith"):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), name)
+
+    def test_an_anonymized_party_s_too(self):
+        self.assertEqual(abbreviate_case_name("A. B. v. C. D."), "A.B. v. C.D.")
+
+
+class InRemResAdversaryTests(unittest.TestCase):
+    """Salazar v. The Atlantic Sun, 881 F.2d 73 (3d Cir. 1989), was cited
+    "Captain Manuel Salazar & the Crew of the Vessel Atl. Sun & Salem Port
+    Auth. v. Atl. Sun": the vessel's quoted name in the first side read as
+    another party in capitals, so the co-parties were never cut (rule
+    10.2.1(a)); and the res lost its "The" (rule 10.2.1(d)), which a caption
+    marks with quotation marks or her appurtenances."""
+
+    CAPTION = (
+        "Captain Manuel SALAZAR and the Crew of the Vessel “ATLANTIC SUN” and "
+        "Salem Port Authority, Intervenor, and<br/>Coast to Coast Trucking, "
+        "Inc., Intervenor, and<br/>v.<br/>The “ATLANTIC SUN,” Her Engines, "
+        "Boilers, etc.")
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page("881 F.2d 73 (1989)",
+                                                    self.CAPTION))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Salazar v. The Atlantic Sun")
+
+    def test_a_res_the_opinion_calls_a_vessel(self):
+        # United States v. The Little Charles, 26 F. Cas. 979 (C.C.D. Va.
+        # 1818), was cited "United States v. Little Charles"; the opinion
+        # calls her "the schooner Little Charles".
+        body = ("The schooner Little Charles, with her tackle, apparel, and "
+                "furniture, was seized by the collector.")
+        self.assertEqual(
+            abbreviate_case_name("United States v. The Little Charles",
+                                 body_text=body),
+            "United States v. The Little Charles")
+        # Without the opinion to say so, the article is a party's.
+        self.assertEqual(
+            abbreviate_case_name("United States v. The Little Charles"),
+            "United States v. Little Charles")
+        self.assertEqual(
+            abbreviate_case_name("United States v. The Boeing Company",
+                                 body_text="The Boeing Company built a ship."),
+            "United States v. Boeing Co.")
+
+    def test_a_res_the_caption_marks(self):
+        for name, cited in (
+                ("Salazar v. The “Atlantic Sun”", "Salazar v. The Atlantic Sun"),
+                ("Jones v. The Western Maid, her tackle",
+                 "Jones v. The Western Maid"),
+                # Unmarked, an article is an ordinary party's.
+                ("United States v. The Boeing Company",
+                 "United States v. Boeing Co.")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+
+class OldEtAlTests(unittest.TestCase):
+    """The early reports write "and others" as "& al." or "and al." —
+    "Glass and al. v. The Sloop Betsey and al.", 3 Dall. 6 (1794) — which is
+    "et al." and is dropped as it is (rule 10.2.1(a))."""
+
+    def test_dropped_like_et_al(self):
+        for name, cited in (
+                ("Glass and al. v. The Sloop Betsey and al.",
+                 "Glass v. Sloop Betsey"),
+                ("Penhallow & al. v. Doane's Administrators",
+                 "Penhallow v. Doane's Adm'rs"),
+                ("Smith & als. v. Jones", "Smith v. Jones"),
+                ("Smith, & al., Appellants v. Jones & al.",
+                 "Smith v. Jones")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_a_name_s_al_is_left_be(self):
+        self.assertEqual(abbreviate_case_name("Harlow and Al. Kane v. Jones"),
+                         "Harlow & Al. Kane v. Jones")
+
+    def test_the_caption_in_capitals(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "3 U.S. 6 (1794)",
+            "GLASS AND AL.<br/>v.<br/>THE SLOOP BETSEY AND AL."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Glass v. Sloop Betsey")
+
+
+class OneProceduralPhraseTests(unittest.TestCase):
+    """Rule 10.2.1(b): every procedural phrase but the first is omitted —
+    "Ex parte In re Smith" is Ex parte Smith."""
+
+    def test_only_the_first(self):
+        for name, cited in (
+                ("Ex parte In re Smith", "Ex parte Smith"),
+                ("Ex parte, In re Smith", "Ex parte Smith"),
+                ("Ex parte In the Matter of Smith", "Ex parte Smith"),
+                ("In re Ex parte Smith", "In re Smith"),
+                ("In re Matter of Smith", "In re Smith"),
+                ("Ex parte Smith", "Ex parte Smith")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_the_caption_in_capitals(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "1 U.S. 1 (1800)", "EX PARTE IN RE SMITH."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Ex parte Smith")
+
+
+class HyphenatedNumberCaseTests(unittest.TestCase):
+    """Continental Grain Co. v. Barge FBL-585, 364 U.S. 19 (1960): the
+    capitals' "BARGE FBL-585" title-cased to "Barge Fbl-585", and the
+    opinion's own "FBL-585" never set it right — a hyphenated word was
+    weighed piece by piece only when every piece was letters."""
+
+    BODY = ("The barge FBL-585 sank at her moorings. Continental Grain Co. "
+            "sued the barge FBL-585 in rem, and FBL-585's owner as well.")
+
+    def test_the_letters_of_it_from_the_prose(self):
+        self.assertEqual(
+            refine_caption_case("Continental Grain Co. v. Barge Fbl-585",
+                                self.BODY),
+            "Continental Grain Co. v. Barge FBL-585")
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "364 U.S. 19 (1960)",
+            "CONTINENTAL GRAIN CO.<br/>v.<br/>BARGE FBL-585 ET AL.",
+        ).replace("<p>Opinion.</p>", f"<p>{self.BODY}</p>"))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Cont'l Grain Co. v. Barge FBL-585")
+
+
 class FirmPairAndSlashInitialsTests(unittest.TestCase):
     """Novo Nordisk A/S v. Caraco Pharm. Lab'ys, Ltd., 688 F.3d 766 (Fed.
     Cir. 2012), was cited "Novo Nordisk A/s & Novo Nordisk, Inc. v. …": both

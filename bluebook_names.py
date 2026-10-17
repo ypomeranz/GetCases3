@@ -1837,12 +1837,15 @@ def refine_caption_case(name: str, body_text: str) -> str:
         return name
     # Each word of a caption is weighed on its own, and so is each piece of
     # a hyphenated one ("Afl-cio", "Pena-irala"), its neighbors being the
-    # pieces beside it.
+    # pieces beside it — a number among them too: "Barge Fbl-585" (364 U.S.
+    # 19) is the opinion's "FBL-585", which, weighed whole, no prose could
+    # spell, as no word of letters alone.
     tokens: list[str] = []
     joins: list[str] = []      # what follows each piece: " ", "-" or ""
     for word in name.split():
         stem = word.strip(".,;:()'\"“”")
-        if re.fullmatch(r"[A-Za-z]+(?:-[A-Za-z]+)+", stem):
+        if (re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", stem)
+                and re.search(r"[A-Za-z]", stem)):
             lead = word[:word.index(stem)]
             tail = word[word.index(stem) + len(stem):]
             pieces = stem.split("-")
@@ -2584,6 +2587,18 @@ def _anonymized_initials(p: str) -> str | None:
     return closed
 
 
+#: Firms known by their founders' initials and a surname alone, which keep
+#: their initials (see _strip_given_names), by their letters.
+_INITIALED_FIRMS = frozenset({
+    "jcrew", "jcpenney", "jpmorgan", "hjheinz", "rjreynolds", "ahrobins",
+    "wrgrace", "jmsmucker", "scjohnson", "hbfuller", "aosmith", "jbhunt",
+    "crbard", "agedwards", "llbean", "jicase", "rhmacy", "fwwoolworth",
+    "sskresge", "wtgrant", "abdick", "bfgoodrich", "hphood", "efhutton",
+    "rrdonnelley", "jdedwards", "gdsearle", "ahbelo", "ewscripps",
+    "jwalterthompson", "hrblock", "tjmaxx", "jmhuber", "ajcanfield",
+})
+
+
 def _strip_given_names(p: str, *, person: bool = False,
                        names: _OpinionNames | None = None,
                        relaxed: bool = True) -> str | None:
@@ -2670,13 +2685,23 @@ def _strip_given_names(p: str, *, person: bool = False,
     # Bank", whose middle token flunks this check).  A stripped honorific
     # already establishes a natural person, so under one any name-shaped
     # middle token passes ("Dr. Theresa Swain Emory" -> "Emory").
+    # Initials before a surname are an individual's (rule 10.2.1(g) omits
+    # "given names or initials of individuals"): "J. MANRO and others", 23
+    # U.S. (10 Wheat.) 473, is Manro.  A firm named for its founder's initials
+    # keeps them — a caption mostly says it is one ("J.C. Penney Co."), and
+    # the firms known without a word of the kind are listed.
+    initialed = (i >= 1
+                 and all(re.fullmatch(r"(?:[A-Z]\.)+", t) for t in tokens[:i])
+                 and re.sub(r"[^a-z]", "", "".join(low))
+                 not in _INITIALED_FIRMS)
     if ((low[0] in _GIVEN_NAMES
             or (t6_surname and low[0] in _census_names()[2])
             or (person_shaped and re.fullmatch(
                 r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+", tokens[0]))
             # An office names a person even by initials: "W.M. Riddle,
             # Sup't" is Riddle.
-            or (person and re.fullmatch(r"(?:[A-Z]\.)+", tokens[0])))
+            or (person and re.fullmatch(r"(?:[A-Z]\.)+", tokens[0]))
+            or initialed)
             and all(titled or suffixed or person or tl in _GIVEN_NAMES
                     or tl in _SURNAME_PARTICLES
                     or re.fullmatch(r"(?:[A-Z]\.)+|[A-Z]\.?", t)
@@ -3262,8 +3287,13 @@ def first_party_in_capitals(side: str) -> str:
                 or len(re.sub(r"[^A-Za-z]", "", head[-1])) < 2):
             continue
         rest = side[m.end():].split()
+        # A vessel's name in quotation marks is the reporter's typography
+        # for the res, not a party set in capitals: "Captain Manuel SALAZAR
+        # and the Crew of the Vessel “ATLANTIC SUN” and Salem Port
+        # Authority" is Salazar (881 F.2d 73).
+        unquoted = re.sub(r"[“\"][^”\"]*[”\"]", " ", side[m.end():]).split()
         if (re.sub(r"[^a-z]", "", rest[0].lower()) in _APPOSITIVE_ENTITY_TERMS
-                or any(_caps_name_word(t) for t in rest)):
+                or any(_caps_name_word(t) for t in unquoted)):
             return side
         return side[:m.start()]
     return side
@@ -3460,6 +3490,13 @@ def _format_procedural(party: str, *, recognize_initials: bool,
     if not m:
         return None
     rest = party[m.end():].strip()
+    # Every procedural phrase but the first is omitted (rule 10.2.1(b)):
+    # "Ex parte In re Smith" is Ex parte Smith, "In re Matter of Smith" In
+    # re Smith.
+    again = _PROCEDURAL_PREFIX_RE.match(rest)
+    while again and rest[again.end():].strip():
+        rest = rest[again.end():].strip()
+        again = _PROCEDURAL_PREFIX_RE.match(rest)
     end = _PROCEDURAL_PARTY_END_RE.search(rest)
     if end:
         rest = rest[:end.start()].strip(" ,")
@@ -3515,6 +3552,54 @@ def _is_bare_place(place: str) -> bool:
 _IN_REM_ADVERSARY_PARTIES = {
     "the amistad": "The Amistad",
 }
+
+# …and a caption may say so itself.  The reporter sets a vessel's name in
+# quotation marks, and lists her appurtenances after it: "The “ATLANTIC
+# SUN,” Her Engines, Boilers, etc." (Salazar v. The Atlantic Sun, 881 F.2d 73)
+# is the res, which "Atl. Sun" lost.  The names a caption marks so, while
+# abbreviate_case_name reads it (see _in_rem_res_names).
+_IN_REM_RES: contextvars.ContextVar = contextvars.ContextVar(
+    "bluebook_in_rem_res", default=frozenset())
+_QUOTED_RES_RE = re.compile(r"the\s+[“\"]\s*([^”\"]+?)[\s.,;]*[”\"]",
+                            re.IGNORECASE)
+_APPURTENANCED_RES_RE = re.compile(
+    r"the\s+([^,;]+?),?\s+(?:her|its)\s+(?:engines?|boilers?|tackle|apparel|"
+    r"cargo|furniture|equipment|appurtenances)\b", re.IGNORECASE)
+
+
+def _res_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+
+
+def _in_rem_res_names(name: str, body_text: str = "") -> frozenset:
+    """The parties of a "v." caption marked as the res of an in rem action —
+    by the caption's own words, "The" before a quoted name or a name her
+    appurtenances follow, or by the opinion's, which calls it a vessel: "The
+    schooner Little Charles, with her tackle …" (United States v. The Little
+    Charles, 26 F. Cas. 979) — by their comparison keys ("atlantic sun")."""
+    sides = re.split(r"\s+vs?\.\s+", name or "")
+    if len(sides) < 2:
+        return frozenset()
+    found = set()
+    for side in sides:
+        side = side.strip()
+        m = _QUOTED_RES_RE.match(side) or _APPURTENANCED_RES_RE.match(side)
+        if m:
+            found.add(_res_key(m.group(1)))
+            continue
+        named = re.match(r"the\s+([^,;]+?)[\s.]*(?:[,;]|$)", side,
+                         re.IGNORECASE)
+        if named and body_text and re.search(
+                r"\b(?:%s)\s+%s\b" % (_VESSEL_WORD_ALT,
+                                      r"\s+".join(map(re.escape,
+                                                      named.group(1).split()))),
+                body_text, re.IGNORECASE):
+            found.add(_res_key(named.group(1)))
+    return frozenset(found)
+
+
+_VESSEL_WORD_ALT = "|".join(sorted(_VESSEL_WORDS | {"steamship"},
+                                   key=len, reverse=True))
 
 
 def _institution_word(word: str) -> bool:
@@ -3615,6 +3700,11 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     vessel = _IN_REM_ADVERSARY_PARTIES.get(p.strip(" ,.").lower())
     if vessel:
         return vessel
+    res = re.match(r"the\s+(.+?)[\s,.]*$", p, flags=re.IGNORECASE)
+    if res and _res_key(res.group(1)) in _IN_REM_RES.get():
+        # The res keeps its article and its name whole, as an in rem
+        # caption's own does (see abbreviate_case_name).
+        return _lowercase_small_words("The " + res.group(1))
     p = re.sub(r"^the\s+", "", p, flags=re.IGNORECASE)  # rule 10.2.1(d)
     p = re.sub(r"\bUnited States of America\b", "United States", p,
                flags=re.IGNORECASE)
@@ -3840,8 +3930,12 @@ def _add_initials_variants() -> None:
 
 # Rule 10.2.1(h): omit "Inc.", "Ltd.", "L.L.C.", "L.L.P.", "N.A.", "F.S.B.",
 # and similar business-entity terms when the name *also* contains a word like
-# "Ass'n", "Bros.", "Co.", or "Corp." that already marks it as a business firm.
-_FIRM_MARKERS = {"ass'n", "assn", "bros", "co", "cos", "corp", "corps"}
+# "Ass'n", "Bros.", "Co.", "Corp." or "R.R." that already marks it as a
+# business firm — and "Ry.", the railway's: "Great Western Railway, Limited"
+# is Great W. Ry.  Without one, the term stays, abbreviated: "Canadian
+# Aviator, Limited" is Can. Aviator, Ltd. (324 U.S. 215).
+_FIRM_MARKERS = {"ass'n", "assn", "bros", "co", "cos", "corp", "corps",
+                 "r.r", "rr", "ry"}
 _REDUNDANT_ENTITY_TERMS = {
     "inc", "ltd", "llc", "l.l.c", "llp", "l.l.p", "lllp", "pllc", "p.l.l.c",
     "plc", "pc", "p.c", "pa", "p.a", "na", "n.a", "f.s.b", "fsb", "lp", "l.p",
@@ -4228,6 +4322,21 @@ def _finish_case_name(joined: str) -> str:
         _strip_trailing_period(_lowercase_small_words(joined)))))
 
 
+# The early reports' "and others": "Glass and al. v. The Sloop Betsey and
+# al." (3 Dall. 6), "Penhallow & al. v. Doane's Administrators" — "et al." by
+# another spelling, and dropped as it is (rule 10.2.1(a)).  Only where it
+# closes a party, so the "Al." of a name ("Harlow and Al. Kane") is left be.
+_OLD_ET_AL_RE = re.compile(
+    r"(?<![A-Za-z])(?:&|and)\s+(als?)\.(?=\s*(?:$|[,;:)\]]|vs?\.\s))",
+    re.IGNORECASE)
+
+
+def normalize_et_al(name: str) -> str:
+    """*name* with the old reports' "& al." and "and al." written "et al.",
+    as every later rule reads it."""
+    return _OLD_ET_AL_RE.sub(lambda m: f"et {m.group(1).lower()}.", name or "")
+
+
 def _clean_caption(name: str) -> str:
     """*name* stripped of what is never part of a cited case name — the
     reporter's typography, footnote markers, cross-references, descriptive
@@ -4236,6 +4345,7 @@ def _clean_caption(name: str) -> str:
     # OCR renders the early reports' turned-comma apostrophe as U+2018
     # ("M‘Intosh"); normalize so name patterns and casing rules see it.
     name = re.sub(r"\s+", " ", (name or "").replace("‘", "'")).strip()
+    name = normalize_et_al(name)
     # Acronyms a title-casing pass lowered go back to capitals first, so
     # the party rules below see "USA", not a surname "Usa" — and spaced
     # initials close up, so they see "U.S.", not "U. S.".
@@ -4340,6 +4450,16 @@ def abbreviate_case_name(name: str, *, court_state: str = "",
                                         body_text=body_text, textual=textual)
         finally:
             _TEXTUAL.reset(mode)
+    # A res the caption or the opinion marks as one (the quotes are cleaned
+    # away below).
+    res = _in_rem_res_names(name, body_text)
+    if res and not res <= _IN_REM_RES.get():
+        marked = _IN_REM_RES.set(_IN_REM_RES.get() | res)
+        try:
+            return abbreviate_case_name(name, court_state=court_state,
+                                        body_text=body_text, textual=textual)
+        finally:
+            _IN_REM_RES.reset(marked)
     name = _clean_caption(name)
     if not name:
         return name
