@@ -172,6 +172,15 @@ parts (one change, a fix) and their Bluebook names (14 changes, all intended).
     WL cite isn't sent to RECAP; on an orders page (568 U.S. 1140) CourtListener's
     first case was taken over the named one; Scholar is searched for 1910 lower-court
     cases, which it doesn't cover (it starts in 1923).
+    **Done** — a hyphen ending a line inside a docket number joins the next line, in
+    the app and the extension (Zitzow, Assist-2-Sell, and C.S. Sewell's docket-only
+    cite now go to RECAP). The orders page was right after all: 568 U.S. 1140 grants
+    Chadbourne & Parke's, Willis's and Proskauer's petitions in one entry, filed under
+    Chadbourne, and rule 10.2.1(a) cites a consolidation by its first-listed case. A
+    case named only in an entry's full name is now matched there, so it is found even
+    when its parties share nothing distinctive with the first. Scholar is not asked
+    for a lower federal court's decision before 1923 (Federal Cases, the circuit
+    reporters reprinted in them, F. first series), which static.case.law supplies.
 19. **Supreme Court cases cited to S. Ct.** when Scholar's text is paginated so (Apple
     v. Pepper, Lexmark, Bridge, Sekhar, …). Last, by the user's choice: U.S. cites come
     from the official scans when copying.

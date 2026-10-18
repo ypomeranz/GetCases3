@@ -3309,9 +3309,26 @@ class NominativeCitationSearchTests(unittest.TestCase):
                    return_value=Mock()) as by_cite:
             self.assertTrue(win._try_open_citation(
                 "Ex parte Merryman", "17 F. Cas. 144", "", fetcher, None))
-        by_cite.assert_called_once_with(["17 F. Cas. 144"], "Ex parte Merryman")
+        by_cite.assert_called_once_with(["17 F. Cas. 144"], "Ex parte Merryman",
+                                        "")
         fetcher.fetch_by_citation.assert_not_called()
         win._post_root.assert_called_once()
+
+    def test_so_do_federal_decisions_older_than_scholar_s(self):
+        # Loeb v. Eastman Kodak Co., 183 F. 704 (3d Cir. 1910): Scholar's
+        # copies of the lower federal courts' decisions begin in 1923.
+        win = object.__new__(CourtListenerGUI)
+        win.root = object()
+        win._post_root = Mock()
+        fetcher = Mock()
+        with patch("courtlistener_gui._case_law_text_source",
+                   return_value=Mock()) as by_cite:
+            self.assertTrue(win._try_open_citation(
+                "Loeb v. Eastman Kodak Co.", "183 F. 704", "", fetcher, None,
+                year="1910"))
+        by_cite.assert_called_once_with(["183 F. 704"],
+                                        "Loeb v. Eastman Kodak Co.", "1910")
+        fetcher.fetch_by_citation.assert_not_called()
 
     def test_direct_lookup_retries_federal_cases_alias_after_scholar_miss(self):
         # static.case.law without the case: Scholar under both spellings.

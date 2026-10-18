@@ -671,7 +671,8 @@
       if (!index.has(key)) index.set(key, { cite: m[0].replace(/\s+/g, " ") });
       const info = index.get(key);
       const end = m.index + m[0].length;
-      const before = text.slice(Math.max(0, m.index - 260), m.index).replace(/\s+/g, " ");
+      const before = joinLineBrokenHyphens(
+        text.slice(Math.max(0, m.index - 260), m.index)).replace(/\s+/g, " ");
       const dm = rx("recapDocket", "").exec(before);
       if (dm && !("docket" in info)) info.docket = dm[1].trim();
       if (!("name" in info)) {
@@ -703,6 +704,12 @@
     });
   }
 
+  /** citations._join_line_broken_hyphens: a hyphen ending a line joined to
+   *  the line after it — a docket number's own, "No. 1:21-⏎cv-3". */
+  function joinLineBrokenHyphens(s) {
+    return (s || "").replace(/([-‐‑])[ \t]*\r?\n[ \t]*(?=[A-Za-z0-9])/g, "$1");
+  }
+
   /** citations.iter_docket_cites: a federal slip opinion cited by docket
    *  alone, "No. 23-1971 (4th Cir. Feb. 12, 2024)", as [start, end, spec]. */
   function docketCites(text) {
@@ -711,7 +718,7 @@
       const courtId = federalCourtId(squash(m[3]));
       const month = MONTHS[m[4].slice(0, 3).toLowerCase()];
       if (!courtId || !month) continue;
-      const fields = { docket: m[1].trim(), date: isoDate(m[6], month, m[5]), court: courtId };
+      const fields = { docket: joinLineBrokenHyphens(m[1]).trim(), date: isoDate(m[6], month, m[5]), court: courtId };
       const name = recapName(text, m.index);
       if (name) fields.name = name;
       out.push([m.index, m.index + m[0].length, pyJson(fields)]);

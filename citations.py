@@ -765,7 +765,9 @@ _NAME_LOOKBEHIND = 200
 # ", No. A-61210-05T3", ", Nos. 12-6371, 12-6372", ", Civ. A. No. 96-3837".
 _DOCKET_AFTER_NAME_RE = re.compile(
     r",\s*(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+)?Nos?\.\s*"
-    r"[\w:().-]{2,30}(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
+    # (A hyphen may end a line inside the number: "No. 1:21-⏎cv-3".)
+    r"(?:[\w:().]|-(?:[ \t]*\r?\n[ \t]*)?){2,30}"
+    r"(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
 
 # "In re Winship", "Ex parte Young", "Matter of Doe", "In the Interest of
 # J.W." — a case name with no "v." in it, anchored to the end of the window
@@ -1326,6 +1328,8 @@ _REPORTER_FAMILIES = (
         "Abb.",
         ("Abb. U.S.", "Abbott U.S.", "Abbott United States"),
         ("Abb.",)),
+    # (FEDERAL_NOMINATIVE_REPORTERS, below, names these lower federal
+    # courts' reporters.)
     # Nineteenth-century state reports published under their reporters'
     # names and never renumbered into an official series; static.case.law
     # files each under a folder of its own.
@@ -1464,6 +1468,21 @@ _WORD_REPORTER_KEYS = frozenset(
 def reporter_family(rep: str) -> "_ReporterFamily | None":
     """The known same-reporter family for *rep*, if any."""
     return _REPORTER_FAMILY_BY_KEY.get(_loose_reporter_key(rep))
+
+
+#: The nineteenth century's reporters of the lower federal courts, reprinted
+#: in the Federal Cases (canonical spellings, as in _REPORTER_FAMILIES).
+FEDERAL_NOMINATIVE_REPORTERS = frozenset({
+    "Sumn.", "Curt.", "Ben.", "Low.", "Gall.", "Story", "Sprague", "Sawy.",
+    "Dill.", "McLean", "Woods", "Biss.", "Blatchf.", "Cliff.", "Flip.",
+    "Woolw.", "Mason", "Paine", "Bond", "Woodb. & M.", "Wash. C.C.", "Abb.",
+})
+
+
+def is_federal_nominative(rep: str) -> bool:
+    """Whether *rep* is one of :data:`FEDERAL_NOMINATIVE_REPORTERS`."""
+    family = reporter_family(rep)
+    return family is not None and family.canonical in FEDERAL_NOMINATIVE_REPORTERS
 
 
 def canonical_reporter(rep: str) -> str:
@@ -2313,6 +2332,14 @@ _RECAP_DOCKET_RE = re.compile(
     r"([A-Za-z]{0,4}\s?[\w:().-]{3,30}?)\s*,\s*$"
 )
 
+
+def _join_line_broken_hyphens(s: str) -> str:
+    """*s* with a hyphen that ends a line joined to the line after it — a
+    docket number's own hyphen where the brief's lines broke it: "No. 1:21-⏎
+    cv-3, 2022 WL 1787110" (Zitzow v. Auto-Owners Ins. Co., cited in a cert
+    petition)."""
+    return re.sub(r"([-‐‑])[ \t]*\r?\n[ \t]*(?=[A-Za-z0-9])", r"\1", s or "")
+
 # The court/date parenthetical after the cite (an optional star pin cite in
 # between): ", at *7 (D.N.J. Mar. 28, 2024)".
 _RECAP_AFTER_RE = re.compile(
@@ -2407,7 +2434,9 @@ def _clean_case_name(raw: str) -> str:
 # form fails the parenthetical), so those citations stay with the WL pass.
 _DOCKET_CITE_RE = re.compile(
     r"(?:Nos?\.|Civ(?:il)?\.?\s?(?:A(?:ction)?\.?)?\s?Nos?\.?|Case\s+No\.)\s*"
-    r"([A-Za-z]{0,4}\s?[\w:.-]{3,30}?)"
+    # (A hyphen may end a line inside the number: see
+    # _join_line_broken_hyphens.)
+    r"([A-Za-z]{0,4}\s?(?:[\w:.]|-(?:[ \t]*\r?\n[ \t]*)?){3,30}?)"
     r"((?:,\s*[\w:.-]{3,30})*?)"
     r"(?:,\s*slip\s+op\.(?:\s+at\s+\d{1,4}(?:\s*[-–—]\s*\d{1,4})?)?)?"
     r"\s*\(([^()]{2,45}?)\s+"
@@ -2491,7 +2520,8 @@ def iter_recap_cites(
         key = (m.group(1), norm_reporter(m.group(2)), m.group(3))
         info = index.setdefault(
             key, {"cite": re.sub(r"\s+", " ", m.group(0))})
-        before = re.sub(r"\s+", " ", text[max(0, m.start() - 260):m.start()])
+        before = re.sub(r"\s+", " ", _join_line_broken_hyphens(
+            text[max(0, m.start() - 260):m.start()]))
         dm = _RECAP_DOCKET_RE.search(before)
         if dm:
             info.setdefault("docket", dm.group(1).strip())
@@ -2590,7 +2620,7 @@ def iter_docket_cites(
         mon = _MONTHS.get(m.group(4)[:3].lower())
         if not court_id or not mon:
             continue
-        fields = {"docket": m.group(1).strip(),
+        fields = {"docket": _join_line_broken_hyphens(m.group(1)).strip(),
                   "date": f"{m.group(6)}-{mon:02d}-{int(m.group(5)):02d}",
                   "court": court_id}
         name = _recap_name(text, m.start(), italic)

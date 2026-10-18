@@ -172,6 +172,26 @@ class CaseCiteSpanTests(unittest.TestCase):
                    "A-61210-05T3, 2008 WL 465653 (N.J. Super. Ct. App. Div. "
                    "Feb. 22, 2008) is a state case."), [])
 
+    def test_a_docket_number_the_lines_broke(self):
+        # Zitzow v. Auto-Owners Ins. Co., as a cert petition's lines broke
+        # its docket: the RECAP lookup had no docket, and no name.
+        import json
+        text = ("See also Zitzow v. AutoOwners Ins. Co., No. 1:21-\ncv-3, 2022 "
+                "WL 1787110, at *5 (E.D. Tenn. March 7, 2022)\n(discussing)")
+        (span, (kind, spec)), = _spans(text)
+        self.assertEqual(kind, "recap")
+        self.assertTrue(span.startswith("Zitzow v. AutoOwners Ins. Co., No."))
+        spec = json.loads(spec)
+        self.assertEqual((spec["docket"], spec["name"], spec["court"]),
+                         ("1:21-cv-3", "Zitzow v. AutoOwners Ins. Co.",
+                          "tned"))
+        # A slip opinion cited by docket alone, too.
+        (_span, (kind, spec)), = _spans(
+            "Peninsula Pathology Assocs. v. Am. Int'l Indus., No. 23-\n1971 "
+            "(4th Cir. Feb. 12, 2024).")
+        self.assertEqual((kind, json.loads(spec)["docket"]),
+                         ("recap", "23-1971"))
+
     def test_multi_word_party_names(self):
         text = ("The Court in District of Columbia v. Wesby, 583 U. S. 48, 57 "
                 "(2018), held otherwise.")

@@ -414,6 +414,13 @@ APP_NS = _load(
      "_SCHOLAR_AVAILABLE": True,
      # The Federal Cases pattern, as the module defines it.
      "_FED_CAS_CITE_RE": _module_value("_FED_CAS_CITE_RE"),
+     # …and the older federal decisions Scholar has no copy of.
+     "_scholar_lacks": _load_function("_scholar_lacks", {
+         "_FED_CAS_CITE_RE": _module_value("_FED_CAS_CITE_RE"),
+         "_FED_FIRST_SERIES_RE": _module_value("_FED_FIRST_SERIES_RE"),
+         "_SCHOLAR_FEDERAL_FROM": _module_value("_SCHOLAR_FEDERAL_FROM"),
+         "_CITE_PARSE_RE": _module_value("_CITE_PARSE_RE"),
+         "_is_federal_nominative": citations.is_federal_nominative}),
      # How a citation's volume and reporter are read, as the module does.
      "_CITE_PARSE_RE": _module_value("_CITE_PARSE_RE"),
      "_canonical_reporter_key": citations.reporter_key,

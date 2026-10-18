@@ -44,11 +44,11 @@ globalThis.GetCasesPatterns = {
   },
   "docketAfterName": {
    "flags": "",
-   "source": ",\\s*(?:Civ(?:il)?\\.?\\s*(?:A(?:ction)?\\.?\\s*)?|Case\\s+)?Nos?\\.\\s*[\\w:().-]{2,30}(?:\\s*(?:,|&|and)\\s*[\\w:().-]{2,30})*\\s*$"
+   "source": ",\\s*(?:Civ(?:il)?\\.?\\s*(?:A(?:ction)?\\.?\\s*)?|Case\\s+)?Nos?\\.\\s*(?:[\\w:().]|-(?:[ \\t]*\\r?\\n[ \\t]*)?){2,30}(?:\\s*(?:,|&|and)\\s*[\\w:().-]{2,30})*\\s*$"
   },
   "docketCite": {
    "flags": "",
-   "source": "(?:Nos?\\.|Civ(?:il)?\\.?\\s?(?:A(?:ction)?\\.?)?\\s?Nos?\\.?|Case\\s+No\\.)\\s*([A-Za-z]{0,4}\\s?[\\w:.-]{3,30}?)((?:,\\s*[\\w:.-]{3,30})*?)(?:,\\s*slip\\s+op\\.(?:\\s+at\\s+\\d{1,4}(?:\\s*[-–—]\\s*\\d{1,4})?)?)?\\s*\\(([^()]{2,45}?)\\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)[a-z]*\\.?)\\s+(\\d{1,2}),\\s+(\\d{4})\\)"
+   "source": "(?:Nos?\\.|Civ(?:il)?\\.?\\s?(?:A(?:ction)?\\.?)?\\s?Nos?\\.?|Case\\s+No\\.)\\s*([A-Za-z]{0,4}\\s?(?:[\\w:.]|-(?:[ \\t]*\\r?\\n[ \\t]*)?){3,30}?)((?:,\\s*[\\w:.-]{3,30})*?)(?:,\\s*slip\\s+op\\.(?:\\s+at\\s+\\d{1,4}(?:\\s*[-–—]\\s*\\d{1,4})?)?)?\\s*\\(([^()]{2,45}?)\\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)[a-z]*\\.?)\\s+(\\d{1,2}),\\s+(\\d{4})\\)"
   },
   "earlyFedCite": {
    "flags": "",

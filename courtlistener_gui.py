@@ -1303,6 +1303,7 @@ from citations import (
     reporter_citation_variants as _reporter_citation_variants,
     reporter_key as _canonical_reporter_key,
     reporter_family as _reporter_family,
+    is_federal_nominative as _is_federal_nominative,
     case_match_text as _case_match_text,
     build_short_cite_index as _build_short_cite_index_here,
     cite_target_from_text as _cite_target_from_text,
@@ -4328,6 +4329,34 @@ _FED_APPX_RE = re.compile(r"F(?:ed)?\.?\s*App['’]?x\.?", re.IGNORECASE)
 # "17 Fed. Cas. 144", "17 F.Cas. 144".
 _FED_CAS_CITE_RE = re.compile(r"^\s*\d+\s+F(?:ed)?\.\s?Cas\.\s+\d+",
                               re.IGNORECASE)
+# The Federal Reporter's first series ("183 F. 704"), not its later ones.
+_FED_FIRST_SERIES_RE = re.compile(r"^\s*(\d{1,3})\s+F\.\s?(\d{1,4})(?!\w)")
+#: Where Google Scholar's copies of the lower federal courts' decisions begin.
+_SCHOLAR_FEDERAL_FROM = 1923
+
+
+def _scholar_lacks(cite: str, year: str = "") -> bool:
+    """Whether Google Scholar is known to hold no copy of the case at *cite*:
+    a lower federal court's decision from before its coverage of them begins
+    — the Federal Cases and the circuit reporters reprinted in them ("12
+    Blatchf. 553"), and the Federal Reporter's first series up to 1922
+    ("Loeb v. Eastman Kodak Co., 183 F. 704 (3d Cir. 1910)", searched for in
+    vain; for "85 F. 271" Scholar answers with the Supreme Court's opinion
+    that reviewed it).  Without a year, the first series' volumes through 280
+    are the ones decided before 1923."""
+    cite = (cite or "").split("@", 1)[0]
+    if _FED_CAS_CITE_RE.search(cite):
+        return True
+    m = _CITE_PARSE_RE.match(cite.strip())
+    if m and _is_federal_nominative(m.group(2)):
+        return True
+    first = _FED_FIRST_SERIES_RE.match(cite)
+    if not first:
+        return False
+    y = str(year or "")[:4]
+    if y.isdigit():
+        return int(y) < _SCHOLAR_FEDERAL_FROM
+    return int(first.group(1)) <= 280
 
 
 def _item_is_fed_appx(item: dict) -> bool:
@@ -4944,14 +4973,28 @@ def _cl_item_for_citation(client, cite: str, name: str = "",
                 out.add(re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", str(c))).lower())
         return out
 
-    def score(case_name: str, cites: set[str], court: str) -> tuple:
+    def tier(case_name: str, full_name: str = "") -> int:
+        """How well *name* matches a record: its own name, or one of the
+        cases its full name lists together (see
+        _names_a_consolidated_case)."""
+        if not name:
+            return -1
+        clean = re.sub(r"<[^>]+>", "", case_name or "")
+        best = max(_match_tier(name, clean), _match_tier(clean, name))
+        if best < 3 and _names_a_consolidated_case(
+                name, re.sub(r"<[^>]+>", "", full_name or "")):
+            return 3
+        return _match_tier(name, clean)
+
+    def score(case_name: str, cites: set[str], court: str,
+              full_name: str = "") -> tuple:
         # Keep the original priority order, but retain the full name score
         # instead of reducing every acceptable match to the same +2 tie.  Two
         # short opinions can legitimately begin on the same reporter page
         # (The Buena Ventura and In re Cooper both bear 243 F. 797); the printed
         # caption is then the signal that identifies the intended cluster.
         clean_name = re.sub(r"<[^>]+>", "", case_name or "")
-        name_tier = _match_tier(name, clean_name) if name else -1
+        name_tier = tier(clean_name, full_name)
         name_score = _name_match_score(name, clean_name) if name else 0.0
         query_tokens = _name_tokens(name) if name else []
         candidate_tokens = _name_tokens(clean_name) if name else []
@@ -4964,7 +5007,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "",
             bool(altkey and (court or "").lower() == _SCOTUS_COURT_ID),
         )
 
-    def pick(candidates: list, name_of, cites_of, court_of):
+    def pick(candidates: list, name_of, cites_of, court_of,
+             full_of=lambda c: ""):
         """The candidate the signals above single out — or None where they
         leave more than one *case* level at the top: the cases sharing a page
         of orders ("498 U.S. 807" begins eleven grants of certiorari), with no
@@ -4974,7 +5018,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "",
         def plain(c) -> str:
             return re.sub(r"<[^>]+>", "", name_of(c) or "")
 
-        rated = [(score(plain(c), cites_of(c), court_of(c)), c)
+        rated = [(score(plain(c), cites_of(c), court_of(c),
+                        str(full_of(c) or "")), c)
                  for c in candidates]
         top = max(s for s, _c in rated)
         tied = [c for s, c in rated if s == top]
@@ -4985,8 +5030,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "",
         # Bank of Kentucky, 2 Met. 327, a Kentucky case running onto the
         # page — and none is better than that.
         if (name and len(_name_parties(name)) == 2
-                and max(_match_tier(name, first),
-                        _match_tier(first, name)) < 0):
+                and tier(first, str(full_of(tied[0]) or "")) < 0
+                and _match_tier(first, name) < 0):
             print(f"[cl-cite] {cite!r}: CourtListener's {first!r} is not "
                   f"{name!r}")
             mismatched.append(first)
@@ -5018,6 +5063,7 @@ def _cl_item_for_citation(client, cite: str, name: str = "",
                     lambda cl: norm_cites(cl.get("citations")),
                     lambda cl: str(
                         cl.get("court_id") or cl.get("court") or ""),
+                    lambda cl: cl.get("case_name_full") or "",
                 )
                 if best is None and mismatched:
                     break           # another case's page: see below
@@ -5052,6 +5098,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "",
                 lambda it: it.get("caseName") or it.get("case_name"),
                 lambda it: norm_cites(it.get("citation")),
                 lambda it: str(it.get("court_id") or ""),
+                lambda it: (it.get("caseNameFull")
+                            or it.get("case_name_full") or ""),
             )
             if best is not None or not mismatched:
                 return best
@@ -5916,6 +5964,29 @@ def _name_match_score(query: str, candidate: str) -> float:
     if max(per_side) < 0.6:
         return 0.0
     return min(1.0, avg + bonus)
+
+
+def _names_a_consolidated_case(query: str, full_name: str) -> bool:
+    """Whether *query* is one of the cases a record's full name lists
+    together — as CourtListener runs them on: "Chadbourne & Parke LLP v.
+    Troice Willis of Colorado Inc. v. Troice and Proskauer Rose LLP v.
+    Troice", the one entry on a page of orders (568 U.S. 1140) granting all
+    three petitions.  Each party of "Willis of Colo. Inc. v. Troice" must be
+    in its place, in the words either side of one of the name's "v."s."""
+    parties = _name_parties(query)
+    seps = list(re.finditer(r"\s+vs?\.\s+", full_name or ""))
+    if len(parties) != 2 or len(seps) < 2:
+        return False    # a name of one case: the ordinary match decides
+    for k, sep in enumerate(seps):
+        left = full_name[seps[k - 1].end() if k else 0:sep.start()]
+        right = full_name[sep.end():seps[k + 1].start()
+                          if k + 1 < len(seps) else len(full_name)]
+        if (_party_overlap(parties[0], set(_name_tokens(left))) >= 0.6
+                and _party_overlap(parties[1],
+                                   set(_name_tokens(right))) >= 0.6
+                and not all(_is_common_party(p) for p in parties)):
+            return True
+    return False
 
 
 def _match_tier(query: str, candidate: str) -> int:
@@ -8672,10 +8743,11 @@ class _CaseOpenRace:
 
     def _scholar_cites(self) -> list:
         """The forms of the citation Scholar is asked by — none for a volume
-        or a docket number, and none for the Federal Cases, which Scholar
-        hardly ever finds by citation (as _warm_case_text)."""
+        or a docket number, and none for a lower federal court's decision
+        older than Scholar's copies of them (see _scholar_lacks; as
+        _warm_case_text)."""
         paged = bool(re.match(r"\d+\s+\D.*?\s\d+\s*$", self.cite or ""))
-        if not paged or _FED_CAS_CITE_RE.search(self.cite or ""):
+        if not paged or _scholar_lacks(self.cite, self.year):
             return []
         return list(_citation_search_variants(self.cite))
 
@@ -14346,11 +14418,12 @@ class CourtListenerGUI:
             if fetcher is None:
                 return False
             try:
-                # Not for Federal Cases: Scholar finds hardly any by
-                # citation, so their text is static.case.law's (fallback).
+                # Not for a lower federal court's decision older than
+                # Scholar's copies (the Federal Cases among them): their text
+                # is static.case.law's (fallback).
                 for lookup_cite in (_citation_search_variants(cite)
-                                    if paged and not _FED_CAS_CITE_RE.search(
-                                        cite or "") else ()):
+                                    if paged and not _scholar_lacks(
+                                        cite, year) else ()):
                     fetched = fetcher.fetch_by_citation(
                         lookup_cite, case_name=case_name, year=year)
                     if not fetched:
@@ -14744,9 +14817,12 @@ class CourtListenerGUI:
         # (not Corfield v. Coryell, 6 F. Cas. 546, nor Ex parte Merryman, 17
         # F. Cas. 144), and asking it took four searches — some sixteen
         # seconds — before static.case.law, which holds the whole reporter,
-        # answered in two.  So static.case.law is asked first.
-        if _FED_CAS_CITE_RE.search(cite):
-            cap = _case_law_text_source([cite], name)
+        # answered in two.  So static.case.law is asked first — as for every
+        # lower federal court's decision older than Scholar's copies of them
+        # (see _scholar_lacks): Loeb v. Eastman Kodak Co., 183 F. 704 (3d
+        # Cir. 1910).
+        if _scholar_lacks(cite, year):
+            cap = _case_law_text_source([cite], name, year)
             if cap is not None:
                 self._post_root(lambda: self._open_case_law_text(
                     target_parent, cap, cite, pin, prefetch_pdf))
