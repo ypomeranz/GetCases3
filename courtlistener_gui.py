@@ -2994,36 +2994,61 @@ def _case_law_case_containing_page(
     Schenck, 11 Johns. 377–89.  The case is the last to begin before the page
     — of several begun on one page, the last of them — so long as it runs on
     to the page, as far as the list says it runs (or :data:`_PIN_AS_CITE_SPAN`
-    pages, where it says nothing).  None where a case begins at the page
-    (that one is the case), where the volume's list can't be read, and where
-    *name* is given and the case is not the one it names."""
+    pages, where it says nothing).
+
+    A reporter that goes by another name is looked for under the official
+    series it was folded into (see _official_series_cites), as
+    static.case.law files it: "9 Wheaton 204" is 22 U.S. 204, the 204th page
+    of Gibbons v. Ogden, 22 U.S. 1–240, which there is no "wheat" folder to
+    say; "19 Pick. 234" is 36 Mass. 234.  The case comes back by the official
+    citation.  Where the name could be two states' series ("4 Met.") and
+    both have a case running over the page, the name must say which.
+
+    None where a case begins at the page (that one is the case), where no
+    volume's list can be read, and where *name* is given and the case is not
+    the one it names."""
     base = (cite or "").split("@", 1)[0].strip()
     cm = _CITE_PARSE_RE.match(base)
-    m = _CASE_LAW_FILE_URL_RE.match(_static_case_law_url(base) or "")
-    if not (cm and m):
+    if not cm:
         return None
-    files, names, lengths = _case_law_volume(m.group(2), m.group(3))
-    if not files or _case_law_cite_key(base) in files:
-        return None
-    vol, rep, page = cm.group(1), cm.group(2).strip(), int(cm.group(3))
-    prefix = _case_law_cite_key(f"{vol} {rep} ")
-    begun = sorted(
-        (int(key[len(prefix):]), stem) for key, stems in files.items()
-        if key.startswith(prefix) and key[len(prefix):].isdigit()
-        for stem in stems if int(key[len(prefix):]) < page)
-    if not begun:
-        return None
-    first, stem = begun[-1]
-    length = lengths.get(stem, 0)
-    if page > (first + length - 1 if length > 0
-               else first + _PIN_AS_CITE_SPAN):
-        return None
-    held = names.get(stem, "")
+    page = int(cm.group(3))
     name = re.sub(r"<[^>]+>", "", name or "").strip()
-    if name and not _is_the_named_case(name, held):
+    found: list[tuple[str, str]] = []
+    for form in dict.fromkeys([base, *_official_series_cites(base)]):
+        fm = _CITE_PARSE_RE.match(form)
+        m = _CASE_LAW_FILE_URL_RE.match(_static_case_law_url(form) or "")
+        if not (fm and m):
+            continue
+        files, names, lengths = _case_law_volume(m.group(2), m.group(3))
+        if not files:
+            continue
+        if _case_law_cite_key(form) in files:
+            return None
+        vol, rep = fm.group(1), fm.group(2).strip()
+        prefix = _case_law_cite_key(f"{vol} {rep} ")
+        begun = sorted(
+            (int(key[len(prefix):]), stem) for key, stems in files.items()
+            if key.startswith(prefix) and key[len(prefix):].isdigit()
+            for stem in stems if int(key[len(prefix):]) < page)
+        if not begun:
+            continue
+        first, stem = begun[-1]
+        length = lengths.get(stem, 0)
+        if page > (first + length - 1 if length > 0
+                   else first + _PIN_AS_CITE_SPAN):
+            continue
+        held = names.get(stem, "")
+        if name and not _is_the_named_case(name, held):
+            continue
+        found.append((f"{vol} {rep} {first}", held))
+    if len(found) != 1:
+        if found:
+            print(f"[case.law] {cite!r} is a page of {len(found)} cases, "
+                  f"one in each series it may mean: "
+                  f"{', '.join(c for c, _n in found)}")
         return None
-    print(f"[case.law] {cite!r} is a page of {held!r}, {vol} {rep} {first}")
-    return f"{vol} {rep} {first}", held
+    print(f"[case.law] {cite!r} is a page of {found[0][1]!r}, {found[0][0]}")
+    return found[0]
 
 
 @dataclass(frozen=True)
@@ -13207,7 +13232,9 @@ class CourtListenerGUI:
         page inside it — Corfield v. Coryell's "8 Johns. 435" is Putnam v.
         Wyley, 8 Johns. 432 — so where no case begins at the page, the one
         static.case.law's volume says runs over it opens, at that page (see
-        _case_law_case_containing_page).  The volume's list is read first, on
+        _case_law_case_containing_page).  So does a citation by a reporter's
+        own name, read anywhere: "9 Wheaton 204" is Gibbons v. Ogden, 22 U.S.
+        1, at 204.  The volume's list is read first, on
         a thread of its own, and the lookup begins again by the case's own
         citation (``inside_checked``).
         """
@@ -13230,8 +13257,13 @@ class CourtListenerGUI:
                 pass
 
         year_read = str(context_year or "").strip()[:4]
-        if (not inside_checked and year_read.isdigit()
-                and int(year_read) < _PAGE_INSIDE_CASE_BEFORE):
+        # A reporter cited by its own name rather than the official series it
+        # became ("9 Wheat. 204", "19 Pick. 234") is an old citation wherever
+        # it is read, Spotlight included.
+        if not inside_checked and (
+                (year_read.isdigit()
+                 and int(year_read) < _PAGE_INSIDE_CASE_BEFORE)
+                or _official_series_cites(cite)):
             def check_page() -> None:
                 onward, onward_name = action, name
                 try:

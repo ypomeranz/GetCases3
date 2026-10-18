@@ -164,11 +164,14 @@
   }
 
   /** Whether *pos* is where a citation's volume stands (after a case name's
-   *  comma, a semicolon, an opening bracket, or the start). */
+   *  comma, a semicolon, an opening bracket, a signal such as "See", or the
+   *  start). */
   function atCitationStart(text, pos) {
     while (pos > 0 && /\s/.test(text[pos - 1])) pos--;
     return pos === 0 || ",;([".includes(text[pos - 1]) ||
-      /\(\s*(?:1[5-9]|20)\d{2}\s*\)$/.test(text.slice(Math.max(0, pos - 8), pos));
+      /\(\s*(?:1[5-9]|20)\d{2}\s*\)$/.test(text.slice(Math.max(0, pos - 8), pos)) ||
+      /(?:^|[\s(;,.])(?:[Ss]ee(?:\s+also)?|[Cc]f\.|[Bb]ut\s+(?:see|cf\.)|[Aa]ccord|[Cc]ontra|[Cc]ompare|[Ee]\.\s?g\.,?)$/
+        .test(text.slice(Math.max(0, pos - 16), pos));
   }
 
   /** "vol reporter page" for a case-cite match (citations.case_match_text). */
