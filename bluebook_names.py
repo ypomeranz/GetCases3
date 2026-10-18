@@ -2600,7 +2600,9 @@ def _first_listed_party(side: str) -> str:
     # Stearns & Co., Inc.").
     for m in _ENTITY_LIST_BREAK_RE.finditer(side):
         before = _word_key(side[:m.start()].rsplit(None, 1)[-1])
-        after = _word_key(side[m.end():].split(None, 1)[0])
+        # Initials a reporter spaces out read as one word: "U. S. A.".
+        after = _word_key(re.sub(r"(?<=\b[A-Z]\.)\s+(?=[A-Z]\.)", "",
+                                 side[m.end():]).split(None, 1)[0])
         if (before in _LIST_CLOSING_DESIGNATORS
                 and after not in _APPOSITIVE_ENTITY_TERMS):
             side = side[:m.start()]
@@ -2860,6 +2862,10 @@ _APPOSITIVE_ENTITY_TERMS = {
     "inc", "incorporated", "corp", "corporation", "co", "cos", "company",
     "companies", "llc", "llp", "lllp", "lp", "pllc", "plc", "pc", "pa",
     "na", "fsb", "ltd", "limited", "gmbh", "ag", "sa", "nv",
+    # The company forms of other countries ("Aerel, S.R.L.", 448 F.3d 899),
+    # and the country a company's own name ends with: "Exxon Co., U.S.A."
+    # (517 U.S. 830).
+    "srl", "sarl", "spa", "sas", "bv", "kk", "pty", "oy", "oyj", "usa",
     "assn", "assoc", "assocs", "associates", "association",
     "bros", "brothers", "sons", "partners", "partnership",
     "group", "grp", "holding", "holdings", "trust", "bank", "fund",
@@ -3098,6 +3104,13 @@ def _format_anonymous_initials(party: str) -> str | None:
     p = party.strip().strip(",")
     if not _INITIALS_ONLY_RE.fullmatch(p):
         return None
+    # Three or four capitals run together are a firm's initials — "IBM",
+    # "UPMC" (West Penn Allegheny Health Sys., Inc. v. UPMC, 627 F.3d 85,
+    # had become "v. U.P.M.C.") — where a person's are printed apart or with
+    # periods ("J. D. B.", "J.G.G.").  Two run together are still a person's:
+    # "DL".
+    if re.fullmatch(r"[A-Z]{3,4}", p):
+        return None
     letters = re.findall(r"[A-Z]", p)
     if "".join(letters) in _RECOGNIZED_ACRONYMS:
         return None
@@ -3276,7 +3289,20 @@ def in_re_caps_name(caption: str) -> str | None:
     name = " ".join(run).strip(" ,;:")
     if _caps_run_sentence_end(run[-1]):
         name = name[:-1].rstrip(" ,;:")
+    name = in_re_title(name)
     return f"{prefix} {lead}{name}" if name else None
+
+
+def in_re_title(name: str) -> str:
+    """An in-re matter's title without what the caption runs on with after it:
+    its docket designation — "BEEF INDUSTRY ANTITRUST LITIGATION, MDL DOCKET
+    NO. 248" (600 F.2d 1148) — or the first party of the case brought under
+    it — "DUAL-DECK VIDEO CASSETTE RECORDER ANTITRUST LITIGATION, GO-VIDEO,
+    INC." (11 F.3d 1460).  A litigation's title ends with the word."""
+    name = re.sub(r"\s*,\s*(?:MDL\s+(?:DOCKET\s+)?|DOCKET\s+)NOS?\.?\s.*$",
+                  "", name or "", flags=re.IGNORECASE)
+    return re.sub(r"^(.*?\bLITIGATION)\s*,\s*\S.*$", r"\1", name,
+                  flags=re.IGNORECASE)
 
 
 # A lowercase "and" or "&" opening a party in ordinary case: "… UNIVERSITY

@@ -352,6 +352,33 @@ class GluedDispositionBylineTests(unittest.TestCase):
         self.assertTrue(parts[1].blocks[0].text().startswith("JUSTICE BREYER"))
 
 
+class JudgesVoteLineTests(unittest.TestCase):
+    """Mefford v. City of Dupontonia, 354 S.W.2d 823 (Tenn. Ct. App. 1961),
+    closes "SHRIVER and CROWNOVER, JJ., concurring." — the other judges'
+    votes, which had been made a concurrence of their own."""
+
+    OPINION = ["HUMPHREYS, J.",
+               "The question is whether the city may be held liable.",
+               "We affirm the judgment below."]
+
+    def test_the_votes_closing_an_opinion_are_no_writing(self):
+        for vote in ("SHRIVER and CROWNOVER, JJ., concurring.",
+                     "SMITH, JONES and BROWN, JJ., concur."):
+            with self.subTest(vote=vote):
+                parts = segment_blocks([_block(t)
+                                        for t in self.OPINION + [vote]])
+                self.assertEqual([p.kind for p in parts], ["majority"])
+
+    def test_judges_writing_together_still_have_their_concurrence(self):
+        parts = segment_blocks([_block(t) for t in self.OPINION + [
+            "SHRIVER and CROWNOVER, JJ., concurring.",
+            "We concur in the result but write separately because the "
+            "majority's reasoning about the municipal immunity statute goes "
+            "further than the case requires; we would leave that question "
+            "for another day."]])
+        self.assertEqual([p.kind for p in parts], ["majority", "concurrence"])
+
+
 class VoteLineHeadingTests(unittest.TestCase):
     """The old reports note a justice's vote on a line of its own — "Mr.
     Justice DANIEL dissented." — and set the same line as the heading of the

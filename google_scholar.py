@@ -1417,6 +1417,30 @@ def _ruled_heading_start(blocks: list, idx: int, floor: int) -> int:
     return j
 
 
+# A line recording several judges' votes, as a state court's opinion closes:
+# "SHRIVER and CROWNOVER, JJ., concurring.", "SMITH, JONES and BROWN, JJ.,
+# concur."  Several names, the plural title.
+_JUDGES_VOTE_RE = re.compile(
+    r"^\s*[A-Z][\w.'’-]+(?:\s*,\s*[A-Z][\w.'’-]+)*,?\s+(?:and|&)\s+"
+    r"[A-Z][\w.'’-]+\s*,\s*JJ\.\s*,?\s*(?:concurr?(?:ing|s)?|dissent(?:ing|s)?)"
+    r"\b[^.:]{0,60}[.:]?\s*$")
+
+
+def _writing_follows(blocks: list, i: int) -> bool:
+    """Whether a writing of some length follows the byline at ``blocks[i]``
+    before the next byline — a joint concurrence's own text — rather than
+    the end of the opinion or another judge's vote."""
+    for b in blocks[i + 1:i + 3]:
+        t = _content_text(b)
+        if not t:
+            continue
+        if (_SEP_HEADER_RE.match(t) or _VOTE_LINE_RE.match(t)
+                or _JUDGES_VOTE_RE.match(t)):
+            return False
+        return len(t) >= 150
+    return False
+
+
 def _opens_own_writing(blocks: list, i: int) -> bool:
     """Whether the writing after a vote line (see _VOTE_LINE_RE) is the
     voter's own — the next paragraph speaking in the first person: "In
@@ -2003,6 +2027,11 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
                 # with "." or ":".
                 and not (b.spans and b.spans[0].pagenum
                          and not re.search(r"[.:]$", t.rstrip()))):
+            if _JUDGES_VOTE_RE.match(t) and not _writing_follows(blocks, i):
+                # "SHRIVER and CROWNOVER, JJ., concurring." closing the
+                # opinion (Mefford v. City of Dupontonia, 354 S.W.2d 823):
+                # the judges' votes, no writing of their own.
+                continue
             kind = "dissent" if re.search(r"dissent", t, re.IGNORECASE) else "concurrence"
             label = t if len(t) <= 90 else t[:87] + "…"
             boundaries.append((i, kind, label))

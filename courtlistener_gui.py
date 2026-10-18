@@ -1221,6 +1221,7 @@ from bluebook_names import (
     ejectment_case_names,
     group_case_name,
     is_recognized_given_name,
+    _is_known_given_name as _judge_given_name,
     normal_case_caption,
     refine_caption_case,
     settled_case_name,
@@ -18530,8 +18531,9 @@ def _fix_name_case(name: str) -> str:
         if len(letters) <= 2:
             return wd                       # "IN", "OF": no name's
         # Each run of letters between apostrophes (straight or curly) and
-        # hyphens: O’CONNOR → O’Connor, SMITH-JONES → Smith-Jones.
-        out = re.sub(r"[A-Za-z]+", cap, wd)
+        # hyphens: O’CONNOR → O’Connor, SMITH-JONES → Smith-Jones — accented
+        # ones among them: PÉREZ → Pérez (it had been "PÉRez").
+        out = re.sub(r"[^\W\d_]+", cap, wd)
         if out.startswith("Mc") and len(out) > 2 and out[2].isalpha():
             out = "Mc" + out[2].upper() + out[3:]
         return out
@@ -28105,8 +28107,10 @@ class _ScholarTextWindow:
             _load_config().get("citation_overrides", {}),
             self._citation_override_keys,
         )
-        if not self._cl_primary:
-            self._refine_part_labels(self._parts)
+        # Whatever the text's source: CourtListener's and static.case.law's
+        # labels name the lead opinion's author as they print it ("Opinion
+        # (KAREN NELSON MOORE, Circuit Judge)"), or not at all.
+        self._refine_part_labels(self._parts)
         # Whether Google Scholar actually carries the opinion text (it usually
         # doesn't for Federal Appendix cases — they're scans only).  Gates the
         # "Scholar"/"Text" toggle while the PDF is showing.
@@ -32324,11 +32328,26 @@ class _ScholarTextWindow:
                 re.IGNORECASE,
             )
         )
-        title = "C.J." if is_chief else "J."
+        title = ("C.J." if is_chief
+                 # Judges writing together: "SHRIVER and CROWNOVER, JJ.,
+                 # concurring" is (Shriver and Crownover, JJ., concurring).
+                 else "JJ." if re.fullmatch(r"JJ\.?", role_seg, re.IGNORECASE)
+                 else "J.")
         name = re.sub(
             r"^(?:THE\s+)?(?:CHIEF\s+)?JUSTICE\s+", "", author_seg, flags=re.IGNORECASE
         ).strip()
         name = _fix_name_case(name)
+        name = self._judge_surname(name)
+        if not name:
+            return ""
+        if statement:
+            return f"statement of {name}, {title}, {phrase}"
+        return f"{name}, {title}, {phrase}"
+
+    def _judge_surname(self, name: str) -> str:
+        """The name a judge is cited by, from the name a byline prints (cased
+        already): the surname, or more where the bench needs it to tell
+        judges apart (see the body)."""
         # A circuit byline may print the judge's full name ("TOBY HEYTENS,
         # Circuit Judge, …"); the writer parenthetical takes the surname
         # alone, while disambiguating initials ("R. Nelson") stay.  The
@@ -32345,30 +32364,39 @@ class _ScholarTextWindow:
         # Seventh Circuit's "DIANE P. WOOD" (Judge Harlington Wood sat on it
         # too), who is cited (Diane P. Wood, J., …).  A bench that prints
         # every name in full says nothing of the kind.
+        # Not where it names her by surname too: Andrx Pharms., Inc. v.
+        # Biovail Corp. Int'l, 256 F.3d 799 (D.C. Cir. 2001), sits "Before:
+        # HENDERSON, RANDOLPH and GARLAND", its list of writings naming
+        # "KAREN LeCRAFT HENDERSON" in full.
         surnamed = sum(1 for k in known if " " not in k)
         if (len(tokens) > 1 and name.lower() in known
-                and surnamed > len(known) / 2):
+                and surnamed > len(known) / 2
+                and tokens[-1].lower() not in known):
             pass
         elif listed:
             name = listed
-        elif len(tokens) > 1 and is_recognized_given_name(tokens[0]):
+        elif len(tokens) > 1 and (
+                _judge_given_name(tokens[0])
+                # An initial goes before a given name — "E. RILEY ANDERSON"
+                # — but not alone before the surname, where it tells two
+                # judges of the name apart: "R. NELSON" is R. Nelson.
+                or (re.fullmatch(r"[A-Z]\.", tokens[0]) and len(tokens) > 2
+                    and _judge_given_name(tokens[1]))):
             # The given names go, and the initials between them and the
-            # surname: "ROSEMARY S. POOLER" is Pooler, not "S. Pooler".
+            # surname: "ROSEMARY S. POOLER" is Pooler, not "S. Pooler"; "E.
+            # RILEY ANDERSON" is Anderson.  A byline's given names are the
+            # Census files' too: "MYRNA PÉREZ" is Pérez.
             k = 1
             while k < len(tokens) - 1 and (
                     re.fullmatch(r"[A-Z]\.", tokens[k])
-                    or is_recognized_given_name(tokens[k])):
+                    or _judge_given_name(tokens[k])):
                 k += 1
             name = " ".join(tokens[k:])
         # A surname of two letters keeps the byline's capitals through the
         # case fixing, which spares "IN" and "OF": "HO" is Ho.
         if re.fullmatch(r"[A-Z]{2}", name):
             name = name[0] + name[1].lower()
-        if not name:
-            return ""
-        if statement:
-            return f"statement of {name}, {title}, {phrase}"
-        return f"{name}, {title}, {phrase}"
+        return name
 
     def _majority_author(self, part) -> str:
         """Running-head label for the lead opinion: 'Blackmun, J.',
@@ -32378,6 +32406,9 @@ class _ScholarTextWindow:
         for b in part.blocks[:3]:
             t = fix_title_comma(re.sub(r"\s+", " ", b.text()).strip())
             t = re.sub(r"^(?:\*\d+\s+)+", "", t)
+            # The heading a state court sets before the byline: "OPINION
+            # WILLIAM M. BARKER, J., delivered the opinion of the court".
+            t = re.sub(r"^OPINION\s+(?=[A-Z])", "", t)
             if re.match(r"PER\s+CURIAM\b", t, re.IGNORECASE):
                 return "per curiam"
             m = re.match(
@@ -32388,16 +32419,57 @@ class _ScholarTextWindow:
             if m:
                 title = "C.J." if m.group(1) else "J."
                 return f"{_fix_name_case(m.group(2))}, {title}"
+            # A state court's: "E. RILEY ANDERSON, J., delivered the opinion
+            # of the court, in which …" (Tennessee).
+            m = re.match(
+                r"((?-i:[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*){0,3}))\s*,\s*"
+                r"(C\.\s?J\.|P\.\s?J\.|J\.|Chief\s+Justice|Justice)\s*,?\s+"
+                r"(?:delivered|announced)\b",
+                t, re.IGNORECASE,
+            )
+            if m:
+                title = ("C.J." if re.match(r"C\.|Chief", m.group(2), re.IGNORECASE)
+                         else "P.J." if m.group(2).upper().startswith("P")
+                         else "J.")
+                return (f"{self._judge_surname(_fix_name_case(m.group(1)))}"
+                        f", {title}")
+            # The byline alone — or, as CourtListener's text of a Sixth
+            # Circuit opinion runs it on, before the first sentence: "MURPHY,
+            # Circuit Judge. The plaintiff in this case …".
             m = re.match(
                 r"([A-Z][\w.'’ -]{0,40}?),\s*((?:Chief\s+)?(?:Senior\s+)?"
-                r"(?:Circuit\s+|District\s+)?Judge)\s*[.:;]?\s*$",
+                r"(?:Circuit\s+|District\s+)?Judge)\s*(?:[.:;]?\s*$|[.:]\s+"
+                r"(?=[A-Z“\"]))",
                 t, re.IGNORECASE,
             )
             if m:
                 title = ("C.J." if re.search(r"\bChief\b", m.group(2), re.IGNORECASE)
                          else "J.")
-                return f"{_fix_name_case(m.group(1).split(',')[0])}, {title}"
+                name = _fix_name_case(m.group(1).split(",")[0])
+                return f"{self._judge_surname(name)}, {title}"
         return ""
+
+    @staticmethod
+    def _label_author(label: str) -> "tuple[str, str]":
+        """The author a source's own label names — CourtListener's
+        "Opinion (Kavanaugh)", static.case.law's "Opinion (KAREN NELSON
+        MOORE, Circuit Judge)", "Opinion (Justice Thomas)", "(PER CURIAM.)"
+        — as ``(name, title)``, or ``("", "")``."""
+        m = re.search(r"\(([^()]+)\)\s*$", label or "")
+        if not m:
+            return "", ""
+        inner = m.group(1).strip().rstrip(".")
+        if re.fullmatch(r"per\s+curiam", inner, re.IGNORECASE):
+            return "per curiam", ""
+        jm = re.fullmatch(r"(?:(Chief\s+)?Justice\s+)(.+)", inner,
+                          re.IGNORECASE)
+        if jm:
+            return jm.group(2).strip(), "C.J." if jm.group(1) else "J."
+        name, _, role = inner.partition(",")
+        role = role.strip()
+        chief = bool(re.match(r"Chief\b", role, re.IGNORECASE)
+                     or re.fullmatch(r"C\.\s?J", role, re.IGNORECASE))
+        return name.strip(), "C.J." if chief else "J."
 
     def _refine_part_labels(self, parts: list) -> None:
         """Sharpen the lead opinion's label.  ``segment_blocks`` calls every
@@ -32421,6 +32493,17 @@ class _ScholarTextWindow:
         else:
             base = "Majority Opinion"
         author = self._majority_author(maj)  # "Name, J." | "per curiam" | ""
+        if not author:
+            # No byline in the text: the author the source's own label names
+            # (CourtListener's sub-opinions, static.case.law's opinions), as a
+            # Scholar text's byline would give it — "KAREN NELSON MOORE,
+            # Circuit Judge" is Moore, J.
+            named, title = self._label_author(maj.label)
+            if named == "per curiam":
+                author = "per curiam"
+            elif named:
+                author = (f"{self._judge_surname(_fix_name_case(named))}, "
+                          f"{title}")
         if signal == "per curiam" or author == "per curiam":
             author = "Per Curiam"
         maj.label = f"{base} ({author})" if author else base
