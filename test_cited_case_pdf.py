@@ -215,7 +215,7 @@ def _fetch_pdf_bytes(url, client=None, timeout=30):
     return FETCHED.get(url)
 
 
-def _cl_item_for_citation(client, cite, name=""):
+def _cl_item_for_citation(client, cite, name="", year=""):
     CL_LOOKUPS.append((cite, name))
     return CL_ITEMS.get(cite)
 

@@ -22,6 +22,9 @@ Ranked by importance to a user × feasibility.
 
 **Status (2026-10-18):** 2, 3, 4, 6 and 8 done; 5 and 7 done in part (see
 each). Re-checked on the petition: 31 more links; the two wrong "Id." links gone.
+Then 9, 10, 11, 13, 14 and 15 done, and 16's doubled court (see each). Checked
+against the 59 scans (only the item-9 changes), the 1,912 stored Scholar texts'
+parts (one change, a fix) and their Bluebook names (14 changes, all intended).
 
 1. **Separate opinions on lower-court scans** — the view a citation clicked in a
    brief opens. Of 14 static.case.law scans with a concurrence or dissent, 10 show
@@ -96,14 +99,33 @@ each). Re-checked on the petition: 31 more links; the two wrong "Id." links gone
    byline. OCR spellings "Rennquist", "Oconnor" (check against the bench). A cited
    dissent read as a part: "(Sotomayor, J., dissenting from denial…)" in Hodge v.
    Plappert (136 F.4th 648). Easy–medium.
+   **Done** — a name followed by a sentence's verb ("took no part", "observed") opens
+   no attribution; a running head's name is read against the roster of Justices
+   (Rehnquist, O'Connor); "concurring in judgment" heads read "in the judgment".
 10. **static.case.law's own split can be wrong.** Ashcroft v. Iqbal: Souter's dissent is
     stored inside the majority. Run byline detection inside each static.case.law
     opinion. Medium.
+    **Done** — each static.case.law opinion, and each CourtListener sub-opinion, is
+    read for writings its bylines open inside it, which become parts of their own.
 11. **Recent cases without Scholar.** 707 S.W.3d 581 (Mo. 2025), 719 S.W.3d 525 (Tex.
     2025), 155 F.4th 859 (6th Cir. 2025): no text — static.case.law stops at 2018 and
     CourtListener's citation lookup didn't know them. Search CourtListener by name,
     court and date when the cite lookup fails. Also: no scan found for the two
     Amerigroup Sixth Circuit opinions (155 F.4th 795, 164 F.4th 529). Medium.
+    **Done** — when nothing bears the citation, CourtListener is searched by the
+    parties' names (abbreviations in every spelling: "Acad." is Academy or Academic),
+    in the citation's year, among the courts the reporter prints (S.W.3d: Missouri's,
+    not Georgia's); a party of initials must have the record's. All five recent cases
+    now open with text and with the court's slip PDF. Reading them turned up, and
+    fixed: a paragraph opening "Justice Roberts has said:" read as a heading
+    (Randolph); Missouri's writings, headed by their title alone and signed at the
+    end ("DISSENTING OPINION" … "Paul C. Wilson, Judge"), in the text and on the
+    scan; the Missouri caption's ")" column, lettered docket number and court
+    heading in the name; the Sixth Circuit's en banc order, its statement
+    "respecting the denial" and the "with whom … join" concurrence on the scan;
+    Texas's line-up ("JUSTICE YOUNG filed a concurring opinion") read as writings;
+    a lead opinion's author named after the caption or only where the writer signs.
+    Werner's concurrence and dissent are not on CourtListener at all.
 12. **The extension without the app** (`browser_extension/src/citations.js`). Wrong
     targets first: pins without "at" ("McCready, 457 U.S. 476" → nine links to a case
     at 476); the brief's page numbers inside a citation ("15 U.S.C.⏎⏎13⏎§15(a)" → § 13,
@@ -114,17 +136,36 @@ each). Re-checked on the petition: 31 more links; the two wrong "Id." links gone
     handling (`citations.scan_text`).
 13. **"Concurring in part and dissenting in part"** writings (static.case.law,
     CourtListener) labelled "Concurrence in Part" and coloured as concurrences. Easy.
+    **Done** — they are dissents ("Concurrence in Part & Dissent in Part"), cited
+    "concurring in part and dissenting in part".
 14. **Capitals.** "Hctec Partners" (676 S.W.3d 619): an anchored 1–1 tie between
     "HCTEC" and "HCTec" goes to the capitals; the 161 bare "HCTec"s are never counted.
     "FCA Us, LLC" (44 F.4th 548). Easy. Also "Pls.com" (32 F.4th 824, from the slip
     caption): a word with a period inside is never weighed against the text.
+    **Done** — a tie goes to the spelling the opinion writes most anywhere, then to
+    mixed case; a neighbor in capitals counts where the caption keeps it so and the
+    match stands in a sentence; a word with a period inside is weighed whole (also
+    fixes "Georgia v. Public.Resource.Org, Inc.").
 15. **Small name rules.** "ex rel." relator dropped (*Gieseke ex rel. Diversified Water
     Diversion, Inc.*, 844 N.W.2d 210); "Wilgar Land Co. v. Director" (*Dir., Off. of
     Workers' Comp. Programs*, 85 F.4th 828); "Inc." lost before "d/b/a/" (Trau-Med,
     71 S.W.3d 691) and Realty One's "Inc." (173 F.3d 995); "Re/max". Easy.
+    **Done** — rule 10.2.1(b)'s "similar expressions" are "ex rel." ("on behalf of",
+    "for the use of", "by and through his next friend …"), but not a class's or an
+    association's ("on behalf of himself and all others", "of its members"), a
+    clause naming no one ("by his guardian ad litem, et al."), or a co-party's; an
+    officer named by the office keeps it; a trade name, a docket number or a
+    co-party run on after "Inc." no longer takes the "Inc." along; "Re/Max".
+    **Note:** applied this way, *Schipper v. Levitt & Sons* (44 N.J. 70) is now
+    "Schipper ex rel. Schipper", *West Virginia v. B.P.J.* "West Virginia v. B.P.J.
+    ex rel. Jackson", and *Barron v. Baltimore* "Barron ex rel. Tiernan" — the rule's
+    form (as the petition cites *D.J. ex rel. R.J.*), not always the familiar one.
 16. **State cases cited to the state reporter.** "350 S.C. 7 (Ct. App. 2002)", "2 Cal.
     5th 505 (2017)", "207 N.C. 545 (N.C. 1935)" rather than S.E./P./S.E. — the same
     pin-page question as S. Ct.; the doubled "N.C. … (N.C." is an easy fix.
+    **Doubled court done** — the court is worked out for the reporter shown, so "207
+    N.C. 545 (1935)" (and "409 Mich. 672 (1980)"). The reporter choice stays: the one
+    whose pages the text gives.
 17. **Scholar's own data errors.** Exxon (517 U.S. 830): another case's Souter dissent
     appended (star page *1045; Exxon was unanimous). Low.
 18. **Minor.** A docket number split across lines ("No. 1:21-⏎cv-3") isn't read, so the

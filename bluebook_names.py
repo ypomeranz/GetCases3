@@ -450,7 +450,25 @@ _STATE_OF_RE = re.compile(
 # Matched case-insensitively and re-emitted in canonical lowercase form.
 _EX_REL_RE = re.compile(
     r"[\s,]+(?:ex\s+rel(?:\.|atione)?"
-    r"|(?:on|upon|at)\s+(?:the\s+)?rel(?:ation|\.)\s+of)"
+    r"|(?:on|upon|at)\s+(?:the\s+)?rel(?:ation|\.)\s+of"
+    # The rule's "similar expressions" (10.2.1(b)): one acting for the
+    # party — "John GIESEKE, on behalf of DIVERSIFIED WATER DIVERSION,
+    # INC." (844 N.W.2d 210), "D.J., by and through his next friend, R.J."
+    # (707 S.W.3d 581) — but not a class's representative, "on behalf of
+    # himself and all others similarly situated".
+    # "on behalf of its members" (460 F. Supp. 56), "of a group of similarly
+    # situated individuals" (578 F.3d 203) name no relator either.
+    r"|on\s+behalf\s+of(?!\s+(?:himself|herself|itself|themselves|themself|"
+    r"its|his|her|their|all|others|a|an|the\s+class|similarly|those|"
+    r"members)\b)"
+    r"|for\s+the\s+use\s+of"
+    # The whole of the role, however many words it runs to: "by her next
+    # friend and mother, Heather Jackson" (146 S. Ct. 2356), "through her
+    # next friend and guardian ad litem, Patrick T. Murphy" (914 F.2d 846).
+    r"|(?:by\s+and\s+through|by|through)\s+(?:(?:his|her|their|its)\s+)?"
+    r"(?:next\s+friends?|natural|legal|parents?|guardians?|mother|father)"
+    r"(?:\s+(?:next\s+friends?|natural|legal|parents?|guardians?|ad\s+litem|"
+    r"mother|father|and|&))*)"
     r"[\s,]+",
     re.IGNORECASE,
 )
@@ -1625,9 +1643,10 @@ def normal_case_caption(text: str) -> str:
             continue
 
         # Capitalize each apostrophe/hyphen component independently so Python's
-        # ordinary str.capitalize() does not produce O'brien.  Then apply the
-        # conventional internal capital after Mc.
-        pieces = re.split(r"(['’-])", low)
+        # ordinary str.capitalize() does not produce O'brien — and each side
+        # of a slash, a brand's "RE/MAX" being Re/Max (173 F.3d 995).  Then
+        # apply the conventional internal capital after Mc.
+        pieces = re.split(r"(['’/-])", low)
         fixed = "".join(
             _capitalize_component(piece) if j % 2 == 0 and piece else piece
             for j, piece in enumerate(pieces)
@@ -1677,7 +1696,13 @@ def _caption_token_case_votes(
                 re.IGNORECASE)
             g_tok, g_nb = 1, 2
         for m in pat.finditer(body_text):
-            if not re.search(r"[a-z]", m.group(g_nb)):
+            if not re.search(r"[a-z]", m.group(g_nb)) and not (
+                    # …unless the neighbor is an initialism the caption
+                    # keeps too, in the run of a sentence: "executives at FCA
+                    # US, LLC and its parent" (Gen. Motors, LLC v. FCA US,
+                    # LLC, 44 F.4th 548).
+                    cores[j].isupper() and len(cores[j]) >= 2
+                    and _in_running_prose(body_text, m.start(), m.end())):
                 continue  # all-caps context: no casing signal
             spelling = m.group(g_tok)
             if (keep_lower or not spelling.islower()) and not _caps_typography(
@@ -1698,6 +1723,18 @@ def _caption_token_case_votes(
             body_text):
         votes = {v: n for v, n in votes.items() if not v.isupper()}
     return votes, unanchored
+
+
+def _in_running_prose(body_text: str, start: int, end: int) -> bool:
+    """Whether ``body_text[start:end]`` stands in a sentence — a lowercase
+    word just before it on its line, or just after it — rather than in a
+    heading or a caption, which set everything in capitals."""
+    line_start = body_text.rfind("\n", 0, start) + 1
+    before = _PROSE_BEFORE_RE.search(body_text[line_start:start])
+    if before and before.group(1).islower():
+        return True
+    after = _PROSE_AFTER_RE.match(body_text[end:end + 40])
+    return bool(after and after.group(1).islower())
 
 
 def _caps_typography(spelling: str, body_text: str, start: int) -> bool:
@@ -1800,7 +1837,17 @@ def _reliable_caption_spelling(
     """The spelling supported strongly enough to use, or an empty string."""
     if not votes:
         return ""
-    best = max(votes, key=lambda s: votes[s])
+    # A tie goes to the spelling the opinion writes more often anywhere —
+    # "HCTEC Partners" once and "HCTec Partners" once, but "HCTec" 161 times
+    # (HCTec Partners, LLC v. Crawford, 676 S.W.3d 619) — and then to mixed
+    # case over the capitals a heading sets.
+    def everywhere(spelling: str) -> int:
+        return len(re.findall(r"(?<![A-Za-z])%s(?![A-Za-z])"
+                              % re.escape(spelling), body_text or ""))
+    top = max(votes.values())
+    tied = [s for s in votes if votes[s] == top]
+    best = (max(tied, key=lambda s: (everywhere(s), not s.isupper()))
+            if len(tied) > 1 else tied[0])
     cur = votes.get(core, 0)
     if best != core and votes[best] <= cur:
         best = core
@@ -1891,6 +1938,10 @@ def refine_caption_case(name: str, body_text: str) -> str:
                 and re.search(r"[A-Za-z]", stem)
                 and not re.fullmatch(r"\d+(?:st|nd|rd|th|d)", stem,
                                      re.IGNORECASE)):
+            cores[i] = stem
+        # So is a word with a period inside it, a web address's: "Pls.com,
+        # LLC" is the opinion's "PLS.com" (32 F.4th 824).
+        elif re.fullmatch(r"[A-Za-z]{2,}(?:\.[A-Za-z]{2,})+", stem):
             cores[i] = stem
     for i, tok in enumerate(tokens):
         core = cores[i]

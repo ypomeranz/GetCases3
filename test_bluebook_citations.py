@@ -1286,8 +1286,10 @@ class PartyListTests(unittest.TestCase):
              "Control Bd."),
             ("Louisiana, by & through its Att'y Gen., Jeff Landry v. Biden",
              "Louisiana v. Biden"),
+            # …but one acting as the party's next friend is its relator
+            # (rule 10.2.1(b)).
             ("A.N., a Minor, by & Through Her Next Friend, J.N. v. Jackson "
-             "R-II Sch. Dist.", "A.N. v. Jackson R-II Sch. Dist."),
+             "R-II Sch. Dist.", "A.N. ex rel. J.N. v. Jackson R-II Sch. Dist."),
             ("John P. Van Ness & Marcia His Wife v. Pacard",
              "Van Ness v. Pacard"),
             ("John Auvil et ux; et al. v. CBS 60 Minutes; et al.",
@@ -2781,6 +2783,30 @@ class ReporterAndDecisionDateTests(unittest.TestCase):
         bb = win._compute_bluebook_parts()
 
         self.assertEqual(bb["display_cite"], "409 Mich. 672")
+        # The Michigan Reports name the court: the parenthetical doesn't.
+        self.assertEqual(bb["court"], "")
+
+    def test_the_court_the_official_reports_name_is_named_once(self):
+        # Osborne v. Atl. Ice & Coal Co., read under 177 S.E. 796, had been
+        # cited "207 N.C. 545 (N.C. 1935)"; the Court of Appeals' official
+        # reports still need the court (350 S.C. 7 (Ct. App. 2002)).
+        def bb_for(cites, court_id, header):
+            win = object.__new__(_ScholarTextWindow)
+            win._item = {"case_name": "Osborne v. Atlantic Ice & Coal Co.",
+                         "citation": cites, "court_id": court_id,
+                         "date_filed": "1935-01-30"}
+            win._blocks = [
+                Block("center", [Span("Osborne v. Atlantic Ice & Coal Co.")]),
+                Block("center", [Span(header)]),
+                Block("para", [Span("The Court holds as follows.")])]
+            return win._compute_bluebook_parts()
+        bb = bb_for(["177 S.E. 796"], "nc", "177 S.E. 796, 207 N.C. 545")
+        self.assertEqual((bb["display_cite"], bb["court"]),
+                         ("207 N.C. 545", ""))
+        bb = bb_for(["564 S.E.2d 324"], "scctapp",
+                    "564 S.E.2d 324, 350 S.C. 7")
+        self.assertEqual((bb["display_cite"], bb["court"]),
+                         ("350 S.C. 7", "Ct. App."))
 
 
 class ReporterConveysCourtTests(unittest.TestCase):
@@ -6311,11 +6337,121 @@ class CaptionLeftoverTests(unittest.TestCase):
                   "THE NATIONAL ASSOCIATION OF REALTORS; BRIGHT MLS, INC.; "
                   "OPINION MIDWEST REAL ESTATE DATA, LLC, "
                   "Defendants-Appellees."],
-                 "Pls.com, LLC v. Nat'l Ass'n of Realtors")):
+                 "Pls.com, LLC v. Nat'l Ass'n of Realtors"),
+                # Missouri's, its court's heading run into it, a column of
+                # ")" beside it and the date it issued (707 S.W.3d 581).
+                (["SUPREME COURT OF MISSOURI en banc D.J., BY AND THROUGH "
+                  "HIS ) Opinion issued February 28, 2025 NEXT FRIEND, R.J., "
+                  ") ) Respondent, ) ) v. ) No. SC100702 ) FIRST STUDENT, "
+                  "INC., ) ) Appellant. )",
+                  "APPEAL FROM THE CIRCUIT COURT OF ST. LOUIS"],
+                 "D.J. ex rel. R.J. v. First Student, Inc.")):
             with self.subTest(want=want):
                 blocks = [Block("para", [Span(p)]) for p in paras]
                 self.assertEqual(
                     abbreviate_case_name(_scholar_caption_name(blocks)), want)
+
+    def test_a_court_named_as_a_party_is_no_heading(self):
+        from scholar_caption import slip_caption_name
+        from google_scholar import Block, Span
+        self.assertEqual(slip_caption_name([Block("para", [Span(
+            "SUPREME COURT OF VIRGINIA ET AL., Appellants, v. CONSUMERS "
+            "UNION OF UNITED STATES, INC., ET AL., Appellees.")])]),
+            "Supreme Court of Virginia v. Consumers Union of United States, "
+            "Inc.")
+
+    def test_one_who_acts_for_the_party(self):
+        # Rule 10.2.1(b)'s "similar expressions" are "ex rel." too.
+        from scholar_caption import caption_party
+        self.assertEqual(
+            caption_party("John GIESEKE, on behalf of DIVERSIFIED WATER "
+                          "DIVERSION, INC., Respondent,"),
+            "Gieseke ex rel. Diversified Water Diversion, Inc.")
+        self.assertEqual(
+            abbreviate_case_name("D.J., by and through his Next Friend, R.J. "
+                                 "v. First Student, Inc."),
+            "D.J. ex rel. R.J. v. First Student, Inc.")
+        # A class's representative acts for no one party, nor an
+        # association for its members.
+        self.assertEqual(
+            abbreviate_case_name("John Smith, on behalf of himself and all "
+                                 "others similarly situated v. Acme Corp."),
+            "Smith v. Acme Corp.")
+        self.assertEqual(caption_party(
+            "AMERICAN DENTAL ASSOCIATION, on behalf of its members"),
+            "American Dental Association")
+        # The whole of the role, however long (914 F.2d 846; 32 U.S. 243).
+        self.assertEqual(caption_party(
+            "K.H., through her next friend and guardian ad litem, Patrick T. "
+            "MURPHY, Plaintiff-Appellee,"), "K.H. ex rel. Murphy")
+        self.assertEqual(caption_party(
+            "JOHN BARRON, SURVIVOR OF JOHN CRAIG, FOR THE USE OF LUKE "
+            "TIERNAN, EXECUTOR OF JOHN CRAIG"), "John Barron ex rel. Luke "
+            "Tiernan")
+        # No relator named (489 U.S. 189), or the clause a co-party's (477
+        # So. 2d 544).
+        # (The prose gives "DeShaney" its capital later.)
+        self.assertEqual(caption_party(
+            "DESHANEY, A MINOR, BY HIS GUARDIAN AD LITEM, ET AL."),
+            "Deshaney")
+        self.assertEqual(caption_party(
+            "Clifton WINFIELD, Nigel Winfield, Nikki Winfield, a Minor, by "
+            "and through Her Father and Next Friend Malcolm Winfield and "
+            "Frank Marano, Petitioners,"), "Winfield")
+
+    def test_an_officer_named_by_the_office(self):
+        from scholar_caption import caption_party
+        self.assertEqual(
+            abbreviate_case_name(
+                "Wilgar Land Co. v. " + caption_party(
+                    "DIRECTOR, OFFICE OF WORKERS’ COMPENSATION PROGRAMS, "
+                    "U.S. DEPARTMENT OF LABOR; Linda Rose Adams")),
+            "Wilgar Land Co. v. Dir., Off. of Workers’ Comp. Programs")
+        # An officer the caption names keeps only the name.
+        self.assertEqual(caption_party(
+            "MARKWAYNE MULLIN, SECRETARY, DEPARTMENT OF HOMELAND SECURITY"),
+            "Mullin")
+
+    def test_a_company_s_form_survives_what_follows_it(self):
+        from scholar_caption import caption_party
+        # A trade name (71 S.W.3d 691), a docket number (173 F.3d 995), a
+        # co-party run on after it (719 S.W.3d 525).
+        self.assertEqual(caption_party(
+            "TRAU-MED OF AMERICA, INC. d/b/a/ Bellevue Clinic"),
+            "Trau-Med of America, Inc.")
+        self.assertEqual(caption_party(
+            "REALTY ONE, INC. (96-3362/3469); Smythe Cramer Company "
+            "(96-3362/3470), Defendants-Appellees/Cross-Appellants."),
+            "Realty One, Inc.")
+        self.assertEqual(caption_party(
+            "Werner Enterprises, Inc. and Shiraz A. Ali, Petitioners,"),
+            "Werner Enterprises, Inc.")
+        # …and a brand's slash: Re/Max.
+        self.assertEqual(caption_party("RE/MAX INTERNATIONAL, INC.; "
+                                       "A.E.B.T.S., Inc."),
+                         "Re/Max International, Inc.")
+
+    def test_capitals_the_prose_settles(self):
+        from bluebook_names import refine_caption_case
+        # A tie between the capitals of a heading and the prose's spelling
+        # goes to the one the opinion writes everywhere (676 S.W.3d 619).
+        body = ("Plaintiff HCTec Partners, LLC (“HCTec”) sued. HCTEC "
+                "Partners moved. " + "HCTec argues. " * 5)
+        self.assertEqual(refine_caption_case(
+            "Hctec Partners, LLC v. Crawford", body),
+            "HCTec Partners, LLC v. Crawford")
+        # A word between capitals, in the run of a sentence (44 F.4th 548).
+        self.assertEqual(refine_caption_case(
+            "General Motors, LLC v. FCA Us, LLC",
+            "For almost a decade, executives at FCA US, LLC and its parent "
+            "company bribed union officials."),
+            "General Motors, LLC v. FCA US, LLC")
+        # A web address's name (32 F.4th 824).
+        self.assertEqual(refine_caption_case(
+            "Pls.com, LLC v. National Association of Realtors",
+            "The plaintiff, PLS.com, LLC, sued. PLS.com argues that the "
+            "policy harms PLS.com and others."),
+            "PLS.com, LLC v. National Association of Realtors")
 
 
 class FirmPairAndSlashInitialsTests(unittest.TestCase):
@@ -7144,6 +7280,46 @@ class LeadOpinionLabelTests(unittest.TestCase):
                         "joined.", dissent=True),
             "Majority Opinion (Barker, J.)")
 
+    def test_who_delivered_it_after_the_court_s_caption(self):
+        # CourtListener's text of Werner Enters., Inc. v. Blake, 719 S.W.3d
+        # 525 (Tex. 2025): the line comes after the caption and the counsel.
+        win = object.__new__(_ScholarTextWindow)
+        win._is_scotus = False
+        lead = OpinionPart("Lead Opinion (Blacklock)", "majority", [
+            Block("para", [Span(t)]) for t in (
+                "Supreme Court of Texas ══════════ No. 23-0493 ══════════",
+                "Werner Enterprises, Inc. and Shiraz A. Ali, Petitioners,",
+                "v.", "Jennifer Blake, Respondent",
+                "On Petition for Review from the Court of Appeals",
+                "Argued January 30, 2025",
+                "CHIEF JUSTICE BLACKLOCK delivered the opinion of the Court, "
+                "in which Justice Devine and Justice Busby joined.",
+                "A negligent actor incurs liability only for damages "
+                "proximately caused by his negligence.")])
+        win._parts = [lead]
+        win._refine_part_labels(win._parts)
+        self.assertEqual(lead.label, "Opinion (Blacklock, C.J.)")
+
+    def test_the_writer_who_signs_it(self):
+        # Missouri names the writer only under the opinion: "Zel M. Fischer,
+        # Judge" (D.J. ex rel. R.J. v. First Student, Inc., 707 S.W.3d 581).
+        win = object.__new__(_ScholarTextWindow)
+        win._is_scotus = False
+        lead = OpinionPart("Opinion", "majority", [
+            Block("para", [Span(t)]) for t in (
+                "SUPREME COURT OF MISSOURI en banc D.J. ) v. ) First Student",
+                "First Student, Inc., appeals the circuit court’s judgment.",
+                "The judgment is vacated, and the case is remanded.",
+                "__________________________ Zel M. Fischer, Judge",
+                "Russell, C.J., Ransom, Broniec, and Gooch, JJ., concur; "
+                "Wilson, J., dissents in separate opinion filed.")])
+        dissent = OpinionPart("Dissenting Opinion (Paul C. Wilson, Judge)",
+                              "dissent", [Block("para", [Span(
+                                  "I respectfully dissent.")])])
+        win._parts = [lead, dissent]
+        win._refine_part_labels(win._parts)
+        self.assertEqual(lead.label, "Majority Opinion (Fischer, J.)")
+
     def test_a_byline_run_on_into_the_opinion(self):
         # CourtListener's text of a Sixth Circuit opinion.
         self.assertEqual(
@@ -7313,6 +7489,38 @@ class WriterParentheticalTests(unittest.TestCase):
             with self.subTest(line=line[:30]):
                 self.assertEqual(self._win()._writer_parenthetical(
                     self._part("separate", line)), cited)
+
+    def test_a_label_naming_a_writing_that_dissents_in_part(self):
+        # A static.case.law or CourtListener part whose text names no role:
+        # the label says it.
+        part = OpinionPart(
+            "Concurrence in Part & Dissent in Part (STAPLETON, Circuit Judge)",
+            "dissent", [Block("para", [Span("I agree with the majority's "
+                                            "treatment of the first claim.")])])
+        self.assertEqual(self._win()._writer_parenthetical(part),
+                         "Stapleton, J., concurring in part and dissenting in "
+                         "part")
+
+    def test_a_writing_s_own_title_and_its_signer(self):
+        # Missouri's, as segmentation labels them (D.J. ex rel. R.J. v. First
+        # Student, Inc., 707 S.W.3d 581): the caption the court repeats and
+        # the title lead the writing.
+        def cited(label, kind):
+            return self._win()._writer_parenthetical(OpinionPart(
+                label, kind, [Block("para", [Span(t)]) for t in (
+                    "10 SUPREME COURT OF MISSOURI en banc D.J. ) v. ) No. "
+                    "SC100702", label.split(" (")[0].upper(),
+                    "The principal opinion vacates the judgment.")]))
+        self.assertEqual(cited("Dissenting Opinion (Paul C. Wilson, Judge)",
+                               "dissent"), "Wilson, J., dissenting")
+        self.assertEqual(
+            cited("Opinion Concurring in Part and Dissenting in Part (Mary "
+                  "R. Russell, Chief Justice)", "dissent"),
+            "Russell, C.J., concurring in part and dissenting in part")
+        self.assertEqual(
+            cited("Opinion Concurring in Result (W. Brent Powell, Judge)",
+                  "concurrence"), "Powell, J., concurring in the result")
+        self.assertEqual(cited("Dissenting Opinion", "dissent"), "")
 
     def test_a_byline_s_footnote_mark_takes_no_colon_with_it(self):
         part = self._part(

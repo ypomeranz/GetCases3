@@ -267,5 +267,145 @@ class FootnoteMarkerTests(unittest.TestCase):
         self.assertIsNone(r._fn_marker_pos("fnref", "f2"))
 
 
+class ScanPartLabelTests(unittest.TestCase):
+    """What the parts rail calls the writings it finds on a scan."""
+
+    def test_a_justice_who_took_no_part_is_not_the_writer(self):
+        # Hemi Group, LLC v. City of New York, 559 U.S. 1: the one-page
+        # concurrence, named by its byline, had been named for Justice
+        # Sotomayor, from the line above it.
+        secs = so.detect_sections([
+            _page(["1 OCTOBER TERM, 2009", "Syllabus",
+                   "The syllabus text begins here and runs on."]),
+            _page(["Cite as: 559 U. S. 1 (2010) 3", "Opinion of the Court",
+                   "Chief Justice Roberts delivered the opinion of the Court.",
+                   "The opinion runs on for several lines of body text."]),
+            _page(["Cite as: 559 U. S. 1 (2010) 17",
+                   "GINSBURG, J., concurring in part and in judgment",
+                   "and the judgment is reversed.",
+                   "Justice Sotomayor took no part in the consideration or",
+                   "decision of this case.",
+                   "Justice Ginsburg, concurring in part and concurring in",
+                   "the judgment."]),
+            _page(["18 HEMI GROUP, LLC v. CITY OF NEW YORK",
+                   "BREYER, J., dissenting",
+                   "Justice Breyer, with whom Justice Stevens and Justice",
+                   "Kennedy join, dissenting."]),
+        ])
+        self.assertTrue(secs[2].label.startswith("Ginsburg, J., concurring"),
+                        secs[2].label)
+
+    def test_a_sentence_about_a_dissent_opens_none(self):
+        # Hodge v. Plappert, 136 F.4th 648 (6th Cir. 2025) (en banc).
+        line = ("Justice Sotomayor observed in her dissent from the denial "
+                "of certiorari")
+        self.assertIsNone(so._line_us_attribution(
+            so.group_lines(_page([line, "in Hodge’s state case, that …"])),
+            0))
+        self.assertEqual(
+            so._line_us_attribution(so.group_lines(_page(
+                ["Justice Ginsburg, concurring in part and concurring in",
+                 "the judgment."])), 0)[0], "concurrence")
+
+    def test_a_running_head_s_ocr_is_read_against_the_bench(self):
+        # Reiter v. Sonotone Corp., 442 U.S. 330 ("Rennquist"); Holmes v.
+        # Sec. Inv. Prot. Corp., 503 U.S. 258 ("Oconnor").
+        self.assertEqual(so._names_display(("RENNQUIST",), roster=True),
+                         "Rehnquist")
+        self.assertEqual(so._names_display(("OCONNOR",), roster=True),
+                         "O’Connor")
+        # A lower court's judge is no Justice: read as printed.
+        self.assertEqual(so._names_display(("BLACKMAN",)), "Blackman")
+
+    def test_in_the_judgment_as_the_byline_says_it(self):
+        self.assertEqual(
+            so._canon_role_phrase(("CONCURRING", "IN", "JUDGMENT")),
+            "concurring in the judgment")
+
+
+class CourtSlipWritingTests(unittest.TestCase):
+    """A court's own slip opinion, which has no running heads: its writings
+    found as the courts that issued the petition's cases set them."""
+
+    BODY = "The opinion runs on for several lines of body text."
+
+    def test_an_en_banc_order_its_statement_and_concurrence(self):
+        # Acad. of Allergy & Asthma in Primary Care v. Amerigroup Tenn., Inc.,
+        # 164 F.4th 529 (6th Cir. 2026): no writing had been found.
+        secs = so.detect_sections([
+            _page(["RECOMMENDED FOR PUBLICATION",
+                   "The court delivered an ORDER denying the petition for "
+                   "rehearing en banc.", self.BODY]),
+            _page(["_________________", "ORDER", "_________________",
+                   "The court received a petition for rehearing en banc."]),
+            _page(["__________________", "STATEMENT", "__________________",
+                   "JOHN K. BUSH, Circuit Judge, respecting the denial of "
+                   "rehearing en banc. This case", self.BODY]),
+            _page(["__________________", "CONCURRENCE", "__________________",
+                   "MURPHY, Circuit Judge, with whom SUTTON, ChiefJudge, and "
+                   "KETHLEDGE, Circuit",
+                   "Judge,join, concurring in the denial of rehearing en banc. "
+                   "Congress has", self.BODY]),
+        ])
+        self.assertEqual(
+            [(s.kind, s.label, s.start_page) for s in secs][1:],
+            [("majority", "Order", 1),
+             ("separate", "Statement of Bush, J., respecting the denial of "
+                          "rehearing en banc", 2),
+             ("concurrence", "Murphy, J., concurring in the denial of "
+                             "rehearing en banc", 3)])
+
+    def test_a_titled_dissent_named_by_its_signature(self):
+        # D.J. ex rel. R.J. v. First Student, Inc., 707 S.W.3d 581 (Mo.
+        # 2025): Missouri heads the dissent with its title alone; each
+        # writer signs, underlined, at the writing's end.
+        secs = so.detect_sections([
+            _page(["SUPREME COURT OF MISSOURI", "en banc",
+                   "The Honorable Rex Burlison, Judge", self.BODY]),
+            _page([self.BODY] * 5 + [
+                   "_Z_e_l _M__F__is_c_h_e_r _J_u_d_g_e_________",
+                   "Russell, C.J., Ransom, Broniec, and Gooch, JJ., concur;",
+                   "Wilson J dissents in separate opinion filed; Powell J"]),
+            _page(["SUPREME COURT OF MISSOURI", "en banc",
+                   "DISSENTING OPINION",
+                   "The principal opinion vacates the judgment.", self.BODY]),
+            _page([self.BODY] * 5 + [
+                   "For the foregoing reasons, I respectfully dissent.",
+                   "_P_a_u_l _C_. _W__il_s_o_n_, _Ju__d _g _e ________"]),
+        ])
+        self.assertEqual([(s.kind, s.label, s.start_page) for s in secs],
+                         [("majority", "Opinion of the Court", 0),
+                          ("dissent", "Wilson, J., dissenting", 2)])
+
+    def test_a_line_up_announces_writings_the_slip_does_not_hold(self):
+        # Werner Enters., Inc. v. Blake, 719 S.W.3d 525 (Tex. 2025): the
+        # concurrence and the dissent are filed apart; the slip closes on the
+        # Chief Justice's signature and "OPINION DELIVERED".
+        secs = so.detect_sections([
+            _page(["Supreme Court of Texas",
+                   "CHIEF JUSTICE BLACKLOCK delivered the opinion of the "
+                   "Court, in",
+                   "which Justice Devine and Justice Busby joined.",
+                   "JUSTICE YOUNG filed a concurring opinion, in which Justice",
+                   "Huddle joined.",
+                   "JUSTICE BLAND filed an opinion dissenting in part, in "
+                   "which", self.BODY]),
+            _page([self.BODY]),
+            _page([self.BODY, "James D. Blacklock", "Chief Justice",
+                   "OPINION DELIVERED: June 27, 2025"]),
+        ])
+        self.assertEqual([(s.kind, s.label, s.start_page) for s in secs],
+                         [("majority", "Opinion of the Court", 0)])
+
+    def test_the_whole_role_and_the_space_the_text_lost(self):
+        # Randolph v. Macauley, 155 F.4th 859 (6th Cir. 2025).
+        lines = so.group_lines(_page([
+            "MATHIS, Circuit Judge, concurring in part and concurring in "
+            "thejudgment. I"]))
+        self.assertEqual(so._west_attribution(lines, 0),
+                         ("concurrence", "Mathis",
+                          "concurring in part and concurring in the judgment"))
+
+
 if __name__ == "__main__":
     unittest.main()
