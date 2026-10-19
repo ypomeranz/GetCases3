@@ -1017,8 +1017,10 @@ class StripIconTests(unittest.TestCase):
         self.assertIn('self._details_btn = _ui_mini_button(\n'
                       '            bar, "", self.toggle_details', self.body)
         self.assertIn('image=self._strip_icons["panel"]', self.body)
-        self.assertIn("_HoverTip(self._details_btn, self._details_label",
-                      self.body)
+        # Its tip names the key as a hotkey (see _hotkey_tip).
+        self.assertIn("_HoverTip(self._details_btn,\n"
+                      "                  lambda: _hotkey_tip("
+                      "self._details_label())", self.body)
 
     def test_at_the_very_end_of_the_strip_where_the_panel_opens(self):
         # Placed before anything else is packed, so it is the first packed

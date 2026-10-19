@@ -123,9 +123,10 @@ of the printed report** or on **Google Scholar's text**: GetCases asks for both
 at once, and the case opens on whichever arrives first. The title bar shows the
 case's Bluebook citation, cited to the reporter those pages actually print.
 
-- **T** (on the viewer's toolbar) switches to the opinion's **text**; **P**
-  switches to the scan. Each switch lands on the passage you were reading. The
-  one that arrived second is behind its key as soon as it comes.
+- **T** (on the viewer's toolbar, or the **t** key) switches to the opinion's
+  **text**; **P** (or **p**) switches to the scan. Each switch lands on the
+  passage you were reading. The one that arrived second is behind its key as
+  soon as it comes.
 - A citation followed out of a scan or an opinion opens on the cited case's
   scan wherever there is one, its text fetched alongside it.
 - If no scan exists anywhere, the case opens on its text in the same kind of
@@ -306,6 +307,7 @@ is **Ctrl+Space** on every platform; you can change it under
 | **←** / **→** | Previous / next page of a scan |
 | **↑** / **↓** | Scroll |
 | **Shift+←** / **Shift+→**, **Shift + mouse wheel** | Move sideways across a zoomed-in page |
+| **t** / **p** | Switch the viewer to the opinion's text / the scanned pages |
 | **s** | Open or close the case-details side panel |
 | **Ctrl/Cmd+C** | Copy (from the text: with its citation, in the chosen style) |
 | **x** | Switch to the next copy style |
@@ -343,9 +345,15 @@ Single-letter keys (**s**, **x**) do nothing while you are typing in a box.
     other than the default one works best with a PDF reader such as SumatraPDF
     or Adobe Acrobat Reader installed.)
 - **On the text:** typesets the opinion as a polished PDF with **LaTeX** (see
-  below), saves it, and offers to open it for printing. Without LaTeX, it offers
-  to save the LaTeX source (`.tex`) instead, which you can edit or typeset
-  elsewhere.
+  below). GetCases first asks how:
+  - **Save as PDF…** saves the PDF and offers to open it for printing.
+  - **Edit LaTeX First…** saves the LaTeX source (`.tex`) and opens it in your
+    editor. Make your changes and save them, then press **Make PDF** in the
+    small window GetCases leaves open: the PDF is made from your edited source
+    and saved beside it. Press **Make PDF** again after further edits.
+
+  Without LaTeX, it offers to save the LaTeX source instead, which you can edit
+  or typeset elsewhere.
 
 ### Copy
 
@@ -423,10 +431,12 @@ things:
    Reports cases open in your web browser.
 2. **Google Scholar when Google blocks the app.** Heavy use can make Google
    Scholar answer with an "unusual traffic" challenge. With Firefox and the
-   `selenium` package installed, GetCases then fetches Scholar pages through a
-   private, invisible copy of Firefox, which Google accepts. If even that is
-   challenged, solve the CAPTCHA once in your normal Firefox. Without Firefox,
-   GetCases falls back to its local database and to CourtListener for the text.
+   `selenium` package installed, GetCases then goes straight to a private,
+   invisible copy of Firefox, which Google usually accepts. If even that is
+   challenged, a Firefox window opens on Google's CAPTCHA: answer it there, and
+   the case opens and the window closes by itself. (Close the window to skip it;
+   GetCases won't ask again for ten minutes.) Without Firefox, GetCases falls
+   back to its local database and to CourtListener for the text.
 
 ### A LaTeX distribution
 

@@ -18,6 +18,11 @@ Design:
     there is no manual setup beyond ``pip install selenium`` and Firefox.
   * The driver is started lazily and kept alive for reuse (start-up is slow);
     :func:`ScholarBrowser.close` / atexit tear it down.
+  * When Google challenges even this Firefox, the page is opened again in a
+    Firefox window the reader can see, on the same profile, and the fetch
+    waits for them to answer the CAPTCHA there (see
+    :meth:`ScholarBrowser._solve`).  What answering earns is carried back into
+    the headless session.
 
 Everything here is optional: :func:`available` is False when Selenium or
 Firefox is missing, and the caller degrades to the local opinion DB /
@@ -31,10 +36,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 _PROFILE_DIR = Path.home() / ".cache" / "courtlistener_scholar_ff"
 _PAGE_LOAD_TIMEOUT = 40
 _CONTENT_TIMEOUT = 20  # seconds to wait for results / opinion to appear
+_SOLVE_TIMEOUT = 300   # seconds the reader has to answer a CAPTCHA
+_SOLVE_SNOOZE = 600    # seconds no CAPTCHA window opens after one went unanswered
 
 # Substrings that mark Google's bot challenge, checked against the URL + source.
 _BLOCK_MARKERS = (
@@ -43,13 +51,53 @@ _BLOCK_MARKERS = (
 )
 
 
+# Said above Google's challenge in the window the reader answers it in.  It must
+# not contain any of _BLOCK_MARKERS, or the page would never read as answered.
+_SOLVE_NOTE = (
+    "GetCases: Google Scholar wants to check that a person is asking. Answer "
+    "the CAPTCHA below and the page you asked for opens in GetCases; this "
+    "window then closes by itself."
+)
+
+_NOTE_JS = """
+if (document.body && !document.getElementById('getcases-solve-note')) {
+  var d = document.createElement('div');
+  d.id = 'getcases-solve-note';
+  d.textContent = arguments[0];
+  d.style.cssText = 'padding:10px 16px;background:#fff3cd;color:#222;'
+    + 'font:15px/1.4 sans-serif;border-bottom:1px solid #d9c27a;';
+  document.body.insertBefore(d, document.body.firstChild);
+}
+"""
+
+#: Told what a fetch is waiting on, when set: ``on_step(text)`` as a CAPTCHA
+#: window opens for the reader (the app shows it in its loading window).
+on_step = None
+
+
+def _tell(hook, *args) -> None:
+    if hook is not None:
+        try:
+            hook(*args)
+        except Exception:
+            pass
+
+
+def _challenged(url: str, source: str) -> bool:
+    """Whether the page at *url* is Google's bot challenge."""
+    low = (source or "").lower()
+    return ("/sorry/" in (url or "").lower()
+            or any(m in low for m in _BLOCK_MARKERS))
+
+
 class BrowserUnavailable(Exception):
     """Selenium or Firefox isn't usable here — caller links out / falls back."""
 
 
 class BrowserBlocked(Exception):
-    """Even the real browser hit Scholar's challenge (rare — usually a CAPTCHA
-    the user must solve once in their normal Firefox)."""
+    """Even the real browser hit Scholar's challenge, and it was not answered
+    (the reader closed the CAPTCHA window or let it time out, or no window
+    was asked for)."""
 
 
 def _firefox_binary() -> "Optional[str]":
@@ -135,11 +183,16 @@ class ScholarBrowser:
     def __init__(self) -> None:
         self._driver = None
         self._lock = threading.Lock()
+        # google.com cookies a CAPTCHA answered in the visible window earned
+        # (Google's exemption chiefly), seeded into the next headless session.
+        self._earned: list = []
+        # No CAPTCHA window before this (monotonic): one went unanswered.
+        self._solve_after = 0.0
         atexit.register(self.close)
 
     # -- lifecycle -----------------------------------------------------------
 
-    def _ensure_driver(self):
+    def _ensure_driver(self, headless: bool = True):
         if self._driver is not None:
             return self._driver
         try:
@@ -155,7 +208,8 @@ class ScholarBrowser:
 
         _PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         opts = Options()
-        opts.add_argument("-headless")
+        if headless:
+            opts.add_argument("-headless")
         # A dedicated, persistent profile (accumulates its own good standing;
         # never touches the user's live, locked profile).
         opts.add_argument("-profile")
@@ -186,10 +240,14 @@ class ScholarBrowser:
 
     def _seed_cookies(self, driver) -> None:
         """Copy the user's google.com cookies into this session, so the driven
-        Firefox carries the same standing as their normal one.  Best-effort:
-        cookies can only be set while on the domain, so we load the (laxly
-        guarded) Scholar homepage first."""
-        rows = _google_cookie_rows()
+        Firefox carries the same standing as their normal one — and, ahead of
+        them, any a CAPTCHA answered in the visible window earned.
+        Best-effort: cookies can only be set while on the domain, so we load
+        the (laxly guarded) Scholar homepage first."""
+        earned = list(self._earned)
+        names = {row.get("name") for row in earned}
+        rows = earned + [row for row in _google_cookie_rows()
+                         if row["name"] not in names]
         if not rows:
             return
         try:
@@ -227,11 +285,14 @@ class ScholarBrowser:
 
     # -- fetch ---------------------------------------------------------------
 
-    def fetch(self, url: str, wait_for: str = "") -> "tuple[str, str]":
+    def fetch(self, url: str, wait_for: str = "",
+              solve: bool = False) -> "tuple[str, str]":
         """Navigate to *url* and return ``(page_source, final_url)`` once the
         page's content has loaded.  ``wait_for`` is a CSS selector to wait for
         (the results container or the opinion div); when empty a sensible one
-        is chosen from the URL.  Raises :class:`BrowserBlocked` on a challenge,
+        is chosen from the URL.  On a challenge, *solve* puts it to the reader
+        in a window they can see (see :meth:`_solve`); without it, or when
+        they don't answer, :class:`BrowserBlocked` is raised.  Raises
         :class:`BrowserUnavailable` when Firefox can't be driven."""
         from selenium.common.exceptions import (
             TimeoutException, WebDriverException,
@@ -258,11 +319,75 @@ class ScholarBrowser:
             self._await_content(driver, wait_for)
             source = driver.page_source or ""
             final_url = driver.current_url or url
-            low = source.lower()
-            if ("/sorry/" in final_url.lower()
-                    or any(m in low for m in _BLOCK_MARKERS)):
+            if _challenged(final_url, source):
+                if solve:
+                    return self._solve(url, wait_for)
                 raise BrowserBlocked()
             return source, final_url
+
+    def _solve(self, url: str, wait_for: str) -> "tuple[str, str]":
+        """Google has challenged the headless Firefox too: put the CAPTCHA to
+        the reader.  *url* is opened again in a Firefox window they can see,
+        on the same profile, and this waits — up to _SOLVE_TIMEOUT — for the
+        challenge to be answered and the page behind it to load, and returns
+        that page.  The window then closes; the cookies answering earned go
+        on into the headless session the next fetch starts.
+
+        Raises :class:`BrowserBlocked` when the reader closes the window or
+        lets it time out — and, for _SOLVE_SNOOZE after that, at once and
+        without a window, so an unanswered challenge does not come back on
+        every fetch."""
+        from selenium.common.exceptions import (
+            TimeoutException, WebDriverException,
+        )
+
+        if time.monotonic() < self._solve_after:
+            raise BrowserBlocked()
+        self.close()  # a profile is open in one Firefox at a time
+        try:
+            driver = self._ensure_driver(headless=False)
+        except BrowserUnavailable as exc:
+            print(f"[scholar-browser] no window for the CAPTCHA: {exc}")
+            self._solve_after = time.monotonic() + _SOLVE_SNOOZE
+            raise BrowserBlocked()
+        print("[scholar-browser] Google challenged Firefox too — waiting for "
+              "the CAPTCHA to be answered in the window")
+        _tell(on_step, "Google Scholar wants a CAPTCHA answered — answer it in "
+                       "the Firefox window that has opened…")
+
+        def go(target: str) -> None:
+            try:
+                driver.get(target)
+            except TimeoutException:
+                pass  # partial load is fine — we inspect what arrived
+
+        try:
+            go(url)
+            deadline = time.monotonic() + _SOLVE_TIMEOUT
+            while time.monotonic() < deadline:
+                final_url = driver.current_url or url
+                source = driver.page_source or ""
+                if not _challenged(final_url, source):
+                    if urlparse(final_url).path != urlparse(url).path:
+                        # Answered, but left somewhere else: go on to the page
+                        # asked for, now that Google lets us.
+                        go(url)
+                    self._await_content(driver, wait_for)
+                    final_url = driver.current_url or url
+                    source = driver.page_source or ""
+                    if not _challenged(final_url, source):
+                        self._earned = driver.get_cookies() or []
+                        print("[scholar-browser] CAPTCHA answered")
+                        return source, final_url
+                driver.execute_script(_NOTE_JS, _SOLVE_NOTE)
+                time.sleep(1.0)
+        except WebDriverException:
+            pass  # the reader closed the window
+        finally:
+            self.close()  # the next fetch starts headless again
+        print("[scholar-browser] the CAPTCHA went unanswered")
+        self._solve_after = time.monotonic() + _SOLVE_SNOOZE
+        raise BrowserBlocked()
 
     @staticmethod
     def _await_content(driver, wait_for: str) -> None:
@@ -300,14 +425,14 @@ if __name__ == "__main__":  # pragma: no cover - live smoke test
     try:
         t0 = time.perf_counter()
         html, final = br.fetch(
-            f"https://scholar.google.com/scholar?q={quote_plus(q)}&as_sdt=4")
+            f"https://scholar.google.com/scholar?q={quote_plus(q)}&as_sdt=4",
+            solve=True)
         dt = time.perf_counter() - t0
         has_rows = "gs_r" in html or "did not match" in html
         print(f"fetched {len(html):,} chars in {dt:.1f}s; final={final[:80]}")
         print("results present:", has_rows)
     except BrowserBlocked:
-        print("BLOCKED even in real Firefox — solve the CAPTCHA in your normal "
-              "Firefox once, then retry.")
+        print("BLOCKED even in real Firefox, and the CAPTCHA went unanswered.")
     except BrowserUnavailable as exc:
         print("unavailable:", exc)
     finally:
