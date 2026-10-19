@@ -690,7 +690,20 @@ _NAME_STOPPERS = frozenset({
     "cert", "cert.", "denied", "granted", "citation", "citations", "omitted",
     "quotation", "internal", "marks", "per", "curiam", "slip", "op", "op.",
     "no", "no.", "nos.", "v", "v.", "vs", "vs.",
+    # Words that open a sentence, capitalized there: "Whether Illinois Brick
+    # Co. v. Illinois, 431 U.S. 720 (1977), bars …" (a question presented).
+    "whether", "although", "though", "when", "while", "where", "if",
+    "unless", "unlike", "like", "after", "before", "following", "thus",
+    "hence", "here", "there", "indeed", "moreover", "further", "similarly",
+    "likewise", "accordingly", "therefore", "however", "notwithstanding",
 })
+# Separators the stop list names that a capital makes an initial instead:
+# the "V." of "Cont'l T. V., Inc. v. GTE Sylvania".
+_SEPARATOR_STOPPERS = frozenset({"v", "v.", "vs", "vs."})
+# Courts a sentence names before a citation of their decision — "The opinion
+# of the Sixth Circuit, 155 F.4th 795, is reproduced at …" — which are no
+# party's name.
+_COURT_NAME_WORDS = frozenset({"circuit", "cir.", "court", "ct."})
 
 # An abbreviation a name may legitimately contain ("Mgmt.", "Corp.", "U.S.",
 # "R.R.", "E.").  Any *other* period-terminated word — "Amendment.",
@@ -752,7 +765,9 @@ _NAME_LOOKBEHIND = 200
 # ", No. A-61210-05T3", ", Nos. 12-6371, 12-6372", ", Civ. A. No. 96-3837".
 _DOCKET_AFTER_NAME_RE = re.compile(
     r",\s*(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+)?Nos?\.\s*"
-    r"[\w:().-]{2,30}(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
+    # (A hyphen may end a line inside the number: "No. 1:21-⏎cv-3".)
+    r"(?:[\w:().]|-(?:[ \t]*\r?\n[ \t]*)?){2,30}"
+    r"(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
 
 # "In re Winship", "Ex parte Young", "Matter of Doe", "In the Interest of
 # J.W." — a case name with no "v." in it, anchored to the end of the window
@@ -934,7 +949,14 @@ def _case_name_start(
         low = re.sub("[\ufffe\u00ad]", "", tok).lower().strip(",;:")
         # A signal opening a parenthetical is capitalized as often as not —
         # "(Citing Hollingsworth v. Perry, …)" — and is no more a name for it.
-        if low in _NAME_STOPPERS or low.lstrip("([\"“‘'") in _NAME_STOPPERS:
+        if ((low in _NAME_STOPPERS
+             or low.lstrip("([\"“‘'") in _NAME_STOPPERS)
+                and not (low in _SEPARATOR_STOPPERS and tok[:1].isupper())):
+            break
+        if re.search(r"\.[”\"’']+[,;:]?$", tok):
+            # A period inside a closing quotation mark ends a sentence: "…
+            # nullify the doctrine of Illinois Brick.” Motorola Mobility LLC
+            # v. AU Optronics Corp., 775 F.3d 816" names Motorola alone.
             break
         if lone and i < len(toks) and tok.endswith(","):
             # With no "v." to anchor it, the party is whatever follows the
@@ -974,6 +996,8 @@ def _case_name_start(
         return None
     if lone and len(toks) - i > 4:
         return None  # a lone party is one or two words, not half a sentence
+    if lone and toks[-1].group(0).lower().strip(",;:") in _COURT_NAME_WORDS:
+        return None  # "…of the Sixth Circuit, 155 F.4th 795": a court
     start = toks[i].start()
     if head[start] in "([":
         start += 1  # "(Hollingsworth v. Perry, …)": the name is inside
@@ -1304,6 +1328,8 @@ _REPORTER_FAMILIES = (
         "Abb.",
         ("Abb. U.S.", "Abbott U.S.", "Abbott United States"),
         ("Abb.",)),
+    # (FEDERAL_NOMINATIVE_REPORTERS, below, names these lower federal
+    # courts' reporters.)
     # Nineteenth-century state reports published under their reporters'
     # names and never renumbered into an official series; static.case.law
     # files each under a folder of its own.
@@ -1442,6 +1468,21 @@ _WORD_REPORTER_KEYS = frozenset(
 def reporter_family(rep: str) -> "_ReporterFamily | None":
     """The known same-reporter family for *rep*, if any."""
     return _REPORTER_FAMILY_BY_KEY.get(_loose_reporter_key(rep))
+
+
+#: The nineteenth century's reporters of the lower federal courts, reprinted
+#: in the Federal Cases (canonical spellings, as in _REPORTER_FAMILIES).
+FEDERAL_NOMINATIVE_REPORTERS = frozenset({
+    "Sumn.", "Curt.", "Ben.", "Low.", "Gall.", "Story", "Sprague", "Sawy.",
+    "Dill.", "McLean", "Woods", "Biss.", "Blatchf.", "Cliff.", "Flip.",
+    "Woolw.", "Mason", "Paine", "Bond", "Woodb. & M.", "Wash. C.C.", "Abb.",
+})
+
+
+def is_federal_nominative(rep: str) -> bool:
+    """Whether *rep* is one of :data:`FEDERAL_NOMINATIVE_REPORTERS`."""
+    family = reporter_family(rep)
+    return family is not None and family.canonical in FEDERAL_NOMINATIVE_REPORTERS
 
 
 def canonical_reporter(rep: str) -> str:
@@ -2167,7 +2208,47 @@ def _id_chain_hard_broken(gap: str) -> bool:
     """Signals that end an "Id." chain however the page number reads: a record
     citation in between — in a brief that "Id." means the record, not the
     authority — or a blank line, which starts a new discussion."""
-    return bool("\n\n" in gap or _RECORD_CITE_RE.search(gap))
+    return bool(_paragraph_break(gap) or _RECORD_CITE_RE.search(gap))
+
+
+def _paragraph_break(gap: str) -> bool:
+    """Whether *gap* has a blank line starting a new discussion — not the one
+    text read page by page sets between two pages, beside the page's number or
+    label (read as spaces, see :func:`without_page_furniture`).  The Sixth
+    Circuit's opinion in a petition's appendix runs "…could go on and on. /
+    (blank) / App-13 / May all these parties … Id. at 535 n.31": one paragraph
+    across a page, its "Id." Associated General Contractors'."""
+    lines = (gap or "").split("\n")
+    for k in range(1, len(lines) - 1):
+        if lines[k]:
+            continue
+        if any(lines[j] and not lines[j].strip()
+               for j in (k - 1, k + 1)):
+            continue    # beside furniture read as spaces: a page break
+        return True
+    return False
+
+
+# A parenthetical naming the source a quotation came from: the citation in it
+# is the quotation's, not the authority a following "Id." means (Bluebook rule
+# 4.1) — "Id. (quoting NicSand, 507 F.3d at 450)" goes on citing the case
+# before it.
+_SOURCE_PAREN_RE = re.compile(
+    r"\(\s*(?:quoting|citing|quoted\s+in|cited\s+in)\b", re.IGNORECASE)
+
+
+def _in_source_parenthetical(text: str, pos: int) -> bool:
+    """Whether *pos* lies inside an open "(quoting …" or "(citing …"."""
+    depth = 0
+    for i in range(pos - 1, max(-1, pos - 400), -1):
+        c = text[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth == 0:
+                return bool(_SOURCE_PAREN_RE.match(text, i))
+            depth -= 1
+    return False
 
 
 def _id_chain_broken(gap: str) -> bool:
@@ -2250,6 +2331,14 @@ _RECAP_DOCKET_RE = re.compile(
     r"(?:Nos?\.|Civ(?:il)?\.?\s?(?:A(?:ction)?\.?)?\s?Nos?\.?|Case\s+No\.)\s*"
     r"([A-Za-z]{0,4}\s?[\w:().-]{3,30}?)\s*,\s*$"
 )
+
+
+def _join_line_broken_hyphens(s: str) -> str:
+    """*s* with a hyphen that ends a line joined to the line after it — a
+    docket number's own hyphen where the brief's lines broke it: "No. 1:21-⏎
+    cv-3, 2022 WL 1787110" (Zitzow v. Auto-Owners Ins. Co., cited in a cert
+    petition)."""
+    return re.sub(r"([-‐‑])[ \t]*\r?\n[ \t]*(?=[A-Za-z0-9])", r"\1", s or "")
 
 # The court/date parenthetical after the cite (an optional star pin cite in
 # between): ", at *7 (D.N.J. Mar. 28, 2024)".
@@ -2345,7 +2434,9 @@ def _clean_case_name(raw: str) -> str:
 # form fails the parenthetical), so those citations stay with the WL pass.
 _DOCKET_CITE_RE = re.compile(
     r"(?:Nos?\.|Civ(?:il)?\.?\s?(?:A(?:ction)?\.?)?\s?Nos?\.?|Case\s+No\.)\s*"
-    r"([A-Za-z]{0,4}\s?[\w:.-]{3,30}?)"
+    # (A hyphen may end a line inside the number: see
+    # _join_line_broken_hyphens.)
+    r"([A-Za-z]{0,4}\s?(?:[\w:.]|-(?:[ \t]*\r?\n[ \t]*)?){3,30}?)"
     r"((?:,\s*[\w:.-]{3,30})*?)"
     r"(?:,\s*slip\s+op\.(?:\s+at\s+\d{1,4}(?:\s*[-–—]\s*\d{1,4})?)?)?"
     r"\s*\(([^()]{2,45}?)\s+"
@@ -2429,7 +2520,8 @@ def iter_recap_cites(
         key = (m.group(1), norm_reporter(m.group(2)), m.group(3))
         info = index.setdefault(
             key, {"cite": re.sub(r"\s+", " ", m.group(0))})
-        before = re.sub(r"\s+", " ", text[max(0, m.start() - 260):m.start()])
+        before = re.sub(r"\s+", " ", _join_line_broken_hyphens(
+            text[max(0, m.start() - 260):m.start()]))
         dm = _RECAP_DOCKET_RE.search(before)
         if dm:
             info.setdefault("docket", dm.group(1).strip())
@@ -2528,7 +2620,7 @@ def iter_docket_cites(
         mon = _MONTHS.get(m.group(4)[:3].lower())
         if not court_id or not mon:
             continue
-        fields = {"docket": m.group(1).strip(),
+        fields = {"docket": _join_line_broken_hyphens(m.group(1)).strip(),
                   "date": f"{m.group(6)}-{mon:02d}-{int(m.group(5)):02d}",
                   "court": court_id}
         name = _recap_name(text, m.start(), italic)
@@ -2690,8 +2782,13 @@ def _id_antecedent(
         if any(end <= u_start and u_end <= start
                for u_start, u_end in unlinkable or ()):
             break  # something we cannot open stands in between
-        if action[0] == "const":
-            continue  # unpaginated — "at N" cannot be pointing here
+        if len(window[k]) > 3 and window[k][3]:
+            continue  # the source of a quotation, in its parenthetical
+        if action[0] in ("const", "usc", "cfr", "rule", "statestat",
+                         "browse"):
+            # Unpaginated — "at N" cannot be pointing here: "15 U.S.C.
+            # §15(a) … Id. at 280" is the case cited before the statute.
+            continue
         if action[0] == "leghist":
             # "132 Cong. Rec. 16823 (1986) (Senate); id., at 17607": another
             # page of the same volume — or of the same report, or the Globe.
@@ -2719,8 +2816,10 @@ def _id_antecedent(
             if m and not _page_in_window(int(m.group(2)), pin):
                 continue
         if gap > ID_NEAR_GAP:
-            break  # a statute has no page to corroborate the reference with
-        return action  # a statute/rule/regulation simply reopens
+            break  # no page of its own to corroborate the reference with
+        # A paginated serial, or a decision cited by docket or WL number
+        # ("id. at *9"), simply reopens.
+        return action
     return None
 
 
@@ -2790,10 +2889,14 @@ _ECF_STAMP_RE = re.compile(
     r"ID:[ \t]*\d{4,12},[ \t]*DktEntry:[ \t]*[\d.\-]{1,10},[ \t]*"
     r"Page[ \t]*\d{1,5}(?:[ \t]+of[ \t]+\d{1,5})?")
 
-# A page number standing alone on its line: "20", "iv", "- 7 -".
+# A page number standing alone on its line: "20", "iv", "- 7 -" — or an
+# appendix's own, as a petition for certiorari numbers the opinions below it
+# prints: "App-13", "App. 13", "Pet. App. 13a", "13a", "A-13".
 _PAGE_NUMBER_LINE_RE = re.compile(
     r"[ \t]*[-–—]?[ \t]*"
-    r"(?:\d{1,4}|(?=[ivxlc])c{0,3}(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3}))"
+    r"(?:\d{1,4}|(?=[ivxlc])c{0,3}(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"
+    r"|(?:Pet(?:ition)?\.?[ \t]*)?App(?:endix)?\.?[ \t]*[-–]?[ \t]*\d{1,4}a?"
+    r"|\d{1,4}a|A-\d{1,4})"
     r"[ \t]*[-–—]?[ \t]*\r?")
 
 # A U.S. Reports page opens on a two-line running head, and a citation broken
@@ -3300,7 +3403,9 @@ def detect_links(
                 # An Id. is itself the nearest antecedent for a following Id.,
                 # but retain the clean reporter cite rather than its @pin
                 # action so a chain never becomes "base@23@24".
-                recent.append((("cite", base), span_end, segments[0][0]))
+                recent.append((("cite", base), span_end, segments[0][0],
+                               not id_pages and _in_source_parenthetical(
+                                   text, segments[0][0])))
             else:
                 span_start = start
                 if kind in ("scotus", "recap", "sec"):
@@ -3318,7 +3423,9 @@ def detect_links(
                 out.append((span_start, span_end, action))
                 # Non-case Id. chains (to a statute, rule, or regulation) are
                 # safe too: their action has no pin suffix to accumulate.
-                recent.append((action, span_end, span_start))
+                recent.append((action, span_end, span_start,
+                               kind != "idcite" and _in_source_parenthetical(
+                                   text, span_start)))
             last_cite_end = span_end
             pos = span_end
             continue

@@ -203,6 +203,59 @@ class LastResortTests(unittest.TestCase):
 
 
 @unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class ConsolidatedOrderTests(unittest.TestCase):
+    """A page of orders where one entry grants several petitions together,
+    as 568 U.S. 1140 grants Chadbourne & Parke's, Willis of Colorado's and
+    Proskauer Rose's: CourtListener files the entry under the first, and
+    lists the others only in its full name.  A citation naming another of
+    them is to that entry — and is no case CourtListener lacks."""
+
+    @staticmethod
+    def _orders(*clusters):
+        return [{"status": 300, "clusters": [
+            {"case_name": name, "case_name_full": full, "id": cid,
+             "citations": [{"volume": 568, "reporter": "U.S.",
+                            "page": 1140}]}
+            for name, full, cid in clusters]}]
+
+    def _pick(self, name, *clusters):
+        client = mock.Mock()
+        client.lookup_citation.return_value = self._orders(*clusters)
+        client.search.return_value = {"results": []}
+        with mock.patch.object(gui, "_cl_case_containing_page",
+                               return_value=None), \
+                mock.patch.object(gui, "_cl_unreported_case",
+                                  return_value=None):
+            item = gui._cl_item_for_citation(client, "568 U.S. 1140",
+                                             name=name)
+        return item and item.get("cluster_id")
+
+    def test_a_case_the_entry_grants_with_the_first(self):
+        # The parties' other case on the page shares only "United States".
+        self.assertEqual(self._pick(
+            "Bravo Mining Co. v. United States",
+            ("Alpha Holdings v. United States",
+             "Alpha Holdings v. United States Bravo Mining Co. v. United "
+             "States", 1),
+            ("Charlie Mining v. United States", "Charlie Mining v. United "
+             "States", 2)), 1)
+
+    def test_each_case_of_its_own_entry(self):
+        clusters = (
+            ("Chadbourne & Parke LLP v. Troice",
+             "Chadbourne & Parke LLP v. Troice Willis of Colorado Inc. v. "
+             "Troice and Proskauer Rose LLP v. Troice", 9240717),
+            ("Bond v. United States", "Bond v. United States", 9240714),
+            ("Garey v. United States", "Garey v. United States", 9240712))
+        self.assertEqual(self._pick("Willis of Colo. Inc. v. Troice",
+                                    *clusters), 9240717)
+        self.assertEqual(self._pick("Bond v. United States", *clusters),
+                         9240714)
+        # No name: no guess.
+        self.assertIsNone(self._pick("", *clusters))
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
 class SharedCitationTests(unittest.TestCase):
 
     def test_the_cases_a_citation_could_be(self):

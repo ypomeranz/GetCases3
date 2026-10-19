@@ -116,12 +116,35 @@ class OpinionPartTests(unittest.TestCase):
             "Dissent (ROE, J., dissenting)",
         ])
 
-    def test_a_partial_concurrence_reads_as_a_concurrence(self):
+    def test_a_writing_that_dissents_in_part_reads_as_a_dissent(self):
+        # As Google Scholar's text of the same opinion has it — McCarthy v.
+        # Recordex Serv., Inc., 80 F.3d 842 (3d Cir. 1996): Judge Stapleton's
+        # writing had been labelled "Concurrence in Part" and coloured as a
+        # concurrence.
         parts, _ = parse_case_law_html(_wrap("", _article(
             '<p class="author">TAMM, J.</p><p>In part.</p>',
             "concurring-in-part-and-dissenting-in-part")))
-        self.assertEqual(parts[0].kind, "concurrence")
-        self.assertEqual(parts[0].label, "Concurrence in Part (TAMM, J.)")
+        self.assertEqual(parts[0].kind, "dissent")
+        self.assertEqual(parts[0].label,
+                         "Concurrence in Part & Dissent in Part (TAMM, J.)")
+
+    def test_a_writing_left_inside_another_opinion_is_split_off(self):
+        # Ashcroft v. Iqbal, 556 U.S. 662: CAP keeps Justice Souter's
+        # dissent inside the Court's opinion.
+        parts, _ = parse_case_law_html(_wrap("", _article(
+            '<p class="author">Justice Kennedy</p>'
+            "<p>delivered the opinion of the Court.</p>"
+            "<p>Respondent Javaid Iqbal is a citizen of Pakistan.</p>"
+            "<p>The judgment of the Court of Appeals is reversed.</p>"
+            "<p>It is so ordered.</p>"
+            "<p>Justice Souter, with whom Justice Stevens, Justice Ginsburg, "
+            "and Justice Breyer join, dissenting.</p>"
+            "<p>This case is here on the uncontested assumption that "
+            "Bivens allows personal liability.</p>",
+            "majority")))
+        self.assertEqual([p.kind for p in parts], ["majority", "dissent"])
+        self.assertTrue(parts[1].label.startswith("Justice Souter, with whom"))
+        self.assertEqual(parts[0].label, "Opinion (Justice Kennedy)")
 
     def test_an_unfamiliar_type_is_read_as_the_main_opinion(self):
         parts, _ = parse_case_law_html(_wrap("", _article(

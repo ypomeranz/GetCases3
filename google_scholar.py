@@ -1191,9 +1191,19 @@ def text_similarity(a: str, b: str, n: int = 4) -> float:
 #   Justice O'CONNOR, with whom Justice BRENNAN joins, dissenting.
 #   KOZINSKI, Circuit Judge, dissenting:
 #   LYONS, Justice (dissenting).          [Alabama-style spelled-out role]
+#
+# "Justice" and the justice's name — with no sentence about the justice
+# after it: "Justice Roberts has said: … (Roberts, C.J., concurring in the
+# judgment)." closes Judge Mathis's concurrence in Randolph v. Macauley (155
+# F.4th 859), and opens nothing.  A comma after the name ("JUSTICE DOUGLAS,
+# while joining …") leaves the role to come.
+_JUSTICE_NAMED = (
+    r"(?:CHIEF\s+)?JUSTICE\s+\S+(?!\S)"
+    r"(?!(?<![,:])\s+(?!(?:concurring|dissenting|concurs|dissents|with|and"
+    r"|joins?|joined)\b)(?-i:[a-z]))")
 _SEP_HEADER_RE = re.compile(
     r"^\s*(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
-    r"(?:(?:CHIEF\s+)?JUSTICE\s+\S+|"
+    r"(?:" + _JUSTICE_NAMED + r"|"
     r"[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*){0,3}\s*,\s*"
     r"(?:C\.\s*J\.|JJ?\.|(?:Chief\s+|Senior\s+|Presiding\s+)?"
     r"(?:Circuit\s+|District\s+|Bankruptcy\s+)?(?:Judge|Justice))"
@@ -1406,6 +1416,91 @@ _ORDER_HEADING_RE = re.compile(
 )
 
 
+# A writing headed by its title alone, its writer signing at its end, as
+# Missouri's courts set theirs: "DISSENTING OPINION" over Judge Wilson's
+# dissent in D.J. v. First Student, Inc. (707 S.W.3d 581), signed
+# "__________ Paul C. Wilson, Judge" — "CONCURRING OPINION", "OPINION
+# CONCURRING IN PART AND DISSENTING IN PART", "SEPARATE OPINION".
+_TITLED_WRITING_RE = re.compile(
+    r"^\s*(?:(?P<pre>(?:SEPARATE|CONCURRING|DISSENTING|CONCURRING\s+AND\s+"
+    r"DISSENTING)\s+OPINION)"
+    r"|OPINION\s+(?P<post>(?:CONCURRING|DISSENTING)\b(?:\s+[A-Z]+){0,7})"
+    r"|(?P<bare>(?:CONCURRING|DISSENTING)\s+IN\s+(?:PART|(?:THE\s+)?RESULT|"
+    r"(?:THE\s+)?JUDGMENT)(?:\s+[A-Z]+){0,5}))"
+    r"\s*(?:\[[^\]\s]{1,6}\]|[*†‡]|\d{1,2})?\s*$",
+    re.IGNORECASE,
+)
+# The writer's signature closing a writing: "Zel M. Fischer, Judge", set
+# under a rule; "/s/ Mary R. Russell, Chief Justice"; Texas's "James D.
+# Blacklock Chief Justice", after the page's number — two names at least,
+# with no comma to set the title off.
+_SIGNATURE_WORD = (r"(?!(?:Chief|Presiding|Senior|Special|Judge|Justice)\b)"
+                   r"(?-i:[A-Z])[\w.'’-]*")
+_SIGNATURE_RE = re.compile(
+    r"^\s*(?:\d{1,3}\s+)?(?:_{3,}\s*|/s/\s*)?"
+    r"(?:(?P<name>" + _SIGNATURE_WORD + r"(?:\s+" + _SIGNATURE_WORD
+    + r"){0,3}(?:,?\s+(?:Jr|Sr|II|III|IV)\.?)?),"
+    r"|(?P<bare>" + _SIGNATURE_WORD + r"(?:\s+" + _SIGNATURE_WORD
+    + r"){1,3}))"
+    r"\s*(?P<title>(?:Chief\s+|Presiding\s+|Senior\s+|Special\s+)?"
+    r"(?:Judge|Justice)|(?:C\.\s*|P\.\s*)?J\.)\s*$",
+    re.IGNORECASE,
+)
+
+
+def signed_by(blocks: list, start: int = 0, end: "Optional[int]" = None) -> str:
+    """Who signs the writing in ``blocks[start:end]`` at its end (see
+    _SIGNATURE_RE): "Paul C. Wilson, Judge", or ""."""
+    end = len(blocks) if end is None else end
+    for b in reversed(blocks[max(start, end - 8):end]):
+        m = _SIGNATURE_RE.match(_content_text(b))
+        if m:
+            return (f"{m.group('name') or m.group('bare')}, "
+                    f"{' '.join(m.group('title').split())}")
+    return ""
+
+
+def _titled_writings(blocks: list, boundaries: list, titled: list) -> list:
+    """*boundaries* with each writing its title alone heads (see
+    _TITLED_WRITING_RE) added: past the opinion's own opening, and with no
+    byline right by the title, which opens the writing itself (the Sixth
+    Circuit's "DISSENT" over one; Scholar's "CONCURRING IN PART AND
+    DISSENTING IN PART" under Chief Judge Cole's in In re 2016 Primary
+    Election, 836 F.3d 584).  The writing starts at the caption the court
+    repeats above it."""
+    if not titled:
+        return boundaries
+    starts = sorted({bd[0] for bd in boundaries} | set(titled))
+    opening = [re.sub(r"^\d{1,4}\s+", "", _content_text(b))[:40].lower()
+               for b in blocks[:5]]
+    added = []
+    for idx in titled:
+        if any(abs(bd[0] - idx) <= 3 for bd in boundaries):
+            continue    # a byline over it or under it opens the writing
+        if sum(len(_content_text(b)) for b in blocks[:idx]) < 2000:
+            continue    # the document's own heading, before any opinion
+        m = _TITLED_WRITING_RE.match(_content_text(blocks[idx]))
+        role = re.sub(r"\s+", " ", (
+            m.group("post") or m.group("bare") or m.group("pre")).lower())
+        role = re.sub(r"\s*opinion$", "", role)
+        kind = ("dissent" if "dissent" in role
+                else "concurrence" if "concur" in role else "separate")
+        end = next((j for j in starts if j > idx), len(blocks))
+        title = re.sub(r"\b(In|And|The|Of|Part)\b",
+                       lambda w: w.group(1).lower(),
+                       " ".join(_content_text(blocks[idx]).split()).title())
+        title = re.sub(r"\bpart\b", "Part", title)
+        signer = signed_by(blocks, idx + 1, end)
+        label = f"{title} ({signer})" if signer else title
+        start = idx
+        prev = (re.sub(r"^\d{1,4}\s+", "", _content_text(blocks[idx - 1]))[:40]
+                .lower() if idx > 0 else "")
+        if len(prev) >= 20 and prev in opening:
+            start = idx - 1
+        added.append((start, kind, label))
+    return sorted(boundaries + added, key=lambda bd: bd[0])
+
+
 def _ruled_heading_start(blocks: list, idx: int, floor: int) -> int:
     """Where the writing whose byline is ``blocks[idx]`` starts: before the
     ruled heading over it (see _RULED_HEADING_RE), never at or before
@@ -1415,6 +1510,30 @@ def _ruled_heading_start(blocks: list, idx: int, floor: int) -> int:
             _content_text(blocks[j - 1])):
         j -= 1
     return j
+
+
+# A line recording several judges' votes, as a state court's opinion closes:
+# "SHRIVER and CROWNOVER, JJ., concurring.", "SMITH, JONES and BROWN, JJ.,
+# concur."  Several names, the plural title.
+_JUDGES_VOTE_RE = re.compile(
+    r"^\s*[A-Z][\w.'’-]+(?:\s*,\s*[A-Z][\w.'’-]+)*,?\s+(?:and|&)\s+"
+    r"[A-Z][\w.'’-]+\s*,\s*JJ\.\s*,?\s*(?:concurr?(?:ing|s)?|dissent(?:ing|s)?)"
+    r"\b[^.:]{0,60}[.:]?\s*$")
+
+
+def _writing_follows(blocks: list, i: int) -> bool:
+    """Whether a writing of some length follows the byline at ``blocks[i]``
+    before the next byline — a joint concurrence's own text — rather than
+    the end of the opinion or another judge's vote."""
+    for b in blocks[i + 1:i + 3]:
+        t = _content_text(b)
+        if not t:
+            continue
+        if (_SEP_HEADER_RE.match(t) or _VOTE_LINE_RE.match(t)
+                or _JUDGES_VOTE_RE.match(t)):
+            return False
+        return len(t) >= 150
+    return False
 
 
 def _opens_own_writing(blocks: list, i: int) -> bool:
@@ -1601,7 +1720,7 @@ def _resolve_neutral_sep_boundaries(
 # followed (within a clause) by "concurring"/"dissenting".
 _SEP_BYLINE = (
     r"(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
-    r"(?:(?:CHIEF\s+)?JUSTICE\s+\S+|"
+    r"(?:" + _JUSTICE_NAMED + r"|"
     r"[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*){0,3}\s*,\s*"
     r"(?:C\.\s*J\.|JJ?\.|(?:Chief\s+|Senior\s+|Presiding\s+)?"
     r"(?:Circuit\s+|District\s+|Bankruptcy\s+)?(?:Judge|Justice)))"
@@ -1940,11 +2059,16 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
     bare_headers: list[tuple[int, str, str, bool]] = []
     # Votes set as the heading of the voter's own opinion (_VOTE_LINE_RE).
     vote_headers: list[tuple[int, str, str, bool]] = []
+    # Writings headed by their title alone (_TITLED_WRITING_RE).
+    titled: list[int] = []
     maj_phrase_all: list[int] = []
     maj_author_idx: Optional[int] = None
     for i, b in enumerate(blocks):
         t = _content_text(b)
         if not t:
+            continue
+        if len(t) <= 80 and _TITLED_WRITING_RE.match(t):
+            titled.append(i)
             continue
         joined_text = " ".join(
             _content_text(nb) for nb in blocks[i:i + 3]
@@ -2003,6 +2127,11 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
                 # with "." or ":".
                 and not (b.spans and b.spans[0].pagenum
                          and not re.search(r"[.:]$", t.rstrip()))):
+            if _JUDGES_VOTE_RE.match(t) and not _writing_follows(blocks, i):
+                # "SHRIVER and CROWNOVER, JJ., concurring." closing the
+                # opinion (Mefford v. City of Dupontonia, 354 S.W.2d 823):
+                # the judges' votes, no writing of their own.
+                continue
             kind = "dissent" if re.search(r"dissent", t, re.IGNORECASE) else "concurrence"
             label = t if len(t) <= 90 else t[:87] + "…"
             boundaries.append((i, kind, label))
@@ -2130,6 +2259,7 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
             boundaries.append((idx, kind, label))
         boundaries.sort(key=lambda bd: bd[0])
     boundaries = _resolve_neutral_sep_boundaries(blocks, boundaries)
+    boundaries = _titled_writings(blocks, boundaries, titled)
     # A writing starts at the ruled heading over it — the Sixth Circuit's
     # "CONCURRENCE" set between rules — not at its byline below.
     floor = maj_idx if maj_idx is not None else 0

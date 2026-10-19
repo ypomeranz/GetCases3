@@ -1221,6 +1221,7 @@ from bluebook_names import (
     ejectment_case_names,
     group_case_name,
     is_recognized_given_name,
+    _is_known_given_name as _judge_given_name,
     normal_case_caption,
     refine_caption_case,
     settled_case_name,
@@ -1247,6 +1248,7 @@ from citation_overrides import (
 from case_law_parse import (
     parse_case_law_html as _parse_case_law_html,
     parse_case_law_json as _parse_case_law_json,
+    split_embedded_writings as _split_embedded_writings,
 )
 from cl_parse import parse_cl_html as _parse_cl_html
 import case_name_usage
@@ -1301,6 +1303,7 @@ from citations import (
     reporter_citation_variants as _reporter_citation_variants,
     reporter_key as _canonical_reporter_key,
     reporter_family as _reporter_family,
+    is_federal_nominative as _is_federal_nominative,
     case_match_text as _case_match_text,
     build_short_cite_index as _build_short_cite_index_here,
     cite_target_from_text as _cite_target_from_text,
@@ -4326,6 +4329,34 @@ _FED_APPX_RE = re.compile(r"F(?:ed)?\.?\s*App['’]?x\.?", re.IGNORECASE)
 # "17 Fed. Cas. 144", "17 F.Cas. 144".
 _FED_CAS_CITE_RE = re.compile(r"^\s*\d+\s+F(?:ed)?\.\s?Cas\.\s+\d+",
                               re.IGNORECASE)
+# The Federal Reporter's first series ("183 F. 704"), not its later ones.
+_FED_FIRST_SERIES_RE = re.compile(r"^\s*(\d{1,3})\s+F\.\s?(\d{1,4})(?!\w)")
+#: Where Google Scholar's copies of the lower federal courts' decisions begin.
+_SCHOLAR_FEDERAL_FROM = 1923
+
+
+def _scholar_lacks(cite: str, year: str = "") -> bool:
+    """Whether Google Scholar is known to hold no copy of the case at *cite*:
+    a lower federal court's decision from before its coverage of them begins
+    — the Federal Cases and the circuit reporters reprinted in them ("12
+    Blatchf. 553"), and the Federal Reporter's first series up to 1922
+    ("Loeb v. Eastman Kodak Co., 183 F. 704 (3d Cir. 1910)", searched for in
+    vain; for "85 F. 271" Scholar answers with the Supreme Court's opinion
+    that reviewed it).  Without a year, the first series' volumes through 280
+    are the ones decided before 1923."""
+    cite = (cite or "").split("@", 1)[0]
+    if _FED_CAS_CITE_RE.search(cite):
+        return True
+    m = _CITE_PARSE_RE.match(cite.strip())
+    if m and _is_federal_nominative(m.group(2)):
+        return True
+    first = _FED_FIRST_SERIES_RE.match(cite)
+    if not first:
+        return False
+    y = str(year or "")[:4]
+    if y.isdigit():
+        return int(y) < _SCHOLAR_FEDERAL_FROM
+    return int(first.group(1)) <= 280
 
 
 def _item_is_fed_appx(item: dict) -> bool:
@@ -4890,7 +4921,8 @@ def _cl_case_containing_page(client, cite: str,
     return best[1]
 
 
-def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
+def _cl_item_for_citation(client, cite: str, name: str = "",
+                          year: str = "") -> Optional[dict]:
     """Resolve a reporter citation to the CourtListener cluster that actually
     bears it, as a search-result-shaped item (or ``None``).
 
@@ -4941,14 +4973,28 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                 out.add(re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", str(c))).lower())
         return out
 
-    def score(case_name: str, cites: set[str], court: str) -> tuple:
+    def tier(case_name: str, full_name: str = "") -> int:
+        """How well *name* matches a record: its own name, or one of the
+        cases its full name lists together (see
+        _names_a_consolidated_case)."""
+        if not name:
+            return -1
+        clean = re.sub(r"<[^>]+>", "", case_name or "")
+        best = max(_match_tier(name, clean), _match_tier(clean, name))
+        if best < 3 and _names_a_consolidated_case(
+                name, re.sub(r"<[^>]+>", "", full_name or "")):
+            return 3
+        return _match_tier(name, clean)
+
+    def score(case_name: str, cites: set[str], court: str,
+              full_name: str = "") -> tuple:
         # Keep the original priority order, but retain the full name score
         # instead of reducing every acceptable match to the same +2 tie.  Two
         # short opinions can legitimately begin on the same reporter page
         # (The Buena Ventura and In re Cooper both bear 243 F. 797); the printed
         # caption is then the signal that identifies the intended cluster.
         clean_name = re.sub(r"<[^>]+>", "", case_name or "")
-        name_tier = _match_tier(name, clean_name) if name else -1
+        name_tier = tier(clean_name, full_name)
         name_score = _name_match_score(name, clean_name) if name else 0.0
         query_tokens = _name_tokens(name) if name else []
         candidate_tokens = _name_tokens(clean_name) if name else []
@@ -4961,7 +5007,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
             bool(altkey and (court or "").lower() == _SCOTUS_COURT_ID),
         )
 
-    def pick(candidates: list, name_of, cites_of, court_of):
+    def pick(candidates: list, name_of, cites_of, court_of,
+             full_of=lambda c: ""):
         """The candidate the signals above single out — or None where they
         leave more than one *case* level at the top: the cases sharing a page
         of orders ("498 U.S. 807" begins eleven grants of certiorari), with no
@@ -4971,7 +5018,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
         def plain(c) -> str:
             return re.sub(r"<[^>]+>", "", name_of(c) or "")
 
-        rated = [(score(plain(c), cites_of(c), court_of(c)), c)
+        rated = [(score(plain(c), cites_of(c), court_of(c),
+                        str(full_of(c) or "")), c)
                  for c in candidates]
         top = max(s for s, _c in rated)
         tied = [c for s, c in rated if s == top]
@@ -4982,8 +5030,8 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
         # Bank of Kentucky, 2 Met. 327, a Kentucky case running onto the
         # page — and none is better than that.
         if (name and len(_name_parties(name)) == 2
-                and max(_match_tier(name, first),
-                        _match_tier(first, name)) < 0):
+                and tier(first, str(full_of(tied[0]) or "")) < 0
+                and _match_tier(first, name) < 0):
             print(f"[cl-cite] {cite!r}: CourtListener's {first!r} is not "
                   f"{name!r}")
             mismatched.append(first)
@@ -5015,6 +5063,7 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                     lambda cl: norm_cites(cl.get("citations")),
                     lambda cl: str(
                         cl.get("court_id") or cl.get("court") or ""),
+                    lambda cl: cl.get("case_name_full") or "",
                 )
                 if best is None and mismatched:
                     break           # another case's page: see below
@@ -5049,12 +5098,219 @@ def _cl_item_for_citation(client, cite: str, name: str = "") -> Optional[dict]:
                 lambda it: it.get("caseName") or it.get("case_name"),
                 lambda it: norm_cites(it.get("citation")),
                 lambda it: str(it.get("court_id") or ""),
+                lambda it: (it.get("caseNameFull")
+                            or it.get("case_name_full") or ""),
             )
             if best is not None or not mismatched:
                 return best
             break
     # 3) The page cited may lie inside the case rather than begin it.
-    return _cl_case_containing_page(client, cite, name) if name else None
+    inside = _cl_case_containing_page(client, cite, name) if name else None
+    if inside is not None or mismatched:
+        return inside
+    # 4) A decision too recent for CourtListener to have its reporter cite.
+    return _cl_unreported_case(client, cite, name, year) if name else None
+
+
+#: How many years back a decision CourtListener files without its reporter
+#: citation may be: the reporter's pages come within a year or two.
+_CL_UNREPORTED_YEARS = 3
+
+#: Words of a party's name that say nothing of which party it is.
+_PARTY_FILLER_WORDS = frozenset({
+    "of", "the", "and", "in", "for", "on", "a", "an", "ex", "rel", "by",
+    "through", "his", "her", "their", "next", "friend", "inc", "llc", "llp",
+    "lp", "co", "corp", "ltd", "et", "al", "na", "pc", "pllc",
+})
+
+
+def _abbreviation_words() -> dict:
+    """Each Bluebook-table abbreviation's letters → the words it stands for
+    ("enters" → {"enterprises"}, "tenn" → {"tennessee"})."""
+    words = getattr(_abbreviation_words, "_cache", None)
+    if words is None:
+        import bluebook_names
+        words = {}
+        for full, abbr in bluebook_names._WORD_MAP.items():
+            words.setdefault(re.sub(r"[^a-z]", "", abbr.lower()),
+                             set()).add(full)
+        _abbreviation_words._cache = words
+    return words
+
+
+def _party_word_choices(side: str) -> list:
+    """The words that identify one side of a case name, each as the set of
+    spellings it may take: lowercased, and a Bluebook abbreviation with the
+    words it stands for ("Werner Enters., Inc." → {werner}, {enters,
+    enterprises}; "Acad." → {acad, academy, academic}).  Initials ("D.J."),
+    filler and designators go."""
+    out = []
+    table = _abbreviation_words()
+    for raw in re.findall(r"[A-Za-z][A-Za-z'’.]*", side or ""):
+        word = re.sub(r"[^a-z]", "", raw.lower())
+        if word not in table and re.search(r"['’]", raw):
+            # "O'Connor", "Children's": the piece a search's index keeps.
+            word = max(re.split(r"['’]", re.sub(r"[^a-z'’]", "", raw.lower())),
+                       key=len)
+        if (len(word) <= 2 or word in _PARTY_FILLER_WORDS
+                or re.fullmatch(r"(?:[A-Za-z]\.)+", raw)):
+            continue
+        out.append(frozenset({word} | table.get(word, set())))
+    return out
+
+
+def _party_initials(side: str) -> list:
+    """The initials a party goes by, as letters ("D.J. ex rel. R.J." → dj,
+    rj): how a minor or a protected party is named."""
+    return [re.sub(r"\W", "", m).lower() for m in re.findall(
+        r"(?<![\w.])(?:[A-Z]\.\s?){2,4}(?!\w)", side or "")]
+
+
+def _party_answers_to(wanted: str, side: str) -> bool:
+    """Whether *side*, one side of a case name as a court record has it,
+    answers to *wanted*, the same side as cited: every word of it there in
+    one of its spellings (see :func:`_party_word_choices`) — or the record's
+    name the shorter, at least two words of it and every one cited
+    ("Academy of Allergy & Asthma" for "Acad. of Allergy & Asthma in Primary
+    Care").  A party cited by initials alone ("D.J. ex rel. R.J.") must have
+    the record's initials."""
+    asked_words = _party_word_choices(wanted)
+    if not asked_words:
+        initials = _party_initials(wanted)
+        return bool(initials) and initials[0] in _party_initials(side)
+    theirs = _party_word_choices(side)
+    if not theirs:
+        return False
+    have = set().union(*theirs)
+    if all(choices & have for choices in asked_words):
+        return True
+    asked = set().union(*asked_words)
+    return len(theirs) >= 2 and all(choices & asked for choices in theirs)
+
+
+#: The states whose courts' decisions each of West's regional reporters prints.
+_REGIONAL_REPORTER_STATES = {
+    "a.": {"connecticut", "delaware", "district of columbia", "maine",
+           "maryland", "new hampshire", "new jersey", "pennsylvania",
+           "rhode island", "vermont"},
+    "n.e.": {"illinois", "indiana", "massachusetts", "new york", "ohio"},
+    "n.w.": {"iowa", "michigan", "minnesota", "nebraska", "north dakota",
+             "south dakota", "wisconsin"},
+    "p.": {"alaska", "arizona", "california", "colorado", "hawaii", "idaho",
+           "kansas", "montana", "nevada", "new mexico", "oklahoma", "oregon",
+           "utah", "washington", "wyoming"},
+    "s.e.": {"georgia", "north carolina", "south carolina", "virginia",
+             "west virginia"},
+    "s.w.": {"arkansas", "kentucky", "missouri", "tennessee", "texas"},
+    "so.": {"alabama", "florida", "louisiana", "mississippi"},
+}
+
+
+def _reporter_holds_court(cite: str, court_id: str) -> bool:
+    """Whether a decision of *court_id* could be printed in *cite*'s reporter:
+    the Federal Reporter the courts of appeals', the Federal Supplement the
+    district courts', the U.S. Reports the Supreme Court's, a regional
+    reporter its own states' courts ("S.W.3d" Missouri's, not Georgia's),
+    and a state's reporter the state courts'.  True where it can't tell."""
+    m = _CITE_PARSE_RE.match((cite or "").split("@", 1)[0].strip())
+    if not m or not court_id:
+        return True
+    rep = re.sub(r"\s+", "", m.group(2)).lower()
+    court = court_id.lower()
+    if rep in ("u.s.", "s.ct.", "l.ed.", "l.ed.2d"):
+        return court == _SCOTUS_COURT_ID
+    if re.fullmatch(r"f\.(?:2d|3d|4th)?|f\.app'?x", rep):
+        return court.startswith("ca")
+    if rep.startswith("f.supp"):
+        return _is_federal_court(court) and not court.startswith("ca")
+    if _is_federal_court(court):
+        return False
+    states = (_REGIONAL_REPORTER_STATES.get(re.sub(r"(?:2d|3d|4th)$", "", rep))
+              or {_cite_state(cite)} - {""})
+    state = _state_of_court(court)
+    return not (states and state) or state in states
+
+
+def _cl_unreported_case(client, cite: str, name: str,
+                        year: str = "") -> Optional[dict]:
+    """The recent decision a citation CourtListener knows nothing of names,
+    found by its parties' names — or None.
+
+    CourtListener files a decision from the court's own release, and attaches
+    its reporter citation only later: "Randolph v. Macauley, 155 F.4th 859
+    (6th Cir. 2025)", "D.J. ex rel. R.J. v. First Student, Inc., 707 S.W.3d
+    581 (Mo. 2025)" and "Werner Enters., Inc. v. Blake, 719 S.W.3d 525 (Tex.
+    2025)" are all there, with no citation yet, and the lookup by citation
+    finds none of them — nor did anything else once Google Scholar stopped
+    answering.  A case is taken only when it answers to *name*, carries no
+    other reporter citation (or carries this one), comes from a court the
+    reporter prints, and was decided in *year* (the citation's) — or, with
+    no year, within :data:`_CL_UNREPORTED_YEARS` years.  Two decisions of
+    different days that answer leave it unknown: the ruling and the order
+    denying rehearing it en banc share their name."""
+    sides = re.split(r"\s+v\.?\s+", name or "", maxsplit=1)
+    if client is None or len(sides) != 2:
+        return None
+    wanted = [_party_word_choices(s) for s in sides]
+    first, second = wanted
+    if len(first) + len(second) < 2:
+        return None     # "D.J. v. Smith": too little to tell one case by
+    want = {re.sub(r"\s+", "", v).lower() for v in _citation_search_variants(
+        cite)}
+    year = str(year or "").strip()[:4]
+    if not year.isdigit():
+        year = ""
+    since = (f"{year}-01-01" if year
+             else f"{_dt.date.today().year - _CL_UNREPORTED_YEARS}-01-01")
+    # The leading words of each side, which a record's shorter name keeps,
+    # each in every spelling an abbreviation may stand for.
+    terms = list(dict.fromkeys(
+        tuple(sorted(choices))
+        for choices in (first[:2] + second[:1] if first and second
+                        else (first or second)[:3])))
+    query = " AND ".join(
+        f"caseName:{c[0]}" if len(c) == 1
+        else "caseName:(" + " OR ".join(c) + ")" for c in terms)
+    try:
+        results = client.search(
+            query, type="o", page_size=20, date_filed_min=since,
+            **({"date_filed_max": f"{year}-12-31"} if year else {}),
+        ).get("results") or []
+    except Exception as exc:
+        print(f"[cl-cite] searching {query!r} failed: {exc}")
+        return None
+    hits = []
+    for item in results if isinstance(results, list) else ():
+        if not isinstance(item, dict):
+            continue
+        case_name = re.sub(r"<[^>]+>", "", str(item.get("caseName") or ""))
+        theirs = re.split(r"\s+v\.?\s+", case_name, maxsplit=1)
+        # Each party in its place: "Smith v. Jones" is no "Jones v. Smith".
+        if len(theirs) != 2 or not all(
+                _party_answers_to(asked, side)
+                for asked, side in zip(sides, theirs)):
+            continue
+        if year and not str(item.get("dateFiled") or "").startswith(year):
+            continue
+        cites = {re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", str(c))).lower()
+                 for c in item.get("citation") or ()}
+        if cites and not (cites & want):
+            continue    # reported, under another citation: another case
+        if not _reporter_holds_court(cite, str(item.get("court_id") or "")):
+            continue    # a court whose decisions the reporter doesn't print
+        hits.append(item)
+    if not hits:
+        return None
+    # CourtListener keeps some decisions more than once (Werner Enterprises
+    # three times, one day): the same case either way.
+    first = re.sub(r"<[^>]+>", "", str(hits[0].get("caseName") or ""))
+    if any(str(h.get("dateFiled")) != str(hits[0].get("dateFiled"))
+           for h in hits[1:]):
+        print(f"[cl-cite] {cite!r}: several recent cases answer to {name!r}")
+        return None
+    print(f"[cl-cite] {cite!r} is not yet on CourtListener under its "
+          f"citation; {first!r} ({hits[0].get('dateFiled')}) is")
+    return hits[0]
 
 
 def _us_reports_cite_via_courtlistener(
@@ -5708,6 +5964,29 @@ def _name_match_score(query: str, candidate: str) -> float:
     if max(per_side) < 0.6:
         return 0.0
     return min(1.0, avg + bonus)
+
+
+def _names_a_consolidated_case(query: str, full_name: str) -> bool:
+    """Whether *query* is one of the cases a record's full name lists
+    together — as CourtListener runs them on: "Chadbourne & Parke LLP v.
+    Troice Willis of Colorado Inc. v. Troice and Proskauer Rose LLP v.
+    Troice", the one entry on a page of orders (568 U.S. 1140) granting all
+    three petitions.  Each party of "Willis of Colo. Inc. v. Troice" must be
+    in its place, in the words either side of one of the name's "v."s."""
+    parties = _name_parties(query)
+    seps = list(re.finditer(r"\s+vs?\.\s+", full_name or ""))
+    if len(parties) != 2 or len(seps) < 2:
+        return False    # a name of one case: the ordinary match decides
+    for k, sep in enumerate(seps):
+        left = full_name[seps[k - 1].end() if k else 0:sep.start()]
+        right = full_name[sep.end():seps[k + 1].start()
+                          if k + 1 < len(seps) else len(full_name)]
+        if (_party_overlap(parties[0], set(_name_tokens(left))) >= 0.6
+                and _party_overlap(parties[1],
+                                   set(_name_tokens(right))) >= 0.6
+                and not all(_is_common_party(p) for p in parties)):
+            return True
+    return False
 
 
 def _match_tier(query: str, candidate: str) -> int:
@@ -7485,10 +7764,30 @@ def _assemble_case_parts(client, item: dict) -> tuple:
             else:
                 op_blocks = []
 
+        # CourtListener types a writing that concurs in part "Concurrence in
+        # Part" whether or not it dissents in part too; its byline says
+        # which ("concurring in part and dissenting in part"), and one that
+        # dissents is a dissent on the parts rail, as Scholar's text has it.
+        if type_code == "035concurrenceinpart" and op_blocks and re.search(
+                r"\bdissent", " ".join(b.text() for b in op_blocks[:2])[:400],
+                re.IGNORECASE):
+            kind = "dissent"
+            label = label.replace("Concurrence in Part",
+                                  "Concurrence in Part & Dissent in Part", 1)
+
         if op_blocks:
             parts.append(OpinionPart(label=label, kind=kind, blocks=op_blocks,
                                      footnotes=op_footnotes))
             all_blocks.extend(op_blocks)
+
+    # A separate writing a source left inside another opinion gets a part of
+    # its own (see case_law_parse.split_embedded_writings) — its blocks, as
+    # the split leaves them, the case's too.
+    split = _split_embedded_writings(parts)
+    if len(split) != len(parts):
+        parts = split
+        all_blocks = list(header_blocks) + [
+            b for p in parts if p.kind != "header" for b in p.blocks]
 
     try:
         plain_text = blocks_to_text(all_blocks)
@@ -7604,6 +7903,7 @@ try:
         is_how_cited_url as _is_how_cited_url,
         parse_opinion_blocks,
         segment_blocks,
+        signed_by as _writing_signed_by,
         text_similarity,
     )
 
@@ -7619,6 +7919,9 @@ except ImportError:
 
     def _is_how_cited_url(url: str) -> bool:  # graceful degradation
         return "scholar_case?" in (url or "") and "about=" in (url or "")
+
+    def _writing_signed_by(blocks, start=0, end=None) -> str:  # degradation
+        return ""
 
 
 #: How many of a case's parallel citations to try on static.case.law before
@@ -8356,7 +8659,8 @@ class _CaseOpenRace:
         if mine:
             try:
                 item = self.app._cited_case_pdf_item(
-                    self.client, self.cite, self.name, known=self.known_item)
+                    self.client, self.cite, self.name, known=self.known_item,
+                    year=self.year)
             except Exception as exc:
                 print(f"[race] looking the case up on CourtListener "
                       f"failed: {exc}")
@@ -8439,10 +8743,11 @@ class _CaseOpenRace:
 
     def _scholar_cites(self) -> list:
         """The forms of the citation Scholar is asked by — none for a volume
-        or a docket number, and none for the Federal Cases, which Scholar
-        hardly ever finds by citation (as _warm_case_text)."""
+        or a docket number, and none for a lower federal court's decision
+        older than Scholar's copies of them (see _scholar_lacks; as
+        _warm_case_text)."""
         paged = bool(re.match(r"\d+\s+\D.*?\s\d+\s*$", self.cite or ""))
-        if not paged or _FED_CAS_CITE_RE.search(self.cite or ""):
+        if not paged or _scholar_lacks(self.cite, self.year):
             return []
         return list(_citation_search_variants(self.cite))
 
@@ -13353,7 +13658,9 @@ class CourtListenerGUI:
                     item, url = found
                 else:
                     item = (racing.cl_item() if racing is not None
-                            else self._cited_case_pdf_item(client, cite, name))
+                            else self._cited_case_pdf_item(
+                                client, cite, name,
+                                year=str(year or "").strip()[:4]))
                     if racing is not None:
                         racing.use_us_cite(item)
                     if context_name and not name:
@@ -13614,13 +13921,17 @@ class CourtListenerGUI:
         threading.Thread(target=run, daemon=True).start()
 
     def _cited_case_pdf_item(self, client, cite: str, name: str,
-                             known: "Optional[dict]" = None) -> dict:
+                             known: "Optional[dict]" = None,
+                             year: str = "") -> dict:
         """A search-result-shaped record for a cited case, good enough for the
         PDF resolver.  CourtListener's own cluster at this citation when it has
         one — it carries the court, the decision date, the docket number and
         the parallel U.S. Reports cite the official scan is keyed on — else the
         citation and the case name alone.  ``known``: the cluster already in
-        hand (a CourtListener search result clicked), not looked up again."""
+        hand (a CourtListener search result clicked), not looked up again.
+        ``year``: the decision's, from the citation's parenthetical, which
+        tells a recent decision from the one below it by name (see
+        _cl_unreported_case)."""
         item: dict = {}
         official = _official_series_for(cite, name)
         if known and (known.get("cluster_id") or known.get("id")):
@@ -13632,7 +13943,8 @@ class CourtListenerGUI:
             for lookup in (cite, *official):
                 try:
                     item = dict(_cl_item_for_citation(client, lookup,
-                                                      name=name) or {})
+                                                      name=name,
+                                                      year=year) or {})
                 except Exception as exc:
                     print(f"[cite-pdf] CourtListener lookup for "
                           f"{lookup!r}: {exc}")
@@ -14106,11 +14418,12 @@ class CourtListenerGUI:
             if fetcher is None:
                 return False
             try:
-                # Not for Federal Cases: Scholar finds hardly any by
-                # citation, so their text is static.case.law's (fallback).
+                # Not for a lower federal court's decision older than
+                # Scholar's copies (the Federal Cases among them): their text
+                # is static.case.law's (fallback).
                 for lookup_cite in (_citation_search_variants(cite)
-                                    if paged and not _FED_CAS_CITE_RE.search(
-                                        cite or "") else ()):
+                                    if paged and not _scholar_lacks(
+                                        cite, year) else ()):
                     fetched = fetcher.fetch_by_citation(
                         lookup_cite, case_name=case_name, year=year)
                     if not fetched:
@@ -14504,9 +14817,12 @@ class CourtListenerGUI:
         # (not Corfield v. Coryell, 6 F. Cas. 546, nor Ex parte Merryman, 17
         # F. Cas. 144), and asking it took four searches — some sixteen
         # seconds — before static.case.law, which holds the whole reporter,
-        # answered in two.  So static.case.law is asked first.
-        if _FED_CAS_CITE_RE.search(cite):
-            cap = _case_law_text_source([cite], name)
+        # answered in two.  So static.case.law is asked first — as for every
+        # lower federal court's decision older than Scholar's copies of them
+        # (see _scholar_lacks): Loeb v. Eastman Kodak Co., 183 F. 704 (3d
+        # Cir. 1910).
+        if _scholar_lacks(cite, year):
+            cap = _case_law_text_source([cite], name, year)
             if cap is not None:
                 self._post_root(lambda: self._open_case_law_text(
                     target_parent, cap, cite, pin, prefetch_pdf))
@@ -18530,8 +18846,9 @@ def _fix_name_case(name: str) -> str:
         if len(letters) <= 2:
             return wd                       # "IN", "OF": no name's
         # Each run of letters between apostrophes (straight or curly) and
-        # hyphens: O’CONNOR → O’Connor, SMITH-JONES → Smith-Jones.
-        out = re.sub(r"[A-Za-z]+", cap, wd)
+        # hyphens: O’CONNOR → O’Connor, SMITH-JONES → Smith-Jones — accented
+        # ones among them: PÉREZ → Pérez (it had been "PÉRez").
+        out = re.sub(r"[^\W\d_]+", cap, wd)
         if out.startswith("Mc") and len(out) > 2 and out[2].isalpha():
             out = "Mc" + out[2].upper() + out[3:]
         return out
@@ -28105,8 +28422,10 @@ class _ScholarTextWindow:
             _load_config().get("citation_overrides", {}),
             self._citation_override_keys,
         )
-        if not self._cl_primary:
-            self._refine_part_labels(self._parts)
+        # Whatever the text's source: CourtListener's and static.case.law's
+        # labels name the lead opinion's author as they print it ("Opinion
+        # (KAREN NELSON MOORE, Circuit Judge)"), or not at all.
+        self._refine_part_labels(self._parts)
         # Whether Google Scholar actually carries the opinion text (it usually
         # doesn't for Federal Appendix cases — they're scans only).  Gates the
         # "Scholar"/"Text" toggle while the PDF is showing.
@@ -31990,6 +32309,16 @@ class _ScholarTextWindow:
         # writes has it: "154 App. Div. 413" where the page prints the courts'
         # "154 A.D. 413", "104 Wash. 2d 677" for "104 Wn.2d 677".
         display_cite = _bluebook_reporter_spelling(display_cite, court_id)
+        # The court the date parenthetical names is the one the reporter cited
+        # doesn't (rule 10.4(b)): the official reports a regional cite gave
+        # way to may name it already — "207 N.C. 545 (1935)", never "(N.C.
+        # 1935)" (Osborne v. Atl. Ice & Coal Co., read under 177 S.E. 796).
+        if (not is_scotus and court_id and display_cite
+                and re.sub(r"\s+", "", display_cite)
+                != re.sub(r"\s+", "", cite)):
+            court_abbr = _court_for_paren(
+                display_cite, court_id,
+                str(item.get("court") or court_id).strip())
         if court_id in ("wis", "wisctapp") or court_id.startswith("wis"):
             wi_cite = _wisconsin_display_cite(known_cites)
             if wi_cite:
@@ -32195,8 +32524,17 @@ class _ScholarTextWindow:
             # built from the cluster ("Dissent (Brandeis)", "Concurrence in
             # Part (O'Connor)").  Same data CourtListener uses for its own
             # color-coding.
+            # Or a writing's own title, as segmentation labels one its title
+            # alone heads, with the judge who signs it: "Dissenting Opinion
+            # (Paul C. Wilson, Judge)", "Opinion Concurring in Part and
+            # Dissenting in Part (…)" (google_scholar._TITLED_WRITING_RE).
             lm = re.match(
-                r"(Concurrence\s+in\s+Part|Concurrence|Dissent)\b"
+                r"(Concurrence\s+in\s+Part\s+(?:&|and)\s+Dissent\s+in\s+Part"
+                r"|Concurrence\s+in\s+Part|Concurrence|Dissent"
+                r"|(?:Separate|Concurring|Dissenting|Concurring\s+and\s+"
+                r"Dissenting)\s+Opinion"
+                r"|(?:Opinion\s+)?(?:Concurring|Dissenting)\b[^()]*?"
+                r"(?=\s*(?:\(|$)))\b"
                 r"(?:.*?\(([^)]+)\))?\s*$",
                 part.label or "",
             )
@@ -32270,11 +32608,19 @@ class _ScholarTextWindow:
                     surname = _fix_name_case(dm.group(2).replace("’", "'"))
                     return f"{surname}, {title}, {neutral_role}"
                 return "separate opinion" if part.kind == "separate" else ""
+            key = re.sub(r"\s+", " ", lm.group(1)).strip().lower()
             phrase = {
                 "concurrence": "concurring",
                 "concurrence in part": "concurring in part",
+                "concurrence in part & dissent in part":
+                    "concurring in part and dissenting in part",
+                "concurrence in part and dissent in part":
+                    "concurring in part and dissenting in part",
                 "dissent": "dissenting",
-            }[re.sub(r"\s+", " ", lm.group(1)).lower()]
+                "separate opinion": "separate opinion",
+            }.get(key) or re.sub(
+                r"\bin (result|judgment)\b", r"in the \1",
+                re.sub(r"^opinion |\s*opinion$", "", key))
             author = (lm.group(2) or "").strip()
             if not author:
                 return ""
@@ -32282,7 +32628,13 @@ class _ScholarTextWindow:
                 return f"per curiam, {phrase}"
             surname = _fix_name_case(
                 author.split(",")[0].split()[-1].replace("’", "'"))
-            return f"{surname}, J., {phrase}"
+            role = author.partition(",")[2]
+            title = ("C.J." if re.match(r"\s*(?:Chief\b|C\.\s?J\.)", role,
+                                        re.IGNORECASE)
+                     else "P.J." if re.match(r"\s*(?:Presiding\b|P\.\s?J\.)",
+                                             role, re.IGNORECASE)
+                     else "J.")
+            return f"{surname}, {title}, {phrase}"
         # The byline's own footnote mark goes before its closing colon:
         # "GRIFFITH, Circuit Judge, concurring in the judgment:[1]".
         phrase = re.sub(r"\s*\[[^\]]{1,6}\]$", "", t[m.start():].rstrip())
@@ -32324,11 +32676,26 @@ class _ScholarTextWindow:
                 re.IGNORECASE,
             )
         )
-        title = "C.J." if is_chief else "J."
+        title = ("C.J." if is_chief
+                 # Judges writing together: "SHRIVER and CROWNOVER, JJ.,
+                 # concurring" is (Shriver and Crownover, JJ., concurring).
+                 else "JJ." if re.fullmatch(r"JJ\.?", role_seg, re.IGNORECASE)
+                 else "J.")
         name = re.sub(
             r"^(?:THE\s+)?(?:CHIEF\s+)?JUSTICE\s+", "", author_seg, flags=re.IGNORECASE
         ).strip()
         name = _fix_name_case(name)
+        name = self._judge_surname(name)
+        if not name:
+            return ""
+        if statement:
+            return f"statement of {name}, {title}, {phrase}"
+        return f"{name}, {title}, {phrase}"
+
+    def _judge_surname(self, name: str) -> str:
+        """The name a judge is cited by, from the name a byline prints (cased
+        already): the surname, or more where the bench needs it to tell
+        judges apart (see the body)."""
         # A circuit byline may print the judge's full name ("TOBY HEYTENS,
         # Circuit Judge, …"); the writer parenthetical takes the surname
         # alone, while disambiguating initials ("R. Nelson") stay.  The
@@ -32345,40 +32712,58 @@ class _ScholarTextWindow:
         # Seventh Circuit's "DIANE P. WOOD" (Judge Harlington Wood sat on it
         # too), who is cited (Diane P. Wood, J., …).  A bench that prints
         # every name in full says nothing of the kind.
+        # Not where it names her by surname too: Andrx Pharms., Inc. v.
+        # Biovail Corp. Int'l, 256 F.3d 799 (D.C. Cir. 2001), sits "Before:
+        # HENDERSON, RANDOLPH and GARLAND", its list of writings naming
+        # "KAREN LeCRAFT HENDERSON" in full.
         surnamed = sum(1 for k in known if " " not in k)
         if (len(tokens) > 1 and name.lower() in known
-                and surnamed > len(known) / 2):
+                and surnamed > len(known) / 2
+                and tokens[-1].lower() not in known):
             pass
         elif listed:
             name = listed
-        elif len(tokens) > 1 and is_recognized_given_name(tokens[0]):
+        elif len(tokens) > 1 and (
+                _judge_given_name(tokens[0])
+                # An initial goes before a given name — "E. RILEY ANDERSON"
+                # — but not alone before the surname, where it tells two
+                # judges of the name apart: "R. NELSON" is R. Nelson.
+                or (re.fullmatch(r"[A-Z]\.", tokens[0]) and len(tokens) > 2
+                    and _judge_given_name(tokens[1]))):
             # The given names go, and the initials between them and the
-            # surname: "ROSEMARY S. POOLER" is Pooler, not "S. Pooler".
+            # surname: "ROSEMARY S. POOLER" is Pooler, not "S. Pooler"; "E.
+            # RILEY ANDERSON" is Anderson.  A byline's given names are the
+            # Census files' too: "MYRNA PÉREZ" is Pérez.
             k = 1
             while k < len(tokens) - 1 and (
                     re.fullmatch(r"[A-Z]\.", tokens[k])
-                    or is_recognized_given_name(tokens[k])):
+                    or _judge_given_name(tokens[k])):
                 k += 1
             name = " ".join(tokens[k:])
         # A surname of two letters keeps the byline's capitals through the
         # case fixing, which spares "IN" and "OF": "HO" is Ho.
         if re.fullmatch(r"[A-Z]{2}", name):
             name = name[0] + name[1].lower()
-        if not name:
-            return ""
-        if statement:
-            return f"statement of {name}, {title}, {phrase}"
-        return f"{name}, {title}, {phrase}"
+        return name
 
     def _majority_author(self, part) -> str:
         """Running-head label for the lead opinion: 'Blackmun, J.',
         'Sykes, C.J.', 'per curiam', or '' when no author is identified.
         Case-insensitive: Google Scholar renders many opinions' attribution
-        lines in mixed case ('Justice Barrett delivered the opinion…')."""
-        for b in part.blocks[:3]:
+        lines in mixed case ('Justice Barrett delivered the opinion…').
+
+        The line that says who delivered the opinion can come after a court's
+        caption ("CHIEF JUSTICE BLACKLOCK delivered the opinion of the Court"
+        is the ninth paragraph of CourtListener's text of Werner Enters., Inc.
+        v. Blake, 719 S.W.3d 525); a court that names its writer only where
+        the writer signs (Missouri's "Zel M. Fischer, Judge") is read there."""
+        for k, b in enumerate(part.blocks[:12]):
             t = fix_title_comma(re.sub(r"\s+", " ", b.text()).strip())
             t = re.sub(r"^(?:\*\d+\s+)+", "", t)
-            if re.match(r"PER\s+CURIAM\b", t, re.IGNORECASE):
+            # The heading a state court sets before the byline: "OPINION
+            # WILLIAM M. BARKER, J., delivered the opinion of the court".
+            t = re.sub(r"^OPINION\s+(?=[A-Z])", "", t)
+            if k < 3 and re.match(r"PER\s+CURIAM\b", t, re.IGNORECASE):
                 return "per curiam"
             m = re.match(
                 r"(?:(?:MR\.|MRS\.|MS\.)\s+)?(CHIEF\s+)?JUSTICE\s+([A-Z][\w.'’-]+)\s*,?\s+"
@@ -32388,16 +32773,74 @@ class _ScholarTextWindow:
             if m:
                 title = "C.J." if m.group(1) else "J."
                 return f"{_fix_name_case(m.group(2))}, {title}"
+            # A state court's: "E. RILEY ANDERSON, J., delivered the opinion
+            # of the court, in which …" (Tennessee).
             m = re.match(
+                r"((?-i:[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*){0,3}))\s*,\s*"
+                r"(C\.\s?J\.|P\.\s?J\.|J\.|Chief\s+Justice|Justice)\s*,?\s+"
+                r"(?:delivered|announced)\b",
+                t, re.IGNORECASE,
+            )
+            if m:
+                title = ("C.J." if re.match(r"C\.|Chief", m.group(2), re.IGNORECASE)
+                         else "P.J." if m.group(2).upper().startswith("P")
+                         else "J.")
+                return (f"{self._judge_surname(_fix_name_case(m.group(1)))}"
+                        f", {title}")
+            # The byline alone — or, as CourtListener's text of a Sixth
+            # Circuit opinion runs it on, before the first sentence: "MURPHY,
+            # Circuit Judge. The plaintiff in this case …".
+            m = k < 3 and re.match(
                 r"([A-Z][\w.'’ -]{0,40}?),\s*((?:Chief\s+)?(?:Senior\s+)?"
-                r"(?:Circuit\s+|District\s+)?Judge)\s*[.:;]?\s*$",
+                r"(?:Circuit\s+|District\s+)?Judge)\s*(?:[.:;]?\s*$|[.:]\s+"
+                r"(?=[A-Z“\"]))",
                 t, re.IGNORECASE,
             )
             if m:
                 title = ("C.J." if re.search(r"\bChief\b", m.group(2), re.IGNORECASE)
                          else "J.")
-                return f"{_fix_name_case(m.group(1).split(',')[0])}, {title}"
+                name = _fix_name_case(m.group(1).split(",")[0])
+                return f"{self._judge_surname(name)}, {title}"
+        signer = _writing_signed_by(part.blocks)
+        if signer:
+            name, _, title = signer.rpartition(", ")
+            title = ("C.J." if re.match(r"Chief\b|C\.", title, re.IGNORECASE)
+                     else "P.J." if re.match(r"Presiding\b|P\.", title,
+                                             re.IGNORECASE)
+                     else "J.")
+            # A signature runs given names first: the surname is the last,
+            # with any particle before it ("Willis Van Devanter").
+            words = [w for w in _fix_name_case(name).split()
+                     if not re.fullmatch(r"(?:Jr|Sr|II|III|IV)\.?,?", w)]
+            k = len(words) - 1
+            while k > 0 and words[k - 1].lower() in (
+                    "van", "von", "de", "del", "della", "der", "da", "di",
+                    "du", "la", "le", "st.", "mac"):
+                k -= 1
+            return f"{' '.join(words[k:]).rstrip(',')}, {title}"
         return ""
+
+    @staticmethod
+    def _label_author(label: str) -> "tuple[str, str]":
+        """The author a source's own label names — CourtListener's
+        "Opinion (Kavanaugh)", static.case.law's "Opinion (KAREN NELSON
+        MOORE, Circuit Judge)", "Opinion (Justice Thomas)", "(PER CURIAM.)"
+        — as ``(name, title)``, or ``("", "")``."""
+        m = re.search(r"\(([^()]+)\)\s*$", label or "")
+        if not m:
+            return "", ""
+        inner = m.group(1).strip().rstrip(".")
+        if re.fullmatch(r"per\s+curiam", inner, re.IGNORECASE):
+            return "per curiam", ""
+        jm = re.fullmatch(r"(?:(Chief\s+)?Justice\s+)(.+)", inner,
+                          re.IGNORECASE)
+        if jm:
+            return jm.group(2).strip(), "C.J." if jm.group(1) else "J."
+        name, _, role = inner.partition(",")
+        role = role.strip()
+        chief = bool(re.match(r"Chief\b", role, re.IGNORECASE)
+                     or re.fullmatch(r"C\.\s?J", role, re.IGNORECASE))
+        return name.strip(), "C.J." if chief else "J."
 
     def _refine_part_labels(self, parts: list) -> None:
         """Sharpen the lead opinion's label.  ``segment_blocks`` calls every
@@ -32421,6 +32864,17 @@ class _ScholarTextWindow:
         else:
             base = "Majority Opinion"
         author = self._majority_author(maj)  # "Name, J." | "per curiam" | ""
+        if not author:
+            # No byline in the text: the author the source's own label names
+            # (CourtListener's sub-opinions, static.case.law's opinions), as a
+            # Scholar text's byline would give it — "KAREN NELSON MOORE,
+            # Circuit Judge" is Moore, J.
+            named, title = self._label_author(maj.label)
+            if named == "per curiam":
+                author = "per curiam"
+            elif named:
+                author = (f"{self._judge_surname(_fix_name_case(named))}, "
+                          f"{title}")
         if signal == "per curiam" or author == "per curiam":
             author = "Per Curiam"
         maj.label = f"{base} ({author})" if author else base

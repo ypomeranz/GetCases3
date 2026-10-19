@@ -172,6 +172,26 @@ class CaseCiteSpanTests(unittest.TestCase):
                    "A-61210-05T3, 2008 WL 465653 (N.J. Super. Ct. App. Div. "
                    "Feb. 22, 2008) is a state case."), [])
 
+    def test_a_docket_number_the_lines_broke(self):
+        # Zitzow v. Auto-Owners Ins. Co., as a cert petition's lines broke
+        # its docket: the RECAP lookup had no docket, and no name.
+        import json
+        text = ("See also Zitzow v. AutoOwners Ins. Co., No. 1:21-\ncv-3, 2022 "
+                "WL 1787110, at *5 (E.D. Tenn. March 7, 2022)\n(discussing)")
+        (span, (kind, spec)), = _spans(text)
+        self.assertEqual(kind, "recap")
+        self.assertTrue(span.startswith("Zitzow v. AutoOwners Ins. Co., No."))
+        spec = json.loads(spec)
+        self.assertEqual((spec["docket"], spec["name"], spec["court"]),
+                         ("1:21-cv-3", "Zitzow v. AutoOwners Ins. Co.",
+                          "tned"))
+        # A slip opinion cited by docket alone, too.
+        (_span, (kind, spec)), = _spans(
+            "Peninsula Pathology Assocs. v. Am. Int'l Indus., No. 23-\n1971 "
+            "(4th Cir. Feb. 12, 2024).")
+        self.assertEqual((kind, json.loads(spec)["docket"]),
+                         ("recap", "23-1971"))
+
     def test_multi_word_party_names(self):
         text = ("The Court in District of Columbia v. Wesby, 583 U. S. 48, 57 "
                 "(2018), held otherwise.")
@@ -1264,6 +1284,84 @@ class ConstitutionCiteTests(unittest.TestCase):
             "under the Fifth and Fourteenth Amendments")
         self.assertEqual(m.group(0), "Fourteenth Amendments")
         self.assertEqual(constitution.cite_spec(m), "amend:14:")
+
+
+class PetitionAppendixTests(unittest.TestCase):
+    """United Biologics, LLC v. Amerigroup Tenn., Inc., petition for
+    certiorari (June 12, 2026), as a PDF's text layer reads it page by page:
+    a blank line between pages and the appendix's own page number ("App-13")
+    on the next page's first line."""
+
+    AGC = ("Cf. Associated Gen. Contractors, 459 U.S. 519, 541 n.46 (1983). "
+           "In short, the list of harmed parties could go on and on.")
+
+    def test_an_id_runs_on_across_a_page(self):
+        text = (self.AGC + "\n\nApp-13\nMay all these parties sue? They may "
+                "not. Id. at 535 n.31.")
+        self.assertEqual(_spans(text)[-1],
+                         ("Id. at 535 n.31", ("cite", "459 U.S. 519@535n31")))
+
+    def test_so_it_does_past_a_page_number_alone(self):
+        for label in ("14", "xii", "13a", "Pet. App. 13a", "App. 13"):
+            with self.subTest(label=label):
+                text = (self.AGC + f"\n\n{label}\nMay they sue? Id. at 537.")
+                self.assertEqual(_spans(text)[-1],
+                                 ("Id. at 537", ("cite", "459 U.S. 519@537")))
+
+    def test_a_new_paragraph_still_ends_it(self):
+        text = self.AGC + "\n\nThe statute says otherwise. Id. at 537."
+        self.assertNotIn("Id. at 537", [t for t, _a in _spans(text)])
+
+    def test_the_page_label_is_no_part_of_a_case_name(self):
+        text = ("cf.\n\nApp-23\nNYNEX Corp. v. Discon, Inc., 525 U.S. 128, "
+                "135-36 (1998).")
+        self.assertEqual(
+            _spans(text)[0],
+            ("NYNEX Corp. v. Discon, Inc., 525 U.S. 128, 135-36 (1998)",
+             ("cite", "525 U.S. 128@135")))
+
+    def test_an_id_with_a_page_never_means_a_statute(self):
+        # "Id. at 280" is Apple v. Pepper, 587 U.S. 273, past the statute;
+        # with no case before the statute, it is no link at all ("(Id. at
+        # 42-54.)" is the complaint's pages).
+        text = ("Apple Inc. v. Pepper, 587 U.S. 273, 279 (2019). Direct "
+                "purchasers may sue under 15 U.S.C. §15(a). Id. at 280.")
+        self.assertEqual(_spans(text)[-1],
+                         ("Id. at 280", ("cite", "587 U.S. 273@280")))
+        text = "UAS sues under 15 U.S.C. § 1. (Id. at 42-54.)"
+        self.assertEqual([a[0] for _t, a in _spans(text)], ["usc"])
+
+    def test_the_names_its_links_carry(self):
+        for text, want in (
+                # The question presented opens on "Whether".
+                ("Whether Illinois Brick Co. v. Illinois, 431 U.S. 720 "
+                 "(1977), bars recovery.",
+                 "Illinois Brick Co. v. Illinois, 431 U.S. 720 (1977)"),
+                # A quotation's sentence ends before the name.
+                ("would nullify the doctrine of Illinois Brick.” Motorola "
+                 "Mobility LLC v. AU Optronics Corp., 775 F.3d 816, 822 (7th "
+                 "Cir. 2015).",
+                 "Motorola Mobility LLC v. AU Optronics Corp., 775 F.3d 816, "
+                 "822 (7th Cir. 2015)"),
+                # A court is no party.
+                ("The opinion of the Sixth Circuit, 155 F.4th 795, is "
+                 "reproduced at App.1-62.", "155 F.4th 795"),
+                # A capital "V." is an initial, not the separator.
+                ("(quoting Cont’l T.\nV., Inc. v. GTE Sylvania, 433 U.S. 36, "
+                 "58-59 (1977))",
+                 "Cont’l T.\nV., Inc. v. GTE Sylvania, 433 U.S. 36, 58-59 "
+                 "(1977)")):
+            with self.subTest(want=want[:30]):
+                self.assertEqual(_spans(text)[0][0], want)
+
+    def test_an_id_passes_over_the_source_of_a_quotation(self):
+        # 470 is a page of both cases; the one in "(quoting …)" is the
+        # quotation's source, not the authority the Id. goes on citing.
+        text = ("Static Control Components, Inc. v. Lexmark Int'l, Inc., 697 "
+                "F.3d 387, 401 (6th Cir. 2012) (quoting NicSand, Inc. v. 3M "
+                "Co., 507 F.3d 442, 450 (6th Cir. 2007)). Id. at 470.")
+        self.assertEqual(_spans(text)[-1],
+                         ("Id. at 470", ("cite", "697 F.3d 387@470")))
 
 
 class IdChainTests(unittest.TestCase):

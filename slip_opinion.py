@@ -282,7 +282,10 @@ def _canon_role_phrase(toks) -> str:
         kept.append(w)
     while kept and kept[-1] in ("in", "and", "the"):
         kept.pop()
-    return " ".join(kept)
+    # The U.S. Reports' running heads shorten it — "WHITE, J., concurring in
+    # judgment" — but the writing's own line, and its citation, say "in the
+    # judgment" (rule 10.6.1).
+    return re.sub(r"\bin (judgment|result)\b", r"in the \1", " ".join(kept))
 
 
 def _name_groups(toks) -> tuple:
@@ -399,7 +402,13 @@ _ATT_WEST_RE = re.compile(
     r"([A-Z][A-Z'’. -]{2,40}?),\s*"
     r"((?:Senior\s+|Chief\s+|Presiding\s+)?(?:Circuit|District)\s+Judge"
     r"|C\.\s?J\.|P\.\s?J\.|JJ?\.)"
-    r"(?:\s*,\s*(dissenting|concurring)[^:.—)]{0,60})?"
+    # The judges who join it, named before the role: "MURPHY, Circuit
+    # Judge, with whom SUTTON, Chief Judge, and KETHLEDGE, Circuit Judge,
+    # join, concurring in the denial of rehearing en banc." (164 F.4th 529).
+    r"(?:\s*,\s*with\s+whom\b[^.:]{0,200}?\bjoin(?:s|ed)?)?"
+    # The role, whole: "concurring in part and concurring in the judgment",
+    # "respecting the denial of rehearing en banc" (a statement).
+    r"(?:\s*,\s*((?:dissenting|concurring|respecting)[^:.—)]{0,80}))?"
     # ":", ".", "—" close the opener; California prints "PETERS, J.—We
     # granted…" whose em-dash OCR often drops, leaving "J." run straight
     # into the text — so a capital letter directly after also closes it.
@@ -459,6 +468,23 @@ def _line_us_attribution(page_lines: list[Line], li: int):
         name.append(t)
         if len(name) >= 2:
             break
+    # The name opens the attribution only when what follows it on the line is
+    # the attribution's own — a comma, a role, "with whom", "delivered" — not
+    # a sentence's verb: "Justice Sotomayor took no part in the consideration
+    # or decision of this case." (Hemi Group, LLC v. City of New York, 559
+    # U.S. 1, the line above Justice Ginsburg's byline, which had named her
+    # concurrence Sotomayor's) and "Justice Sotomayor observed in her dissent
+    # from the denial of certiorari…" (Hodge v. Plappert, 136 F.4th 648, read
+    # as a dissent of its own).
+    if name and _prose_after_name(page_lines[li].text, toks, j, name):
+        return None
+    # A line-up announcing the writing is not the writing: "JUSTICE YOUNG
+    # filed a concurring opinion, in which Justice Huddle joined." (Werner
+    # Enters., Inc. v. Blake, 719 S.W.3d 525, whose slip holds only the
+    # Court's opinion).
+    rest = window[len(name):len(name) + 1] if name else []
+    if rest and rest[0] == "FILED":
+        return None
     for i, t in enumerate(window):
         if _fuzzy(t, "DELIVERED", 0.8) or _fuzzy(t, "DELIVER", 0.86):
             return ("majority", tuple(name), "")
@@ -471,6 +497,32 @@ def _line_us_attribution(page_lines: list[Line], li: int):
         if _fuzzy(t, "ANNOUNCED", 0.8):
             return ("separate", tuple(name), "")
     return None
+
+
+#: Words that may follow a justice's name in the attribution itself.
+_ATT_AFTER_NAME = {"concurring", "dissenting", "concurred", "dissented",
+                   "concurs", "dissents", "delivered", "announced", "with",
+                   "and", "joins", "join", "filed"}
+
+
+def _prose_after_name(text: str, toks: list, j: int, name: list) -> bool:
+    """Whether the word after the justice's *name* on the line, written in
+    lower case, is a sentence's (a verb: "took", "observed") rather than an
+    attribution's (see :data:`_ATT_AFTER_NAME`).  *toks* are the line's
+    tokens in capitals, ``toks[j]`` the "JUSTICE"; a comma straight after
+    the name is the attribution's too."""
+    words = list(re.finditer(r"[A-Za-z0-9]+", re.sub(r"[’']", "", text)))
+    if len(words) != len(toks):
+        return False    # the tokens don't line up; leave the line be
+    last = name[-1]
+    k = next((i for i in range(j + 1, len(toks)) if toks[i] == last), None)
+    if k is None or k + 1 >= len(words):
+        return False    # the name ends the line: nothing to judge by
+    between = re.sub(r"[’']", "", text)[words[k].end():words[k + 1].start()]
+    if "," in between or ":" in between:
+        return False
+    nxt = words[k + 1].group(0)
+    return nxt[:1].islower() and nxt.lower() not in _ATT_AFTER_NAME
 
 
 _ATT_BLOCKERS = {"FILED", "POST", "ANTE", "SUPRA", "INFRA", "SEE"}
@@ -617,8 +669,46 @@ def _title_tokens(toks) -> str:
     return " ".join(words)
 
 
-def _names_display(groups: tuple) -> str:
-    names = [_title_name(g) for g in groups]
+#: The Justices of the Supreme Court, as the Reports spell them.  A part a
+#: running head names (slip opinions, the U.S. Reports — documents of that
+#: Court) is the opinion of one of them, so a head's OCR is read against the
+#: roster: "RENNQUIST" is Rehnquist (Reiter v. Sonotone Corp., 442 U.S. 330),
+#: and "OCONNOR" — _head_tokens drops the apostrophe — O’Connor.
+_JUSTICES = (
+    "Jay", "Rutledge", "Cushing", "Wilson", "Blair", "Iredell", "Johnson",
+    "Paterson", "Chase", "Ellsworth", "Washington", "Moore", "Marshall",
+    "Livingston", "Todd", "Duvall", "Story", "Thompson", "Trimble", "McLean",
+    "Baldwin", "Wayne", "Taney", "Barbour", "Catron", "McKinley", "Daniel",
+    "Nelson", "Woodbury", "Grier", "Curtis", "Campbell", "Clifford",
+    "Swayne", "Miller", "Davis", "Field", "Strong", "Bradley", "Hunt",
+    "Waite", "Harlan", "Woods", "Matthews", "Gray", "Blatchford", "Lamar",
+    "Fuller", "Brewer", "Brown", "Shiras", "Jackson", "White", "Peckham",
+    "McKenna", "Holmes", "Day", "Moody", "Lurton", "Hughes", "Van Devanter",
+    "Pitney", "McReynolds", "Brandeis", "Clarke", "Taft", "Sutherland",
+    "Butler", "Sanford", "Stone", "Roberts", "Cardozo", "Black", "Reed",
+    "Frankfurter", "Douglas", "Murphy", "Byrnes", "Burton", "Vinson",
+    "Clark", "Minton", "Warren", "Brennan", "Whittaker", "Stewart",
+    "Goldberg", "Fortas", "Burger", "Blackmun", "Powell", "Rehnquist",
+    "Stevens", "O’Connor", "Scalia", "Kennedy", "Souter", "Thomas",
+    "Ginsburg", "Breyer", "Alito", "Sotomayor", "Kagan", "Gorsuch",
+    "Kavanaugh", "Barrett",
+)
+_JUSTICE_KEYS = {re.sub(r"[^A-Z]", "", j.upper()): j for j in _JUSTICES}
+
+
+def _justice_name(squashed: str) -> str:
+    """The Justice a running head's (OCR'd) name is, or the name as read."""
+    key = re.sub(r"[^A-Z]", "", (squashed or "").upper())
+    if key in _JUSTICE_KEYS:
+        return _JUSTICE_KEYS[key]
+    best = max(_JUSTICE_KEYS, key=lambda k: _sim(k, key)) if key else ""
+    if best and _sim(best, key) >= 0.8:
+        return _JUSTICE_KEYS[best]
+    return _title_name(squashed)
+
+
+def _names_display(groups: tuple, roster: bool = False) -> str:
+    names = [_justice_name(g) if roster else _title_name(g) for g in groups]
     if len(names) <= 1:
         return "".join(names)
     return ", ".join(names[:-1]) + " and " + names[-1]
@@ -685,7 +775,7 @@ def _finalize(sec: dict) -> SlipSection:
         use = groups[0][0]
     else:
         use = att_names or (groups[0][0] if groups else ())
-    names = _names_display(use) if use else "?"
+    names = _names_display(use, roster=True) if use else "?"
     marker = "JJ." if len(use) > 1 else "J."
     phrase = sec["roles"].most_common(1)
     role = phrase[0][0] if phrase else ""
@@ -778,6 +868,9 @@ def _west_attribution(lines: list, li: int):
     """A West-style opinion opener on line *li* — same-line, or wrapping
     onto the next line.  Returns ``(kind, name, role)`` or ``None``."""
     text = lines[li].text.strip()
+    if re.search(r"\bwith\s+whom\b", text) and li + 1 < len(lines):
+        # A joinder runs long: the role comes on the next line.
+        text = f"{text} {lines[li + 1].text.strip()}"
     m = _ATT_WEST_RE.search(text)
     wrapped = False
     if m is None:
@@ -794,13 +887,23 @@ def _west_attribution(lines: list, li: int):
     # Small-caps names come through as caps; a mixed-case match is prose.
     if not name.isupper() or len(name) < 4:
         return None
-    role = "" if wrapped else (m.group(3) or "").lower()
+    role = "" if wrapped else " ".join((m.group(3) or "").lower().split())
+    role = re.sub(r"[\s,;]+$", "", role)
+    # The PDF's text can lose a space: "concurring in thejudgment".
+    role = re.sub(r"\b(the|of|in|and)(?=(?:judgment|result|denial|part|"
+                  r"rehearing|petition)\b)", r"\1 ", role)
     if wrapped:
         r = _ATT_ROLE_LEAD_RE.match(lines[li + 1].text)
         role = (r.group(1) or "").lower() if r else ""
-    kind = ("dissent" if role.startswith("dissent")
+    kind = ("separate" if role.startswith("respecting")
+            else "dissent" if "dissent" in role
             else "concurrence" if role.startswith("concur") else "majority")
-    return kind, _title_name(name.split(" AND ")[0]), role
+    # "JOHN K. BUSH": the surname after the initials.
+    words = name.split(" AND ")[0].split()
+    initial = max((k for k, w in enumerate(words)
+                   if re.fullmatch(r"[A-Z]\.", w)), default=-1)
+    words = words[initial + 1:] or words
+    return kind, " ".join(_title_name(w) for w in words), role
 
 
 def _sections_from_attributions(pages: list,
@@ -832,24 +935,127 @@ def _sections_from_attributions(pages: list,
                 key = (kind if kind == "majority" else "sep", name.upper())
                 if key in seen:
                     continue
+                if kind == "majority" and any(s["kind"] == "majority"
+                                              for s in out):
+                    # One opinion of the court: a second "delivered" is the
+                    # signature's ("Chief Justice / OPINION DELIVERED: June
+                    # 27, 2025", closing Werner Enterprises' slip).
+                    continue
                 seen.add(key)
                 out.append({"kind": kind, "start": pi, "name": name,
                             "phrase": phrase})
                 if len(out) > 10:  # implausible — quoted, not real parts
                     return []
+    out += _headed_writings(pages, out)
     if not any(s["kind"] == "majority" for s in out):
         return []  # never found the opinion itself — don't trust the rest
     out.sort(key=lambda s: s["start"])
     return out
 
 
+# The heading a court sets over its order, between rules (the Sixth
+# Circuit's "ORDER" denying rehearing en banc, 164 F.4th 529).
+_RULE_LINE_RE = re.compile(r"^_{5,}$")
+# A writing headed by its title alone (see google_scholar._TITLED_WRITING_RE):
+# Missouri's "DISSENTING OPINION", "OPINION CONCURRING IN PART AND
+# DISSENTING IN PART".
+_TITLE_LINE_RE = re.compile(
+    r"^(?:(?P<pre>(?:SEPARATE|CONCURRING|DISSENTING|CONCURRING AND "
+    r"DISSENTING) OPINION)"
+    r"|OPINION (?P<post>(?:CONCURRING|DISSENTING)(?: [A-Z]+){0,7})"
+    r"|(?P<bare>(?:CONCURRING|DISSENTING) IN (?:PART|(?:THE )?RESULT|"
+    r"(?:THE )?JUDGMENT)(?: [A-Z]+){0,5}))$")
+# A writer's signature, as the scan has it — underlined, so that the rule
+# under it breaks the glyphs up: "_P_a_u_l _C_. _W__il_s_o_n_, _Ju__d _g _e".
+_SIGNATURE_TAIL_RE = re.compile(
+    r"(?P<name>(?:[A-Z][\w.'’-]*,?\s+){1,4}?)"
+    r"(?:Chief\s+|Presiding\s+|Senior\s+)?(?:J\s*u\s*d\s*g\s*e|J\s*u\s*s\s*t\s*i\s*c\s*e)"
+    r"[\s,.]*$")
+
+
+def _signature_surname(pages: list, first: int, last: int) -> str:
+    """The surname of the writer who signs the pages *first*..*last* at
+    their end ("Wilson"), or ""."""
+    for pi in range(min(last, len(pages) - 1), first - 1, -1):
+        for ln in reversed(group_lines(pages[pi])):
+            text = re.sub(r"\s+", " ", ln.text.replace("_", "")).strip()
+            m = _SIGNATURE_TAIL_RE.fullmatch(text)
+            if not m or text.startswith("The Honorable"):
+                continue
+            words = [w.strip(",.") for w in m.group("name").split()]
+            surname = words[-1] if words else ""
+            # An initial run into the surname once its period and space are
+            # lost: "Zel MFischer".
+            surname = re.sub(r"^[A-Z](?=[A-Z][a-z]{2,})", "", surname)
+            if len(surname) >= 3:
+                return surname
+    return ""
+
+
+def _headed_writings(pages: list, found: list) -> list:
+    """Writings the attribution scan can't open: a court's order under its
+    ruled heading, and a writing its title alone heads, with its writer's
+    surname from where the writer signs — and, where the opinion before the
+    first of them has no attribution of its own, that opinion, from the
+    first page."""
+    titles: list = []
+    for pi, chars in enumerate(pages):
+        lines = group_lines(chars)
+        for li, ln in enumerate(lines):
+            t = " ".join(ln.text.split())
+            if t == "ORDER" and not any(s["kind"] == "majority"
+                                        for s in found):
+                near = [lines[k].text.strip() for k in (li - 1, li + 1)
+                        if 0 <= k < len(lines)]
+                if any(_RULE_LINE_RE.match(n) for n in near):
+                    titles.append({"kind": "majority", "start": pi,
+                                   "name": "", "phrase": "order"})
+                continue
+            m = _TITLE_LINE_RE.match(t) if pi else None
+            if not m:
+                continue
+            role = (m.group("post") or m.group("bare")
+                    or m.group("pre")).lower()
+            role = re.sub(r"\s*opinion$", "", role)
+            role = re.sub(r"\bin (result|judgment)\b", r"in the \1", role)
+            kind = ("dissent" if "dissent" in role
+                    else "concurrence" if "concur" in role else "separate")
+            titles.append({"kind": kind, "start": pi, "name": "",
+                           "phrase": "separate opinion" if kind == "separate"
+                           else role, "titled": True})
+    if not any(w.get("titled") for w in titles):
+        return [w for w in titles if w["kind"] == "majority"]
+    starts = sorted({s["start"] for s in found} | {w["start"] for w in titles})
+    for w in titles:
+        if w.get("titled"):
+            end = next((p for p in starts if p > w["start"]), len(pages)) - 1
+            w["name"] = _signature_surname(pages, w["start"], max(end,
+                                                                  w["start"]))
+    if not any(s["kind"] == "majority" for s in found + titles):
+        first = min(w["start"] for w in titles if w.get("titled"))
+        titles.append({"kind": "majority", "start": 0, "name":
+                       _signature_surname(pages, 0, first), "phrase": ""})
+    return titles
+
+
 def _finalize_attribution(sec: dict) -> SlipSection:
     if sec["kind"] == "majority":
-        return SlipSection("Opinion of the Court", "majority", sec["start"])
+        return SlipSection("Order" if sec["phrase"] == "order"
+                           else "Opinion of the Court", "majority",
+                           sec["start"])
     role = sec["phrase"] or ("dissenting" if sec["kind"] == "dissent"
                              else "concurring")
     kind = ("dissent" if "dissent" in role
             else "concurrence" if "concur" in role else "separate")
+    if role.startswith("respecting"):
+        # A statement, as the courts cite one: "(statement of Bush, J.,
+        # respecting the denial of rehearing en banc)".
+        return SlipSection(f"Statement of {sec['name']}, J., {role}",
+                           "separate", sec["start"])
+    if not sec["name"]:
+        # A titled writing no one signs that the scan could read.
+        return SlipSection(f"Opinion {role}".capitalize() if kind != "separate"
+                           else "Separate opinion", kind, sec["start"])
     return SlipSection(f"{sec['name']}, J., {role}", kind, sec["start"])
 
 

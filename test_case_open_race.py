@@ -359,6 +359,20 @@ class RaceLaneTests(unittest.TestCase):
         )
         return fetcher
 
+    def test_scholar_is_not_asked_for_what_it_lacks(self):
+        # Loeb v. Eastman Kodak Co., 183 F. 704 (3d Cir. 1910): a lower
+        # federal court's decision before Scholar's copies of them begin.
+        for cite, year in (("183 F. 704", "1910"), ("183 F. 704", ""),
+                           ("12 Blatchf. 553", ""), ("17 F. Cas. 144", "")):
+            with self.subTest(cite=cite):
+                self.assertEqual(self._race(cite, year=year)._scholar_cites(),
+                                 [])
+        # From 1923 it has them, and the Federal Reporter's second series.
+        for cite, year in (("290 F. 1", "1923"), ("5 F.2d 370", ""),
+                           ("2 Va. 298", "1796")):
+            with self.subTest(cite=cite):
+                self.assertTrue(self._race(cite, year=year)._scholar_cites())
+
     def test_one_quick_hop_is_granted_for_the_case(self):
         fetcher = self._fetcher(found=PAGE)
         race = self._race("365 U.S. 167", "Monroe v. Pape", fetcher=fetcher)

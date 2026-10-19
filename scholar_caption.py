@@ -130,7 +130,11 @@ _PARTY_DESIGNATION_RE = re.compile(
 # 215) is Canadian Aviator, Ltd., which lost its "Limited" as a co-party.
 _ENTITY_SUFFIX_RE = re.compile(
     r"(?:inc|incorporated|l\.?l\.?c|l\.?l\.?p|l\.?p|ltd|limited|ltda|p\.?l\.?c|"
-    r"p\.?c|s\.?a|s\.?p\.?a|a\.?g|n\.?v|s\.?l|gmbh|co|corp|n\.?a)\.?",
+    r"p\.?c|s\.?a|s\.?p\.?a|a\.?g|n\.?v|s\.?l|gmbh|co|corp|n\.?a"
+    # …"AEREL, S.R.L." (448 F.3d 899), and the country a company's own name
+    # ends with: "EXXON CO., U. S. A." (517 U.S. 830).
+    r"|s\.?\s?r\.?\s?l|s\.?a\.?r\.?l|s\.?a\.?s|b\.?v|k\.?k|pty"
+    r"|u\.?\s?s\.?\s?a)\.?",
     re.IGNORECASE,
 )
 
@@ -145,6 +149,40 @@ _ORG_TAIL_RE = re.compile(
     r"inc\.?|llc|llp|ltd\.?|limited|plc)\s*\.?\s*$",
     re.IGNORECASE,
 )
+
+
+def _names_someone(relator: str) -> bool:
+    """Whether a relator read off a caption names a person or a body, not
+    just "et al." or the rest of the role ("Ad Litem")."""
+    rest = re.sub(r"\bet\.?\s*als?\b\.?|\bad\s+litem\b|\b(?:and|mother|father|"
+                  r"next|friends?|guardians?|parents?)\b|&", " ", relator,
+                  flags=re.IGNORECASE)
+    return bool(re.search(r"[A-Z]", rest))
+
+
+# What may follow a party's name before a relator clause without naming
+# another party: "LAWRENCE J. SCHIPPER, II, A MINOR, BY HIS FATHER …" (44
+# N.J. 70), "Teresa Ann HENSLEY, as relator ON BEHALF OF …" (876 F.3d 573).
+_PARTY_DESCRIPTOR_RE = re.compile(
+    r"(?:an?\s+(?:minor|infant|incompetent|child|incapacitated\s+person)"
+    r"|individually|deceased|jr\.?|sr\.?|i{1,3}|iv|as\s+\w+.*"
+    # "JOHN BARRON, SURVIVOR OF JOHN CRAIG, FOR THE USE OF LUKE TIERNAN" (32
+    # U.S. 243) sues as the survivor.
+    r"|(?:surviving\s+)?(?:survivor|executor|executrix|administrator|"
+    r"administratrix|trustee|heir|widow|guardian)s?\b.*)\.?",
+    re.IGNORECASE)
+
+
+def _co_parties_before(head: str) -> bool:
+    """Whether *head*, a caption side up to its relator clause, lists more
+    parties than its first: a segment after the first comma that is no
+    description of it ("a Minor", "II", "survivor of JOHN CRAIG" — a mixed
+    caption sets those in lowercase) but a name ("Nigel Winfield")."""
+    for seg in [p.strip() for p in head.split(",")[1:]]:
+        if not seg or seg[:1].islower() or _PARTY_DESCRIPTOR_RE.fullmatch(seg):
+            continue
+        return True
+    return False
 
 
 def caption_party(s: str) -> str:
@@ -179,6 +217,24 @@ def caption_party(s: str) -> str:
     # segment of it: the quotes stay together (see abbreviate_case_name's
     # in rem res).
     s = re.sub(r"([,;])([”\"])", r"\2\1", s)
+    # A semicolon parts one party from the next, as a comma may not: "UPMC;
+    # Highmark, Inc." is UPMC (West Penn Allegheny Health Sys., Inc. v.
+    # UPMC, 627 F.3d 85), not "UPMC, Highmark, Inc." read as one name.
+    # (A relator past one is a co-party's too — see below.)
+    s = s.split(";", 1)[0]
+    # Asides in parentheses that name no one: a co-plaintiff's docket number,
+    # "Mary Ann REID (No. 84-1189), …" (790 F.2d 453), and a nickname, "James
+    # McCoy (Yazoo) SMITH" (593 F.2d 1173) — they kept the given names, which
+    # the surname in capitals would otherwise have shed.
+    # So is one with the docket numbers alone: "REALTY ONE, INC.
+    # (96-3362/3469)" (Re/Max Int'l, Inc. v. Realty One, Inc., 173 F.3d 995)
+    # had lost its "Inc.".
+    s = re.sub(r"\s*\((?:Nos?\.\s*[^()]*|[A-Z][a-z]+|\d[\d\s/,–-]*\d)\)", "",
+               s)
+    # A trade name the party does business under is no part of the party's
+    # name, and takes none of it along: "TRAU-MED OF AMERICA, INC. d/b/a/
+    # Bellevue Clinic" (71 S.W.3d 691) is Trau-Med of America, Inc.
+    s = re.sub(r"\s+d/?b/?a/?(?=\s)[^,;]*", "", s, flags=re.IGNORECASE)
 
     # A relator clause is the party's, not a co-party to cut away (rule
     # 10.2.1(b)): "THE UNITED STATES, ON THE RELATION OF WILLIAM B. STOKES
@@ -190,8 +246,16 @@ def caption_party(s: str) -> str:
     relation = split_relator(s.split(";", 1)[0])
     if relation is not None:
         party, relator = (caption_party(p) for p in relation)
-        if party and relator:
+        # The relator is someone named — not "DESHANEY, A MINOR, BY HIS
+        # GUARDIAN AD LITEM, ET AL." (489 U.S. 189) — and the clause is the
+        # first party's: "Clifton WINFIELD, Nigel Winfield, Nikki Winfield, a
+        # Minor, by and through Her Father …" (477 So. 2d 544) is a
+        # co-party's, who goes with it.
+        if (party and relator and _names_someone(relator)
+                and not _co_parties_before(relation[0])):
             return f"{party} ex rel. {relator}"
+        if party:
+            return party
     # So is a demise, the old ejectment plaintiff's: "JOHN DEN, ex dem. JAMES
     # B. MURRAY AND JOHN C. KAYSER" is Den suing on Murray's demise — cited
     # "Murray's Lessee v. Hoboken Land & Improvement Co." — not John Den and
@@ -229,6 +293,22 @@ def caption_party(s: str) -> str:
                     r"(?:the\s+)?bank\s+of\b",
                     segs[2], re.IGNORECASE)):
             segs = [", ".join(segs[:3])] + segs[3:]
+        # An officer named by the office alone is cited with it: "DIRECTOR,
+        # OFFICE OF WORKERS' COMPENSATION PROGRAMS, U.S. DEPARTMENT OF LABOR"
+        # is Director, Office of Workers' Compensation Programs (Wilgar Land
+        # Co. v. Dir., Off. of Workers' Comp. Programs, 85 F.4th 828), not
+        # "Director" alone.
+        if (len(segs) >= 2
+                and re.fullmatch(
+                    r"(?:the\s+)?(?:acting\s+|deputy\s+)?(?:director|"
+                    r"secretary|commissioner|administrator|comptroller|"
+                    r"superintendent|chairman|chair|registrar|librarian|"
+                    r"(?:attorney|solicitor|postmaster|surgeon)\s+general)",
+                    segs[0], re.IGNORECASE)
+                and re.match(r"(?:the\s+)?(?:office|department|dep't|bureau|"
+                             r"division|agency|administration|service)\b",
+                             segs[1], re.IGNORECASE)):
+            segs = [f"{segs[0]}, {segs[1]}"] + segs[2:]
         # 1. Consolidation cut: a later segment that re-names the first party
         # (same final token), contains its own " v. ", or introduces another
         # party ("and Ace Garage" — unless it ends the entity's own name,
@@ -263,10 +343,22 @@ def caption_party(s: str) -> str:
         # 2. Designations / offices / suffixes strip from the right.
         while len(segs) > 1 and _PARTY_DESIGNATION_RE.fullmatch(segs[-1]):
             segs.pop()
-        # 3. A business-entity suffix continues the first segment's name.
+        # 3. A business-entity suffix continues the first segment's name —
+        # even with a co-party run on after it: "Werner Enterprises, Inc. and
+        # Shiraz A. Ali, Petitioners" (719 S.W.3d 525) is Werner Enterprises,
+        # Inc.
         kept = [segs[0]]
         rest = segs[1:]
-        if rest and _ENTITY_SUFFIX_RE.fullmatch(rest[0]):
+        if rest:
+            run_on = re.match(r"((?:" + _ENTITY_SUFFIX_RE.pattern
+                              + r"))\s+(?:and|&)\s+\S", rest[0], re.IGNORECASE)
+            if run_on:
+                rest = [run_on.group(1)]
+        if rest and _ENTITY_SUFFIX_RE.fullmatch(rest[0]) and not (
+                # A country continues a company's name only: "EXXON CO., U.
+                # S. A." does, "UNITED STATES, U.S.A." is the United States.
+                re.fullmatch(r"u\.?\s?s\.?\s?a\.?", rest[0], re.IGNORECASE)
+                and not _ORG_TAIL_RE.search(segs[0])):
             kept.append(rest.pop(0))
         # 4. The remaining segments stay only when they read as one entity
         # name; anything else is a co-party list, dropped as before.  Bare
@@ -306,6 +398,10 @@ def caption_party(s: str) -> str:
     # entity initialisms ("McDonald's USA, LLC") must remain intact.
     s = collapse_personal_all_caps_run(s)
     out = _titlecase_caps(s).strip(" ,;&")
+    # A party the caption names twice, in capitals and again in ordinary
+    # case: "CATERPILLAR TRACTOR CO. Caterpillar Tractor Co., Appellant."
+    # (Merican, Inc. v. Caterpillar Tractor Co., 713 F.2d 958).
+    out = re.sub(r"^(.{3,}?)\s+\1$", r"\1", out, flags=re.IGNORECASE)
     # One side of a caption has no "v." of its own: a "V." in it is a middle
     # initial, which title-casing takes for the separator — "BEATRICE V.
     # DITTUS" became "Beatrice v. Dittus", and Dittus v. Cranston, 53 Cal. 2d
@@ -541,6 +637,99 @@ def scholar_caption_name(blocks) -> str:
                     t, re.IGNORECASE)):
             return refine(
                 _titlecase_caps(_cut_companion_cases(t).split(",")[0].strip()))
+    slip = slip_caption_name(blocks)
+    return refine(slip) if slip else ""
+
+
+# The parties' roles a court's own caption sets after each of them.
+_SLIP_ROLE_RE = re.compile(
+    r"\b(?:Plaintiffs?|Defendants?|Petitioners?|Respondents?|Appellants?|"
+    r"Appellees?)\b", re.IGNORECASE)
+# The box the Sixth Circuit draws round its caption, the docket number set in
+# it or beside it ("> No. 19-1235", "D.C. No. 2:20-cv-04790-"), the tail of a
+# docket number the Ninth Circuit's caption wraps onto the line with the "v."
+# ("v. JWH-RAO"), and that court's "OPINION" label beside the caption.
+_SLIP_BOX_RE = re.compile(r"[┐┘┌└│├┤─>]")
+# Missouri's docket numbers lead with the court's letters ("No. SC100702",
+# "No. ED112233").
+_SLIP_DOCKET_RE = re.compile(
+    r"\b(?:D\.\s?C\.\s+)?Nos?\.\s*(?:[A-Z]{1,3}-?)?\d[\w:]*(?:[-–][\w:]+)*-?",
+    re.IGNORECASE)
+_SLIP_DOCKET_TAIL_RE = re.compile(r"(?<=\bv\.)\s+[A-Z]{2,4}-[A-Z]{2,4}\b")
+# The court's heading over the caption, where the court's own text runs it
+# into the parties: "SUPREME COURT OF MISSOURI en banc D.J., …" (D.J. ex rel.
+# R.J. v. First Student, Inc., 707 S.W.3d 581), "IN THE MISSOURI COURT OF
+# APPEALS EASTERN DISTRICT …".  Only with what marks it a heading — "In the"
+# before it, a panel after it — since a court can be a party: "SUPREME COURT
+# OF VIRGINIA ET AL. v. CONSUMERS UNION" (446 U.S. 719).
+_SLIP_COURT_HEAD_RE = re.compile(
+    r"^\s*(?:(?P<inthe>IN\s+THE\s+)?(?:[A-Z]+\s+){0,2}"
+    r"(?:SUPREME\s+COURT|COURT\s+OF\s+(?:CRIMINAL\s+|CIVIL\s+)?APPEALS|"
+    r"APPELLATE\s+COURT)(?:\s+OF(?:\s+THE)?(?:\s+STATE\s+OF)?"
+    r"(?:\s+[A-Z][A-Z.]*){1,3}?)?)"
+    r"(?:\s+(?P<panel>(?i:en\s+banc|in\s+division|division\s+\w+|"
+    r"(?:eastern|western|southern|northern|middle)\s+district)\b))*")
+# The date the court set beside its caption: "Opinion issued February 28,
+# 2025".
+_SLIP_ISSUED_RE = re.compile(
+    r"\b(?:Opinion\s+(?:issued|filed)|Filed|Decided|Date\s+filed):?\s+"
+    r"(?:January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\s+\d{1,2},\s+\d{4}\b", re.IGNORECASE)
+
+
+def _unmatched_parens_out(text: str) -> str:
+    """*text* without the ")"s nothing opened — the column of them Missouri
+    sets beside its caption — keeping a name's own "(U.S.)"."""
+    out = []
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if not depth:
+                out.append(" ")
+                continue
+            depth -= 1
+        out.append(ch)
+    return "".join(out)
+
+
+def slip_caption_name(blocks) -> str:
+    """The case name a court's own caption gives, where a text carries no
+    caption Scholar's way — CourtListener's text of a slip opinion, its first
+    paragraphs as the PDF sets them: "ROYAL TRUCK & TRAILER SALES AND SERVICE,
+    INC., ┐ Plaintiff-Appellant, │ │ > No. 19-1235 v. │ │ │ MIKE KRAFT; KELLY
+    MATTHEWS, │ Defendants-Appellees. │ ┘" (974 F.3d 756), which CourtListener
+    names only "Royal Truck & Trailer Sales v. Mike Kraft".  "" when none of
+    the first paragraphs reads as a caption."""
+    paras = []
+    for b in list(blocks)[:10]:
+        t = re.sub(r"\s+", " ", b.text()).strip()
+        if t:
+            paras.append(t)
+    for i, t in enumerate(paras):
+        if not _SLIP_ROLE_RE.search(t):
+            continue
+        text = t
+        # The defendants on a line of their own (the Ninth Circuit's).
+        if (not _SLIP_ROLE_RE.search(t.split(" v. ")[-1])
+                and i + 1 < len(paras) and _SLIP_ROLE_RE.search(paras[i + 1])):
+            text += " " + paras[i + 1]
+        head = _SLIP_COURT_HEAD_RE.match(text)
+        if head and (head.group("inthe") or head.group("panel")):
+            text = text[head.end():]
+        text = _unmatched_parens_out(_SLIP_ISSUED_RE.sub(" ", text))
+        text = _SLIP_BOX_RE.sub(" ", text)
+        text = _SLIP_DOCKET_RE.sub(" ", text)
+        text = re.sub(r"\bOPINION\b", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        text = _SLIP_DOCKET_TAIL_RE.sub("", text)
+        sides = re.split(r"\s+v\.\s+", text, maxsplit=1)
+        if len(sides) != 2:
+            return ""
+        left = caption_party(sides[0])
+        right = caption_party(_cut_companion_cases(sides[1]))
+        return f"{left} v. {right}" if left and right else ""
     return ""
 
 

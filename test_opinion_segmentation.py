@@ -352,6 +352,33 @@ class GluedDispositionBylineTests(unittest.TestCase):
         self.assertTrue(parts[1].blocks[0].text().startswith("JUSTICE BREYER"))
 
 
+class JudgesVoteLineTests(unittest.TestCase):
+    """Mefford v. City of Dupontonia, 354 S.W.2d 823 (Tenn. Ct. App. 1961),
+    closes "SHRIVER and CROWNOVER, JJ., concurring." — the other judges'
+    votes, which had been made a concurrence of their own."""
+
+    OPINION = ["HUMPHREYS, J.",
+               "The question is whether the city may be held liable.",
+               "We affirm the judgment below."]
+
+    def test_the_votes_closing_an_opinion_are_no_writing(self):
+        for vote in ("SHRIVER and CROWNOVER, JJ., concurring.",
+                     "SMITH, JONES and BROWN, JJ., concur."):
+            with self.subTest(vote=vote):
+                parts = segment_blocks([_block(t)
+                                        for t in self.OPINION + [vote]])
+                self.assertEqual([p.kind for p in parts], ["majority"])
+
+    def test_judges_writing_together_still_have_their_concurrence(self):
+        parts = segment_blocks([_block(t) for t in self.OPINION + [
+            "SHRIVER and CROWNOVER, JJ., concurring.",
+            "We concur in the result but write separately because the "
+            "majority's reasoning about the municipal immunity statute goes "
+            "further than the case requires; we would leave that question "
+            "for another day."]])
+        self.assertEqual([p.kind for p in parts], ["majority", "concurrence"])
+
+
 class VoteLineHeadingTests(unittest.TestCase):
     """The old reports note a justice's vote on a line of its own — "Mr.
     Justice DANIEL dissented." — and set the same line as the heading of the
@@ -813,6 +840,103 @@ class EnBancOrderTests(unittest.TestCase):
             "PER CURIAM:", "The judgment is affirmed.", line, "More."]])
         self.assertEqual(parts[-1].kind, "concurrence")
         self.assertEqual(parts[-1].blocks[0].text(), line)
+
+
+class TitledWritingTests(unittest.TestCase):
+    """D.J. ex rel. R.J. v. First Student, Inc., 707 S.W.3d 581 (Mo. 2025),
+    as CourtListener has it: Missouri heads a separate writing with its
+    title alone, under the caption repeated, and its writer signs at its
+    end.  The dissent had read as the majority's."""
+
+    CAPTION = ("SUPREME COURT OF MISSOURI en banc D.J., BY AND THROUGH HIS ) "
+               "NEXT FRIEND, R.J., ) ) Respondent, ) ) v. ) No. SC100702 ) "
+               "FIRST STUDENT, INC., ) ) Appellant. )")
+    REASONING = ("Because the criminal act of a third party was an "
+                 "intervening and superseding event, D.J. failed to prove any "
+                 "action First Student took or failed to take was the "
+                 "proximate cause of D.J.’s injuries. ") * 6
+
+    def _blocks(self, title):
+        return [_block(t) for t in [
+            self.CAPTION,
+            "APPEAL FROM THE CIRCUIT COURT OF ST. LOUIS The Honorable Rex "
+            "Burlison, Judge",
+            self.REASONING,
+            self.REASONING,
+            "The judgment is vacated, and the case is remanded.",
+            "__________________________ Zel M. Fischer, Judge",
+            "Russell, C.J., Ransom, Broniec, and Gooch, JJ., concur; Wilson, "
+            "J., dissents in separate opinion filed; Powell, J., concurs in "
+            "opinion of Wilson, J.",
+            "10 " + self.CAPTION,
+            title,
+            "The principal opinion vacates the circuit court’s judgment.",
+            "For the following reasons, I respectfully dissent.",
+            "__________________________ Paul C. Wilson, Judge",
+        ]]
+
+    def test_a_dissent_its_title_heads_and_its_writer_signs(self):
+        parts = segment_blocks(self._blocks("DISSENTING OPINION"))
+        self.assertEqual([p.kind for p in parts][-2:], ["majority", "dissent"])
+        dissent = parts[-1]
+        self.assertEqual(dissent.label,
+                         "Dissenting Opinion (Paul C. Wilson, Judge)")
+        # The caption the court repeats over the dissent is the dissent's;
+        # the votes stay with the opinion they close.
+        self.assertEqual(dissent.blocks[0].text(), "10 " + self.CAPTION)
+        self.assertTrue(parts[-2].blocks[-1].text().startswith("Russell, C.J."))
+
+    def test_a_writing_that_concurs_in_part_and_dissents_in_part(self):
+        parts = segment_blocks(self._blocks(
+            "OPINION CONCURRING IN PART AND DISSENTING IN PART"))
+        self.assertEqual(parts[-1].kind, "dissent")
+        self.assertEqual(parts[-1].label,
+                         "Opinion Concurring in Part and Dissenting in Part "
+                         "(Paul C. Wilson, Judge)")
+
+    def test_a_title_over_a_byline_leaves_the_byline_to_open_it(self):
+        parts = segment_blocks([_block(t) for t in [
+            "PER CURIAM:", self.REASONING, self.REASONING,
+            "DISSENTING OPINION",
+            "WILSON, Circuit Judge, dissenting.",
+            "I respectfully dissent.",
+        ]])
+        self.assertEqual([p.kind for p in parts][-1:], ["dissent"])
+        self.assertEqual(parts[-1].label, "WILSON, Circuit Judge, dissenting.")
+        self.assertEqual(parts[-1].blocks[0].text(), "DISSENTING OPINION")
+
+    def test_a_title_under_a_byline_opens_nothing_more(self):
+        # In re 2016 Primary Election, 836 F.3d 584 (6th Cir. 2016), as
+        # Scholar sets it.
+        parts = segment_blocks([_block(t) for t in [
+            "PER CURIAM:", self.REASONING, self.REASONING,
+            "COLE, Chief Judge, concurring in part and dissenting in part.",
+            "CONCURRING IN PART AND DISSENTING IN PART",
+            "I agree with much of the majority's opinion.",
+            "But I would not stay the order.",
+        ]])
+        self.assertEqual([p.kind for p in parts][-2:], ["majority", "dissent"])
+        self.assertEqual(len(parts[-1].blocks), 4)
+
+    def test_a_sentence_about_a_justice_opens_no_writing(self):
+        # Randolph v. Macauley, 155 F.4th 859 (6th Cir. 2025): Judge
+        # Mathis's concurrence closes on a quotation whose citation carries a
+        # concurrence's parenthetical.
+        parts = segment_blocks([_block(t) for t in [
+            "BUSH, J., delivered the opinion of the court.",
+            self.REASONING,
+            "MATHIS, Circuit Judge, concurring in part and concurring in the "
+            "judgment.",
+            "I, like the majority, would deny his request.",
+            "Justice Roberts has said: “If it is not necessary to decide "
+            "more to dispose of a case, then it is necessary not to decide "
+            "more.” Dobbs v. Jackson Women’s Health Org., 597 U.S. 215, 348 "
+            "(2022) (Roberts, C.J., concurring in the judgment).",
+        ]])
+        self.assertEqual([p.kind for p in parts][-2:],
+                         ["majority", "concurrence"])
+        self.assertTrue(parts[-1].blocks[-1].text().startswith(
+            "Justice Roberts has said"))
 
 
 if __name__ == "__main__":

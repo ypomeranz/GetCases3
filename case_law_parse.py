@@ -61,7 +61,9 @@ _CAP_OPINION_KIND = {
     "rehearing": "majority",
     "remittitur": "majority",
     "concurrence": "concurrence",
-    "concurring-in-part-and-dissenting-in-part": "concurrence",
+    # A writing that dissents in part is a dissent on the parts rail, as
+    # Google Scholar's text of the same opinion has it (its byline says so).
+    "concurring-in-part-and-dissenting-in-part": "dissent",
     "dissent": "dissent",
 }
 
@@ -75,7 +77,8 @@ _CAP_OPINION_LABEL = {
     "rehearing": "Rehearing",
     "remittitur": "Remittitur",
     "concurrence": "Concurrence",
-    "concurring-in-part-and-dissenting-in-part": "Concurrence in Part",
+    "concurring-in-part-and-dissenting-in-part":
+        "Concurrence in Part & Dissent in Part",
     "dissent": "Dissent",
 }
 
@@ -407,6 +410,7 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
 
     if not body:
         return [], []
+    parts, body = _with_embedded_writings(parts, body)
     _finish(parts)
     return parts, body
 
@@ -477,6 +481,7 @@ def parse_case_law_json(casebody) -> "tuple[list, list]":
 
     if not body:
         return [], []
+    parts, body = _with_embedded_writings(parts, body)
     _finish(parts)
     return parts, body
 
@@ -534,6 +539,64 @@ def _caption_first(blocks: list, parties_at: list) -> list:
 
 # The bracket closing CAP's preamble: "Dec. 18, 1959.]" -> "Dec. 18, 1959."
 _BRACKET_CLOSE_RE = re.compile(r"([.,]?)\s*\]\s*$")
+
+
+def _with_embedded_writings(parts: list, body: list) -> "tuple[list, list]":
+    """``(parts, body)`` once :func:`split_embedded_writings` has run, the
+    body read back off the parts (a split can make two blocks of one)."""
+    split = split_embedded_writings(parts)
+    if len(split) == len(parts):
+        return parts, body
+    return split, [b for p in split for b in p.blocks]
+
+
+def split_embedded_writings(parts: list) -> list:
+    """*parts* with each separate writing CAP left inside another opinion's
+    text given a part of its own.
+
+    CAP's split of a case into opinions is its own, and not always right:
+    Ashcroft v. Iqbal, 556 U.S. 662, stores Justice Souter's dissent inside
+    the Court's opinion — "Justice Souter, with whom Justice Stevens, Justice
+    Ginsburg, and Justice Breyer join, dissenting." mid-way through the
+    majority — and Justice Breyer's as the only dissent.  So each opinion is
+    read the way a Scholar text is (google_scholar.segment_blocks), and a
+    concurrence or dissent its bylines open past the opinion's first
+    paragraph is split off.  The opinion's own footnotes stay with it."""
+    try:
+        from google_scholar import OpinionPart, segment_blocks
+    except ImportError:
+        return parts
+    out: list = []
+    for part in parts:
+        if part.kind == "header" or len(part.blocks) < 4:
+            out.append(part)
+            continue
+        try:
+            found = segment_blocks(list(part.blocks))
+        except Exception:
+            out.append(part)
+            continue
+        # The segmenter's own blocks (it splits a run-on byline from its
+        # sentence): everything before the first separate writing stays the
+        # opinion; each separate writing, with what follows it up to the
+        # next, becomes a part.
+        groups: list = [[part.label, part.kind, [], list(part.footnotes)]]
+        seen = 0
+        for sub in found:
+            if (sub.kind in ("concurrence", "dissent", "separate") and seen
+                    and sub.blocks):
+                groups.append([sub.label, sub.kind, [], []])
+            groups[-1][2].extend(sub.blocks)
+            groups[-1][3].extend(sub.footnotes)
+            seen += len(sub.blocks)
+        if len(groups) == 1:
+            out.append(part)
+            continue
+        for label, kind, blocks, notes in groups:
+            if blocks:
+                out.append(OpinionPart(label=label, kind=kind, blocks=blocks,
+                                       footnotes=notes))
+    return out
 
 
 def _finish(parts: list) -> None:
