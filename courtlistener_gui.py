@@ -160,6 +160,9 @@ _UI = {
     "surface":     "#f2f3f5",  # inset surfaces (search bar, toolbars)
     "surface_alt": "#e9ebef",  # hover on inset surfaces
     "border":      "#e2e4e9",  # hairline separators
+    # The edge of a card floating over other windows (Spotlight): dark enough
+    # to part it from a white window behind, where the hairline vanishes.
+    "float_border": "#a4a9b3",
     "text":        "#1c1d21",  # primary text
     "muted":       "#8b909a",  # secondary text / placeholders
     "accent":      "#2f6bd8",  # primary action / links
@@ -11917,7 +11920,7 @@ class CourtListenerGUI:
             self._spot_knockout_corners(popup)
             border = ctk.CTkFrame(
                 popup, corner_radius=16, fg_color=_UI["window"],
-                border_width=1, border_color=_UI["border"],
+                border_width=2, border_color=_UI["float_border"],
             )
             border.pack(fill="both", expand=True)
             bar = ctk.CTkFrame(border, corner_radius=12, fg_color=_UI["surface"])
@@ -12322,7 +12325,7 @@ class CourtListenerGUI:
                 self._spot_knockout_corners(toast)
                 card = ctk.CTkFrame(
                     toast, corner_radius=16, fg_color=_UI["window"],
-                    border_width=1, border_color=_UI["border"],
+                    border_width=2, border_color=_UI["float_border"],
                 )
                 card.pack(fill="both", expand=True)
                 ctk.CTkLabel(
