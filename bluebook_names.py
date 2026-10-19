@@ -3793,10 +3793,25 @@ def _complete_firm_name(segment: str) -> bool:
         re.search(r"[A-Za-z]", w) for w in words[:-1])
 
 
+# A national bank's legal form spelled out, closing its name: after a comma,
+# or straight after a bank's or trust company's own name.  Leading a name it
+# is none ("National Association of Realtors").
+_NATIONAL_ASSOCIATION_RE = re.compile(
+    r"(?<=\S)(,\s*|(?:(?<=bank)|(?<=trust))\s+)national\s+association\.?$",
+    re.IGNORECASE)
+
+
 def _abbreviate_party(party: str, *, recognize_initials: bool = True,
                       court_state: str = "",
                       names: _OpinionNames | None = None) -> str:
     p = _strip_party_designations(re.sub(r"\s+", " ", party).strip())
+    # The bank's legal form is cited by its initials, as rule 10.2.1(h)
+    # names it, not word by word from table T6 ("Nat'l Ass'n"): "Wachovia
+    # Bank, National Association" is Wachovia Bank, N.A. (546 U.S. 303), and
+    # "U.S. Bank National Association" U.S. Bank N.A. (583 U.S. 387).  Rule
+    # 10.2.1(h) then drops it beside a firm word, as it does "N.A." itself.
+    p = _NATIONAL_ASSOCIATION_RE.sub(
+        lambda m: (", " if "," in m.group(1) else " ") + "N.A.", p)
     # A recognized agency's initials a title-casing pass lowered, as the
     # whole party ("Ins v. Chadha", "Sec v. Jarkesy") — alone it is no
     # abbreviation for Insurance or Section.

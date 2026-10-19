@@ -113,7 +113,6 @@ _PARTY_DESIGNATION_RE = re.compile(
     r"execut(?:ors?|rix)|trustees?|receivers?|guardians?|conservators?|"
     r"comptroller|clerk|marshal|postmaster|solicitor)\b[\w.'’ -]{0,60}|"
     r"president\s+of\b.*|grand\s+jury\b.*|fictitious\w*\b.*|"
-    r"national\s+association|"
     # descriptive phrases
     r"(?:individually|personally)\b.*|(?:as|by|in\s+(?:his|her|its|their))\b.*|"
     r"on\s+behalf\b.*|for\s+the\s+use\b.*|d/?b/?a\b.*|"
@@ -134,9 +133,12 @@ _PARTY_DESIGNATION_RE = re.compile(
 # Nacionales de Colombia, S.A., which lost its "S.A." while only the unspaced
 # form was read as one — as did "GOODYEAR DUNLOP TIRES OPERATIONS, S. A."
 # (564 U.S. 915).  A Mexican company's form runs on: "S.A. de C.V.".
+# A national bank's, spelled out, is one too: "WACHOVIA BANK, NATIONAL
+# ASSOCIATION" (546 U.S. 303) is Wachovia Bank, N.A., not Wachovia Bank.
 _DOT = r"(?:\.\s?)?"
 _ENTITY_SUFFIX_RE = re.compile(
     r"(?:inc|incorporated|ltd|limited|ltda|gmbh|co|corp|pty|"
+    r"national\s+association|"
     + "|".join(_DOT.join(form) for form in (
         "llc", "llp", "lp", "plc", "pc", "spa", "ag", "nv", "sl", "na",
         "sarl", "sas", "bv", "kk"))

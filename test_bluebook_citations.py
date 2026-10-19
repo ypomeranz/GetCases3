@@ -6101,6 +6101,59 @@ class LimitedTests(unittest.TestCase):
                                  "Smith"),
             "Petroleos Mexicanos, S.A. de C.V. v. Smith")
 
+    def test_a_national_bank_s_spelled_out_form_is_n_a(self):
+        # "NATIONAL ASSOCIATION" closing a bank's name is its legal form,
+        # cited as rule 10.2.1(h) names it: Wachovia Bank, N.A. v. Schmidt,
+        # 546 U.S. 303 (2006), had lost it altogether, and U.S. Bank N.A. v.
+        # Village at Lakeridge, LLC, 583 U.S. 387 (2018), had it word by
+        # word, "Nat'l Ass'n".
+        from google_scholar import parse_opinion_blocks
+        for report, caption, cited in (
+                ("546 U.S. 303 (2006)",
+                 "WACHOVIA BANK, NATIONAL ASSOCIATION<br/>v.<br/>"
+                 "SCHMIDT ET AL.",
+                 "Wachovia Bank, N.A. v. Schmidt"),
+                ("583 U.S. 387 (2018)",
+                 "U. S. BANK NATIONAL ASSOCIATION, TRUSTEE, BY AND THROUGH "
+                 "CWCAPITAL ASSET MANAGEMENT LLC<br/>v.<br/>VILLAGE AT "
+                 "LAKERIDGE, LLC",
+                 "U.S. Bank N.A. v. Vill. at Lakeridge, LLC")):
+            with self.subTest(report=report):
+                blocks = parse_opinion_blocks(_scholar_page(report, caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)), cited)
+
+    def test_as_it_is_from_any_source(self):
+        for name, cited in (
+                ("Wachovia Bank, National Association v. Schmidt",
+                 "Wachovia Bank, N.A. v. Schmidt"),
+                ("Capital One, National Association v. Smith",
+                 "Cap. One, N.A. v. Smith"),
+                ("Citibank National Association v. Smith",
+                 "Citibank N.A. v. Smith"),
+                # …and dropped beside a firm word, as "N.A." itself is.
+                ("Citicorp Trust Co., National Association v. Smith",
+                 "Citicorp Tr. Co. v. Smith")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+
+    def test_leading_a_name_it_is_no_legal_form(self):
+        for name, cited in (
+                ("Smith v. National Association of Realtors",
+                 "Smith v. Nat'l Ass'n of Realtors"),
+                ("National Association for the Advancement of Colored "
+                 "People v. Button", "NAACP v. Button"),
+                ("Smith v. Federal National Mortgage Association",
+                 "Smith v. Fed. Nat'l Mortg. Ass'n"),
+                ("Smith v. National Association", "Smith v. Nat'l Ass'n"),
+                ("Smith v. Ice Skating National Association",
+                 "Smith v. Ice Skating Nat'l Ass'n")):
+            with self.subTest(name=name):
+                self.assertEqual(abbreviate_case_name(name), cited)
+        from scholar_caption import caption_party
+        self.assertEqual(caption_party("NATIONAL ASSOCIATION OF REALTORS"),
+                         "National Association of Realtors")
+
     def test_while_a_person_s_initials_still_go(self):
         from scholar_caption import caption_party
         self.assertEqual(caption_party("SMITH, A. B."), "Smith")
