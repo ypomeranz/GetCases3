@@ -1272,6 +1272,7 @@ import statutes_at_large
 import us_code
 import pdfium_lock
 import scan_process
+import scholar_browser
 import us_reports_pdf
 import brief_reader
 import browser_links
@@ -25624,6 +25625,7 @@ def _load_watched() -> bool:
 # the calling thread's watch, so a download reports to the load it is part
 # of, and to nothing when no load is being watched.
 us_reports_pdf.on_step = leghist_fetch.on_step = _load_step
+scholar_browser.on_step = _load_step
 us_reports_pdf.on_bytes = leghist_fetch.on_bytes = _load_bytes
 
 
@@ -26232,6 +26234,15 @@ class _FloatingPdfWindow:
         # Bare "s" opens the case's details beside the pages — over the pages
         # as much as over the text, since it is the same case either way.
         self._win.bind("<KeyPress-s>", self._details_shortcut)
+        # Bare "t" and "p" press the strip's T and P: the opinion's text, the
+        # scanned pages.  Caps Lock or Shift gives the capital, so both are
+        # bound.
+        for key in ("t", "T"):
+            self._win.bind(f"<KeyPress-{key}>",
+                           lambda e: self._mode_shortcut(True, e))
+        for key in ("p", "P"):
+            self._win.bind(f"<KeyPress-{key}>",
+                           lambda e: self._mode_shortcut(False, e))
         self._win.bind("<Destroy>", self._on_destroy, add="+")
         if data is None:
             # A window with no scan to show — a case the reporter interface
@@ -26758,8 +26769,8 @@ class _FloatingPdfWindow:
             return ("No scan of this case could be found"
                     if self._scan_search is False
                     else "Looking for the scanned pages…")
-        return ("Show the scanned pages" if self.showing_text()
-                else "Show the opinion text")
+        return ("Show the scanned pages   p" if self.showing_text()
+                else "Show the opinion text   t")
 
     def attach_scan(self, data: bytes, url: str, title: str = "",
                     *, margin: Optional[int] = None,
@@ -26828,6 +26839,21 @@ class _FloatingPdfWindow:
             self._show_scan()
         else:
             self._show_text()
+
+    def _mode_shortcut(self, text: bool, event=None):
+        """The bare "t" and "p" keys: press the strip's T (*text*) or its P.
+        Each does what its button does, and only where its button is — "t"
+        over the opinion text, or "p" over the pages, leaves the window as it
+        is.  Left to the keyboard while a field that takes typing has it."""
+        try:
+            focused = self._win.focus_get()
+        except (KeyError, tk.TclError):
+            focused = None
+        if _widget_accepts_typing(focused):
+            return None
+        if self.showing_text() != text:
+            self._toggle_mode()
+        return "break"
 
     def _build_reader(self):
         """The opinion, rendered into a frame of this window's own — built the

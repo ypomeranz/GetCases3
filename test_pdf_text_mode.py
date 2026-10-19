@@ -343,7 +343,7 @@ class _FakeHostFrame:
 
 VIEWER_NAMES = [
     "showing_text", "has_scan", "has_text_side", "set_text_side",
-    "_mode_button_tip", "_toggle_mode",
+    "_mode_button_tip", "_toggle_mode", "_mode_shortcut",
     "_build_reader", "zoom",
     "_show_text", "_show_scan", "_sync_bar", "_place_details_btn",
     "_refresh_scale", "_flash",
@@ -358,7 +358,8 @@ VIEWER_NS = _load(
     "_FloatingPdfWindow", VIEWER_NAMES,
     {"_EmbeddedCaseHost": _FakeHostFrame,
      "_build_copy_menu": lambda master, reader: (
-         None if reader is None else _FakeMenu())},
+         None if reader is None else _FakeMenu()),
+     "_widget_accepts_typing": _load_function("_widget_accepts_typing")},
 )
 
 
@@ -472,9 +473,10 @@ class ModeSwitchTests(unittest.TestCase):
 
     def test_the_tooltip_names_what_the_press_would_show(self):
         viewer = _Viewer()
-        self.assertEqual(viewer._mode_button_tip(), "Show the opinion text")
+        self.assertEqual(viewer._mode_button_tip(), "Show the opinion text   t")
         viewer._toggle_mode()
-        self.assertEqual(viewer._mode_button_tip(), "Show the scanned pages")
+        self.assertEqual(viewer._mode_button_tip(),
+                         "Show the scanned pages   p")
 
     def test_the_opinion_is_built_once_and_kept(self):
         viewer = _in_text_mode()
@@ -489,6 +491,78 @@ class ModeSwitchTests(unittest.TestCase):
         self.assertIs(host.master, viewer._body)
         self.assertIs(host.window, viewer)
         self.assertIs(viewer._reader.host, host)
+
+
+class ModeKeyTests(unittest.TestCase):
+    """Bare "t" and "p" press the T and the P."""
+
+    def setUp(self):
+        _FakeHostFrame.made = []
+
+    def _viewer(self, focused=None, **kw):
+        viewer = _Viewer(**kw)
+        viewer._win.focus_get.return_value = focused
+        return viewer
+
+    def test_t_shows_the_opinion_text(self):
+        viewer = self._viewer()
+        self.assertEqual(viewer._mode_shortcut(True), "break")
+        self.assertTrue(viewer.showing_text())
+        self.assertEqual(viewer._mode_btn.text, "P")
+
+    def test_p_puts_the_scan_back(self):
+        viewer = self._viewer()
+        viewer._mode_shortcut(True)
+        self.assertEqual(viewer._mode_shortcut(False), "break")
+        self.assertFalse(viewer.showing_text())
+        self.assertEqual(viewer._mode_btn.text, "T")
+        self.assertTrue(viewer._pane.packed)
+
+    def test_t_over_the_text_leaves_it_there(self):
+        # There is no T on the strip to press: it reads P.
+        viewer = self._viewer()
+        viewer._mode_shortcut(True)
+        viewer._mode_shortcut(True)
+        self.assertTrue(viewer.showing_text())
+        self.assertEqual(len(viewer.built), 1)
+
+    def test_p_over_the_scan_leaves_it_there(self):
+        viewer = self._viewer()
+        viewer._mode_shortcut(False)
+        self.assertFalse(viewer.showing_text())
+        self.assertEqual(viewer.built, [])
+
+    def test_t_says_so_when_the_text_has_not_come(self):
+        viewer = self._viewer(build_text=lambda host: None)
+        viewer._mode_shortcut(True)
+        self.assertFalse(viewer.showing_text())
+        self.assertEqual(viewer._zoom_var.get(), "Text not ready")
+
+    def test_a_field_taking_typing_keeps_the_letters(self):
+        field = mock.Mock()
+        field.winfo_class.return_value = "Entry"
+        field.cget.return_value = "normal"
+        viewer = self._viewer(focused=field)
+        self.assertIsNone(viewer._mode_shortcut(True))
+        self.assertFalse(viewer.showing_text())
+
+    def test_the_read_only_opinion_text_does_not(self):
+        text = mock.Mock()
+        text.winfo_class.return_value = "Text"
+        text.cget.return_value = "disabled"
+        viewer = self._viewer()
+        viewer._mode_shortcut(True)
+        viewer._win.focus_get.return_value = text
+        self.assertEqual(viewer._mode_shortcut(False), "break")
+        self.assertFalse(viewer.showing_text())
+
+    def test_the_window_binds_both_cases_of_both_letters(self):
+        src = _source_of("_FloatingPdfWindow", "__init__")
+        self.assertIn('for key in ("t", "T"):', src)
+        self.assertIn('for key in ("p", "P"):', src)
+        self.assertIn('f"<KeyPress-{key}>"', src)
+        self.assertIn("self._mode_shortcut(True, e)", src)
+        self.assertIn("self._mode_shortcut(False, e)", src)
 
 
 class NoTextYetTests(unittest.TestCase):
