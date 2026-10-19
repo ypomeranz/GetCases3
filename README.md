@@ -345,9 +345,15 @@ Single-letter keys (**s**, **x**) do nothing while you are typing in a box.
     other than the default one works best with a PDF reader such as SumatraPDF
     or Adobe Acrobat Reader installed.)
 - **On the text:** typesets the opinion as a polished PDF with **LaTeX** (see
-  below), saves it, and offers to open it for printing. Without LaTeX, it offers
-  to save the LaTeX source (`.tex`) instead, which you can edit or typeset
-  elsewhere.
+  below). GetCases first asks how:
+  - **Save as PDF…** saves the PDF and offers to open it for printing.
+  - **Edit LaTeX First…** saves the LaTeX source (`.tex`) and opens it in your
+    editor. Make your changes and save them, then press **Make PDF** in the
+    small window GetCases leaves open: the PDF is made from your edited source
+    and saved beside it. Press **Make PDF** again after further edits.
+
+  Without LaTeX, it offers to save the LaTeX source instead, which you can edit
+  or typeset elsewhere.
 
 ### Copy
 

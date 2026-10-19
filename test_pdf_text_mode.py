@@ -309,6 +309,9 @@ class _FakeReader:
     def _export_pdf_latex(self):
         self.exported.append("latex")
 
+    def _print_text(self):
+        self.exported.append("print")
+
     def _show_text_at_pdf_viewport(self, url, viewport):
         return False
 
@@ -359,7 +362,8 @@ VIEWER_NS = _load(
     {"_EmbeddedCaseHost": _FakeHostFrame,
      "_build_copy_menu": lambda master, reader: (
          None if reader is None else _FakeMenu()),
-     "_widget_accepts_typing": _load_function("_widget_accepts_typing")},
+     "_widget_accepts_typing": _load_function("_widget_accepts_typing"),
+     "_hotkey_tip": _load_function("_hotkey_tip")},
 )
 
 
@@ -473,10 +477,11 @@ class ModeSwitchTests(unittest.TestCase):
 
     def test_the_tooltip_names_what_the_press_would_show(self):
         viewer = _Viewer()
-        self.assertEqual(viewer._mode_button_tip(), "Show the opinion text   t")
+        self.assertEqual(viewer._mode_button_tip(),
+                         "Show the opinion text (hotkey: t)")
         viewer._toggle_mode()
         self.assertEqual(viewer._mode_button_tip(),
-                         "Show the scanned pages   p")
+                         "Show the scanned pages (hotkey: p)")
 
     def test_the_opinion_is_built_once_and_kept(self):
         viewer = _in_text_mode()
@@ -864,9 +869,10 @@ class SaveAndPrintTests(unittest.TestCase):
         self.assertEqual(viewer.saved, 0)
 
     def test_and_print_typesets_it_with_latex(self):
+        # The opinion's own print, which asks how (see test_print_text_choice).
         viewer = _in_text_mode()
         viewer._print()
-        self.assertEqual(viewer._reader.exported, ["latex"])
+        self.assertEqual(viewer._reader.exported, ["print"])
         self.assertEqual(viewer.printed, [])
 
     def test_the_hover_labels_say_which(self):

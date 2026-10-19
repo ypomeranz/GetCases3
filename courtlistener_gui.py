@@ -951,6 +951,16 @@ class _HoverTip:
             self._tip = None
 
 
+def _hotkey_tip(label: str) -> str:
+    """A strip label as its hover tip.  The label names its key three spaces
+    after the action ("Case Details   s"), which the right-click menu tabs
+    into its accelerator column; a tip has no such column, and a lone letter
+    there reads as part of the description — so the tip calls it a hotkey:
+    "Case Details (hotkey: s)"."""
+    action, sep, key = label.rpartition("   ")
+    return f"{action} (hotkey: {key})" if sep and key.strip() else label
+
+
 def _install_status_label(parent, textvariable, *, padx=(10, 0)):
     """The status message that sits among a case window's bottom-bar buttons.
 
@@ -20632,6 +20642,94 @@ def _compile_latex(
         return False, "\n".join(lines[-15:])
 
 
+def _ask_print_text(parent) -> Optional[str]:
+    """Print, on an opinion's text, where LaTeX is installed to typeset it:
+    make the PDF now ("pdf"), or save the LaTeX source to edit first and make
+    the PDF from that ("tex").  None when the dialog is put away."""
+    dlg = _ui_toplevel(parent)
+    dlg.title("Print Opinion")
+    try:
+        if parent is not None and parent.winfo_viewable():
+            dlg.transient(parent)
+    except tk.TclError:
+        pass
+    dlg.resizable(False, False)
+    frame = _ui_frame(dlg)
+    frame.pack(fill="both", expand=True, padx=16, pady=14)
+    ttk.Label(
+        frame, justify="left", wraplength=400,
+        text=("The opinion is typeset with LaTeX. Make the PDF now, or save "
+              "the LaTeX source first, to edit it before it is made into the "
+              "PDF?"),
+    ).pack(fill="x", pady=(0, 12))
+    buttons = _ui_frame(frame)
+    buttons.pack(fill="x")
+    answer: list = [None]
+
+    def pick(choice: str) -> None:
+        answer[0] = choice
+        dlg.destroy()
+
+    _ui_button(buttons, "Save as PDF…", command=lambda: pick("pdf"),
+               primary=True, width=120).pack(side="right")
+    _ui_button(buttons, "Edit LaTeX First…", command=lambda: pick("tex"),
+               width=150).pack(side="right", padx=(0, 8))
+    _ui_button(buttons, "Cancel", command=dlg.destroy, width=86).pack(
+        side="left")
+    dlg.bind("<Return>", lambda _e: pick("pdf"))
+    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+    try:
+        dlg.focus_set()
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+    dlg.wait_window()
+    return answer[0]
+
+
+def _latex_edit_window(parent, tex_path: str, make_pdf) -> None:
+    """A small window left up while the reader edits the LaTeX source saved
+    at *tex_path*: Make PDF typesets the file as it then stands (*make_pdf*),
+    and may be pressed again after further edits; Open Source opens it again
+    should the editor have been closed.  Not modal — the reader works in the
+    editor meanwhile — and gone with the window it was opened from."""
+    dlg = _ui_toplevel(parent)
+    dlg.title("Edit the LaTeX, Then Make the PDF")
+    try:
+        if parent is not None and parent.winfo_viewable():
+            dlg.transient(parent)
+    except tk.TclError:
+        pass
+    dlg.resizable(False, False)
+    frame = _ui_frame(dlg)
+    frame.pack(fill="both", expand=True, padx=16, pady=14)
+    pdf_name = os.path.splitext(os.path.basename(tex_path))[0] + ".pdf"
+    ttk.Label(
+        frame, justify="left", wraplength=420,
+        text=(f"The opinion's LaTeX source is saved to:\n{tex_path}\n\n"
+              "Edit it and save your changes, then press Make PDF. The PDF is "
+              f"written beside it, as {pdf_name}; press Make PDF again after "
+              "further edits to make it afresh."),
+    ).pack(fill="x", pady=(0, 12))
+    buttons = _ui_frame(frame)
+    buttons.pack(fill="x")
+
+    def open_source() -> None:
+        try:
+            CourtListenerGUI._open_file(tex_path)
+        except OSError as exc:
+            messagebox.showerror("Could Not Open the Source", str(exc),
+                                 parent=dlg)
+
+    _ui_button(buttons, "Make PDF", command=make_pdf, primary=True,
+               width=110).pack(side="right")
+    _ui_button(buttons, "Open Source", command=open_source, width=110).pack(
+        side="right", padx=(0, 8))
+    _ui_button(buttons, "Close", command=dlg.destroy, width=86).pack(
+        side="left")
+    dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+
 def _copy_rich_clipboard(widget: tk.Misc, rtf: str, plain: str) -> str:
     """
     Put *rtf* on the system clipboard (with *plain* as fallback where the
@@ -26301,7 +26399,8 @@ class _FloatingPdfWindow:
         self._details_btn = _ui_mini_button(
             bar, "", self.toggle_details, width=30,
             image=self._strip_icons["panel"])
-        _HoverTip(self._details_btn, self._details_label, delay=450)
+        _HoverTip(self._details_btn,
+                  lambda: _hotkey_tip(self._details_label()), delay=450)
         self._place_details_btn()
         # The menus a document window carries on its menu bar and this one
         # has no bar for, as icons at the strip's far end — words would crowd
@@ -26327,11 +26426,13 @@ class _FloatingPdfWindow:
         save_btn = _ui_mini_button(bar, "", self._save, width=30,
                                    image=self._strip_icons["save"])
         save_btn.pack(side="left", padx=(8, 0), pady=4)
-        _HoverTip(save_btn, self._save_label, delay=450)
+        _HoverTip(save_btn, lambda: _hotkey_tip(self._save_label()),
+                  delay=450)
         print_btn = _ui_mini_button(bar, "", self._print, width=30,
                                     image=self._strip_icons["print"])
         print_btn.pack(side="left", padx=(4, 0), pady=4)
-        _HoverTip(print_btn, self._print_label, delay=450)
+        _HoverTip(print_btn, lambda: _hotkey_tip(self._print_label()),
+                  delay=450)
         _ui_mini_button(bar, "−", self._smaller).pack(
             side="left", padx=(12, 0), pady=4)
         _ui_mini_button(bar, "+", self._bigger).pack(
@@ -26769,8 +26870,8 @@ class _FloatingPdfWindow:
             return ("No scan of this case could be found"
                     if self._scan_search is False
                     else "Looking for the scanned pages…")
-        return ("Show the scanned pages   p" if self.showing_text()
-                else "Show the opinion text   t")
+        return _hotkey_tip("Show the scanned pages   p" if self.showing_text()
+                           else "Show the opinion text   t")
 
     def attach_scan(self, data: bytes, url: str, title: str = "",
                     *, margin: Optional[int] = None,
@@ -27539,7 +27640,7 @@ class _FloatingPdfWindow:
     def _print(self) -> None:
         if self.showing_text():
             try:
-                self._reader._export_pdf_latex()
+                self._reader._print_text()
             except (AttributeError, tk.TclError) as exc:
                 print(f"[pdf-window] typesetting the text failed: {exc}")
             return
@@ -34175,18 +34276,41 @@ class _ScholarTextWindow:
             out.append("\\end{footnotesize}\n")
         return "".join(out)
 
-    def _export_pdf_latex(self) -> None:
+    def _print_text(self) -> None:
+        """Print, on the opinion's text (the viewer's print button and its
+        Ctrl/Cmd+P): the opinion is typeset with LaTeX — and where LaTeX is
+        installed, the reader chooses how: the PDF now, or the LaTeX source
+        first, to edit and then make the PDF from (see
+        _edit_latex_then_typeset).  Where it is not, the PDF export says so
+        and offers the source alone."""
         engine = _find_latex_engine()
         if engine is None:
-            if messagebox.askyesno(
-                "LaTeX Not Found",
-                "Exporting to PDF needs a LaTeX installation (pdflatex, "
-                "xelatex, lualatex or tectonic), and none was found on "
-                "this system.\n\nSave the LaTeX source (.tex) instead?  It "
-                "will typeset anywhere LaTeX is installed.",
-                parent=self._win,
-            ):
-                self._export_latex_source()
+            self._no_latex_found()
+            return
+        choice = _ask_print_text(self._win)
+        if choice == "pdf":
+            self._export_pdf_latex(engine)
+        elif choice == "tex":
+            self._edit_latex_then_typeset(engine)
+
+    def _no_latex_found(self) -> None:
+        """No LaTeX here to typeset with: say so, and offer the source."""
+        if messagebox.askyesno(
+            "LaTeX Not Found",
+            "Exporting to PDF needs a LaTeX installation (pdflatex, "
+            "xelatex, lualatex or tectonic), and none was found on "
+            "this system.\n\nSave the LaTeX source (.tex) instead?  It "
+            "will typeset anywhere LaTeX is installed.",
+            parent=self._win,
+        ):
+            self._save_latex_source()
+
+    def _export_pdf_latex(
+        self, engine: "Optional[tuple[str, str]]" = None,
+    ) -> None:
+        engine = engine or _find_latex_engine()
+        if engine is None:
+            self._no_latex_found()
             return
         tex = self._with_full_view(self._build_export_latex)
         default = _build_default_filename(self._filename_item())
@@ -34230,28 +34354,100 @@ class _ScholarTextWindow:
             CourtListenerGUI._open_file(path)
 
     def _export_latex_source(self) -> None:
-        """Save the LaTeX document the PDF export typesets, without typesetting
-        it.  Same source, so it builds to the same PDF — but the reader can edit
-        it first, and it needs no LaTeX installed here to be worth having."""
+        """The Export menu's LaTeX source, to edit and then typeset: where
+        LaTeX is installed, the same edit-then-make-the-PDF the print button
+        offers; where it is not, the source alone."""
+        engine = _find_latex_engine()
+        if engine is None:
+            self._save_latex_source()
+        else:
+            self._edit_latex_then_typeset(engine)
+
+    def _write_latex_source(self, title: str) -> str:
+        """Ask where, and save the LaTeX document the PDF export typesets
+        there; the path written, or "" when nothing was."""
         tex = self._with_full_view(self._build_export_latex)
         default = _build_default_filename(self._filename_item())
         path = filedialog.asksaveasfilename(
             defaultextension=".tex",
             filetypes=[("LaTeX source", "*.tex"), ("All files", "*.*")],
             initialfile=f"{default}.tex",
-            title="Export Opinion as LaTeX Source",
+            title=title,
             parent=self._win,
         )
         if not path:
-            return
+            return ""
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(tex)
         except OSError as exc:
             self._status_var.set("LaTeX export failed.")
             messagebox.showerror("Export Failed", str(exc), parent=self._win)
-            return
+            return ""
         self._status_var.set(f"Exported LaTeX source: {path}")
+        return path
+
+    def _edit_latex_then_typeset(self, engine: tuple[str, str]) -> None:
+        """Save the LaTeX source the PDF would be typeset from, open it for
+        editing, and leave up a small window whose Make PDF typesets it — as
+        edited, read back from the file — into a PDF of the same name beside
+        it, as often as the reader edits and asks again."""
+        path = self._write_latex_source(
+            "Save LaTeX Source to Edit, Then Make the PDF")
+        if not path:
+            return
+        try:
+            CourtListenerGUI._open_file(path)
+        except OSError as exc:
+            # No editor for .tex files: the window names the file to open.
+            print(f"[export] opening the LaTeX source failed: {exc}")
+        _latex_edit_window(self._win, path,
+                           lambda: self._typeset_source(path, engine))
+
+    def _typeset_source(self, tex_path: str, engine: tuple[str, str]) -> None:
+        """Typeset the LaTeX source at *tex_path*, as it now stands on disk,
+        into the PDF of the same name beside it."""
+        pdf_path = os.path.splitext(tex_path)[0] + ".pdf"
+        try:
+            with open(tex_path, encoding="utf-8") as f:
+                tex = f.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            messagebox.showerror(
+                "PDF Export Failed",
+                f"The LaTeX source could not be read (it must be saved as "
+                f"UTF-8):\n{tex_path}\n\n{exc}",
+                parent=self._win,
+            )
+            return
+        self._status_var.set(f"Typesetting PDF with {engine[0]}…")
+        try:
+            self._win.update_idletasks()
+        except tk.TclError:
+            pass
+        ok, err = _compile_latex(tex, engine, pdf_path)
+        if not ok:
+            self._status_var.set("PDF export failed.")
+            messagebox.showerror(
+                "PDF Export Failed",
+                f"{engine[0]} could not build the PDF from:\n{tex_path}"
+                + (f"\n\n{err.strip()}" if err.strip() else ""),
+                parent=self._win,
+            )
+            return
+        self._status_var.set(f"Exported PDF: {pdf_path}")
+        if messagebox.askyesno(
+            "Export Complete", f"PDF saved to:\n{pdf_path}\n\nOpen it now?",
+            parent=self._win,
+        ):
+            CourtListenerGUI._open_file(pdf_path)
+
+    def _save_latex_source(self) -> None:
+        """Save the LaTeX document the PDF export typesets, without typesetting
+        it.  Same source, so it builds to the same PDF — but the reader can edit
+        it first, and it needs no LaTeX installed here to be worth having."""
+        path = self._write_latex_source("Export Opinion as LaTeX Source")
+        if not path:
+            return
         if messagebox.askyesno(
             "Export Complete",
             f"LaTeX source saved to:\n{path}\n\nOpen it now?",
