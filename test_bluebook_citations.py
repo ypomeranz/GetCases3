@@ -6055,6 +6055,57 @@ class LimitedTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(abbreviate_case_name(name), cited)
 
+    def test_a_spaced_company_form_is_kept(self):
+        # The U.S. Reports space a dotted form's letters: "S. A." was read as
+        # no company form at all, and dropped as a co-party — Helicopteros
+        # Nacionales de Colombia, S.A. v. Hall, 466 U.S. 408 (1984), was
+        # cited without its "S.A.".  No firm word ("Co.", "Corp.") precedes
+        # it, so rule 10.2.1(h) keeps it.
+        from google_scholar import parse_opinion_blocks
+        for report, caption, cited in (
+                ("466 U.S. 408 (1984)",
+                 "HELICOPTEROS NACIONALES DE COLOMBIA, S. A.<br/>v.<br/>"
+                 "HALL ET AL.",
+                 "Helicopteros Nacionales de Colombia, S.A. v. Hall"),
+                ("564 U.S. 915 (2011)",
+                 "GOODYEAR DUNLOP TIRES OPERATIONS, S. A., ET AL.<br/>v.<br/>"
+                 "BROWN ET UX.",
+                 "Goodyear Dunlop Tires Operations, S.A. v. Brown"),
+                ("527 U.S. 308 (1999)",
+                 "GRUPO MEXICANO DE DESARROLLO, S. A., ET AL.<br/>v.<br/>"
+                 "ALLIANCE BOND FUND, INC., ET AL.",
+                 "Grupo Mexicano de Desarrollo, S.A. v. All. Bond Fund, "
+                 "Inc.")):
+            with self.subTest(report=report):
+                blocks = parse_opinion_blocks(_scholar_page(report, caption))
+                self.assertEqual(
+                    abbreviate_case_name(_scholar_caption_name(blocks)), cited)
+
+    def test_so_is_every_spaced_form(self):
+        from scholar_caption import caption_party
+        for side, party in (
+                ("ACME, L. L. C.", "Acme, L. L. C."),
+                ("CHASE BANK, N. A.", "Chase Bank, N. A."),
+                ("ACME, A. G.", "Acme, A. G."),
+                ("ACME, S. P. A.", "Acme, S. P. A."),
+                # A "V." closing one is a letter of it, not another case's
+                # "v.".
+                ("ACME HOLDING, B. V.", "Acme Holding, B. V."),
+                ("ACME, N. V., ET AL.", "Acme, N. V."),
+                ("PETROLEOS MEXICANOS, S. A. DE C. V.",
+                 "Petroleos Mexicanos, S. A. de C. V.")):
+            with self.subTest(side=side):
+                self.assertEqual(caption_party(side), party)
+        self.assertEqual(
+            abbreviate_case_name("Petroleos Mexicanos, S. A. de C. V. v. "
+                                 "Smith"),
+            "Petroleos Mexicanos, S.A. de C.V. v. Smith")
+
+    def test_while_a_person_s_initials_still_go(self):
+        from scholar_caption import caption_party
+        self.assertEqual(caption_party("SMITH, A. B."), "Smith")
+        self.assertEqual(caption_party("SMITH, JONES v. BROWN"), "Smith")
+
     def test_a_limited_partner_is_no_firm(self):
         from scholar_caption import caption_party
         self.assertEqual(caption_party("JOHN SMITH, LIMITED PARTNER"),

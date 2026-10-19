@@ -128,13 +128,22 @@ _PARTY_DESIGNATION_RE = re.compile(
 # segment ("Socony-Vacuum Oil Co., Inc." — one party, two segments), spelled
 # out as the old reports print it too: "CANADIAN AVIATOR, LIMITED" (324 U.S.
 # 215) is Canadian Aviator, Ltd., which lost its "Limited" as a co-party.
+#
+# The letters of a dotted form may be spaced, as the U.S. Reports set them:
+# "HELICOPTEROS NACIONALES DE COLOMBIA, S. A." (466 U.S. 408) is Helicopteros
+# Nacionales de Colombia, S.A., which lost its "S.A." while only the unspaced
+# form was read as one — as did "GOODYEAR DUNLOP TIRES OPERATIONS, S. A."
+# (564 U.S. 915).  A Mexican company's form runs on: "S.A. de C.V.".
+_DOT = r"(?:\.\s?)?"
 _ENTITY_SUFFIX_RE = re.compile(
-    r"(?:inc|incorporated|l\.?l\.?c|l\.?l\.?p|l\.?p|ltd|limited|ltda|p\.?l\.?c|"
-    r"p\.?c|s\.?a|s\.?p\.?a|a\.?g|n\.?v|s\.?l|gmbh|co|corp|n\.?a"
+    r"(?:inc|incorporated|ltd|limited|ltda|gmbh|co|corp|pty|"
+    + "|".join(_DOT.join(form) for form in (
+        "llc", "llp", "lp", "plc", "pc", "spa", "ag", "nv", "sl", "na",
+        "sarl", "sas", "bv", "kk"))
+    + "|" + _DOT.join("sa") + r"(?:\.?\s+de\s+" + _DOT.join("cv") + ")?"
     # …"AEREL, S.R.L." (448 F.3d 899), and the country a company's own name
     # ends with: "EXXON CO., U. S. A." (517 U.S. 830).
-    r"|s\.?\s?r\.?\s?l|s\.?a\.?r\.?l|s\.?a\.?s|b\.?v|k\.?k|pty"
-    r"|u\.?\s?s\.?\s?a)\.?",
+    + r"|s\.?\s?r\.?\s?l|u\.?\s?s\.?\s?a)\.?",
     re.IGNORECASE,
 )
 
@@ -329,7 +338,11 @@ def caption_party(s: str) -> str:
                             or t.strip(".,").lower() in ("mfg", "mfrs")
                             for t in seg.split()))
             )
-            if (re.search(r"\s[vV]s?\.\s", f" {seg} ")
+            # The "V." closing a company's spaced form ("ACME, B. V.";
+            # "S. A. DE C. V.") is one of its letters, not another case's "v.".
+            new_case = (re.search(r"\s[vV]s?\.\s", f" {seg} ")
+                        and not _ENTITY_SUFFIX_RE.fullmatch(seg))
+            if (new_case
                     or re.match(r"(?:et\s+als?\.?|successors?)\b", seg,
                                 re.IGNORECASE)
                     or (first_last_tok and first_last_tok in toks)
