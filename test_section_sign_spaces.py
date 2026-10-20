@@ -121,5 +121,100 @@ class ExportAndFindTests(unittest.TestCase):
             root.destroy()
 
 
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class MacReaderTextTests(unittest.TestCase):
+    """On a Mac the reader's widget holds an ordinary space instead.
+
+    Tk on macOS trims a non-breaking space off the end of every run of text
+    it measures (tkMacOSXFont.c), and a run ends at any tag change or mark —
+    Tk's own "current" and "insert" marks among them.  A run ending in the
+    space after a "§" made its line end before the "§" and the next line
+    end after it, the "§" alone on a line: in an opinion already open, as
+    the pointer passed over the number or a click landed by it."""
+
+    BOUND = "Under 42 U.S.C. §" + NBSP + "1983 and §§" + NBSP + "1981-1982."
+
+    def setUp(self):
+        try:
+            self.root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("no display")
+        self.root.withdraw()
+        self.addCleanup(self.root.destroy)
+
+    def text(self, mac: bool = True):
+        txt = gui._ReaderText(self.root)
+        txt._PLAIN_SPACES = mac
+        return txt
+
+    @staticmethod
+    def held(txt) -> str:
+        """What the widget itself holds, as Tk lays it out."""
+        return txt.tk.call(txt._w, "get", "1.0", "end-1c")
+
+    def test_the_widget_holds_an_ordinary_space(self):
+        txt = self.text()
+        txt.insert("1.0", self.BOUND)
+        self.assertNotIn(NBSP, self.held(txt))
+        self.assertEqual(self.held(txt), self.BOUND.replace(NBSP, " "))
+
+    def test_in_every_piece_of_a_tagged_insert(self):
+        txt = self.text()
+        txt.insert("end", "42 U.S.C. §" + NBSP, ("plain",),
+                   "1983", ("citelink", "lnk1"), " and ¶" + NBSP + "12", ())
+        self.assertNotIn(NBSP, self.held(txt))
+        self.assertEqual(txt.tag_ranges("citelink")[0].string, "1.12")
+
+    def test_read_back_it_is_bound_again(self):
+        txt = self.text()
+        txt.insert("1.0", self.BOUND)
+        self.assertEqual(txt.get("1.0", "end-1c"), self.BOUND)
+
+    def test_one_for_one_so_every_offset_holds(self):
+        mac, other = self.text(), self.text(mac=False)
+        for txt in (mac, other):
+            txt.insert("1.0", self.BOUND)
+        self.assertEqual(mac.index("end-1c"), other.index("end-1c"))
+        self.assertEqual(mac.search("1983", "1.0"), other.search("1983", "1.0"))
+
+    def test_across_a_tag_change_as_well(self):
+        # "§ " closing one run and the number opening a link: the very case
+        # whose run ended in the space.
+        txt = self.text()
+        txt.insert("end", "42 U.S.C. §" + NBSP, (), "1983", ("citelink",),
+                   " applies.", ())
+        pieces = [value for key, value, _i in
+                  txt.dump("1.0", "end-1c", text=True, tag=True)
+                  if key == "text"]
+        self.assertEqual(pieces, ["42 U.S.C. §" + NBSP, "1983", " applies."])
+
+    def test_so_copies_and_exports_keep_it(self):
+        txt = self.text()
+        txt.insert("end", "Under §" + NBSP, (), "1983", ("citelink",), ".", ())
+        plain = gui._plain_without_layout_chars(txt, "1.0", "end-1c")
+        self.assertEqual(plain, "Under §" + NBSP + "1983.")
+        paras = gui._dump_export_paragraphs(txt, [("1.0", "end-1c")], {})
+        self.assertEqual("".join(r.text for r in paras[0].runs), plain)
+        self.assertIn("\\~1983", gui._rtf_escape(plain))
+
+    def test_a_typed_space_still_finds_it(self):
+        txt = self.text()
+        txt.insert("1.0", self.BOUND)
+        n = tk.IntVar()
+        idx = txt.search(gui._find_pattern("§ 1983"), "1.0", stopindex="end",
+                         regexp=True, count=n)
+        self.assertEqual(txt.get(idx, f"{idx}+{n.get()}c"), "§" + NBSP + "1983")
+
+    def test_elsewhere_the_widget_keeps_the_non_breaking_space(self):
+        txt = self.text(mac=False)
+        txt.insert("1.0", self.BOUND)
+        self.assertEqual(self.held(txt), self.BOUND)
+
+    def test_only_on_a_mac(self):
+        import sys
+        self.assertEqual(gui._ReaderText._PLAIN_SPACES,
+                         sys.platform == "darwin")
+
+
 if __name__ == "__main__":
     unittest.main()

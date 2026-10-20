@@ -444,8 +444,8 @@ Installing LaTeX ([TeX Live](https://tug.org/texlive/),
 [MiKTeX](https://miktex.org/) or [Tectonic](https://tectonic-typesetting.github.io/))
 lets GetCases typeset opinions as print-quality PDFs when you **print from the
 text side** of a viewer (the printer icon, or Ctrl/Cmd+P). The result is a
-single justified column in a Century Schoolbook-style typeface, with footnotes
-at the foot of the page that cites them and a running head showing the
+page of two justified columns in a Century Schoolbook-style typeface, with
+footnotes at the foot of the column that cites them and a running head showing the
 reporter pages on each sheet. The syllabus or headnotes and each separate
 opinion begin on a page of their own. GetCases finds an installed LaTeX by itself.
 
