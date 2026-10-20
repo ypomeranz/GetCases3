@@ -28204,6 +28204,24 @@ class _ReaderText(tk.Text):
 
     _DLINEINFOS = "::getcases::dlineinfos"
 
+    # Tk on macOS measures the text a run at a time — a run ends at every
+    # tag change and every mark, Tk's own among them — and before it says
+    # how much of a run fits it trims any whitespace the run ends in but the
+    # ASCII space: a non-breaking space with it (TkpMeasureCharsInContext,
+    # tkMacOSXFont.c, in Tk 8.6 and 9 alike).  A run that ends in the space
+    # binding a "§" to its number then seems not to fit: its line ends
+    # before the "§", and the next line ends after it, the "§" alone on a
+    # line of its own.  The run can end there at any moment — Tk keeps its
+    # "current" mark on the character under the pointer and its insertion
+    # mark where the reader clicked, and lays the text out afresh whenever
+    # the cursor changes over a link — so the space must not be in the
+    # widget at all.  On a Mac it goes in as an ordinary space, one for one
+    # (every offset into the opinion still holds), and what is read back
+    # out has its signs bound to their numbers again: copied or exported,
+    # "§ 1983" holds together as before.  Only the line may now break after
+    # a "§", as in any other text.
+    _PLAIN_SPACES = sys.platform == "darwin"
+
     def __init__(self, master=None, **kw) -> None:
         super().__init__(master, **kw)
         # Defined afresh for each widget: it is cheap, and a proc kept per
@@ -28218,6 +28236,43 @@ class _ReaderText(tk.Text):
             "    }\n"
             "    return $out\n"
             "}")
+
+    def insert(self, index, chars, *args):
+        # ``args`` alternates tags and further text: (tags, chars, tags, …).
+        if self._PLAIN_SPACES:
+            chars = chars.replace(" ", " ")
+            args = tuple(a.replace(" ", " ")
+                         if i % 2 and isinstance(a, str) else a
+                         for i, a in enumerate(args))
+        return super().insert(index, chars, *args)
+
+    def get(self, index1, index2=None):
+        text = super().get(index1, index2)
+        if self._PLAIN_SPACES:
+            from google_scholar import bind_signs_to_numbers
+            text = bind_signs_to_numbers(text)
+        return text
+
+    def dump(self, index1, index2=None, command=None, **kw):
+        """Tk's dump, its text read back as :meth:`get` reads it — the signs
+        bound across a tag change too: "§ " can end one run and its number
+        start the next."""
+        items = super().dump(index1, index2, command, **kw)
+        if not self._PLAIN_SPACES or command is not None or not items:
+            return items
+        from google_scholar import bind_signs_to_numbers
+        texts = [i for i, item in enumerate(items) if item[0] == "text"]
+        full = "".join(items[i][1] for i in texts)
+        bound = bind_signs_to_numbers(full)
+        if bound == full:
+            return items
+        out = list(items)
+        pos = 0
+        for i in texts:
+            key, value, index = items[i]
+            out[i] = (key, bound[pos:pos + len(value)], index)
+            pos += len(value)
+        return out
 
     def dlineinfos(self, indices) -> list:
         """``dlineinfo`` of each of *indices*: its (x, y, width, height,
