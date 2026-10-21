@@ -4858,6 +4858,54 @@ def _cases_beginning_at(client, cite: str) -> list[dict]:
     return cases
 
 
+def _answers_to_name(name: str, held: str) -> bool:
+    """Whether *held*, a source's name for the case at a citation, answers to
+    *name*, the name the citation came with, as the sources' own checks take
+    it (see _case_law_named_url): the two share a party that is no frequent
+    name."""
+    return max(_match_tier(name, held), _match_tier(held, name)) >= 1
+
+
+def _named_otherwise(name: str, held: str) -> bool:
+    """Whether *held* may be another name for the case *name* names, though
+    the two share no party: one of them is no "A v. B" caption at all, but a
+    name the case goes by — "Legal Tender Cases" for Knox v. Lee, 79 U.S.
+    457; "Civil Rights Cases" for United States v. Stanley, 109 U.S. 3; "The
+    Brig Amy Warwick" for the Prize Cases; "Steel Seizure Case" for
+    Youngstown Sheet & Tube Co. v. Sawyer.  Two "A v. B" captions with no
+    party in common are two cases."""
+    return bool(name and held) and (len(_name_parties(name)) != 2
+                                    or len(_name_parties(held)) != 2)
+
+
+def _cases_by_another_name(name: str, cases: list, year: str = "",
+                           latest: str = "") -> bool:
+    """Whether to offer the reader *cases* — those beginning at a citation
+    (see _cases_beginning_at) — because none answers to *name*, the name the
+    citation came with, yet one may be its case by another name (see
+    _named_otherwise).  The sources each turn away a case that does not
+    answer to the name, so the case cited by the name it goes by opened
+    nowhere, and "No case found" came of it.
+
+    A case decided more than a year from *year* (the citation's own) or
+    after *latest* (that of the opinion citing it) is another case."""
+    name = re.sub(r"<[^>]+>", "", name or "").strip()
+    if not (name and cases) or any(_answers_to_name(name, case["name"])
+                                   for case in cases):
+        return False
+
+    def dated_right(case: dict) -> bool:
+        held = str(case.get("year") or "")[:4]
+        if not held.isdigit():
+            return True
+        cited, before = str(year or "")[:4], str(latest or "")[:4]
+        return not ((cited.isdigit() and abs(int(held) - int(cited)) > 1)
+                    or (before.isdigit() and int(held) > int(before)))
+
+    return any(_named_otherwise(name, case["name"]) and dated_right(case)
+               for case in cases)
+
+
 #: How far into a case a page cited as though the case began there may lie.
 _PIN_AS_CITE_SPAN = 250
 
@@ -5843,10 +5891,54 @@ _NAME_PARTY_SPLIT_RE = re.compile(r"\s+v(?:s)?\.?\s+", re.IGNORECASE)
 _US_PARTY_RE = re.compile(r"^\s*u\.?\s*s\.?\s*a?\.?\s*$", re.IGNORECASE)
 
 
+#: A Bluebook abbreviation that splitting a name at its punctuation would
+#: break apart: a run of initials ("N.Y.", "R.R.", "U. S."), West Virginia's
+#: "W. Va.", or a contraction ("Ass'n", "Dep't", "Int'l").
+_ABBREVIATION_RUN_RE = re.compile(
+    r"(?<![\w.'’])(?:(?:[A-Za-z]\.\s?)+[A-Za-z]\.(?![A-Za-z])"
+    r"|W\.\s?Va\.(?!\w)|[A-Za-z]+['’][A-Za-z]+\b)")
+
+
+def _abbreviated_places() -> dict:
+    """The places of several words tables T6 and T10 abbreviate to initials,
+    by the initials' letters ("ny" → "new york", "wva" → "west virginia",
+    "us" → "united states")."""
+    places = getattr(_abbreviated_places, "_cache", None)
+    if places is None:
+        import bluebook_names
+        places = {}
+        for words, abbr in (bluebook_names._PHRASES
+                            + bluebook_names._T10_CITY_PHRASES):
+            places.setdefault(re.sub(r"[^a-z]", "", abbr.lower()), words)
+        _abbreviated_places._cache = places
+    return places
+
+
+def _spell_abbreviations(name: str) -> str:
+    """*name* with the Bluebook abbreviations a word split would break apart
+    put back together: one tables T6 and T10 make of a word is written as its
+    letters ("Ass'n" → "Assn", "R.R." → "RR"), which :func:`_token_close`
+    takes for the word, and one they make of a place of several words as the
+    place ("N.Y." → "new york", "W. Va." → "west virginia").  Any other
+    ("O'Brien", "J.P.") is left as it is."""
+    words, places = _abbreviation_words(), _abbreviated_places()
+
+    def spell(m: "re.Match") -> str:
+        run = m.group(0)
+        letters = re.sub(r"[^a-z]", "", run.lower())
+        if "." in run and letters in places:
+            return f" {places[letters]} "
+        return letters if letters in words else run
+
+    return _ABBREVIATION_RUN_RE.sub(spell, name or "")
+
+
 def _name_tokens(name: str) -> list[str]:
     """Significant lowercased word tokens of a case (or party) name, with
-    HTML, punctuation, articles, bare numbers and one-letter tokens removed."""
-    name = re.sub(r"<[^>]+>", " ", name or "")
+    HTML, punctuation, articles, bare numbers and one-letter tokens removed.
+    A Bluebook abbreviation stays one token, or becomes the place it stands
+    for (see :func:`_spell_abbreviations`)."""
+    name = _spell_abbreviations(re.sub(r"<[^>]+>", " ", name or ""))
     name = re.sub(r"[^\w\s]", " ", name.lower())
     return [
         t for t in name.split()
@@ -5867,11 +5959,16 @@ def _name_parties(name: str) -> list[set[str]]:
 
 
 def _token_close(a: str, b: str) -> bool:
-    """Two name tokens match when equal, one is a prefix of the other, or
-    they are near-identical spellings (handles plurals and minor variants)."""
+    """Two name tokens match when equal, one is a prefix of the other, one is
+    the other's Bluebook abbreviation ("techs" for "technologies", "assn" for
+    "association": see :func:`_abbreviation_words`), or they are
+    near-identical spellings (handles plurals and minor variants)."""
     if a == b:
         return True
     if len(a) >= 4 and len(b) >= 4 and (a.startswith(b) or b.startswith(a)):
+        return True
+    words = _abbreviation_words()
+    if b in words.get(a, ()) or a in words.get(b, ()):
         return True
     if len(a) >= 5 and len(b) >= 5:
         return difflib.SequenceMatcher(None, a, b).ratio() >= 0.85
@@ -12176,6 +12273,10 @@ class CourtListenerGUI:
             ):
                 return
             cases = _cases_beginning_at(client, cite) if choose else []
+            if _cases_by_another_name(name, cases, year):
+                self._post_root(self._ask_which_cited_case, query, cite,
+                                pin, cases, fetcher, client, name)
+                return
             if len(cases) > 1:
                 self._post_root(self._ask_which_cited_case, query, cite,
                                 pin, cases, fetcher, client)
@@ -12217,18 +12318,22 @@ class CourtListenerGUI:
                                 prefetch_pdf)
 
     def _ask_which_case_at(self, parent, cite: str, pin: str, cases: list,
-                           fetcher, client, prefetch_pdf: bool = True) -> None:
+                           fetcher, client, prefetch_pdf: bool = True,
+                           name: str = "") -> None:
         """Ask which of *cases* — the cases beginning at *cite*, ``{"name",
         "year"[, "url"]}`` — is meant, as an E.R. page's are asked, and open
         that one by its name and year; failing that, its static.case.law scan
         (``url``) where one came with it.  Asked once: a case picked that
-        cannot be opened either is a miss, said so."""
+        cannot be opened either is a miss, said so.  *name*: the name the
+        citation came with, where none of them answers to it (see
+        _cases_by_another_name)."""
         try:
             host = parent if parent.winfo_exists() else self.root
         except (AttributeError, tk.TclError):
             host = self.root
         chosen = _choose_cited_case(host, cite, cases,
-                                    bring_to_front=self._bring_to_front)
+                                    bring_to_front=self._bring_to_front,
+                                    name=name)
         if chosen is None:
             return
 
@@ -12250,11 +12355,14 @@ class CourtListenerGUI:
         threading.Thread(target=run, daemon=True).start()
 
     def _ask_which_cited_case(self, query: str, cite: str, pin: str,
-                              cases: list, fetcher, client) -> None:
+                              cases: list, fetcher, client,
+                              name: str = "") -> None:
         """Ask which of *cases* the citation means, and open that one — asked
-        once: if the case picked cannot be opened either, that is a miss."""
+        once: if the case picked cannot be opened either, that is a miss.
+        *name*: the name typed with it, where none of them answers to it."""
         chosen = _choose_cited_case(self.root, cite, cases,
-                                    bring_to_front=self._bring_to_front)
+                                    bring_to_front=self._bring_to_front,
+                                    name=name)
         if chosen is None:
             return
         self._open_typed_case_citation(
@@ -14813,7 +14921,10 @@ class CourtListenerGUI:
         Where nothing opens and several cases begin at the citation, the
         reader is asked which (*choose*), as for an E.R. page, and the one
         picked opens by its name — True then too: the lookup ended in the
-        question, not in nothing."""
+        question, not in nothing.  So too where the name answers to none of
+        the cases there but one may be its case by another name (see
+        _cases_by_another_name): the reader is told there is no exact
+        match, and picks or cancels."""
         target_parent = self.root if view_parent is None else view_parent
         # Federal Appendix cases are scans Google Scholar rarely has — open the
         # static.case.law PDF built straight from the citation.
@@ -14947,6 +15058,19 @@ class CourtListenerGUI:
                         return True
             except Exception as exc:
                 print(f"[citelist] courtlistener {cite!r}: {exc}")
+        # The name answers to no case at the citation, though one there may
+        # be its case by another name (see _cases_by_another_name): the
+        # reader picks, rather than that case's scan opening unasked below
+        # (or, with no scan, nothing) — or, not to ask (*choose*), nothing
+        # opens, and the caller asks.
+        cases = (_cases_beginning_at(client, cite)
+                 if cite and (name or "").strip() else None)
+        if cases and _cases_by_another_name(name, cases, year):
+            if not choose:
+                return False
+            self._post_root(self._ask_which_case_at, target_parent, cite,
+                            pin, cases, fetcher, client, prefetch_pdf, name)
+            return True
         pdf = _case_law_pdf_for_cite(cite, name, year) if cite else None
         if pdf:
             self._post_case_law_pdf(
@@ -14966,7 +15090,8 @@ class CourtListenerGUI:
         # said which, or what did answers to none the sources could open:
         # the reader picks, rather than hearing that nothing was found.
         if choose and cite:
-            cases = _cases_beginning_at(client, cite)
+            if cases is None:
+                cases = _cases_beginning_at(client, cite)
             if len(cases) > 1:
                 self._post_root(self._ask_which_case_at, target_parent, cite,
                                 pin, cases, fetcher, client, prefetch_pdf)
@@ -18427,11 +18552,14 @@ class _CourtPickerDialog:
     """
     Checkbox-tree dialog for choosing which courts to search.
 
-    The tree mirrors ``court_catalog.CATALOG``: Federal (Supreme Court,
-    Courts of Appeals, District Courts — grouped by state — and Specialized)
-    and State (each state with its appellate courts).  Clicking a group
-    toggles everything under it; groups show ☑ / ☐ / ◪ for all / none /
-    some selected.  An empty selection means "all courts" (no filter).
+    The tree mirrors ``court_catalog.CATALOG``: Federal (the Supreme Court,
+    then a group to each circuit — its court of appeals, its district courts
+    by state, and the specialized courts it alone hears appeals from — and
+    the rest of the specialized courts) and State (each state with its
+    appellate courts).  Clicking a group toggles everything under it, so a
+    circuit's every court is one click; groups show ☑ / ☐ / ◪ for all /
+    none / some selected.  An empty selection means "all courts" (no
+    filter).
     """
 
     _GLYPH_ALL, _GLYPH_NONE, _GLYPH_SOME = "☑", "☐", "◪"
@@ -36679,17 +36807,20 @@ class _ScholarTextWindow:
         app._ask_which_scholar_case(self._live_parent(), cite, pin, mates,
                                     app._get_scholar(), client)
 
-    def _ask_cases_at(self, cite: str, pin: str, cases: list) -> None:
+    def _ask_cases_at(self, cite: str, pin: str, cases: list,
+                      name: str = "") -> None:
         """Several cases begin at a citation clicked here, and none of the
-        sources could say which was meant: ask (see
+        sources could say which was meant — or none answers to the link's
+        *name*, though one may be its case by another name: ask (see
         CourtListenerGUI._ask_which_case_at)."""
-        self._status_var.set(f"{len(cases)} cases begin at {cite} — "
-                             "choose one.")
+        self._status_var.set(
+            f"No exact match for {name} at {cite} — choose a case." if name
+            else f"{len(cases)} cases begin at {cite} — choose one.")
         self._end_text_load(cite)       # the load ends in the question
         app = self._app
         client = app._get_client() if app._token_var.get().strip() else None
         app._ask_which_case_at(self._live_parent(), cite, pin, cases,
-                               app._get_scholar(), client)
+                               app._get_scholar(), client, name=name)
 
     def _claim_text_load(self, cite: str) -> None:
         """Take up the load waiting on the text of *cite* — its scan could not
@@ -36936,6 +37067,17 @@ class _ScholarTextWindow:
                     target = _cl_item_for_citation(client, alt, name=name)
                     if target is not None:
                         break
+                cases = None
+                if target is None and cite and name:
+                    # Nothing at the citation answers to the name, though a
+                    # case there may be it by another name (see
+                    # _cases_by_another_name): the reader picks, rather than
+                    # that case opening unasked, or another of the name.
+                    cases = _cases_beginning_at(client, cite)
+                    if _cases_by_another_name(name, cases,
+                                              latest=cited_by_year):
+                        self._post(self._ask_cases_at, cite, pin, cases, name)
+                        return
                 if target is None and cite:
                     # CourtListener has no cluster at this exact citation.
                     # Prefer the citation-keyed static.case.law PDF — the
@@ -36954,7 +37096,8 @@ class _ScholarTextWindow:
                     # Several cases begin at the cite and nothing here said
                     # which: the reader picks, rather than hearing that
                     # nothing was found.
-                    cases = _cases_beginning_at(client, cite)
+                    if cases is None:
+                        cases = _cases_beginning_at(client, cite)
                     if len(cases) > 1:
                         self._post(self._ask_cases_at, cite, pin, cases)
                         return
@@ -41501,25 +41644,47 @@ def _choose_eng_rep_case(parent: tk.Misc,
 
 def _choose_cited_case(parent: tk.Misc, cite: str,
                        cases: "list[dict]",
-                       bring_to_front=None) -> "Optional[dict]":
+                       bring_to_front=None, name: str = "") -> "Optional[dict]":
     """Several cases bear one citation and nothing typed says which — let the
     reader pick, as :func:`_choose_eng_rep_case` does for an E.R. page.
     *cases* are ``{"name", "year"}`` (see :func:`_cases_bearing_citation`).
     *bring_to_front* puts the dialog in front of whatever the reader went to
     while the lookup ran: it comes up seconds after Spotlight closed, and
     Windows keeps a program that is not in front from putting itself there.
-    Returns the chosen case, or None if cancelled."""
+    *name*, the name the citation came with, where none of *cases* answers
+    to it: the dialog says there is no exact match, and lists the case or
+    cases bearing the citation — one may be it by another name (see
+    _cases_by_another_name).  Returns the chosen case, or None if cancelled
+    or closed."""
+    unmatched = bool(name) and not any(
+        _answers_to_name(name, case["name"]) for case in cases)
     dlg = _ui_toplevel(parent)
     _ensure_modern_ttk_styles(dlg)
-    dlg.title(f"{cite} — {len(cases)} cases")
+    dlg.title(f"{cite} — no exact match" if unmatched
+              else f"{cite} — {len(cases)} cases")
     dlg.geometry("640x380")
     # Spotlight leaves the main window withdrawn: a dialog transient to (or
     # grabbing against) a hidden window stays invisible.
     if parent.winfo_viewable():
         dlg.transient(parent)
-    _ui_label(dlg, f"{len(cases)} cases are reported at {cite}. Pick one:",
-              size=13, weight="bold", anchor="w").pack(
-        anchor="w", fill="x", padx=14, pady=(12, 0))
+    if unmatched:
+        some = len(cases) > 1
+        for text, size, pady, style in (
+                (f"No exact match for “{name}” was found.", 13, (12, 0),
+                 {"weight": "bold"}),
+                (f"The following case{'s' if some else ''} "
+                 f"{'have' if some else 'has'} this citation, {cite}. "
+                 "Open one, or cancel:", 12, (2, 0), {"muted": True})):
+            label = _ui_label(dlg, text, size=size, anchor="w", **style)
+            # A caption runs long ("Butchers' Benevolent Ass'n of New
+            # Orleans v. Crescent City Live-Stock Landing & …").
+            label.configure(wraplength=600, justify="left")
+            label.pack(anchor="w", fill="x", padx=14, pady=pady)
+    else:
+        _ui_label(dlg, f"{len(cases)} cases are reported at {cite}. "
+                       "Pick one:",
+                  size=13, weight="bold", anchor="w").pack(
+            anchor="w", fill="x", padx=14, pady=(12, 0))
     box = _ui_frame(dlg, card=True)
     box.pack(fill="both", expand=True, padx=12, pady=(8, 8))
     sb_style = ("Modern.Vertical.TScrollbar" if _CTK_AVAILABLE

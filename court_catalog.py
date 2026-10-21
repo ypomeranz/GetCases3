@@ -157,13 +157,48 @@ _SPECIAL_LABELS: list[tuple[str, str]] = [
     ("tax", "U.S. Tax Court"),
     ("cavet", "Court of Appeals for Veterans Claims"),
     ("caaf", "Court of Appeals for the Armed Forces"),
-    ("bap1", "Bankruptcy App. Panel — 1st Cir."),
-    ("bap2", "Bankruptcy App. Panel — 2d Cir."),
-    ("bap6", "Bankruptcy App. Panel — 6th Cir."),
-    ("bap8", "Bankruptcy App. Panel — 8th Cir."),
-    ("bap9", "Bankruptcy App. Panel — 9th Cir."),
-    ("bap10", "Bankruptcy App. Panel — 10th Cir."),
+    ("bap1", "Bankruptcy Appellate Panel"),
+    ("bap2", "Bankruptcy Appellate Panel"),
+    ("bap6", "Bankruptcy Appellate Panel"),
+    ("bap8", "Bankruptcy Appellate Panel"),
+    ("bap9", "Bankruptcy Appellate Panel"),
+    ("bap10", "Bankruptcy Appellate Panel"),
 ]
+
+# --- Circuits ------------------------------------------------------------------
+
+# Geographic circuit for each federal district (fixed by 28 U.S.C. §§ 41,
+# 1294 — not available from the API: Court.appeals_to is unpopulated).
+CIRCUIT_OF_DISTRICT: dict[str, str] = {}
+for _cir, _dists in {
+    "ca1": ("med", "mad", "nhd", "prd", "rid"),
+    "ca2": ("ctd", "nyed", "nynd", "nysd", "nywd", "vtd"),
+    "ca3": ("ded", "njd", "paed", "pamd", "pawd", "vid"),
+    "ca4": ("mdd", "nced", "ncmd", "ncwd", "scd", "vaed", "vawd",
+            "wvnd", "wvsd"),
+    "ca5": ("laed", "lamd", "lawd", "msnd", "mssd", "txed", "txnd",
+            "txsd", "txwd"),
+    "ca6": ("kyed", "kywd", "mied", "miwd", "ohnd", "ohsd", "tned",
+            "tnmd", "tnwd"),
+    "ca7": ("ilcd", "ilnd", "ilsd", "innd", "insd", "wied", "wiwd"),
+    "ca8": ("ared", "arwd", "iand", "iasd", "mnd", "moed", "mowd",
+            "ned", "ndd", "sdd"),
+    "ca9": ("akd", "azd", "cacd", "caed", "cand", "casd", "gud", "hid",
+            "idd", "mtd", "nvd", "nmid", "ord", "waed", "wawd"),
+    "ca10": ("cod", "ksd", "nmd", "oked", "oknd", "okwd", "utd", "wyd"),
+    "ca11": ("almd", "alnd", "alsd", "flmd", "flnd", "flsd", "gamd",
+             "gand", "gasd"),
+    "cadc": ("dcd",),
+}.items():
+    for _d in _dists:
+        CIRCUIT_OF_DISTRICT[_d] = _cir
+
+# Specialized federal courts whose appeals go to a single circuit.
+SPECIAL_UP: dict[str, str] = {
+    "uscfc": "cafc", "cit": "cafc", "cavet": "cafc",
+    "bap1": "ca1", "bap2": "ca2", "bap6": "ca6", "bap8": "ca8",
+    "bap9": "ca9", "bap10": "ca10",
+}
 
 # --- State courts ------------------------------------------------------------
 # Per state: (state name, [(court_id, bluebook abbr, display label), ...]).
@@ -919,26 +954,48 @@ def _district_state(abbr: str) -> str:
                     + word[1:] for word in name.split())
 
 
-def _district_courts_by_state() -> list[tuple]:
-    """The district courts, a group to each state or territory in
-    alphabetical order, its districts in order within it."""
-    by_state: dict[str, list[tuple[str, str]]] = {}
-    for cid, abbr in sorted(DISTRICT_COURTS.items(), key=lambda kv: kv[1]):
-        by_state.setdefault(_district_state(abbr) or "Other", []).append(
-            (cid, abbr))
-    return sorted(by_state.items(),
-                  key=lambda group: (group[0] == "Other", group[0]))
+def _circuit_groups() -> list[tuple]:
+    """The lower federal courts, a group to each circuit — so one click
+    takes in every court in it: its court of appeals; its district courts, in
+    the alphabetical order of their states and territories, a state's
+    several districts in a group of their own ("California": C.D., E.D.,
+    N.D., S.D. Cal.) and a state's one district by the state's name ("Maine
+    (D. Me.)"); then the specialized courts whose appeals go to that circuit
+    alone (see SPECIAL_UP) — its bankruptcy appellate panel, or for the
+    Federal Circuit the Court of Federal Claims, the Court of International
+    Trade and the Court of Appeals for Veterans Claims."""
+    special_labels = dict(_SPECIAL_LABELS)
+    groups = []
+    for circuit, name in _CIRCUIT_LABELS:
+        by_state: dict[str, list[tuple[str, str]]] = {}
+        for cid, abbr in sorted(DISTRICT_COURTS.items(), key=lambda kv: kv[1]):
+            if CIRCUIT_OF_DISTRICT.get(cid) == circuit:
+                by_state.setdefault(_district_state(abbr), []).append(
+                    (cid, abbr))
+        courts: list[tuple] = [
+            (circuit, f"Court of Appeals ({CIRCUIT_COURTS[circuit]})")]
+        for state, districts in sorted(by_state.items()):
+            if len(districts) == 1:
+                cid, abbr = districts[0]
+                courts.append((cid, f"{state} ({abbr})"))
+            else:
+                courts.append((state, districts))
+        courts += sorted(
+            ((cid, f"{label} ({SPECIAL_COURTS[cid]})")
+             for cid, label in special_labels.items()
+             if SPECIAL_UP.get(cid) == circuit),
+            key=lambda court: court[1])
+        groups.append((name, courts))
+    return groups
 
 
 CATALOG: list[tuple] = [
     ("Federal", [
         ("scotus", "Supreme Court of the United States"),
-        ("Courts of Appeals", [
-            (cid, f"{label} ({CIRCUIT_COURTS[cid]})") for cid, label in _CIRCUIT_LABELS
-        ]),
-        ("District Courts", _district_courts_by_state()),
+        *_circuit_groups(),
         ("Specialized", [
             (cid, label) for cid, label in _SPECIAL_LABELS
+            if cid not in SPECIAL_UP
         ]),
     ]),
     ("State", [

@@ -344,7 +344,8 @@ class WhichCaseTests(unittest.TestCase):
             app._ask_which_cited_case("2 Va 319", "2 Va 319", "", THREE,
                                       "fetcher", "client")
         choose.assert_called_once_with(app.root, "2 Va 319", THREE,
-                                       bring_to_front=app._bring_to_front)
+                                       bring_to_front=app._bring_to_front,
+                                       name="")
         app._open_typed_case_citation.assert_called_once_with(
             "2 Va 319", "Pleasants v. Pleasants", "2 Va 319", "", "1800",
             "fetcher", "client", choose=False)
