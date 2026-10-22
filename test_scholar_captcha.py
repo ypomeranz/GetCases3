@@ -225,11 +225,7 @@ class _BrowserFixture(unittest.TestCase):
                    "selenium.common.exceptions": exc}
         for patcher in (mock.patch.dict(sys.modules, modules),
                         mock.patch.object(sb.time, "sleep"),
-                        mock.patch.object(sb, "on_step", None),
-                        # Firefox, whichever machine runs this (without it
-                        # the app's own browser is asked: test_app_browser).
-                        mock.patch.object(sb, "_firefox_binary",
-                                          return_value="firefox")):
+                        mock.patch.object(sb, "on_step", None)):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.browser = sb.ScholarBrowser()

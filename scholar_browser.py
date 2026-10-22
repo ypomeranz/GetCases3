@@ -24,15 +24,9 @@ Design:
     :meth:`ScholarBrowser._solve`).  What answering earns is carried back into
     the headless session.
 
-Where Firefox isn't installed, the browser the app drives for itself
-(Chrome or Edge, or Safari on a Mac — see :mod:`app_browser`) fetches the
-page instead, minimized, and comes up for the reader only should Google set
-a CAPTCHA there too (Safari's window takes no answer while it is driven, so
-there an unanswerable challenge is :class:`BrowserBlocked`).
-
-Everything here is optional: :func:`available` is False when Selenium is
-missing, or Firefox and every other browser to drive, and the caller
-degrades to the local opinion DB / CourtListener exactly as before.
+Everything here is optional: :func:`available` is False when Selenium or
+Firefox is missing, and the caller degrades to the local opinion DB /
+CourtListener exactly as before.
 """
 
 from __future__ import annotations
@@ -62,7 +56,7 @@ _BLOCK_MARKERS = (
 _SOLVE_NOTE = (
     "GetCases: Google Scholar wants to check that a person is asking. Answer "
     "the CAPTCHA below and the page you asked for opens in GetCases; this "
-    "window then gets out of the way by itself."
+    "window then closes by itself."
 )
 
 _NOTE_JS = """
@@ -174,19 +168,12 @@ def _google_cookie_rows() -> list:
 
 
 def available() -> bool:
-    """True when a Scholar fetch through a real browser is possible here:
-    Firefox, or failing it a browser the app drives (see app_browser)."""
+    """True when a Scholar fetch through Firefox is possible here."""
     try:
         import selenium  # noqa: F401
     except ImportError:
         return False
-    if _firefox_binary() is not None:
-        return True
-    try:
-        import app_browser
-    except ImportError:
-        return False
-    return app_browser.available()
+    return _firefox_binary() is not None
 
 
 class ScholarBrowser:
@@ -311,8 +298,6 @@ class ScholarBrowser:
             TimeoutException, WebDriverException,
         )
 
-        if _firefox_binary() is None:
-            return self._fetch_elsewhere(url, wait_for, solve)
         with self._lock:
             driver = self._ensure_driver()
             if not wait_for:
@@ -404,59 +389,25 @@ class ScholarBrowser:
         self._solve_after = time.monotonic() + _SOLVE_SNOOZE
         raise BrowserBlocked()
 
-    def _fetch_elsewhere(self, url: str, wait_for: str,
-                         solve: bool) -> "tuple[str, str]":
-        """:meth:`fetch` where Firefox isn't installed: the browser the app
-        drives for itself (see app_browser) loads the page, minimized, and
-        on a challenge is brought up for the reader to answer it when
-        *solve* — not for _SOLVE_SNOOZE after one went unanswered."""
-        import app_browser
-
-        if not wait_for:
-            wait_for = ("#gs_opinion" if "scholar_case" in url
-                        else "#gs_res_ccl, .gs_r")
-        try:
-            browser = app_browser.shared()
-        except app_browser.Unavailable as exc:
-            raise BrowserUnavailable(str(exc))
-        ask = solve and time.monotonic() >= self._solve_after
-        try:
-            return browser.open(
-                url, challenged=_challenged,
-                ready=lambda d: self._content_ready(d, wait_for), ask=ask,
-                note=_SOLVE_NOTE,
-                waiting=(f"Google Scholar wants a CAPTCHA answered — answer "
-                         f"it in the {browser.name} window that has opened…"),
-                on_step=on_step)
-        except app_browser.NeedsPerson:
-            if ask:
-                self._solve_after = time.monotonic() + _SOLVE_SNOOZE
-            raise BrowserBlocked()
-        except app_browser.Unavailable as exc:
-            raise BrowserUnavailable(str(exc))
-
-    @staticmethod
-    def _content_ready(d, wait_for: str) -> bool:
-        """Whether the page has come to a state worth reading: any of
-        *wait_for*'s selectors present, or Scholar's "no results" notice, or
-        the challenge page."""
-        from selenium.webdriver.common.by import By
-
-        for sel in wait_for.split(","):
-            sel = sel.strip()
-            if sel and d.find_elements(By.CSS_SELECTOR, sel):
-                return True
-        src = (d.page_source or "").lower()
-        return ("did not match any" in src or "/sorry/" in d.current_url
-                or "unusual traffic" in src)
-
     @staticmethod
     def _await_content(driver, wait_for: str) -> None:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import WebDriverWait
 
+        def ready(d) -> bool:
+            # Any target selector present, or Scholar's "no results" notice,
+            # or the challenge page — all terminal states.
+            for sel in wait_for.split(","):
+                sel = sel.strip()
+                if sel and d.find_elements(By.CSS_SELECTOR, sel):
+                    return True
+            src = (d.page_source or "").lower()
+            return ("did not match any" in src or "/sorry/" in d.current_url
+                    or "unusual traffic" in src)
+
         try:
-            WebDriverWait(driver, _CONTENT_TIMEOUT).until(
-                lambda d: ScholarBrowser._content_ready(d, wait_for))
+            WebDriverWait(driver, _CONTENT_TIMEOUT).until(ready)
         except Exception:
             pass  # timed out — return whatever is present; caller handles it
 
