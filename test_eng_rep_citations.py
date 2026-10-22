@@ -94,6 +94,48 @@ class ReportersByNameTests(unittest.TestCase):
                          [f"n:mcle:0:{first}"])
         self.assertTrue(specs("Dewitt v. Post, 2 Williams's Saunders, 101"))
 
+    def test_a_reporter_s_reports_and_its_possessive(self):
+        # "2 Dow's Rep. 519" was read as an American citation and searched
+        # for on Scholar: the matcher knew Dow only as "Dow." and "Dow. P.C."
+        for text in ("Shand v. Henderson, 2 Dow's Rep. 519",
+                     "Shand v. Henderson, 2 Dow’s Rep. 519",
+                     "Shand v. Henderson, 2 Dow Rep. 519",
+                     "Shand v. Henderson, 2 Dow's R. 519",
+                     "Shand v. Henderson, 2 Dow's P.C. 519",
+                     "Shand v. Henderson, 2 Dow's Parl. Cas. 519",
+                     "Shand v. Henderson, 2 Dow. Parl. Cas. 519"):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), ["n:dowpc:2:519"])
+                self.assertEqual(
+                    [action for _s, _e, action in citations.detect_links(text)],
+                    [("engrep", "n:dowpc:2:519")])
+        self.assertEqual([(c.vol, c.page) for c in eng_rep.resolve(
+            "n:dowpc:2:519")], [(3, 952)])
+        # The span runs over the whole of it, "Rep." and all.
+        text = "Shand v. Henderson, 2 Dow's Rep. 519, 525."
+        (start, _end, spec), = eng_rep.iter_cites(text)
+        self.assertEqual((text[start:].split(",")[0], spec),
+                         ("2 Dow's Rep. 519", "n:dowpc:2:519@525"))
+
+    def test_so_too_the_other_reporters(self):
+        for text, spec in (("1 Bligh's Rep. 1", "n:blighpc:1:1"),
+                           ("2 Burr. Rep. 1046", "n:burr:2:1046"),
+                           ("3 Taunt. Rep. 1", "n:taunt:3:1"),
+                           ("Smith v. Jones, Lofft's Rep. 1", "n:lofft:0:1"),
+                           ("1 Dow N.S. 1", "n:dowcl:1:1")):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), [spec])
+        # A form that carries "Rep." itself is still that form.
+        self.assertEqual(specs("3 Co. Rep. 7"), ["n:corep:3:7"])
+        self.assertEqual(specs("1 Bl. Rep. 665"), ["n:blackw:1:665"])
+
+    def test_but_an_american_reporter_s_reports_are_its_own(self):
+        for text in ("Warren v. Lynch, 5 Johns. R. 289, the",
+                     "Commonwealth v. Pleasants, 10 Leigh Rep., 697",
+                     "Smith's Rep. 100"):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), [])
+
     def test_a_case_name_does_not_swallow_the_volume(self):
         # "Hobart" is a reporter too; "Hobart, 3" is turned away, and the
         # citation after it is read whole.
