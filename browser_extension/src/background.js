@@ -7,10 +7,11 @@
 // reader for local-network access — so they ask here.
 //
 // Also here: the right-click "Look up in GetCases"; sending PDFs Chrome
-// opens to the extension's own viewer, which links their citations; and,
+// opens to the extension's own viewer, which links their citations;
 // without GetCases, a case's scan: before a case opens on the web, the
 // sites its scan would be at (the Library of Congress, GovInfo, the Caselaw
-// Access Project) are asked whether they have it.
+// Access Project) are asked whether they have it; and, with GetCases,
+// CommonLII's CloudFlare check passed here, handed to the app.
 
 importScripts("settings.js", "patterns.js", "citations.js");
 
@@ -347,3 +348,109 @@ chrome.tabs.onUpdated.addListener(async (tabId, change) => {
   if (await bypassed(url)) return;
   await openPdfViewer(url, tabId);
 });
+
+// ---------------------------------------------------------------------------
+// CommonLII's CloudFlare check, passed here, for GetCases
+// ---------------------------------------------------------------------------
+//
+// GetCases shows the English Reports' scans from CommonLII, which CloudFlare
+// lets through only once a person has passed its check in a browser.  The
+// app can't read Chrome's cookies, so when a CommonLII page loads here past
+// the check, its cookies go to GetCases, which fetches the scans with them
+// (see the app's eng_rep_pdf.py).  CloudFlare holds them to the browser
+// that passed: the headers that page went out with go too.  Only
+// CommonLII's, only to GetCases on this computer, only while it is running.
+
+/** The sites behind CloudFlare whose cookies GetCases asks for. */
+const CLEARANCE_SITES = ["commonlii.org"];
+const CLEARANCE_URLS = CLEARANCE_SITES.map((domain) => `*://*.${domain}/*`);
+/** The headers that go with a clearance: who the browser said it was. */
+const CLEARANCE_HEADERS = ["user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "accept-language"];
+
+/** The headers each page of those sites went out with, by request, until
+ *  its answer is in. */
+const sentHeaders = new Map();
+
+chrome.webRequest.onSendHeaders.addListener(
+  (details) => {
+    const kept = {};
+    for (const h of details.requestHeaders || []) {
+      const name = h.name.toLowerCase();
+      if (CLEARANCE_HEADERS.includes(name) && h.value) kept[name] = h.value;
+    }
+    sentHeaders.set(details.requestId, kept);
+    // A page whose answer never came leaves its entry; keep the last few.
+    while (sentHeaders.size > 20) sentHeaders.delete(sentHeaders.keys().next().value);
+  },
+  { urls: CLEARANCE_URLS, types: ["main_frame"] },
+  ["requestHeaders", "extraHeaders"],
+);
+
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    const headers = sentHeaders.get(details.requestId);
+    sentHeaders.delete(details.requestId);
+    // A page CloudFlare let through: not its check ("cf-mitigated:
+    // challenge"), nor a refusal.
+    if (details.statusCode !== 200 || header(details.responseHeaders, "cf-mitigated")) return;
+    sendClearance(details.url, headers).catch(() => {});
+  },
+  { urls: CLEARANCE_URLS, types: ["main_frame"] },
+  ["responseHeaders"],
+);
+
+/** The browser, as the reader knows it: "Chrome", "Edge". */
+function browserName() {
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  const own = brands.map((b) => b.brand).find((b) => b !== "Chromium" && !/not.?a.?brand/i.test(b));
+  if (!own) return /\bEdg\//.test(navigator.userAgent) ? "Edge" : "Chrome";
+  return own.replace(/^(Google|Microsoft)\s+/, "");
+}
+
+/** The headers the browser sends, as best this worker can say, for a page
+ *  whose own were not caught (the worker had been stopped in between). */
+function ownHeaders() {
+  const out = { "user-agent": navigator.userAgent };
+  const data = navigator.userAgentData;
+  if (data) {
+    out["sec-ch-ua"] = data.brands.map((b) => `"${b.brand}";v="${b.version}"`).join(", ");
+    out["sec-ch-ua-mobile"] = data.mobile ? "?1" : "?0";
+    out["sec-ch-ua-platform"] = `"${data.platform}"`;
+  }
+  return out;
+}
+
+/** The cookies a page of *url*'s site carries.  CloudFlare's may be
+ *  Partitioned, kept under the site itself as the top-level site; Chrome
+ *  sends a top-level page both kinds. */
+async function siteCookies(url) {
+  const domain = CLEARANCE_SITES.find((d) => {
+    const host = hostOf(url);
+    return host === d || host.endsWith("." + d);
+  });
+  const jar = new Map();
+  for (const cookie of await chrome.cookies.getAll({ url })) jar.set(cookie.name, cookie);
+  try {
+    const partitioned = await chrome.cookies.getAll({ url, partitionKey: { topLevelSite: `https://${domain}` } });
+    for (const cookie of partitioned) jar.set(cookie.name, cookie);
+  } catch (e) {
+    // A Chrome before 119 has no partitioned cookies to ask for.
+  }
+  return [...jar.values()].map((c) => ({ name: c.name, value: c.value, expires: c.expirationDate || 0 }));
+}
+
+/** Hand GetCases the cookies a page of a CloudFlare'd site loaded with. */
+async function sendClearance(url, headers) {
+  if (!(await appRunning())) return;
+  const cookies = await siteCookies(url);
+  if (!cookies.some((c) => c.name === "cf_clearance")) return;
+  await appFetch("/clearance", {
+    body: {
+      url,
+      browser: browserName(),
+      cookies,
+      headers: headers && headers["user-agent"] ? headers : ownHeaders(),
+    },
+    timeout: 5000,
+  });
+}

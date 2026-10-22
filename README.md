@@ -427,8 +427,11 @@ things:
    that check once in Firefox (open any English Reports case there), and
    GetCases reuses Firefox's clearance to download the scans itself. This needs
    the `curl_cffi` and `browser_cookie3` packages. When the clearance expires,
-   GetCases asks you to pass the check in Firefox again. Without Firefox, English
-   Reports cases open in your web browser.
+   GetCases asks you to pass the check in Firefox again. Without Firefox, the
+   [Chrome extension](browser_extension/README.md) does the same from Chrome or
+   Edge: GetCases opens the case there, you pass the check, and the extension
+   hands the clearance to GetCases. With neither, English Reports cases open in
+   your web browser.
 2. **Google Scholar when Google blocks the app.** Heavy use can make Google
    Scholar answer with an "unusual traffic" challenge. With Firefox and the
    `selenium` package installed, GetCases then goes straight to a private,
@@ -540,7 +543,9 @@ automatic matching that can go wrong. In particular:
   and keeps your saved opinions. It updates the Chrome extension's folder too;
   click its reload arrow in `chrome://extensions` afterwards.
 - **The Chrome extension** sends a page's text only to GetCases, on your own
-  computer, and only while GetCases is running.
+  computer, and only while GetCases is running. The one site whose cookies it
+  reads is CommonLII, for the English Reports' scans; they too go only to
+  GetCases.
 
 ---
 
@@ -554,7 +559,7 @@ automatic matching that can go wrong. In particular:
 | Scans open in the browser instead of the app | Install `pypdfium2` and `Pillow` |
 | "CourtListener" results missing | Add your API token under **Settings → API Token…** |
 | Google Scholar returns nothing, or says it is blocked | Wait a few minutes, or set up [Firefox and selenium](#firefox) |
-| English Reports ask you to "pass the check in Firefox" | Open any English Reports case in Firefox, let the check finish, then try again |
+| English Reports ask you to pass a CloudFlare check | Click **Open in Chrome**, **Open in Edge** or **Open in Firefox** on the panel and let the check finish there; the scan then loads by itself. Chrome and Edge need the [extension](browser_extension/README.md), version 1.3 or later |
 | PDF export says LaTeX was not found | Install a [LaTeX distribution](#a-latex-distribution), or save the `.tex` source instead |
 | A document seems stuck | Its status window shows what is being tried; **Stop waiting** abandons it |
 | Citations clicked in Chrome open on the web although GetCases is running | Check **Settings → Open Citations Clicked in Chrome Here** is ticked, and see the [extension's README](browser_extension/README.md#troubleshooting) |

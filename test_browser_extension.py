@@ -1042,6 +1042,9 @@ class BridgeLifetimeTests(unittest.TestCase):
             self.assertIs(win._start_browser_bridge(), bridge.return_value)
         self.assertEqual(bridge.call_args.kwargs["port"], 31999)
         bridge.return_value.start.assert_called_once_with()
+        # It takes the CloudFlare clearance the extension hands over too.
+        self.assertIs(bridge.call_args.kwargs["on_clearance"],
+                      self.gui.eng_rep_pdf.accept_browser_clearance)
 
     def test_a_newer_getcases_gets_the_port(self):
         win = self.app()

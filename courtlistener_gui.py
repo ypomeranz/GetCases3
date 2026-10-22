@@ -11706,8 +11706,11 @@ class CourtListenerGUI:
                 self.root.after(100, self._drain_browser_requests)
             except tk.TclError:
                 pass
-        bridge = browser_bridge.BrowserBridge(self._browser_requests.put,
-                                              port=port)
+        # The extension also hands over CommonLII's CloudFlare clearance
+        # from Chrome or Edge, for the English Reports' scans (eng_rep_pdf).
+        bridge = browser_bridge.BrowserBridge(
+            self._browser_requests.put, port=port,
+            on_clearance=eng_rep_pdf.accept_browser_clearance)
         self._browser_bridge = bridge
         bridge.start()
         return bridge
@@ -41233,38 +41236,42 @@ def _open_sec(parent: tk.Misc, spec: str,
 
 
 # ---------------------------------------------------------------------------
-# Pages behind a CloudFlare check: fetched with Firefox's clearance, or not
+# Pages behind a CloudFlare check: fetched with a browser's clearance, or not
 # ---------------------------------------------------------------------------
 
 class _CloudflarePdfWindow(_PdfWindow):
     """A viewer for pages kept behind a CloudFlare check that admits people,
     not scripts — the English Reports on CommonLII.  The pages are fetched
-    with the clearance the reader obtained by passing the check in Firefox
-    (see eng_rep_pdf).  With none CloudFlare accepts, the window asks: open
-    the page in Firefox and pass the check there — the pages then load here
-    by themselves — or open it in the browser instead.  A subclass names its
-    site, says where its page is, and words the panels."""
+    with the clearance the reader obtained by passing the check in a
+    browser: Firefox, whose cookies the app reads itself, or Chrome or Edge
+    with the GetCases extension, which hands the browser's to the app (see
+    eng_rep_pdf).  With none CloudFlare accepts, the window asks: open the
+    page in one of them and pass the check there — the pages then load here
+    by themselves — or open it in the browser instead.  A subclass names
+    its site, says where its page is, and words the panels."""
 
     #: The site, as the reader knows it: "CommonLII".
     _SITE_NAME = ""
 
     def _site_url(self) -> str:
-        """The page to open outside the app — in Firefox, to pass the
-        check, or in the browser instead."""
+        """The page to open outside the app — in a browser the app can get
+        a clearance from, to pass the check, or in the browser instead."""
         return self._url
 
     def _clearance_mark(self) -> tuple:
-        """What changes when the reader passes the site's check in Firefox
-        (see eng_rep_pdf.clearance_mark)."""
+        """What changes when the reader passes the site's check in Firefox,
+        or in Chrome or Edge with the extension (see
+        eng_rep_pdf.clearance_mark)."""
         return eng_rep_pdf.clearance_mark()
 
-    def _handoff_text(self) -> str:
-        """The CloudFlare panel's explanation."""
+    def _handoff_text(self, browsers=("Firefox",)) -> str:
+        """The CloudFlare panel's explanation; *browsers* are the ones it
+        offers to open the page in, by name."""
         return ""
 
-    def _handoff_waiting_text(self) -> str:
-        """The status once Firefox is open on the check."""
-        return "Pass the check in Firefox — the scan loads here then."
+    def _handoff_waiting_text(self, browser: str = "Firefox") -> str:
+        """The status once *browser* is open on the check."""
+        return f"Pass the check in {browser} — the scan loads here then."
 
     def _link_out_text(self, has_ff: bool) -> str:
         """The explanation when the pages can't be fetched here at all."""
@@ -41274,33 +41281,71 @@ class _CloudflarePdfWindow(_PdfWindow):
         for child in self._body.winfo_children():
             child.destroy()
 
-    def _need_clearance(self, web_url: str, refused_ua: str = "") -> None:
-        """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
-        and try again by itself the moment Firefox holds a new clearance.
-        *refused_ua*: see eng_rep_pdf.CloudflareChallenge."""
+    def _extension_listening(self) -> bool:
+        """Whether the GetCases extension can hand a clearance to this app
+        now: the app has the port it knocks on (browser_bridge)."""
+        bridge = getattr(getattr(self, "_app", None), "_browser_bridge", None)
+        return bool(getattr(bridge, "bound", False))
+
+    def _extension_browsers(self) -> "list[eng_rep_pdf.ExtensionBrowser]":
+        """The browsers with the GetCases extension that can hand this app a
+        clearance — one profile of each, the one used last — or none while
+        the app isn't listening for the extension."""
+        if not self._extension_listening():
+            return []
+        out, seen = [], set()
+        for browser in eng_rep_pdf.extension_browsers():
+            if browser.name not in seen:
+                seen.add(browser.name)
+                out.append(browser)
+        return out
+
+    def _need_clearance(self, web_url: str, refused_ua: str = "",
+                        refused_by: str = "") -> None:
+        """Show the CloudFlare hand-off panel — open the page in Chrome or
+        Edge (where the GetCases extension is) or Firefox, then Retry — and
+        try again by itself the moment the app holds a new clearance.
+        *refused_ua*, *refused_by*: see eng_rep_pdf.CloudflareChallenge."""
         self._reveal()
         self._clear_body()
         self._status_var.set(f"{self._SITE_NAME} needs a CloudFlare check.")
         frame = ttk.Frame(self._body)
         frame.pack(fill="both", expand=True, padx=24, pady=24)
-        text = self._handoff_text()
+        extension = self._extension_browsers()
+        has_ff = eng_rep_pdf.firefox_available()
+        names = [b.name for b in extension] + (["Firefox"] if has_ff else [])
+        text = self._handoff_text(names)
         if refused_ua:
             # CloudFlare stops honouring a clearance long before its cookie
             # says it expires.
-            text += ("\n\nFirefox holds a clearance from an earlier check, but "
-                     "CloudFlare no longer accepts it from the app: pass the "
-                     "check again in Firefox.")
+            by = refused_by or "Firefox"
+            if by == "Firefox":
+                text += ("\n\nFirefox holds a clearance from an earlier check, "
+                         "but CloudFlare no longer accepts it from the app: "
+                         "pass the check again in Firefox.")
+            else:
+                text += (f"\n\nCloudFlare no longer accepts the clearance "
+                         f"{by} handed over from an earlier check: pass the "
+                         f"check again in {by}"
+                         + (", or in Firefox." if has_ff else "."))
+        if not extension and eng_rep_pdf.extension_browsers():
+            # The extension is there, but the app isn't listening for it.
+            text += ("\n\nThe GetCases extension in your browser can pass the "
+                     "check to the app too: turn on Settings ▸ Open Citations "
+                     "Clicked in Chrome Here.")
         ttk.Label(
             frame, wraplength=560, justify="left", text=text,
         ).pack(anchor="w", pady=(0, 16))
         row = ttk.Frame(frame)
         row.pack(anchor="w")
 
-        def open_ff() -> None:
-            if eng_rep_pdf.open_in_firefox(web_url):
-                self._status_var.set(self._handoff_waiting_text())
-            else:
-                eng_rep_pdf.open_in_browser(web_url)
+        def opener(name: str, launch):
+            def go() -> None:
+                if launch(web_url):
+                    self._status_var.set(self._handoff_waiting_text(name))
+                else:
+                    eng_rep_pdf.open_in_browser(web_url)
+            return go
 
         def retry() -> None:
             self._clearance_watch = None
@@ -41309,8 +41354,19 @@ class _CloudflarePdfWindow(_PdfWindow):
 
         self._watch_for_clearance(retry)
 
-        ttk.Button(row, text="Open in Firefox", command=open_ff).pack(side="left")
-        ttk.Button(row, text="Retry", command=retry).pack(side="left", padx=8)
+        for browser in extension:
+            ttk.Button(
+                row, text=f"Open in {browser.name}",
+                command=opener(browser.name, lambda url, b=browser:
+                               eng_rep_pdf.open_in_extension_browser(url, b)),
+            ).pack(side="left", padx=(0, 8))
+        if has_ff:
+            ttk.Button(row, text="Open in Firefox",
+                       command=opener("Firefox", lambda url:
+                                      eng_rep_pdf.open_in_firefox(url)),
+                       ).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="Retry", command=retry).pack(side="left",
+                                                          padx=(0, 8))
         ttk.Button(row, text="Open in browser instead",
                    command=lambda: (eng_rep_pdf.open_in_browser(self._site_url()),
                                     self._win.destroy())).pack(side="left")
@@ -41321,11 +41377,11 @@ class _CloudflarePdfWindow(_PdfWindow):
     _CLEARANCE_POLL = 3.0
 
     def _watch_for_clearance(self, retry) -> None:
-        """Call *retry* once Firefox holds a clearance for the site it did
-        not hold when the panel went up — the reader has passed the check —
-        for as long as the panel is showing (up to ten minutes).  Only the
-        clearance the reader obtains is used; nothing here answers the
-        check."""
+        """Call *retry* once the app holds a clearance for the site it did
+        not hold when the panel went up — the reader has passed the check,
+        in Firefox or in a browser with the extension — for as long as the
+        panel is showing (up to ten minutes).  Only the clearance the reader
+        obtains is used; nothing here answers the check."""
         token = object()
         self._clearance_watch = token
 
@@ -41350,7 +41406,7 @@ class _CloudflarePdfWindow(_PdfWindow):
             try:
                 mark = self._clearance_mark()
             except Exception as exc:
-                print(f"[cloudflare] can't watch Firefox's cookies: {exc}")
+                print(f"[cloudflare] can't watch for a clearance: {exc}")
                 return
             deadline = time.monotonic() + self._CLEARANCE_WAIT
             while watching() and time.monotonic() < deadline:
@@ -41366,9 +41422,9 @@ class _CloudflarePdfWindow(_PdfWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _link_out(self) -> None:
-        """In-app fetch isn't possible here (Firefox or a dependency
-        missing).  Offer the page on the site instead — in Firefox, when
-        it's installed, or the browser."""
+        """In-app fetch isn't possible here (no browser to get a clearance
+        from, or a dependency missing).  Offer the page on the site instead
+        — in Firefox, when it's installed, or the browser."""
         self._reveal()
         self._clear_body()
         web_url = self._site_url()
@@ -41403,8 +41459,10 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
     """The in-app viewer for an English Reports scan from CommonLII.  Reuses the
     Statutes-at-Large PDF pane (centered, zoomable, Download/Print) but fetches
     through :mod:`eng_rep_pdf` — disk cache first, then a ``curl_cffi`` fetch
-    using Firefox's CloudFlare clearance.  When there is no clearance yet it
-    shows a hand-off panel that opens the case in Firefox and offers Retry."""
+    using a browser's CloudFlare clearance (Firefox's, or what the GetCases
+    extension hands over from Chrome or Edge).  When there is no clearance
+    yet it shows a hand-off panel that opens the case in one of those
+    browsers and offers Retry."""
 
     _SITE_NAME = "CommonLII"
 
@@ -41489,7 +41547,8 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
                     meta = _measure_pdf_pages(data)
                 self._post(self._show, data, meta)
             except eng_rep_pdf.CloudflareChallenge as exc:
-                self._post(self._need_clearance, exc.web_url, exc.refused_ua)
+                self._post(self._need_clearance, exc.web_url, exc.refused_ua,
+                           exc.refused_by)
             except eng_rep_pdf.FetchUnavailable:
                 self._post(self._link_out)
             except eng_rep_pdf.OriginError as exc:
@@ -41540,10 +41599,19 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
         # it is clicked from there.
         return self._case.web_url
 
-    def _handoff_text(self) -> str:  # overrides _CloudflarePdfWindow
+    def _handoff_text(self, browsers=("Firefox",)) -> str:  # overrides _CloudflarePdfWindow
+        if browsers:
+            first, *others = browsers
+            how = f"click “Open in {first}”"
+            if others:
+                how += (" (or " + " or ".join(f"“Open in {b}”" for b in others)
+                        + ")")
+            how += " and pass the “Just a moment…” check there"
+        else:
+            how = ("pass the “Just a moment…” check in Firefox, or in Chrome "
+                   "or Edge with the GetCases extension")
         return ("CommonLII is behind a CloudFlare check.\n\n"
-                "To view this scan in the app, click “Open in Firefox” and "
-                "pass the “Just a moment…” check there — the scan loads here "
+                f"To view this scan in the app, {how} — the scan loads here "
                 "as soon as you have (or click “Retry”).  Once cleared, this "
                 "and other English Reports cases load straight in the app "
                 "(and are cached so you won't be asked again).")
@@ -41554,9 +41622,13 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
                "scan there: the site only serves the PDF when you arrive from "
                "a link on its own pages, so opening the case page first gets "
                "you past that block.")
-        if not has_ff:
-            msg += ("\n\nFor in-app viewing (cached, no repeat checks), install "
-                    "Firefox and run:\n\n    pip install curl_cffi browser_cookie3")
+        if not eng_rep_pdf.deps_present():
+            msg += ("\n\nFor in-app viewing (cached, no repeat checks), "
+                    "run:\n\n    pip install curl_cffi")
+        elif not has_ff:
+            msg += ("\n\nFor in-app viewing (cached, no repeat checks), "
+                    "install Firefox, or the GetCases extension in Chrome or "
+                    "Edge.")
         return msg
 
     def _error(self, msg: str) -> None:  # overrides _PdfWindow._error

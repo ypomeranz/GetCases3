@@ -63,9 +63,26 @@ works -- discovered empirically -- is:
   4. The bytes are cached on disk, so the same case never needs the network (or
      the captcha) again.
 
-All of this is optional: ``curl_cffi`` and Firefox may be absent, in which case
-:func:`can_fetch` is False and the caller falls back to simply opening the
-citation in the user's browser.
+Chrome and Edge, through the GetCases extension.  Their cookie stores are
+app-bound encrypted, so the app cannot read a clearance obtained in them --
+but the GetCases browser extension (``browser_extension/``) can.  When a
+CommonLII page loads past the check in a browser that has it, the extension
+posts the site's cookies, and the headers the browser sent with them, to the
+app's loopback port (:mod:`browser_bridge`), which hands them to
+:func:`accept_browser_clearance`.  CloudFlare holds a clearance to the
+browser it was issued to, so that browser's User-Agent *and* its client
+hints go out with the cookies (curl_cffi's own ``sec-ch-ua*`` name another
+version and another platform), under curl_cffi's Chrome fingerprint --
+Edge's TLS is Chrome's.  The browser is the reader's own, opened on the
+profile the extension is in (:func:`extension_browsers`) with nothing
+driving it: a browser under automation never passes CommonLII's check.
+What the extension hands over is kept on disk beside the scans' cache and
+is a candidate like any Firefox profile's; refused, it is dropped, and the
+same cookie sent again is not taken back.
+
+All of this is optional: ``curl_cffi`` may be absent, and so may Firefox and
+the extension, in which case :func:`can_fetch` is False and the caller falls
+back to simply opening the citation in the user's browser.
 
 No tkinter here -- the GUI drives the user-facing hand-off/retry; this module is
 the headless fetch+cache engine.  Run ``python -X utf8 eng_rep_pdf.py`` to see
@@ -78,11 +95,15 @@ from __future__ import annotations
 
 import configparser
 import glob
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
+import time
+import urllib.parse
 import webbrowser
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -99,21 +120,25 @@ _TIMEOUT = 45
 # ---------------------------------------------------------------------------
 
 class FetchUnavailable(Exception):
-    """In-app fetching isn't possible here (Firefox or a dependency missing);
-    the caller should just open the citation in the browser."""
+    """In-app fetching isn't possible here (no browser the app can get a
+    clearance from, or a dependency missing); the caller should just open
+    the citation in the browser."""
 
 
 class CloudflareChallenge(Exception):
     """The site served a CloudFlare challenge -- the user must clear it in
-    Firefox.  ``web_url`` is the page to open for them to do so.
-    ``refused_ua``, where Firefox did hold a clearance, is the User-Agent it
-    was sent under: CloudFlare turned the app away though the check had been
-    passed."""
+    Firefox, or in Chrome or Edge with the GetCases extension.  ``web_url``
+    is the page to open for them to do so.  ``refused_ua``, where the app
+    did hold a clearance, is the User-Agent it was sent under: CloudFlare
+    turned the app away though the check had been passed.  ``refused_by``
+    is the browser that clearance came from ("Firefox", "Chrome")."""
 
-    def __init__(self, web_url: str, refused_ua: str = ""):
+    def __init__(self, web_url: str, refused_ua: str = "",
+                 refused_by: str = ""):
         super().__init__("CloudFlare challenge")
         self.web_url = web_url
         self.refused_ua = refused_ua
+        self.refused_by = refused_by
 
 
 class OriginError(Exception):
@@ -132,7 +157,6 @@ class OriginError(Exception):
 
 def _firefox_exe() -> Optional[str]:
     """Path to firefox.exe / firefox, or None when Firefox isn't installed."""
-    import shutil
     found = shutil.which("firefox")
     if found:
         return found
@@ -258,6 +282,175 @@ def open_in_browser(url: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chrome and Edge, where the GetCases extension is
+# ---------------------------------------------------------------------------
+
+#: The extension's name in its manifest: what it is known by in a profile.
+EXTENSION_NAME = "GetCases Citation Links"
+
+
+class _Chromium(NamedTuple):
+    name: str               # as the reader knows it: "Chrome"
+    data: Path              # where its profiles live ("User Data")
+    exes: "list[str]"       # where the browser itself may be, or its command
+
+
+def _chromium_browsers() -> "list[_Chromium]":
+    """The Chromium browsers the extension can hand a clearance over from,
+    on this system: Chrome, then Edge."""
+    home = Path.home()
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if not local:
+            return []
+        roots = [os.environ.get(var, "") for var in
+                 ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+
+        def exes(*parts: str) -> "list[str]":
+            return [os.path.join(root, *parts) for root in roots if root]
+
+        return [
+            _Chromium("Chrome", Path(local, "Google", "Chrome", "User Data"),
+                      exes("Google", "Chrome", "Application", "chrome.exe")),
+            _Chromium("Edge", Path(local, "Microsoft", "Edge", "User Data"),
+                      exes("Microsoft", "Edge", "Application", "msedge.exe")),
+        ]
+    if sys.platform == "darwin":
+        support = home / "Library" / "Application Support"
+        return [
+            _Chromium("Chrome", support / "Google" / "Chrome",
+                      ["/Applications/Google Chrome.app/Contents/MacOS/"
+                       "Google Chrome"]),
+            _Chromium("Edge", support / "Microsoft Edge",
+                      ["/Applications/Microsoft Edge.app/Contents/MacOS/"
+                       "Microsoft Edge"]),
+        ]
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return [
+        _Chromium("Chrome", config / "google-chrome",
+                  ["google-chrome", "google-chrome-stable"]),
+        _Chromium("Edge", config / "microsoft-edge",
+                  ["microsoft-edge", "microsoft-edge-stable"]),
+    ]
+
+
+def _first_exe(candidates: "list[str]") -> Optional[str]:
+    for cand in candidates:
+        if os.path.isabs(cand):
+            if os.path.isfile(cand):
+                return cand
+        else:
+            found = shutil.which(cand)
+            if found:
+                return found
+    return None
+
+
+def _is_extension_dir(folder: Path) -> bool:
+    """Whether *folder* holds the GetCases extension (its manifest names it)."""
+    try:
+        manifest = json.loads(
+            (folder / "manifest.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(manifest, dict) and manifest.get("name") == EXTENSION_NAME
+
+
+def _profile_has_extension(profile: Path) -> bool:
+    """Whether the GetCases extension is installed, and not turned off, in
+    the Chromium profile folder *profile*.  The profile's preferences are the
+    browser's own record of its extensions: each entry's ``path`` is the
+    folder it was loaded unpacked from (as the extension's README has it
+    installed), or, packed, its folder under the profile's ``Extensions``."""
+    for prefs in ("Secure Preferences", "Preferences"):
+        try:
+            settings = json.loads((profile / prefs).read_text(
+                encoding="utf-8"))["extensions"]["settings"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if not isinstance(settings, dict):
+            continue
+        for entry in settings.values():
+            if not isinstance(entry, dict):
+                continue
+            manifest = entry.get("manifest")
+            ours = (isinstance(manifest, dict)
+                    and manifest.get("name") == EXTENSION_NAME)
+            path = entry.get("path")
+            if not ours and isinstance(path, str) and path:
+                folder = Path(path)
+                if not folder.is_absolute():
+                    folder = profile / "Extensions" / folder
+                ours = _is_extension_dir(folder)
+            if not ours:
+                continue
+            # Turned off: a reason it is (a list now, a bit mask before), or
+            # the old "state" 0.
+            if entry.get("disable_reasons") or entry.get("state") == 0:
+                continue
+            return True
+    return False
+
+
+class ExtensionBrowser(NamedTuple):
+    """A browser profile the GetCases extension is installed and on in."""
+
+    name: str               # "Chrome", "Edge"
+    exe: str                # the browser
+    profile: str            # the profile's folder: "Default", "Profile 1"
+    used: float             # when it was last used (its preferences' mtime)
+
+
+#: (when looked, what was found): the profiles are read at most this often.
+_EXTENSION_BROWSERS: Optional[tuple] = None
+_EXTENSION_BROWSERS_TTL = 30.0
+
+
+def extension_browsers() -> "list[ExtensionBrowser]":
+    """The Chrome and Edge profiles the GetCases extension is installed and
+    on in, most recently used first: where the reader can pass CloudFlare's
+    check and have the extension hand the clearance to the app.  Read from
+    the profiles' preferences, so known whether or not the browser is
+    running; read afresh at most every half minute."""
+    global _EXTENSION_BROWSERS
+    cached = _EXTENSION_BROWSERS
+    if cached is not None and time.monotonic() - cached[0] < _EXTENSION_BROWSERS_TTL:
+        return list(cached[1])
+    found: list[ExtensionBrowser] = []
+    for browser in _chromium_browsers():
+        exe = _first_exe(browser.exes)
+        if not exe:
+            continue
+        try:
+            profiles = [p for p in browser.data.iterdir()
+                        if (p / "Preferences").is_file()]
+        except OSError:
+            continue
+        for profile in profiles:
+            if _profile_has_extension(profile):
+                found.append(ExtensionBrowser(
+                    browser.name, exe, profile.name,
+                    _safe_mtime(profile / "Preferences")))
+    found.sort(key=lambda b: b.used, reverse=True)
+    _EXTENSION_BROWSERS = (time.monotonic(), found)
+    return list(found)
+
+
+def open_in_extension_browser(url: str, browser: ExtensionBrowser) -> bool:
+    """Open *url* in *browser*, on the profile the extension is in, for the
+    reader to pass CloudFlare's check there; the extension hands the
+    clearance to the app once they have.  The browser is only asked to open
+    a page, as a link opens one: CloudFlare's check refuses a browser under
+    automation.  Returns False if it couldn't be launched."""
+    try:
+        subprocess.Popen([browser.exe, f"--profile-directory={browser.profile}",
+                          url])
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Optional dependencies (imported lazily so the app runs without them)
 # ---------------------------------------------------------------------------
 
@@ -274,35 +467,41 @@ def deps_present() -> bool:
 
 
 def can_fetch() -> bool:
-    """True when in-app fetching is possible: Firefox installed and both
-    optional packages importable.  When False the caller links out instead."""
-    return firefox_available() and deps_present()
+    """True when in-app fetching is possible: curl_cffi importable, and a
+    clearance to be had -- Firefox installed, or the GetCases extension in
+    Chrome or Edge, or a clearance the extension has handed over already.
+    When False the caller links out instead."""
+    return deps_present() and (firefox_available()
+                               or bool(_browser_clearances())
+                               or bool(extension_browsers()))
 
 
-_IMPERSONATE_CACHE: Optional[str] = None
+#: The target :func:`_impersonate_target` found, by browser family.
+_IMPERSONATE_CACHE: dict = {}
 
 
-def _impersonate_target() -> str:
-    """The newest Firefox TLS-fingerprint target curl_cffi offers (its JA3 is
-    stable across Firefox versions, so the latest available matches a newer
-    installed Firefox closely enough to pass CloudFlare)."""
-    global _IMPERSONATE_CACHE
-    if _IMPERSONATE_CACHE:
-        return _IMPERSONATE_CACHE
-    target = "firefox"
+def _impersonate_target(family: str = "firefox") -> str:
+    """The newest TLS-fingerprint target curl_cffi offers for *family*
+    ("firefox", or "chrome" -- Edge's too, whose TLS is Chrome's).  A
+    browser's fingerprint barely moves between its versions, so the latest
+    available matches a newer installed browser closely enough to pass
+    CloudFlare."""
+    if family in _IMPERSONATE_CACHE:
+        return _IMPERSONATE_CACHE[family]
+    target = family
     try:
         import typing
         from curl_cffi.requests.impersonate import BrowserTypeLiteral
-        ffs = []
+        found = []
         for t in typing.get_args(BrowserTypeLiteral):
-            m = re.fullmatch(r"firefox(\d+)", t)
+            m = re.fullmatch(rf"{family}(\d+)", t)
             if m:
-                ffs.append((int(m.group(1)), t))
-        if ffs:
-            target = max(ffs)[1]
+                found.append((int(m.group(1)), t))
+        if found:
+            target = max(found)[1]
     except Exception:
         pass
-    _IMPERSONATE_CACHE = target
+    _IMPERSONATE_CACHE[family] = target
     return target
 
 
@@ -558,20 +757,35 @@ def _read_cookies_sqlite(db: Path, domain_substr: str) -> dict:
 
 
 class Clearance(NamedTuple):
-    """One Firefox profile's clearance for a site (CommonLII), with
-    everything that has to travel with it: the profile's whole cookie
-    set for the site and the User-Agent of the Firefox that runs that
-    profile."""
+    """One browser's clearance for a site (CommonLII), with everything that
+    has to travel with it: the browser's whole cookie set for the site and
+    the User-Agent it sent them under -- a Firefox profile's, or what the
+    GetCases extension handed over from Chrome or Edge, which brings the
+    rest of that browser's headers too."""
 
-    db: Optional[Path]      # the profile's cookies.sqlite (None: browser_cookie3)
+    db: Optional[Path]      # the profile's cookies.sqlite (None: not read from one)
     cookies: dict           # every live cookie of that profile for the site
     obtained: float         # when cf_clearance was last set or sent, Unix seconds
     expiry: float           # its stated expiry -- a floor, not a promise
     user_agent: str         # what the clearance must be sent under
+    #: The browser's other headers that go with it (client hints, its
+    #: languages), from Chrome or Edge; None for Firefox's.
+    headers: Optional[dict] = None
+    #: The browser it was obtained in, as the reader knows it.
+    browser: str = "Firefox"
 
     @property
     def value(self) -> str:
         return self.cookies.get("cf_clearance", "")
+
+    @property
+    def origin(self) -> str:
+        """Where it came from, for the log."""
+        if self.db is not None:
+            return str(self.db)
+        if self.headers is None:
+            return "browser_cookie3"
+        return f"{self.browser} (the GetCases extension)"
 
 
 #: The cookie host of the site CommonLII's English Reports come from --
@@ -642,18 +856,176 @@ def _firefox_clearances(site: str = COMMONLII) -> "list[Clearance]":
     return out
 
 
+# ---------------------------------------------------------------------------
+# Clearances the GetCases extension hands over from Chrome or Edge
+# ---------------------------------------------------------------------------
+
+#: The sites the extension may hand a clearance over for: the domain a
+#: page's address is in, to the cookie host it is filed under here.
+_EXTENSION_SITES = {"commonlii.org": COMMONLII}
+
+#: The headers a clearance from Chrome or Edge is sent under, as the browser
+#: sent them.  CloudFlare holds a clearance to the browser it issued it to;
+#: curl_cffi's own client hints name another version and another platform.
+_BROWSER_HEADERS = ("user-agent", "sec-ch-ua", "sec-ch-ua-mobile",
+                    "sec-ch-ua-platform", "accept-language")
+
+_BROWSER_LOCK = threading.Lock()
+#: What the extension has handed over, by site; None until read from disk.
+_BROWSER_CLEARANCES: Optional[dict] = None
+#: cf_clearance values CloudFlare has refused from the app.  The extension
+#: sends the browser's clearance again each time a page of the site loads
+#: there, and a dead one is no news.
+_BROWSER_REFUSED: set = set()
+
+
+def _browser_store() -> Path:
+    """Where the extension's clearances are kept between runs: beside the
+    scans' cache."""
+    return CACHE_DIR.parent / "browser_clearances.json"
+
+
+def _held_browser_clearances() -> dict:
+    """The extension's clearances, by site, read from disk the first time;
+    expired ones dropped.  Called with _BROWSER_LOCK held."""
+    global _BROWSER_CLEARANCES
+    if _BROWSER_CLEARANCES is None:
+        _BROWSER_CLEARANCES = {}
+        try:
+            kept = json.loads(_browser_store().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            kept = {}
+        for site, entry in (kept.items() if isinstance(kept, dict) else ()):
+            try:
+                _BROWSER_CLEARANCES[site] = Clearance(
+                    None, dict(entry["cookies"]), float(entry["obtained"]),
+                    float(entry["expiry"]), str(entry["user_agent"]),
+                    headers=dict(entry["headers"]),
+                    browser=str(entry["browser"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    now = time.time()
+    for site, held in list(_BROWSER_CLEARANCES.items()):
+        if held.expiry and held.expiry < now:
+            del _BROWSER_CLEARANCES[site]
+    return _BROWSER_CLEARANCES
+
+
+def _save_browser_clearances() -> None:
+    """Write the extension's clearances to disk.  With _BROWSER_LOCK held."""
+    kept = {site: {"cookies": c.cookies, "obtained": c.obtained,
+                   "expiry": c.expiry, "user_agent": c.user_agent,
+                   "headers": c.headers, "browser": c.browser}
+            for site, c in (_BROWSER_CLEARANCES or {}).items()}
+    path = _browser_store()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.part")
+        tmp.write_text(json.dumps(kept, indent=1), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        print(f"[eng_rep_pdf] could not keep the browser's clearance: {exc}")
+
+
+def accept_browser_clearance(data: dict) -> bool:
+    """Take what the GetCases extension hands over when a page of a site
+    behind CloudFlare has loaded past the check in Chrome or Edge (through
+    :mod:`browser_bridge`'s ``/clearance``)::
+
+        {"url": the page, "browser": "Chrome",
+         "cookies": [{"name", "value", "expires"}, ...],
+         "headers": {"user-agent": ..., "sec-ch-ua": ..., ...}}
+
+    Returns whether it was taken: not for a site the app fetches nothing
+    from, nor without a ``cf_clearance`` and the User-Agent it went out
+    under, nor a clearance CloudFlare has already refused from the app."""
+    try:
+        host = (urllib.parse.urlsplit(str(data.get("url") or "")).hostname
+                or "").lower()
+    except ValueError:
+        return False
+    site = next((s for domain, s in _EXTENSION_SITES.items()
+                 if host == domain or host.endswith("." + domain)), None)
+    if site is None:
+        return False
+    cookies, expiry = {}, 0.0
+    for cookie in data.get("cookies") or ():
+        if not isinstance(cookie, dict):
+            continue
+        name, value = cookie.get("name"), cookie.get("value")
+        if not (isinstance(name, str) and name and isinstance(value, str)):
+            continue
+        cookies[name] = value
+        if name == "cf_clearance":
+            try:
+                expiry = float(cookie.get("expires") or 0.0)
+            except (TypeError, ValueError):
+                expiry = 0.0
+    sent = data.get("headers")
+    headers = {k.lower(): v for k, v in (sent.items() if isinstance(
+                   sent, dict) else ())
+               if isinstance(k, str) and isinstance(v, str)
+               and k.lower() in _BROWSER_HEADERS}
+    agent = headers.pop("user-agent", "")
+    value = cookies.get("cf_clearance")
+    if not value or not agent:
+        return False
+    browser = str(data.get("browser") or "").strip() or "Chrome"
+    with _BROWSER_LOCK:
+        if value in _BROWSER_REFUSED:
+            return False
+        held = _held_browser_clearances()
+        before = held.get(site)
+        held[site] = Clearance(None, cookies, time.time(), expiry, agent,
+                               headers=headers, browser=browser)
+        _save_browser_clearances()
+    if before is None or before.value != value:
+        print(f"[eng_rep_pdf] {browser} handed over a {site} clearance")
+    return True
+
+
+def _browser_clearances(site: str = COMMONLII) -> "list[Clearance]":
+    """The clearance the extension handed over for *site*, if it holds one."""
+    with _BROWSER_LOCK:
+        held = _held_browser_clearances().get(site)
+    return [held] if held is not None else []
+
+
+def _drop_browser_clearance(site: str, value: str) -> None:
+    """CloudFlare refused the extension's clearance *value* for *site*: let
+    it go, and don't take it again."""
+    with _BROWSER_LOCK:
+        _BROWSER_REFUSED.add(value)
+        held = _held_browser_clearances()
+        if site in held and held[site].value == value:
+            del held[site]
+            _save_browser_clearances()
+
+
+def _clearances(site: str = COMMONLII) -> "list[Clearance]":
+    """Every clearance the app can send for *site* -- what the extension
+    handed over from Chrome or Edge, and each Firefox profile's --
+    freshest first, the order :func:`fetch_cleared` tries them in.
+    Firefox's stores are searched only where Firefox is."""
+    out = _browser_clearances(site)
+    if firefox_available():
+        out += _firefox_clearances(site)
+    out.sort(key=lambda c: (c.obtained, c.expiry), reverse=True)
+    return out
+
+
 def clearance_mark(site: str = COMMONLII) -> tuple:
-    """The clearances Firefox holds for *site* now — each profile's — as a
-    token that changes the moment the reader passes CloudFlare's check in
-    Firefox, so the viewer waiting on it can try again without being told
-    to.
+    """The clearances the app holds for *site* now — each Firefox profile's,
+    and what the extension handed over — as a token that changes the moment
+    the reader passes CloudFlare's check in Firefox, or in Chrome or Edge
+    with the extension, so the viewer waiting on it can try again without
+    being told to.
 
     A clearance newly issued has a new value; when it was last *used* is
     left out, since Firefox moves that every time it sends the cookie, and
     a reader still reading the site in Firefox would look like one passing
     the check again and again."""
-    return tuple(sorted(
-        (str(c.db), c.value) for c in _firefox_clearances(site)))
+    return tuple(sorted((c.origin, c.value) for c in _clearances(site)))
 
 
 # ---------------------------------------------------------------------------
@@ -718,12 +1090,15 @@ def _is_challenge(status: int, body: bytes, cf_mitigated: str = "") -> bool:
     return status in (403, 503) and any(mk in body for mk in _CHALLENGE_MARKERS)
 
 
-def _get(url: str, headers: dict, cookies: dict) -> "tuple[int, bytes, str]":
-    """One GET through curl_cffi under Firefox's TLS fingerprint:
-    ``(status, body, cf-mitigated header)``."""
+def _get(url: str, headers: dict, cookies: dict,
+         impersonate: str = "") -> "tuple[int, bytes, str]":
+    """One GET through curl_cffi under a browser's TLS fingerprint --
+    *impersonate*, Firefox's by default: ``(status, body, cf-mitigated
+    header)``."""
     from curl_cffi import requests as creq
     resp = creq.get(url, headers=headers, cookies=cookies,
-                    impersonate=_impersonate_target(), timeout=_TIMEOUT)
+                    impersonate=impersonate or _impersonate_target(),
+                    timeout=_TIMEOUT)
     return (resp.status_code, resp.content or b"",
             resp.headers.get("cf-mitigated") or "")
 
@@ -733,73 +1108,100 @@ _NAV_ACCEPT = ("text/html,application/xhtml+xml,application/xml;q=0.9,"
                "image/avif,image/webp,*/*;q=0.8")
 
 
-def _is_pdf(data: bytes) -> bool:
-    return data[:4] == b"%PDF"
-
-
-def fetch_cleared(url: str, site: str, *, referer: str, web_url: str) -> bytes:
-    """GET the PDF *url* from a site behind CloudFlare under the clearance
-    Firefox holds for it -- *site* is the cookie host ("commonlii").
-
-    Raises :class:`FetchUnavailable` when in-app fetching isn't possible (the
-    caller links out), :class:`CloudflareChallenge` carrying *web_url* -- the
-    page for the reader to pass the check on -- when the user must clear the
-    check in Firefox, or :class:`OriginError` when the site refused the
-    request without a check -- the origin's own error, or a CloudFlare rule
-    that blocks rather than checks.
-
-    Every Firefox profile holding a live-looking clearance is a candidate,
-    tried freshest first with its own cookies under its own Firefox's
-    User-Agent.  A candidate CloudFlare refuses is simply passed over --
-    its cookie's expiry said nothing, CloudFlare had already dropped it --
-    and only when every candidate is refused is the reader sent to Firefox.
-    That is what keeps a dead clearance in one profile (the regular Firefox's,
-    say) from hiding the one just obtained in another (the Microsoft Store
-    build's), whichever the store's timestamps happen to favour.
-    """
-    global _LAST_GOOD
-    if not can_fetch():
-        raise FetchUnavailable()
-
-    candidates = list(_firefox_clearances(site))
-    if not candidates:
-        # No clearance anywhere -- the user has to pass the check in Firefox.
-        raise CloudflareChallenge(web_url)
-    last = (_LAST_GOOD or {}).get(site)
-    if last is not None:
-        # Stable sort: the one that worked last goes first, the rest keep
-        # their freshest-first order.
-        candidates.sort(key=lambda c: (str(c.db), c.value) != last)
-
-    for cand in candidates:
-        headers = {
+def _headers_for(cand: Clearance, referer: str) -> dict:
+    """The headers *cand* goes out with: its browser's User-Agent, and the
+    Referer the origin wants.  A clearance from Chrome or Edge brings the
+    browser's client hints and languages besides, over curl_cffi's own
+    (which name another version, and macOS), and says it was asked for
+    from the case's page, as a click there asks."""
+    if cand.headers is None:
+        return {
             "User-Agent": cand.user_agent,
             "Accept": _NAV_ACCEPT,
             "Accept-Language": "en-US,en;q=0.5",
             "Referer": referer,
         }
+    return {**cand.headers, "User-Agent": cand.user_agent,
+            "Referer": referer, "Sec-Fetch-Site": "same-origin"}
+
+
+def _agent_brief(user_agent: str) -> str:
+    """The browser and version a User-Agent names, for the log."""
+    m = (re.search(r"\b(?:Firefox|Edg)/[\d.]+", user_agent)
+         or re.search(r"\bChrome/[\d.]+", user_agent))
+    return m.group(0) if m else user_agent.rsplit(" ", 1)[-1]
+
+
+def _is_pdf(data: bytes) -> bool:
+    return data[:4] == b"%PDF"
+
+
+def fetch_cleared(url: str, site: str, *, referer: str, web_url: str) -> bytes:
+    """GET the PDF *url* from a site behind CloudFlare under a clearance the
+    app holds for it -- *site* is the cookie host ("commonlii").
+
+    Raises :class:`FetchUnavailable` when in-app fetching isn't possible (the
+    caller links out), :class:`CloudflareChallenge` carrying *web_url* -- the
+    page for the reader to pass the check on -- when the user must clear the
+    check in a browser, or :class:`OriginError` when the site refused the
+    request without a check -- the origin's own error, or a CloudFlare rule
+    that blocks rather than checks.
+
+    Every Firefox profile holding a live-looking clearance is a candidate,
+    and so is what the GetCases extension handed over from Chrome or Edge,
+    tried freshest first, each with its own cookies under its own browser's
+    User-Agent (and, from Chrome or Edge, its client hints, under Chrome's
+    TLS fingerprint).  A candidate CloudFlare refuses is simply passed over
+    -- its cookie's expiry said nothing, CloudFlare had already dropped it
+    -- and only when every candidate is refused is the reader sent to pass
+    the check again.  That is what keeps a dead clearance in one profile
+    (the regular Firefox's, say) from hiding the one just obtained in
+    another (the Microsoft Store build's, or Chrome's), whichever the
+    timestamps happen to favour.
+    """
+    global _LAST_GOOD
+    if not can_fetch():
+        raise FetchUnavailable()
+
+    candidates = _clearances(site)
+    if not candidates:
+        # No clearance anywhere -- the user has to pass the check.
+        raise CloudflareChallenge(web_url)
+    last = (_LAST_GOOD or {}).get(site)
+    if last is not None:
+        # Stable sort: the one that worked last goes first, the rest keep
+        # their freshest-first order.
+        candidates.sort(key=lambda c: (c.origin, c.value) != last)
+
+    for cand in candidates:
+        family = "firefox" if cand.headers is None else "chrome"
         try:
-            status, data, cf_mitigated = _get(url, headers, cand.cookies)
+            status, data, cf_mitigated = _get(
+                url, _headers_for(cand, referer), cand.cookies,
+                _impersonate_target(family))
         except Exception as exc:
             raise OriginError(0) from exc
 
         if status == 200 and _is_pdf(data):
             _LAST_GOOD = {**(_LAST_GOOD or {}),
-                          site: (str(cand.db), cand.value)}
+                          site: (cand.origin, cand.value)}
             return data
 
         if _is_challenge(status, data, cf_mitigated):
             # CloudFlare no longer honours this clearance (dropped early, or
-            # obtained by a Firefox since updated) -- on to the next profile.
+            # obtained by a browser since updated) -- on to the next one.
             print(f"[eng_rep_pdf] CloudFlare refused the {site} clearance "
-                  f"from {cand.db or 'browser_cookie3'} "
-                  f"(sent as {cand.user_agent.rsplit(' ', 1)[-1]})")
+                  f"from {cand.origin} "
+                  f"(sent as {_agent_brief(cand.user_agent)})")
+            if cand.headers is not None:
+                _drop_browser_clearance(site, cand.value)
             continue
         raise OriginError(status)
 
     # Every clearance refused: cookie expired server-side, or fingerprint
-    # mismatch -> the user must re-clear in Firefox.
-    raise CloudflareChallenge(web_url, candidates[0].user_agent)
+    # mismatch -> the user must pass the check again.
+    raise CloudflareChallenge(web_url, candidates[0].user_agent,
+                              candidates[0].browser)
 
 
 def fetch_pdf(year: int, num: int, web_url: str) -> bytes:
@@ -807,7 +1209,7 @@ def fetch_pdf(year: int, num: int, web_url: str) -> bytes:
 
     Raises :class:`FetchUnavailable` when in-app fetching isn't possible (the
     caller links out), :class:`CloudflareChallenge` when the user must clear the
-    check in Firefox, or :class:`OriginError` on an origin HTTP error (see
+    check in a browser, or :class:`OriginError` on an origin HTTP error (see
     :func:`fetch_cleared`).  Successful fetches are cached.
     """
     cached = get_cached(year, num)
@@ -900,7 +1302,8 @@ if __name__ == "__main__":
     print("firefox UA        :", firefox_user_agent(), "(freshest profile)")
     print("deps present      :", deps_present())
     print("can_fetch         :", can_fetch())
-    print("impersonate target:", _impersonate_target())
+    print("impersonate target:", _impersonate_target(), "(Firefox's),",
+          _impersonate_target("chrome"), "(Chrome's and Edge's)")
     print("cache dir         :", CACHE_DIR)
 
     # Profile search diagnostics: shows where we looked and whether the
@@ -923,12 +1326,24 @@ if __name__ == "__main__":
                        else "session"))
         print(f"  - {db}\n      runs under {firefox_user_agent(db).rsplit(' ', 1)[-1]}"
               f"; live commonlii cookies {sorted(rows)}  {flag}")
-    cands = _firefox_clearances()
-    print("  will try        :", "none" if not cands
+    # The other route: Chrome or Edge with the GetCases extension, which
+    # hands the clearance over through the app's browser bridge.
+    print("\nchrome/edge with the GetCases extension:")
+    browsers = extension_browsers()
+    print("  installed in    :", ", ".join(
+        f"{b.name} (profile {b.profile!r}, used {_when(b.used)})"
+        for b in browsers) or "(none)")
+    for c in _browser_clearances():
+        print(f"  handed over     : {c.browser}'s clearance, "
+              f"{_when(c.obtained)}, as {_agent_brief(c.user_agent)}; "
+              f"cookies {sorted(c.cookies)}")
+
+    cands = _clearances()
+    print("\nwill try          :", "none" if not cands
           else f"{len(cands)} clearance(s), in this order:")
     for i, c in enumerate(cands, 1):
-        print(f"    {i}. {c.db or 'browser_cookie3'}  as "
-              f"{c.user_agent.rsplit(' ', 1)[-1]}  cookies {sorted(c.cookies)}")
+        print(f"    {i}. {c.origin}  as {_agent_brief(c.user_agent)}  "
+              f"cookies {sorted(c.cookies)}")
 
     # Hadley v Baxendale, 156 E.R. 145  ->  [1854] EngR 296
     year, num = 1854, 296
@@ -952,12 +1367,18 @@ if __name__ == "__main__":
         again = fetch_pdf(year, num, web)
         print(f"  cache hit on 2nd call: {again == data}")
     except CloudflareChallenge as exc:
-        print(f"  needs CloudFlare clearance in Firefox: {exc.web_url}")
+        print(f"  needs CloudFlare clearance in a browser: {exc.web_url}")
+        if exc.refused_by:
+            print(f"  ({exc.refused_by}'s clearance was refused)")
         if "--open" in sys.argv:
-            open_in_firefox(exc.web_url)
-            print("  opened Firefox -- solve the check and re-run.")
+            if browsers and open_in_extension_browser(exc.web_url, browsers[0]):
+                print(f"  opened {browsers[0].name} -- solve the check there; "
+                      "the extension hands the clearance to a running "
+                      "GetCases (not to this script).")
+            elif open_in_firefox(exc.web_url):
+                print("  opened Firefox -- solve the check and re-run.")
     except FetchUnavailable:
-        print("  in-app fetch unavailable (needs Firefox + curl_cffi); "
-              "would link out.")
+        print("  in-app fetch unavailable (needs curl_cffi, and Firefox or "
+              "the GetCases extension in Chrome or Edge); would link out.")
     except OriginError as exc:
         print(f"  origin error: {exc}")

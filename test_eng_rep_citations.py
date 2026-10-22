@@ -416,9 +416,10 @@ class ViewerTests(unittest.TestCase):
         with mock.patch.object(gui.threading, "Thread", Inline), \
                 mock.patch.object(eng_rep_pdf, "fetch_pdf", side_effect=
                                   eng_rep_pdf.CloudflareChallenge(
-                                      "https://c/296.html", ua)):
+                                      "https://c/296.html", ua, "Firefox")):
             win._fetch()
-        win._need_clearance.assert_called_once_with("https://c/296.html", ua)
+        win._need_clearance.assert_called_once_with(
+            "https://c/296.html", ua, "Firefox")
 
     def test_passing_the_check_in_firefox_loads_the_scan(self):
         win = object.__new__(gui._EngRepPdfWindow)
@@ -501,6 +502,23 @@ class PanelTests(unittest.TestCase):
         win._watch_for_clearance = mock.Mock()
         win._fetch = mock.Mock()
         self.win = win
+        # Firefox here, and no extension, unless a test says otherwise.
+        for name, value in (("firefox_available", True),
+                            ("extension_browsers", [])):
+            p = mock.patch.object(eng_rep_pdf, name, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    CHROME = eng_rep_pdf.ExtensionBrowser("Chrome", r"C:\chrome.exe",
+                                          "Default", 2.0)
+
+    def _with_extension(self, *browsers):
+        """The GetCases extension in *browsers*, and the app listening."""
+        self.win._app = mock.Mock(_browser_bridge=mock.Mock(bound=True))
+        p = mock.patch.object(eng_rep_pdf, "extension_browsers",
+                              return_value=list(browsers))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_it_offers_firefox_retry_and_the_browser(self):
         self.win._need_clearance(self.WEB)
@@ -537,6 +555,52 @@ class PanelTests(unittest.TestCase):
         text = _labels(self.win._body)[0]
         self.assertIn("pass the check again in Firefox", text)
         self.assertNotIn("curl_cffi", text)
+
+    def test_it_offers_the_browser_with_the_extension_first(self):
+        edge = eng_rep_pdf.ExtensionBrowser("Edge", r"C:\msedge.exe",
+                                            "Profile 1", 1.0)
+        old_chrome = self.CHROME._replace(profile="Profile 2", used=0.5)
+        self._with_extension(self.CHROME, edge, old_chrome)
+        self.win._need_clearance(self.WEB)
+        self.assertIn("click “Open in Chrome” (or “Open in Edge” or "
+                      "“Open in Firefox”)", _labels(self.win._body)[0])
+        buttons = _buttons(self.win._body)
+        # One button a browser: its profile used last.
+        self.assertEqual(list(buttons), ["Open in Chrome", "Open in Edge",
+                                         "Open in Firefox", "Retry",
+                                         "Open in browser instead"])
+        with mock.patch.object(eng_rep_pdf, "open_in_extension_browser",
+                               return_value=True) as launch:
+            buttons["Open in Chrome"].invoke()
+        launch.assert_called_once_with(self.WEB, self.CHROME)
+        self.win._status_var.set.assert_called_with(
+            "Pass the check in Chrome — the scan loads here then.")
+
+    def test_without_firefox_the_extension_is_the_way(self):
+        self._with_extension(self.CHROME)
+        with mock.patch.object(eng_rep_pdf, "firefox_available",
+                               return_value=False):
+            self.win._need_clearance(self.WEB)
+        self.assertEqual(sorted(_buttons(self.win._body)),
+                         ["Open in Chrome", "Open in browser instead", "Retry"])
+
+    def test_not_while_the_app_isnt_listening_for_the_extension(self):
+        # Settings ▸ Open Citations Clicked in Chrome Here is off: a check
+        # passed in Chrome would never reach the app.
+        self._with_extension(self.CHROME)
+        self.win._app._browser_bridge = None
+        self.win._need_clearance(self.WEB)
+        self.assertNotIn("Open in Chrome", _buttons(self.win._body))
+        self.assertIn("turn on Settings ▸ Open Citations Clicked in Chrome "
+                      "Here", _labels(self.win._body)[0])
+
+    def test_a_refused_clearance_from_chrome_names_chrome(self):
+        self._with_extension(self.CHROME)
+        self.win._need_clearance(self.WEB, "Mozilla/5.0 … Chrome/155.0.0.0",
+                                 "Chrome")
+        text = _labels(self.win._body)[0]
+        self.assertIn("the clearance Chrome handed over", text)
+        self.assertIn("pass the check again in Chrome, or in Firefox.", text)
 
 
 if __name__ == "__main__":
