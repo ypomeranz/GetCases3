@@ -189,7 +189,6 @@ class GeorgiaReporterTests(unittest.TestCase):
         for reporter, folder in (("R. Charlton", "charlton"),
                                  ("R.M. Charlt.", "charlton"),
                                  ("R. M. Charlton", "charlton"),
-                                 ("Charlton", "charlton"),
                                  ("T.U.P. Charlt.", "charlton-rep"),
                                  ("T. U. P. Charlton", "charlton-rep"),
                                  ("Charlton Rep.", "charlton-rep"),
@@ -205,6 +204,27 @@ class GeorgiaReporterTests(unittest.TestCase):
             with self.subTest(reporter=reporter):
                 self.assertEqual(citations.canonical_reporter(reporter),
                                  printed)
+
+    def test_a_name_both_books_go_by_is_read_as_either(self):
+        # Bare, "Charlton" is either man's reports; "Dud." is Georgia's
+        # Dudley or South Carolina's (23 S.C.L., its Equity 13 S.C. Eq.).
+        for cite, readings in (
+            ("1 Charlton 13", ["1 R.M. Charlt. 13", "1 T.U.P. Charlt. 13"]),
+            ("1 Charlt. 13", ["1 R.M. Charlt. 13", "1 T.U.P. Charlt. 13"]),
+            ("1 Dud. 7", ["23 S.C.L. 7", "1 Dudley Rep. 7"]),
+            ("1 Dud. Eq. 1", ["13 S.C. Eq. 1"]),
+            # Each ran to one volume; the initials say which Charlton.
+            ("2 Charlton 5", []),
+            ("1 R. Charlton 13", []),
+            ("1 Dudley Rep. 1", []),
+        ):
+            with self.subTest(cite=cite):
+                self.assertEqual(state_nominative_cites(cite), readings)
+        self.assertEqual(cites("State v. Cuthbert, 1 Charlton 13"),
+                         ["1 Charlton 13"])
+        self.assertEqual(cites("Poag v. Carroll, 23 S.C.L. (1 Dud.) 1"),
+                         ["23 S.C.L. 1"])
+        self.assertIsNone(citations.reporter_family("Charlton"))
 
 
 @unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
@@ -233,9 +253,21 @@ class GeorgiaReporterLookupTests(unittest.TestCase):
              "https://static.case.law/charlton/1/case-pdfs/0001-01.pdf"),
             ("1 T.U.P. Charlt. 13",
              "https://static.case.law/charlton-rep/1/case-pdfs/0013-01.pdf"),
+            ("23 S.C.L. 7",
+             "https://static.case.law/scl/23/case-pdfs/0007-01.pdf"),
+            ("1 Dudley Rep. 7",
+             "https://static.case.law/dudley-rep/1/case-pdfs/0007-01.pdf"),
         ):
             with self.subTest(cite=cite):
                 self.assertEqual(gui._static_case_law_url(cite), url)
+
+    def test_a_name_both_books_go_by_has_no_folder_of_its_own(self):
+        # "charlton" is R.M.'s folder, but "1 Charlton 13" may be T.U.P.'s:
+        # only its readings are looked for (see _readings_to_ask).
+        for cite in ("1 Charlton 13", "1 Charlt. 13", "1 Dud. 7"):
+            with self.subTest(cite=cite):
+                self.assertIsNone(gui._static_case_law_url(cite))
+                self.assertIsNone(gui._case_law_json_url(cite))
 
     def test_static_case_law_s_list_is_read_by_the_reporter_meant(self):
         # CAP lists State v. Doon as "1 Charlton 1"; T.U.P.'s cases as "1

@@ -221,7 +221,10 @@ US_NOMINATIVE_PARALLEL_RE = re.compile(
 # volumes the reporter ran to.  Bluebook table T1.  An abbreviation used by two
 # states ("Met." for Metcalf in Massachusetts and in Kentucky; "Sneed" in
 # Kentucky and Tennessee) maps to both, and the lookup lets the case name
-# settle which is meant.
+# settle which is meant — or, where nothing does, the reader.  A book never
+# renumbered into a series stands as its own, at offset 0, where it shares
+# its name with another: "Dud." is Georgia's Dudley as well as South
+# Carolina's.
 _STATE_NOMINATIVE_SERIES: tuple[tuple[tuple[str, ...], str, int, int], ...] = (
     # Massachusetts: 2–96 Mass.
     (("Tyng",), "Mass.", 1, 16),
@@ -306,6 +309,18 @@ _STATE_NOMINATIVE_SERIES: tuple[tuple[tuple[str, ...], str, int, int], ...] = (
     # New Jersey: Dutcher 1–5 is 25–29 N.J.L. ("State v. Roe, 2 Dutcher,
     # 215" is 26 N.J.L. 215).
     (("Dutch.", "Dutcher"), "N.J.L.", 24, 5),
+    # South Carolina: Dudley's Law Reports are 23 S.C.L., his Equity 13 S.C.
+    # Eq. (static.case.law's volumes carry both citations: 23 S.C.L. 1 is "1
+    # Dud. 1", Poag v. Carroll).  Georgia's Dudley (1830–1833) is a book of
+    # its own, "Dudley Rep." to static.case.law and CourtListener alike.
+    (("Dud. Eq.",), "S.C. Eq.", 12, 1),
+    (("Dud.",), "S.C.L.", 22, 1),
+    (("Dud.",), "Dudley Rep.", 0, 1),
+    # Georgia: R.M. Charlton's and T.U.P. Charlton's are both "Charlton's
+    # Reports", one volume each; "1 Charlton 13" is Wakefield v. Limbert in
+    # the son's and State v. Cuthbert in the father's.
+    (("Charlton", "Charlt."), "R.M. Charlt.", 0, 1),
+    (("Charlton", "Charlt."), "T.U.P. Charlt.", 0, 1),
 )
 
 
@@ -353,7 +368,8 @@ STATE_NOMINATIVE_CITE_RE = re.compile(
 # read as "93 Mass. 11" — the nominative volume taken for the page.
 STATE_NOMINATIVE_PARALLEL_RE = re.compile(
     r"\b(\d{1,3})\s+(Mass\.|Ill\.|Ky\.|Tenn\.|Va\.|Del\.|Miss\.|Pa\.|"
-    r"N\.\s?Y\.|N\.\s?C\.|Me\.|N\.\s?J\.\s?L\.)\s*[\[(]?\s*\d{1,2}\s+"
+    r"N\.\s?Y\.|N\.\s?C\.|Me\.|N\.\s?J\.\s?L\.|S\.\s?C\.\s?L\.|"
+    r"S\.\s?C\.\s?Eq\.)\s*[\[(]?\s*\d{1,2}\s+"
     + _STATE_NOM_ALT + r"\s*[\])]?\s*[-–—]?\s*(\d{1,4})\b")
 
 
@@ -1390,11 +1406,10 @@ _REPORTER_FAMILIES = (
     # static.case.law files R.M.'s as "Charlton" and T.U.P.'s as "Charlton
     # Rep.", and CourtListener files both as "Charlton", so a page both books
     # begin a case on is ambiguous there and the case's name decides.  Bare
-    # "Charlton" and "Charlt." are R.M.'s, as all three of them have it.
+    # "Charlton" and "Charlt." may be either (_STATE_NOMINATIVE_SERIES).
     _ReporterFamily(
         "R.M. Charlt.",
-        ("R.M. Charlton", "R. Charlton", "R. Charlt.", "Charlt. R.M.",
-         "Charlt.", "Charlton"),
+        ("R.M. Charlton", "R. Charlton", "R. Charlt.", "Charlt. R.M."),
         ("Charlton",), "charlton"),
     _ReporterFamily(
         "T.U.P. Charlt.",
@@ -1446,6 +1461,18 @@ for _full, _abbr in _STATE_REPORTER_NAMES.items():
                 r"[^a-z0-9-]", "", _abbr.lower().replace(" ", "-"))).strip("-"))
         _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_abbr)] = _family
     _REPORTER_FAMILY_BY_KEY[_loose_reporter_key(_full)] = _family
+
+_REPORTER_FAMILY_BY_FOLDER = {
+    family.case_law_slug: family
+    for family in _REPORTER_FAMILY_BY_KEY.values() if family.case_law_slug}
+
+
+def reporter_family_in_folder(slug: str) -> "_ReporterFamily | None":
+    """The reporter static.case.law files in its folder *slug*, where the
+    app knows it — "charlton" is R.M. Charlton's, though "Charlton" alone
+    may be either Charlton's."""
+    return _REPORTER_FAMILY_BY_FOLDER.get(slug or "")
+
 
 def _punctuated_reporters() -> "list[str]":
     """The reporters a court may write without their periods: the federal
@@ -1747,6 +1774,21 @@ _PAREN_ONLY_SERIES: dict[tuple[str, str], tuple[str, int, int]] = {
     ("howard", "miss"): ("Miss.", 1, 7),
 }
 
+#: The state of a series in _STATE_NOMINATIVE_SERIES whose name does not
+#: spell it as "Mass." and "Ky." do: "1 Dud. (Ga.) 7" is 1 Dudley Rep. 7,
+#: "1 Dud. (S.C.) 7" 23 S.C.L. 7.
+_SERIES_STATES = {
+    "S.C.L.": "sc", "S.C. Eq.": "sc",
+    "Dudley Rep.": "ga", "R.M. Charlt.": "ga", "T.U.P. Charlt.": "ga",
+}
+
+
+def _series_state(cite: str) -> str:
+    """The state key of the series official cite *cite* is in."""
+    series = cite.split(" ", 1)[1].rsplit(" ", 1)[0]
+    return (_SERIES_STATES.get(series)
+            or re.sub(r"[^a-z]", "", series.lower()))
+
 
 def paren_official_cite(m: re.Match) -> str:
     """The citation a case-cite match means, by its own jurisdiction
@@ -1778,9 +1820,7 @@ def paren_official_cite(m: re.Match) -> str:
     official = state_nominative_cites(case_match_text(m))
     if not official:
         return ""
-    picks = [c for c in official
-             if re.sub(r"[^a-z]", "", c.split(" ", 1)[1].rsplit(" ", 1)[0]
-                       .lower()) == state]
+    picks = [c for c in official if _series_state(c) == state]
     if not picks:
         return f"{vol} {rep} ({paren.group(1).strip()}) {page}"
     return picks[0] if len(official) > 1 and len(picks) == 1 else ""

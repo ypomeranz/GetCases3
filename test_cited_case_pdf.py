@@ -299,6 +299,9 @@ TITLED: list = []            # every item a window title was built from
 SAVED_CONFIG: dict = {}    # what _load_config returns
 #: cite -> (the case's own citation, its name) for a page inside a case.
 INSIDE: dict = {}
+#: cite -> the cases of the books a shared reporter name may mean, a case
+#: at the page in each, that nothing said which (see _readings_to_ask).
+READINGS: dict = {}
 HEADER_COURTS: dict = {}   # opinion html -> the court its header names
 
 
@@ -428,6 +431,8 @@ APP_NS = _load(
      "_case_law_text_for_scan": _case_law_text_for_scan,
      # The case static.case.law's volume says a page lies inside (see
      # INSIDE), and the age of opinion that cites so.
+     "_readings_to_ask": lambda cite, name="", year="", cited_in="": list(
+         READINGS.get(cite, ())),
      "_case_law_case_containing_page": lambda cite, name="": INSIDE.get(
          cite.split("@")[0]),
      "_PAGE_INSIDE_CASE_BEFORE": 1900,
@@ -1095,6 +1100,60 @@ class PageMatesAskTests(unittest.TestCase):
         self._click()
         self.assertEqual(ASKED, [])
         self.assertEqual(_FakeViewer.opened[0].data, b"%PDF-johnson")
+
+
+_RM = "https://static.case.law/charlton/1/case-pdfs/0013-01.pdf"
+_TUP = "https://static.case.law/charlton-rep/1/case-pdfs/0013-01.pdf"
+
+
+class SharedReporterNameAskTests(unittest.TestCase):
+    """"1 Charlton 13" is Wakefield v. Limbert in R.M. Charlton's reports
+    and State v. Cuthbert in T.U.P. Charlton's.  Bare, it asks which — the
+    first book's case opened, whichever was meant."""
+
+    def setUp(self):
+        RESOLVED.clear(); FETCHED.clear(); CL_ITEMS.clear()
+        TEXT_OPENS.clear(); _FakeViewer.opened.clear(); _Thread.started.clear()
+        ASKED.clear(); PICKED.clear(); TITLED.clear(); READINGS.clear()
+        self.addCleanup(READINGS.clear)
+        READINGS["1 Charlton 13"] = [
+            SimpleNamespace(url=_RM, name="Wakefield v. Limbert",
+                            cite="1 R.M. Charlt. 13", paren="Ga. 1811"),
+            SimpleNamespace(url=_TUP, name="State v. Cuthbert",
+                            cite="1 T.U.P. Charlt. 13", paren="Ga. 1805")]
+        FETCHED[_RM] = (b"%PDF-rm", _RM)
+        FETCHED[_TUP] = (b"%PDF-tup", _TUP)
+        RESOLVED["1 Charlton 13"] = _RM
+        self.app = _App()
+        self.app._bring_to_front = lambda win: None
+
+    def _click(self, cite="1 Charlton 13"):
+        return self.app.open_cited_case_pdf(
+            _FakeHost(), ("cite", cite), "", lambda _s: None,
+            fallback=lambda: None)
+
+    def test_the_reader_picks_the_book(self):
+        PICKED.append(lambda opinions: opinions[1])
+        self.assertTrue(self._click())
+        self.assertEqual(ASKED, [("1 Charlton 13", ["Wakefield v. Limbert",
+                                                    "State v. Cuthbert"])])
+        (viewer,) = _FakeViewer.opened
+        self.assertEqual(viewer.data, b"%PDF-tup")
+        # Named for the case picked, by its own book's citation.
+        self.assertEqual(viewer.title, "State v. Cuthbert — 1 T.U.P. Charlt. 13")
+        self.assertEqual(self.app.resolved_items, [])
+
+    def test_cancelling_opens_nothing(self):
+        self.assertTrue(self._click())
+        self.assertEqual(_FakeViewer.opened, [])
+
+    def test_one_reading_is_looked_up_as_before(self):
+        # Settled — by the case's name, its year, or a book with nothing at
+        # the page — there is nothing to ask.
+        READINGS.clear()
+        self._click()
+        self.assertEqual(ASKED, [])
+        self.assertEqual(_FakeViewer.opened[0].data, b"%PDF-rm")
 
 
 class CitedScanBookmarkTests(unittest.TestCase):

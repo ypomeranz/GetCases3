@@ -207,8 +207,6 @@ globalThis.GetCasesPatterns = {
    "cair": "cai",
    "cal": "cal",
    "california": "cal",
-   "charlt": "charlton",
-   "charlton": "charlton",
    "charltonrep": "charlton-rep",
    "charltrm": "charlton",
    "charlttup": "charlton-rep",
@@ -2434,8 +2432,6 @@ globalThis.GetCasesPatterns = {
    "cair": "Cai.",
    "cal": "Cal.",
    "california": "Cal.",
-   "charlt": "R.M. Charlt.",
-   "charlton": "R.M. Charlt.",
    "charltonrep": "T.U.P. Charlt.",
    "charltrm": "R.M. Charlt.",
    "charlttup": "T.U.P. Charlt.",
@@ -2898,6 +2894,30 @@ globalThis.GetCasesPatterns = {
      12
     ]
    ],
+   "charlt": [
+    [
+     "R.M. Charlt.",
+     0,
+     1
+    ],
+    [
+     "T.U.P. Charlt.",
+     0,
+     1
+    ]
+   ],
+   "charlton": [
+    [
+     "R.M. Charlt.",
+     0,
+     1
+    ],
+    [
+     "T.U.P. Charlt.",
+     0,
+     1
+    ]
+   ],
    "coldw": [
     [
      "Tenn.",
@@ -2966,6 +2986,25 @@ globalThis.GetCasesPatterns = {
      "Ky.",
      30,
      9
+    ]
+   ],
+   "dud": [
+    [
+     "S.C.L.",
+     22,
+     1
+    ],
+    [
+     "Dudley Rep.",
+     0,
+     1
+    ]
+   ],
+   "dudeq": [
+    [
+     "S.C. Eq.",
+     12,
+     1
     ]
    ],
    "dutch": [
@@ -3593,7 +3632,6 @@ globalThis.GetCasesPatterns = {
    "calrptr",
    "calrptr2d",
    "calrptr3d",
-   "charlton",
    "clct",
    "clifford",
    "colo",
