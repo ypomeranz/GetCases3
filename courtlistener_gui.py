@@ -17,6 +17,7 @@ Token lookup order:
 
 from __future__ import annotations
 
+import bisect
 import datetime as _dt
 import difflib
 import gc
@@ -21373,6 +21374,13 @@ def _bind_find_keys(win: tk.Misc, open_cb, next_cb, prev_cb) -> None:
         win.bind("<Command-Shift-g>", wrap(prev_cb))
 
 
+def _text_index_key(index: str) -> "tuple[int, int]":
+    """A Text widget's "line.char" index as numbers, to sort and compare
+    without asking Tk."""
+    line, _, col = str(index).partition(".")
+    return int(line), int(col or 0)
+
+
 def _find_pattern(needle: str) -> str:
     """*needle* as a Tk (Tcl) regular expression that matches it literally,
     save that each space matches an ordinary or a non-breaking one."""
@@ -21404,6 +21412,7 @@ class _TextFinder:
         self._matches: list[tuple[str, str]] = []
         self._cur = -1
         self._pending: Optional[str] = None  # debounce timer id
+        self._tagging: Optional[str] = None  # the next batch of highlights
 
         txt.tag_configure("findmatch", background="#fff3b0")
         txt.tag_configure("findcur", background="#ffb347")
@@ -21472,8 +21481,35 @@ class _TextFinder:
         self._txt.focus_set()
 
     def _clear_tags(self) -> None:
+        if self._tagging is not None:
+            try:
+                self._win.after_cancel(self._tagging)
+            except tk.TclError:
+                pass
+            self._tagging = None
         self._txt.tag_remove("findmatch", "1.0", "end")
         self._txt.tag_remove("findcur", "1.0", "end")
+
+    #: Matches highlighted at a time.  A letter or two in a long opinion
+    #: matches tens of thousands of times, and highlighting them all at once
+    #: held the window up for half a second; a batch at a time, the reader
+    #: types on in between.
+    _TAG_BATCH = 2000
+
+    def _highlight(self, spans: list) -> None:
+        """Highlight *spans* (``[(start, end), …]``): the first batch now,
+        the rest a batch at a time as the window has a moment."""
+        batch, rest = spans[:self._TAG_BATCH], spans[self._TAG_BATCH:]
+        self._tagging = None
+        if batch:
+            self._txt.tag_add("findmatch",
+                              *(i for span in batch for i in span))
+        if rest:
+            try:
+                self._tagging = self._win.after(
+                    1, lambda: self._highlight(rest))
+            except tk.TclError:
+                pass
 
     def _on_key(self, event) -> None:
         if event.keysym in ("Return", "Escape", "F3"):
@@ -21483,7 +21519,13 @@ class _TextFinder:
         self._pending = self._win.after(250, self.refresh)
 
     def refresh(self) -> None:
-        """Re-run the search (also called after the text is re-rendered)."""
+        """Re-run the search (also called after the text is re-rendered).
+
+        The whole text is searched in one call to Tk, and what it finds is
+        highlighted in one more.  A long opinion holds tens of thousands of
+        matches for a letter or two, and asked for one at a time, each then
+        tagged on its own, they froze the window: 13 seconds for "t" in Dred
+        Scott, the first key typed."""
         self._pending = None
         if not self._visible:
             return
@@ -21494,29 +21536,37 @@ class _TextFinder:
             self._count_var.set("")
             return
         txt = self._txt
-        idx = "1.0"
-        n = tk.IntVar()
         # A space typed finds a non-breaking one too, as the text binds a
         # section or paragraph sign to its number with one: "§ 1983", "¶ 12".
         spaced = " " in needle or "\u00a0" in needle
         if spaced:
             needle = _find_pattern(needle)
-        while True:
-            idx = txt.search(needle, idx, stopindex="end", nocase=True,
-                             count=n, regexp=spaced)
-            if not idx or not n.get():
-                break
-            end = f"{idx}+{n.get()}c"
-            self._matches.append((idx, end))
-            txt.tag_add("findmatch", idx, end)
-            idx = end
+        counts = tk.Variable(txt)
+        args = ["-all", "-nocase", "-count", str(counts)]
+        if spaced:
+            args.append("-regexp")
+        try:
+            found = txt.tk.splitlist(txt.tk.call(
+                txt._w, "search", *args, "--", needle, "1.0", "end"))
+            lengths = txt.tk.splitlist(txt.tk.globalgetvar(str(counts)))
+        except tk.TclError:
+            found, lengths = (), ()
+        # A match lies within its line (the needle has no newline), so its
+        # end is so many index positions along that line.
+        for start, length in zip(found, lengths):
+            line, col = _text_index_key(start)
+            n = int(length)
+            if n:
+                self._matches.append((f"{line}.{col}", f"{line}.{col + n}"))
         if self._matches:
             # start at the first match at or below the current view
-            top = txt.index("@0,0")
-            first = next(
-                (i for i, (s, _e) in enumerate(self._matches)
-                 if txt.compare(s, ">=", top)), 0,
-            )
+            top = _text_index_key(txt.index("@0,0"))
+            first = bisect.bisect_left(
+                [_text_index_key(s) for s, _e in self._matches], top)
+            if first >= len(self._matches):
+                first = 0
+            # Those from the view on are highlighted first.
+            self._highlight(self._matches[first:] + self._matches[:first])
             self._goto(first)
         else:
             self._count_var.set("no matches")
@@ -21524,6 +21574,15 @@ class _TextFinder:
     def step(self, delta: int) -> None:
         if not self._visible:
             self.open()
+            return
+        if self._pending:
+            # Enter pressed before typing paused: search for what was typed
+            # (not step through what was found for the word before it).
+            try:
+                self._win.after_cancel(self._pending)
+            except tk.TclError:
+                pass
+            self.refresh()
             return
         if not self._matches:
             self.refresh()
@@ -24089,6 +24148,7 @@ class _PdfPane(ttk.Frame):
         self._search_ids: dict[int, list] = {}
         self._find_bar = None
         self._find_showing = False
+        self._find_after = None     # the search waiting for typing to pause
         # Mouse text selection (enabled with the text layer, see enable_find):
         # the anchor and range are (page_index, char_index) pairs.
         self._sel_bound = False
@@ -25266,6 +25326,7 @@ class _PdfPane(ttk.Frame):
         return "break"
 
     def _close_find(self) -> str:
+        self._cancel_pending_find()
         self._search_matches = []
         self._search_cur = -1
         self._redraw_search()
@@ -25278,13 +25339,36 @@ class _PdfPane(ttk.Frame):
             pass
         return "break"
 
+    #: How long typing must pause before the pages are searched.
+    _FIND_DELAY_MS = 250
+
     def _on_find_key(self, event: tk.Event) -> None:
         if event.keysym in ("Return", "Escape", "Up", "Down",
                              "Shift_L", "Shift_R"):
             return
-        self._run_find()
+        # Searched once the reader pauses, not at every key: every page of a
+        # long scan is searched, and its first letter or two match
+        # thousands of times over.
+        self._cancel_pending_find()
+        try:
+            self._find_after = self.after(self._FIND_DELAY_MS, self._run_find)
+        except tk.TclError:
+            self._find_after = None
+
+    def _cancel_pending_find(self) -> bool:
+        """Drop the search waiting for typing to pause; whether there was
+        one."""
+        pending, self._find_after = getattr(self, "_find_after", None), None
+        if pending is None:
+            return False
+        try:
+            self.after_cancel(pending)
+        except tk.TclError:
+            pass
+        return True
 
     def _run_find(self) -> None:
+        self._find_after = None
         query = self._find_var.get() if self._find_bar is not None else ""
         self._search_matches = self._compute_matches(query)
         self._search_cur = 0 if self._search_matches else -1
@@ -25301,7 +25385,33 @@ class _PdfPane(ttk.Frame):
         if not qn or not self._search_pages:
             return []
         matches: list = []
-        for pi, chars in enumerate(self._search_pages):
+        for pi, (ntext, idxmap) in enumerate(self._search_text()):
+            chars = self._search_pages[pi]
+            start = 0
+            while True:
+                k = ntext.find(qn, start)
+                if k < 0:
+                    break
+                boxes = [chars[idxmap[j]][1] for j in range(k, k + len(qn))
+                         if chars[idxmap[j]][1] is not None]
+                rects = _union_line_runs(boxes) if boxes else []
+                if rects:
+                    matches.append((pi, rects))
+                start = k + len(qn)
+        return matches
+
+    def _search_text(self) -> list:
+        """Each page's text as find reads it — a run of white space as one
+        space, in lower case — with, for each of its characters, where it
+        stands among the page's own: ``[(text, index_map), …]``.  Worked out
+        once for the document, not at every search: a long scan's pages are
+        a few hundred thousand characters to go through."""
+        pages = self._search_pages or []
+        cached = getattr(self, "_search_norm", None)
+        if cached is not None and cached[0] is pages:
+            return cached[1]
+        out: list = []
+        for chars in pages:
             norm: list = []        # normalized chars
             idxmap: list = []      # normalized index -> original char index
             prev_ws = False
@@ -25315,19 +25425,9 @@ class _PdfPane(ttk.Frame):
                     norm.append(ch)
                     idxmap.append(li)
                     prev_ws = False
-            ntext = "".join(norm).lower()
-            start = 0
-            while True:
-                k = ntext.find(qn, start)
-                if k < 0:
-                    break
-                boxes = [chars[idxmap[j]][1] for j in range(k, k + len(qn))
-                         if chars[idxmap[j]][1] is not None]
-                rects = _union_line_runs(boxes) if boxes else []
-                if rects:
-                    matches.append((pi, rects))
-                start = k + len(qn)
-        return matches
+            out.append(("".join(norm).lower(), idxmap))
+        self._search_norm = (pages, out)
+        return out
 
     def _draw_search(self, i: int) -> None:
         """(Re)draw the search-match highlights for page *i*; the current match
@@ -25366,6 +25466,11 @@ class _PdfPane(ttk.Frame):
             self._find_count.set(f"{self._search_cur + 1} of {n}")
 
     def _find_step(self, direction: int) -> str:
+        if self._cancel_pending_find():
+            # Enter pressed before typing paused: search for what was typed,
+            # and show its first match.
+            self._run_find()
+            return "break"
         if not self._search_matches:
             return "break"
         self._search_cur = (self._search_cur + direction) % len(self._search_matches)
