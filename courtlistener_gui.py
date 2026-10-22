@@ -2833,10 +2833,21 @@ _CASE_LAW_FILE_URL_RE = re.compile(
 _CASE_LAW_VOLUMES: dict = {}
 
 
+#: "vol reporter page", or "vol reporter " — the start of a volume's keys.
+_CASE_LAW_KEY_RE = re.compile(r"\s*(\d+)\s+(.+?)(?:\s+(\d+))?\s*")
+
+
 def _case_law_cite_key(cite: str) -> str:
     """A citation reduced to what CAP's spelling and a brief's agree on:
-    "237 N. Y. 193" and "237 N.Y. 193" are both "237ny193"."""
-    return re.sub(r"[\s.]", "", str(cite or "")).lower()
+    "237 N. Y. 193" and "237 N.Y. 193" are both "237ny193".  A reporter that
+    goes by more than one name is read by its Bluebook one, so CAP's "1
+    Charlton 1" and an opinion's "1 R. Charlton 1" are both "1rmcharlt1"."""
+    cite = str(cite or "")
+    m = _CASE_LAW_KEY_RE.fullmatch(cite)
+    family = _reporter_family(m.group(2)) if m else None
+    if family is not None:
+        cite = f"{m.group(1)} {family.canonical} {m.group(3) or ''}"
+    return re.sub(r"[\s.]", "", cite).lower()
 
 
 def _case_law_volume(slug: str, vol: str) -> "tuple[dict, dict, dict]":

@@ -1383,6 +1383,26 @@ _REPORTER_FAMILIES = (
         ("Pa.",), "pa"),
     _ReporterFamily("N.J.L.", ("N.J. Law",), ("N.J.L.",), "njl"),
     _ReporterFamily("Mo.", ("Misso.",), ("Mo.",), "mo"),
+    # Georgia's superior courts before its Supreme Court sat (1846), each
+    # reported in a book of its own: Thomas U.P. Charlton's (1805–1810), his
+    # son Robert M. Charlton's (1811–1837), and the Georgia Decisions
+    # (1842–1843).  The Bluebook tells the Charltons apart by initials;
+    # static.case.law files R.M.'s as "Charlton" and T.U.P.'s as "Charlton
+    # Rep.", and CourtListener files both as "Charlton", so a page both books
+    # begin a case on is ambiguous there and the case's name decides.  Bare
+    # "Charlton" and "Charlt." are R.M.'s, as all three of them have it.
+    _ReporterFamily(
+        "R.M. Charlt.",
+        ("R.M. Charlton", "R. Charlton", "R. Charlt.", "Charlt. R.M.",
+         "Charlt.", "Charlton"),
+        ("Charlton",), "charlton"),
+    _ReporterFamily(
+        "T.U.P. Charlt.",
+        ("T.U.P. Charlton", "T. Charlton", "T. Charlt.", "Charlt. T.U.P.",
+         "Charlton Rep."),
+        ("Charlton",), "charlton-rep"),
+    _ReporterFamily("Ga. Dec.", ("Georgia Decisions",),
+                    ("Georgia Decisions",), "georgia-decisions"),
 )
 
 _REPORTER_FAMILY_BY_KEY: dict[str, _ReporterFamily] = {}
