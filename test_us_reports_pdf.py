@@ -545,8 +545,10 @@ PAGE_NS = _load(
     # apart here exactly as they are everywhere else in the app.
     "_match_page_opinion", "_match_tier", "_name_match_score", "_name_parties",
     "_name_tokens", "_party_overlap", "_is_acronym_of", "_is_common_party",
-    "_token_close",
+    "_token_close", "_spell_abbreviations", "_abbreviation_words",
+    "_abbreviated_places",
     consts=("_US_CITE_RE", "_LOC_CUTOFF", "_GOVINFO_MAX", "_PDF_TITLE_RE",
+            "_ABBREVIATION_RUN_RE",
             "_PDF_STRING_ESCAPES", "_LOC_PAGE_SUFFIXES", "_MAX_PAGE_OPINIONS",
             "_LOC_SIBLING_URL_RE", "_LOC_USREP_URL_RE", "_GOVINFO_USREP_URL_RE",
             "_us_reports_page_lock",

@@ -47,46 +47,18 @@ from typing import Any, Callable, Optional
 
 from court_catalog import (
     CIRCUIT_COURTS,
+    CIRCUIT_OF_DISTRICT,
     COURT_BLUEBOOK,
+    SPECIAL_UP,
     STATE_COURTS,
 )
 
 # ----------------------------------------------------------------------
 # Court hierarchy
 # ----------------------------------------------------------------------
-
-# Geographic circuit for each federal district (fixed by 28 U.S.C. §§ 41,
-# 1294 — not available from the API: Court.appeals_to is unpopulated).
-CIRCUIT_OF_DISTRICT: dict[str, str] = {}
-for _cir, _dists in {
-    "ca1": ("med", "mad", "nhd", "prd", "rid"),
-    "ca2": ("ctd", "nyed", "nynd", "nysd", "nywd", "vtd"),
-    "ca3": ("ded", "njd", "paed", "pamd", "pawd", "vid"),
-    "ca4": ("mdd", "nced", "ncmd", "ncwd", "scd", "vaed", "vawd",
-            "wvnd", "wvsd"),
-    "ca5": ("laed", "lamd", "lawd", "msnd", "mssd", "txed", "txnd",
-            "txsd", "txwd"),
-    "ca6": ("kyed", "kywd", "mied", "miwd", "ohnd", "ohsd", "tned",
-            "tnmd", "tnwd"),
-    "ca7": ("ilcd", "ilnd", "ilsd", "innd", "insd", "wied", "wiwd"),
-    "ca8": ("ared", "arwd", "iand", "iasd", "mnd", "moed", "mowd",
-            "ned", "ndd", "sdd"),
-    "ca9": ("akd", "azd", "cacd", "caed", "cand", "casd", "gud", "hid",
-            "idd", "mtd", "nvd", "nmid", "ord", "waed", "wawd"),
-    "ca10": ("cod", "ksd", "nmd", "oked", "oknd", "okwd", "utd", "wyd"),
-    "ca11": ("almd", "alnd", "alsd", "flmd", "flnd", "flsd", "gamd",
-             "gand", "gasd"),
-    "cadc": ("dcd",),
-}.items():
-    for _d in _dists:
-        CIRCUIT_OF_DISTRICT[_d] = _cir
-
-# Specialized federal courts whose appeals go to a single circuit.
-SPECIAL_UP: dict[str, str] = {
-    "uscfc": "cafc", "cit": "cafc", "cavet": "cafc",
-    "bap1": "ca1", "bap2": "ca2", "bap6": "ca6", "bap8": "ca8",
-    "bap9": "ca9", "bap10": "ca10",
-}
+# Each district's circuit, and the specialized courts' (CIRCUIT_OF_DISTRICT,
+# SPECIAL_UP), are court_catalog's, which files the court picker's federal
+# courts by them.
 
 # state court id -> (state name, index in that state's court list);
 # index 0 is the court of last resort (STATE_COURTS ordering).
