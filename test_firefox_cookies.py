@@ -613,7 +613,12 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_without_firefox_or_curl_cffi_the_caller_links_out(self):
-        with mock.patch.object(eng_rep_pdf, "can_fetch", return_value=False):
+        # …with no other browser for the app to drive either (with one, it
+        # fetches the scan: see test_app_browser).
+        import app_browser
+        with mock.patch.object(eng_rep_pdf, "can_fetch", return_value=False), \
+                mock.patch.object(app_browser, "available",
+                                  return_value=False):
             with self.assertRaises(eng_rep_pdf.FetchUnavailable):
                 self._fetch([self._candidate("store", "today", "156")])
         self.assertEqual(self.requests, [])

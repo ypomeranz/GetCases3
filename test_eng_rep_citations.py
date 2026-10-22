@@ -418,7 +418,9 @@ class ViewerTests(unittest.TestCase):
                                   eng_rep_pdf.CloudflareChallenge(
                                       "https://c/296.html", ua)):
             win._fetch()
-        win._need_clearance.assert_called_once_with("https://c/296.html", ua)
+        # Firefox's clearance refused: no browser of the app's own asked.
+        win._need_clearance.assert_called_once_with("https://c/296.html", ua,
+                                                    "", True)
 
     def test_passing_the_check_in_firefox_loads_the_scan(self):
         win = object.__new__(gui._EngRepPdfWindow)

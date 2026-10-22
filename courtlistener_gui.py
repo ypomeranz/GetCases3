@@ -41242,8 +41242,10 @@ class _CloudflarePdfWindow(_PdfWindow):
     with the clearance the reader obtained by passing the check in Firefox
     (see eng_rep_pdf).  With none CloudFlare accepts, the window asks: open
     the page in Firefox and pass the check there — the pages then load here
-    by themselves — or open it in the browser instead.  A subclass names its
-    site, says where its page is, and words the panels."""
+    by themselves — or open it in the browser instead.  Where Firefox isn't
+    installed, the browser the app drives for itself fetches them, and puts
+    the check to the reader in its own window (see app_browser).  A subclass
+    names its site, says where its page is, and words the panels."""
 
     #: The site, as the reader knows it: "CommonLII".
     _SITE_NAME = ""
@@ -41274,13 +41276,19 @@ class _CloudflarePdfWindow(_PdfWindow):
         for child in self._body.winfo_children():
             child.destroy()
 
-    def _need_clearance(self, web_url: str, refused_ua: str = "") -> None:
+    def _need_clearance(self, web_url: str, refused_ua: str = "",
+                        browser: str = "", answerable: bool = True) -> None:
         """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
         and try again by itself the moment Firefox holds a new clearance.
-        *refused_ua*: see eng_rep_pdf.CloudflareChallenge."""
+        *refused_ua*: see eng_rep_pdf.CloudflareChallenge.  *browser*: the
+        app's own browser put the check to the reader instead, where Firefox
+        isn't installed (see _browser_check_panel)."""
         self._reveal()
         self._clear_body()
         self._status_var.set(f"{self._SITE_NAME} needs a CloudFlare check.")
+        if browser:
+            self._browser_check_panel(browser, answerable)
+            return
         frame = ttk.Frame(self._body)
         frame.pack(fill="both", expand=True, padx=24, pady=24)
         text = self._handoff_text()
@@ -41314,6 +41322,42 @@ class _CloudflarePdfWindow(_PdfWindow):
         ttk.Button(row, text="Open in browser instead",
                    command=lambda: (eng_rep_pdf.open_in_browser(self._site_url()),
                                     self._win.destroy())).pack(side="left")
+
+    def _browser_check_panel(self, browser: str, answerable: bool) -> None:
+        """The hand-off panel where Firefox isn't installed and the app's own
+        browser (*browser*, "Google Chrome") asked for the pages: the check
+        it put to the reader went unanswered.  Retry puts it to them again
+        in that window; or the site opens in their browser.  Safari
+        (*answerable* False) takes no answer while the app drives it, so
+        there the site in their browser is what is left."""
+        frame = ttk.Frame(self._body)
+        frame.pack(fill="both", expand=True, padx=24, pady=24)
+        if answerable:
+            text = (f"{self._SITE_NAME} wants a person to pass its CloudFlare "
+                    f"check.  The app showed it to you in a {browser} window, "
+                    "and it went unanswered.\n\nClick “Retry” to bring the "
+                    "check up again — the scan loads here once you have "
+                    "passed it.")
+        else:
+            text = (f"{self._SITE_NAME} wants a person to pass its CloudFlare "
+                    f"check, and {browser} can't take an answer while the app "
+                    "is fetching with it.\n\nOpen the case in your browser "
+                    "instead, or click “Retry” in case the check passes by "
+                    "itself this time.")
+        ttk.Label(frame, wraplength=560, justify="left", text=text).pack(
+            anchor="w", pady=(0, 16))
+        row = ttk.Frame(frame)
+        row.pack(anchor="w")
+
+        def retry() -> None:
+            self._clear_body()
+            self._fetch()
+
+        ttk.Button(row, text="Retry", command=retry).pack(side="left")
+        ttk.Button(row, text="Open in browser instead",
+                   command=lambda: (eng_rep_pdf.open_in_browser(self._site_url()),
+                                    self._win.destroy())).pack(
+            side="left", padx=8)
 
     #: How long the hand-off panel waits for a new clearance before leaving it
     #: to the Retry button, and how often it looks.
@@ -41365,19 +41409,23 @@ class _CloudflarePdfWindow(_PdfWindow):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _link_out(self) -> None:
-        """In-app fetch isn't possible here (Firefox or a dependency
-        missing).  Offer the page on the site instead — in Firefox, when
-        it's installed, or the browser."""
+    def _link_out(self, reason: str = "") -> None:
+        """In-app fetch isn't possible here (Firefox, a browser the app can
+        drive, or a dependency missing).  Offer the page on the site instead
+        — in Firefox, when it's installed, or the browser.  *reason*, where
+        the app's own browser said why it could not be used (Safari's remote
+        automation off), is said too."""
         self._reveal()
         self._clear_body()
         web_url = self._site_url()
         has_ff = eng_rep_pdf.firefox_available()
         frame = ttk.Frame(self._body)
         frame.pack(fill="both", expand=True, padx=24, pady=24)
+        text = self._link_out_text(has_ff)
+        if reason:
+            text += f"\n\n({reason})"
         ttk.Label(frame, wraplength=560, justify="left",
-                  text=self._link_out_text(has_ff)).pack(
-            anchor="w", pady=(0, 16))
+                  text=text).pack(anchor="w", pady=(0, 16))
         row = ttk.Frame(frame)
         row.pack(anchor="w")
         if has_ff:
@@ -41481,17 +41529,25 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
         self._status_var.set("Loading the English Reports scan…")
         case = self._case
 
+        def step(text: str) -> None:
+            # The app's own browser has put CommonLII's check to the reader
+            # (see eng_rep_pdf.fetch_in_app_browser): said in the load's
+            # window and in this one.
+            _load_step(text)
+            self._post(self._say, text)
+
         def run() -> None:
             try:
                 with _watching(self._watch):
                     data = eng_rep_pdf.fetch_pdf(case.year, case.num,
-                                                 case.web_url)
+                                                 case.web_url, on_step=step)
                     meta = _measure_pdf_pages(data)
                 self._post(self._show, data, meta)
             except eng_rep_pdf.CloudflareChallenge as exc:
-                self._post(self._need_clearance, exc.web_url, exc.refused_ua)
-            except eng_rep_pdf.FetchUnavailable:
-                self._post(self._link_out)
+                self._post(self._need_clearance, exc.web_url, exc.refused_ua,
+                           exc.browser, exc.answerable)
+            except eng_rep_pdf.FetchUnavailable as exc:
+                self._post(self._link_out, exc.reason)
             except eng_rep_pdf.OriginError as exc:
                 self._post(self._error,
                            f"CommonLII returned an error (HTTP {exc.status}).")
@@ -41556,7 +41612,9 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
                "you past that block.")
         if not has_ff:
             msg += ("\n\nFor in-app viewing (cached, no repeat checks), install "
-                    "Firefox and run:\n\n    pip install curl_cffi browser_cookie3")
+                    "Firefox and run:\n\n    pip install curl_cffi browser_cookie3"
+                    "\n\n— or, with Chrome or Edge (or Safari on a Mac), "
+                    "run:\n\n    pip install selenium")
         return msg
 
     def _error(self, msg: str) -> None:  # overrides _PdfWindow._error

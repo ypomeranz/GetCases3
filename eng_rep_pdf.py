@@ -64,14 +64,20 @@ works -- discovered empirically -- is:
      the captcha) again.
 
 All of this is optional: ``curl_cffi`` and Firefox may be absent, in which case
-:func:`can_fetch` is False and the caller falls back to simply opening the
-citation in the user's browser.
+:func:`can_fetch` is False.  The browser the app drives for itself (Chrome or
+Edge, or Safari on a Mac -- see :mod:`app_browser`) then fetches the scan
+instead, from inside the case's page, minimized, and comes to the front only
+when the check wants the reader (:func:`fetch_in_app_browser`).  Its cookies
+stay in it: nothing it is admitted with is sent by any other client.  With no
+browser to drive either, the caller falls back to simply opening the citation
+in the user's browser.
 
 No tkinter here -- the GUI drives the user-facing hand-off/retry; this module is
 the headless fetch+cache engine.  Run ``python -X utf8 eng_rep_pdf.py`` to see
 every profile, its clearance and the UA it will be sent under, and to fetch a
 sample PDF live (``--fresh`` drops the sample from the cache first so the
-network path is really exercised).
+network path is really exercised; ``--app-browser`` fetches it as though
+Firefox weren't installed, by the app's own browser).
 """
 
 from __future__ import annotations
@@ -99,8 +105,14 @@ _TIMEOUT = 45
 # ---------------------------------------------------------------------------
 
 class FetchUnavailable(Exception):
-    """In-app fetching isn't possible here (Firefox or a dependency missing);
-    the caller should just open the citation in the browser."""
+    """In-app fetching isn't possible here (Firefox, a browser to drive or a
+    dependency missing); the caller should just open the citation in the
+    browser.  ``reason``, where there is one worth telling the reader:
+    Safari's remote automation is off, say."""
+
+    def __init__(self, reason: str = ""):
+        super().__init__(reason or "in-app fetching unavailable")
+        self.reason = reason
 
 
 class CloudflareChallenge(Exception):
@@ -108,12 +120,18 @@ class CloudflareChallenge(Exception):
     Firefox.  ``web_url`` is the page to open for them to do so.
     ``refused_ua``, where Firefox did hold a clearance, is the User-Agent it
     was sent under: CloudFlare turned the app away though the check had been
-    passed."""
+    passed.  ``browser``, where the app's own browser asked instead of
+    Firefox (see :func:`fetch_in_app_browser`), is its name: the reader was
+    shown the check in it and did not pass it -- or, ``answerable`` False,
+    could not (Safari takes no answer while it is driven)."""
 
-    def __init__(self, web_url: str, refused_ua: str = ""):
+    def __init__(self, web_url: str, refused_ua: str = "", *,
+                 browser: str = "", answerable: bool = True):
         super().__init__("CloudFlare challenge")
         self.web_url = web_url
         self.refused_ua = refused_ua
+        self.browser = browser
+        self.answerable = answerable
 
 
 class OriginError(Exception):
@@ -274,8 +292,9 @@ def deps_present() -> bool:
 
 
 def can_fetch() -> bool:
-    """True when in-app fetching is possible: Firefox installed and both
-    optional packages importable.  When False the caller links out instead."""
+    """True when fetching under Firefox's clearance is possible: Firefox
+    installed and curl_cffi importable.  When False :func:`fetch_pdf` asks
+    the app's own browser instead (see :func:`fetch_in_app_browser`)."""
     return firefox_available() and deps_present()
 
 
@@ -802,23 +821,85 @@ def fetch_cleared(url: str, site: str, *, referer: str, web_url: str) -> bytes:
     raise CloudflareChallenge(web_url, candidates[0].user_agent)
 
 
-def fetch_pdf(year: int, num: int, web_url: str) -> bytes:
+def fetch_pdf(year: int, num: int, web_url: str, on_step=None) -> bytes:
     """Return the PDF bytes for a CommonLII case, from cache or the network.
+
+    With Firefox and curl_cffi, under Firefox's clearance (see
+    :func:`fetch_cleared`); without them, by the browser the app drives (see
+    :func:`fetch_in_app_browser`), which tells *on_step* when it puts the
+    check to the reader.
 
     Raises :class:`FetchUnavailable` when in-app fetching isn't possible (the
     caller links out), :class:`CloudflareChallenge` when the user must clear the
-    check in Firefox, or :class:`OriginError` on an origin HTTP error (see
-    :func:`fetch_cleared`).  Successful fetches are cached.
+    check, or :class:`OriginError` on an origin HTTP error.  Successful
+    fetches are cached.
     """
     cached = get_cached(year, num)
     if cached is not None:
         return cached
     pdf_url = re.sub(r"\.html?$", ".pdf", web_url)
-    # The Referer is the case's page: the origin Apache hotlink-blocks PDFs
-    # requested without it.
-    data = fetch_cleared(pdf_url, COMMONLII, referer=web_url, web_url=web_url)
+    if can_fetch():
+        # The Referer is the case's page: the origin Apache hotlink-blocks
+        # PDFs requested without it.
+        data = fetch_cleared(pdf_url, COMMONLII, referer=web_url,
+                             web_url=web_url)
+    else:
+        data = fetch_in_app_browser(pdf_url, web_url, on_step=on_step)
     _store(year, num, data)
     return data
+
+
+#: Said above CommonLII's check in the window the reader passes it in.  It
+#: must not contain any of the words :func:`_page_is_check` looks for.
+_PERSON_NOTE = ("GetCases: CommonLII wants to check that a person is asking. "
+                "Pass the check below and the scan opens in GetCases; this "
+                "window then goes back down by itself.")
+
+
+def _page_is_check(url: str, source: str) -> bool:
+    """Whether a page the app's browser loaded is CloudFlare's check: its
+    "Just a moment" title, or the check's own script.  Not CloudFlare's
+    ``/cdn-cgi/challenge-platform/`` script, which it puts into every page."""
+    return ("<title>Just a moment" in source or "__cf_chl_opt" in source
+            or "cf-browser-verification" in source)
+
+
+def fetch_in_app_browser(pdf_url: str, web_url: str, on_step=None) -> bytes:
+    """GET the PDF *pdf_url* by the browser the app drives where Firefox
+    isn't installed (see :mod:`app_browser`): the case's page *web_url* is
+    loaded in it first, and the PDF asked for from inside that page, as a
+    reader's click would ask for it.  CloudFlare's check, where the page
+    meets one, is the browser's to pass: one that passes by itself is waited
+    for, and one that wants a person brings the window up for the reader,
+    *on_step* told so, and is waited for in turn.
+
+    Raises :class:`FetchUnavailable` (with its reason) when no browser can be
+    driven, :class:`CloudflareChallenge` naming the browser when the check
+    stood, and :class:`OriginError` when the site refused the PDF."""
+    try:
+        import app_browser
+    except ImportError:
+        raise FetchUnavailable()
+    if not app_browser.available():
+        raise FetchUnavailable()
+    try:
+        browser = app_browser.shared()
+        status, data, cf_mitigated = browser.fetch_file(
+            web_url, pdf_url, challenged=_page_is_check, note=_PERSON_NOTE,
+            waiting=(f"Pass CommonLII's check in the {browser.name} window "
+                     "that has opened — the scan loads here then."),
+            on_step=on_step)
+    except app_browser.NeedsPerson as exc:
+        raise CloudflareChallenge(web_url, browser=exc.browser,
+                                  answerable=exc.answerable)
+    except app_browser.Unavailable as exc:
+        print(f"[eng_rep_pdf] the app's browser: {exc}")
+        raise FetchUnavailable(str(exc))
+    if status == 200 and _is_pdf(data):
+        return data
+    if _is_challenge(status, data, cf_mitigated):
+        raise CloudflareChallenge(web_url, browser=browser.name)
+    raise OriginError(status)
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +977,14 @@ if __name__ == "__main__":
     def _when(ts: float) -> str:
         return f"{_dt.datetime.fromtimestamp(ts):%Y-%m-%d %H:%M}" if ts else "-"
 
+    if "--app-browser" in sys.argv:
+        # As though Firefox weren't installed: the app's own browser fetches
+        # the scan (see fetch_in_app_browser), and puts CommonLII's check to
+        # whoever runs this in its window.
+        def _firefox_exe() -> Optional[str]:
+            return None
+        print("as if Firefox weren't installed: the app's own browser asks")
+
     print("firefox exe       :", _firefox_exe())
     print("firefox UA        :", firefox_user_agent(), "(freshest profile)")
     print("deps present      :", deps_present())
@@ -952,12 +1041,18 @@ if __name__ == "__main__":
         again = fetch_pdf(year, num, web)
         print(f"  cache hit on 2nd call: {again == data}")
     except CloudflareChallenge as exc:
+        if exc.browser:
+            print(f"  CommonLII's check stood in {exc.browser}"
+                  + ("" if exc.answerable else ", which takes no answer "
+                     "while it is driven"))
+            sys.exit(1)
         print(f"  needs CloudFlare clearance in Firefox: {exc.web_url}")
         if "--open" in sys.argv:
             open_in_firefox(exc.web_url)
             print("  opened Firefox -- solve the check and re-run.")
-    except FetchUnavailable:
-        print("  in-app fetch unavailable (needs Firefox + curl_cffi); "
-              "would link out.")
+    except FetchUnavailable as exc:
+        print("  in-app fetch unavailable (needs Firefox + curl_cffi, or "
+              "selenium and a browser to drive); would link out."
+              + (f"\n  {exc.reason}" if exc.reason else ""))
     except OriginError as exc:
         print(f"  origin error: {exc}")

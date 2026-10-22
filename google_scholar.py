@@ -352,15 +352,16 @@ _COOKIE_STORE = Path.home() / ".cache" / "courtlistener_scholar_state.json"
 
 _CAPTCHA_TIP = (
     "[scholar] Google Scholar is challenging this computer and the real "
-    "Firefox fallback isn't available (install `selenium` + Firefox to enable "
-    "it). Meanwhile the app serves results from the local opinion database and "
-    "CourtListener; the block clears on its own in a while."
+    "browser fallback isn't available (install `selenium`, with Firefox, "
+    "Chrome or Edge — or Safari on a Mac — to enable it). Meanwhile the app "
+    "serves results from the local opinion database and CourtListener; the "
+    "block clears on its own in a while."
 )
 _CAPTCHA_UNANSWERED_TIP = (
-    "[scholar] Google Scholar is challenging this computer and Firefox did "
-    "not get past the challenge either. Meanwhile the app serves results from "
-    "the local opinion database and CourtListener; Firefox offers the CAPTCHA "
-    "again in a few minutes."
+    "[scholar] Google Scholar is challenging this computer and the real "
+    "browser did not get past the challenge either. Meanwhile the app serves "
+    "results from the local opinion database and CourtListener; the browser "
+    "offers the CAPTCHA again in a few minutes."
 )
 
 
@@ -3725,8 +3726,8 @@ class GoogleScholarFetcher:
             return False
         if not scholar_browser.available():
             self._browser_dead = True
-            print("[scholar] real-Firefox fallback unavailable "
-                  "(needs `pip install selenium` and Firefox)")
+            print("[scholar] real-browser fallback unavailable (needs "
+                  "`pip install selenium` and Firefox, Chrome or Edge)")
             return False
         return True
 
