@@ -1286,6 +1286,7 @@ import us_code
 import pdfium_lock
 import scan_process
 import scholar_browser
+import scholar_extension
 import us_reports_pdf
 import brief_reader
 import browser_links
@@ -11706,19 +11707,43 @@ class CourtListenerGUI:
                 self.root.after(100, self._drain_browser_requests)
             except tk.TclError:
                 pass
-        # The extension also hands over CommonLII's CloudFlare clearance
-        # from Chrome or Edge, for the English Reports' scans (eng_rep_pdf).
+        # The extension also hands over what passing a check for people in
+        # Chrome or Edge earns: CommonLII's CloudFlare clearance, for the
+        # English Reports' scans (eng_rep_pdf), and Google's CAPTCHA
+        # exemption, with the page it stood in front of, for Scholar
+        # (scholar_extension).
         bridge = browser_bridge.BrowserBridge(
             self._browser_requests.put, port=port,
-            on_clearance=eng_rep_pdf.accept_browser_clearance)
+            on_clearance=self._extension_clearance,
+            on_page=scholar_extension.deliver_page)
         self._browser_bridge = bridge
+        scholar_extension.bridge = bridge
+        scholar_extension.on_answered = self._raise_after_browser
         bridge.start()
         return bridge
+
+    @staticmethod
+    def _extension_clearance(data: dict):
+        """What the extension hands over from a page that loaded past a check
+        for people (the bridge's /clearance): Scholar's to scholar_extension,
+        the rest (CommonLII's) to eng_rep_pdf."""
+        if scholar_extension.handles(str(data.get("url") or "")):
+            return scholar_extension.accept_clearance(data)
+        return eng_rep_pdf.accept_browser_clearance(data)
+
+    def _raise_after_browser(self) -> None:
+        """The reader has answered a CAPTCHA in their browser: the window the
+        page it stood in front of opens comes to the front (see
+        _on_window_mapped).  Called off the Tk thread; it only sets a time."""
+        self._browser_raise_until = (time.monotonic()
+                                     + self._BROWSER_RAISE_SECONDS)
 
     def _stop_browser_bridge(self) -> None:
         """Give the extension's port up.  Off the Tk thread: the server can
         take half a second to notice."""
         bridge, self._browser_bridge = self._browser_bridge, None
+        if scholar_extension.bridge is bridge:
+            scholar_extension.bridge = None
         if bridge is not None:
             threading.Thread(target=bridge.close, daemon=True).start()
 

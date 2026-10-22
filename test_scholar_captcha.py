@@ -63,6 +63,9 @@ class _FetcherFixture(unittest.TestCase):
         f._browser_usable = mock.Mock(return_value=True)
         f._browser_get = mock.Mock(
             return_value=gs._BrowserResponse(RESULTS, URL))
+        # No Chrome or Edge with the extension, unless a test says so.
+        f._extension_usable = mock.Mock(return_value=False)
+        f._extension_get = mock.Mock(return_value=None)
         self._answer(429, "https://scholar.google.com/sorry/")
 
     def tearDown(self):
@@ -149,6 +152,67 @@ class FirefoxFirstTests(_FetcherFixture):
     def test_a_check_for_a_newer_version_puts_no_captcha_to_the_reader(self):
         self.fetcher._get(URL, once=True)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+
+
+# ---------------------------------------------------------------------------
+# Chrome or Edge, where the GetCases extension is: where the CAPTCHA goes
+# ---------------------------------------------------------------------------
+
+
+class ExtensionBrowserTests(_FetcherFixture):
+    """With the extension in Chrome or Edge, a CAPTCHA is put to the reader
+    there rather than in a Firefox window."""
+
+    def setUp(self):
+        super().setUp()
+        f = self.fetcher
+        f._extension_usable.return_value = True
+        f._extension_get.return_value = gs._BrowserResponse(RESULTS, URL)
+        f._browser_get.return_value = None     # the hidden Firefox challenged
+
+    def test_the_hidden_firefox_is_asked_but_puts_up_no_window(self):
+        resp = self.fetcher._get(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.fetcher._extension_get.assert_called_once_with(URL)
+        self.assertEqual(resp.text, RESULTS)
+
+    def test_one_challenge_is_enough_without_firefox_too(self):
+        self.fetcher._browser_usable.return_value = False
+        self.fetcher._get(URL)
+        self.assertEqual(self.session.get.call_count, 1)
+        self.fetcher._extension_get.assert_called_once_with(URL)
+
+    def test_firefox_passing_needs_no_browser(self):
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(
+            RESULTS, URL)
+        self.fetcher._get(URL)
+        self.fetcher._extension_get.assert_not_called()
+        self.assertTrue(self.fetcher._browser_first)
+
+    def test_the_browser_answering_is_not_firefox_working(self):
+        # Next time the app's own requests go first again, wearing what the
+        # browser handed over (see _adopt_browser_identity).
+        self.fetcher._get(URL)
+        self.assertFalse(self.fetcher._browser_first)
+
+    def test_unanswered_there_too_cools_down(self):
+        self.fetcher._extension_get.return_value = None
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
+
+    def test_with_firefox_first_too(self):
+        self.fetcher._browser_first = True
+        self.fetcher._get(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.fetcher._extension_get.assert_called_once_with(URL)
+        self.session.get.assert_not_called()
+
+    def test_not_for_a_check_for_a_newer_version(self):
+        self.fetcher._browser_first = True
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL, once=True)
+        self.fetcher._extension_get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

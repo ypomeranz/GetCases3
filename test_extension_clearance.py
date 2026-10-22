@@ -349,6 +349,20 @@ class DiscoveryTests(unittest.TestCase):
         self.exe.unlink()
         self.assertEqual(self.found(), [])
 
+    def test_in_edge_too(self):
+        edge_exe = self.tmp / "msedge.exe"
+        edge_exe.write_bytes(b"")
+        edge_data = self.tmp / "Edge User Data"
+        eng_rep_pdf._chromium_browsers.return_value = [
+            eng_rep_pdf._Chromium("Chrome", self.data, [str(self.exe)]),
+            eng_rep_pdf._Chromium("Edge", edge_data, [str(edge_exe)])]
+        self.profile("Default", {"xyz": self.OTHER})          # Chrome's
+        self.data = edge_data
+        self.profile("Profile 1", {"abc": {"path": str(EXTENSION)}})
+        self.assertEqual(self.found(), [("Edge", "Profile 1")])
+        (edge,) = eng_rep_pdf.extension_browsers()
+        self.assertEqual(edge.exe, str(edge_exe))
+
     def test_the_page_opens_on_the_extension_s_profile(self):
         browser = eng_rep_pdf.ExtensionBrowser("Edge", r"C:\msedge.exe",
                                                "Profile 2", 0.0)
@@ -397,9 +411,21 @@ class BridgeClearanceTests(unittest.TestCase):
                     "/clearance", handed_over(), headers=headers)[0], 403)
         self.assertEqual(self.taken, [])
 
+    def test_no_cookies_is_still_a_clearance_to_hand_on(self):
+        # Scholar's page, from a browser holding none of Google's cookies.
+        status, reply, _ = self.b.request("/clearance",
+                                          {**handed_over(), "cookies": []})
+        self.assertEqual((status, reply), (200, {"ok": True}))
+        self.assertEqual(self.taken[0]["cookies"], [])
+
+    def test_a_reply_of_the_app_s_own_is_passed_back(self):
+        self.b.bridge._on_clearance = lambda data: {"ok": True, "page": True}
+        self.assertEqual(self.b.request("/clearance", handed_over())[:2],
+                         (200, {"ok": True, "page": True}))
+
     def test_out_of_shape_is_refused(self):
         good = handed_over()
-        for bad in ({**good, "url": 5}, {**good, "cookies": []},
+        for bad in ({**good, "url": 5},
                     {**good, "cookies": [{"name": "a"}]},
                     {**good, "cookies": "cf_clearance=x"},
                     {**good, "headers": {"user-agent": 5}},
@@ -417,6 +443,29 @@ class BridgeClearanceTests(unittest.TestCase):
         other = _Bridge.__new__(_Bridge)
         other.bridge = bare
         self.assertEqual(other.request("/clearance", handed_over())[0], 404)
+        self.assertEqual(other.request("/page", {"url": WEB,
+                                                 "html": "<p>"})[0], 404)
+
+    def test_a_page_is_passed_on_and_the_app_s_reply_back(self):
+        pages = []
+        self.b.bridge._on_page = lambda data: pages.append(data) or {
+            "ok": True, "close": True}
+        page = {"url": "https://scholar.google.com/scholar?q=x",
+                "html": "<html>results</html>"}
+        self.assertEqual(self.b.request("/page", page)[:2],
+                         (200, {"ok": True, "close": True}))
+        self.assertEqual(pages, [page])
+
+    def test_a_page_out_of_shape_or_too_big_is_refused(self):
+        self.b.bridge._on_page = pages = mock.Mock(return_value=True)
+        url = "https://scholar.google.com/scholar?q=x"
+        self.assertEqual(self.b.request("/page", {"url": url})[0], 400)
+        self.assertEqual(self.b.request("/page", {"url": url, "html": ""})[0],
+                         400)
+        with mock.patch.object(browser_bridge, "MAX_PAGE", 10):
+            self.assertEqual(self.b.request(
+                "/page", {"url": url, "html": "x" * 11})[0], 413)
+        pages.assert_not_called()
 
     def test_end_to_end_into_eng_rep_pdf(self):
         tmp = Path(tempfile.mkdtemp(prefix="extclear_bridge_"))
@@ -438,16 +487,37 @@ class ExtensionSourceTests(unittest.TestCase):
             encoding="utf-8"))
         self.assertIn("cookies", manifest["permissions"])
 
-    def test_it_hands_over_the_sites_the_app_takes_and_no_others(self):
+    def _listed(self, name):
         import re
         worker = (EXTENSION / "src" / "background.js").read_text(
             encoding="utf-8")
-        sites = re.search(r"const CLEARANCE_SITES = \[([^\]]*)\]", worker)
-        self.assertEqual(sorted(re.findall(r'"([^"]+)"', sites.group(1))),
-                         sorted(eng_rep_pdf._EXTENSION_SITES))
-        headers = re.search(r"const CLEARANCE_HEADERS = \[([^\]]*)\]", worker)
-        self.assertEqual(re.findall(r'"([^"]+)"', headers.group(1)),
+        found = re.search(rf"const {name} = \[([^\]]*)\]", worker)
+        return re.findall(r'"([^"]+)"', found.group(1))
+
+    def test_it_hands_over_the_sites_the_app_takes_and_no_others(self):
+        import scholar_extension
+        self.assertEqual(sorted(self._listed("CLEARANCE_SITES")),
+                         sorted([*eng_rep_pdf._EXTENSION_SITES,
+                                 scholar_extension.SCHOLAR_HOST]))
+        self.assertEqual(self._listed("CLEARANCE_HEADERS"),
                          list(eng_rep_pdf._BROWSER_HEADERS))
+
+    def test_of_google_s_cookies_only_those_the_app_takes(self):
+        import scholar_extension
+        listed = self._listed("GOOGLE_COOKIES")
+        self.assertEqual(listed, list(scholar_extension.COOKIES))
+        # None of those that sign the reader in to Google.
+        for signs_in in ("SID", "HSID", "SSID", "APISID", "SAPISID",
+                         "__Secure-1PSID", "__Secure-3PSID", "LSID"):
+            self.assertNotIn(signs_in, listed)
+
+    def test_the_page_script_keeps_scholar_s_page_as_it_arrived(self):
+        content = (EXTENSION / "src" / "content.js").read_text(
+            encoding="utf-8")
+        # Taken before start() links anything in it.
+        self.assertLess(content.index("const arrived ="),
+                        content.index("async function start()"))
+        self.assertIn('message.type === "pageHtml"', content)
 
 
 if __name__ == "__main__":

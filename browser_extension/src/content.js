@@ -13,6 +13,12 @@
   if (globalThis.__getcasesContent) return;
   globalThis.__getcasesContent = true;
 
+  // A Google Scholar page as it arrived, before anything is linked in it:
+  // what GetCases is handed when it opened the page here to have Google's
+  // CAPTCHA answered (see background.js).
+  const arrived = window === window.top && location.hostname === "scholar.google.com"
+    ? document.documentElement.outerHTML : "";
+
   const C = globalThis.GetCasesCitations;
   const LINK = "getcases-cite";
   const MAX_TEXT = 2000000;
@@ -450,6 +456,9 @@
     }
     if (message && message.type === "count") {
       reply({ links: links.size, mode });
+    }
+    if (message && message.type === "pageHtml") {
+      reply({ html: arrived });
     }
     return false;
   });
