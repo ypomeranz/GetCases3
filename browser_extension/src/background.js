@@ -7,10 +7,12 @@
 // reader for local-network access — so they ask here.
 //
 // Also here: the right-click "Look up in GetCases"; sending PDFs Chrome
-// opens to the extension's own viewer, which links their citations; and,
+// opens to the extension's own viewer, which links their citations;
 // without GetCases, a case's scan: before a case opens on the web, the
 // sites its scan would be at (the Library of Congress, GovInfo, the Caselaw
-// Access Project) are asked whether they have it.
+// Access Project) are asked whether they have it; and, with GetCases,
+// CommonLII's CloudFlare check and Google Scholar's CAPTCHA passed here,
+// handed to the app.
 
 importScripts("settings.js", "patterns.js", "citations.js");
 
@@ -347,3 +349,149 @@ chrome.tabs.onUpdated.addListener(async (tabId, change) => {
   if (await bypassed(url)) return;
   await openPdfViewer(url, tabId);
 });
+
+// ---------------------------------------------------------------------------
+// Checks for people passed here, for GetCases: CommonLII's, Google Scholar's
+// ---------------------------------------------------------------------------
+//
+// GetCases shows the English Reports' scans from CommonLII, which CloudFlare
+// lets through only once a person has passed its check in a browser, and
+// opinions from Google Scholar, which Google sometimes puts a CAPTCHA in
+// front of.  The app can't read Chrome's cookies, so when a page of either
+// loads here past the check, its cookies go to GetCases, which fetches with
+// them (see the app's eng_rep_pdf.py and scholar_extension.py).  The check
+// holds them to the browser that passed: the headers that page went out
+// with go too.  And when GetCases opened the page here itself, to have a
+// CAPTCHA answered, it is waiting for the page: that goes to it as well,
+// and the tab closes.  Only these sites' cookies, only to GetCases on this
+// computer, only while it is running.
+
+/** The sites whose cookies GetCases asks for. */
+const CLEARANCE_SITES = ["commonlii.org", "scholar.google.com"];
+const CLEARANCE_URLS = CLEARANCE_SITES.map((domain) => `*://*.${domain}/*`);
+/** Of Google's cookies, the only ones read: Google's anti-abuse state (the
+ *  CAPTCHA exemption among it), a returning browser's standing, Scholar's
+ *  preferences and consent.  Never those that sign you in to Google. */
+const GOOGLE_COOKIES = ["GOOGLE_ABUSE_EXEMPTION", "AEC", "NID", "__Secure-ENID", "GSP", "SOCS", "CONSENT"];
+/** The headers that go with a clearance: who the browser said it was. */
+const CLEARANCE_HEADERS = ["user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "accept-language"];
+
+/** The headers each page of those sites went out with, by request, until
+ *  its answer is in. */
+const sentHeaders = new Map();
+
+chrome.webRequest.onSendHeaders.addListener(
+  (details) => {
+    const kept = {};
+    for (const h of details.requestHeaders || []) {
+      const name = h.name.toLowerCase();
+      if (CLEARANCE_HEADERS.includes(name) && h.value) kept[name] = h.value;
+    }
+    sentHeaders.set(details.requestId, kept);
+    // A page whose answer never came leaves its entry; keep the last few.
+    while (sentHeaders.size > 20) sentHeaders.delete(sentHeaders.keys().next().value);
+  },
+  { urls: CLEARANCE_URLS, types: ["main_frame"] },
+  ["requestHeaders", "extraHeaders"],
+);
+
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    const headers = sentHeaders.get(details.requestId);
+    sentHeaders.delete(details.requestId);
+    // A page let through: not CloudFlare's check ("cf-mitigated:
+    // challenge"), nor a refusal.  (Google sends its CAPTCHA from elsewhere,
+    // or as a page GetCases knows when it sees one.)
+    if (details.statusCode !== 200 || header(details.responseHeaders, "cf-mitigated")) return;
+    sendClearance(details, headers).catch(() => {});
+  },
+  { urls: CLEARANCE_URLS, types: ["main_frame"] },
+  ["responseHeaders"],
+);
+
+/** Which of CLEARANCE_SITES *url* is on. */
+function clearanceSite(url) {
+  const host = hostOf(url);
+  return CLEARANCE_SITES.find((d) => host === d || host.endsWith("." + d));
+}
+
+/** The browser, as the reader knows it: "Chrome", "Edge". */
+function browserName() {
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  const own = brands.map((b) => b.brand).find((b) => b !== "Chromium" && !/not.?a.?brand/i.test(b));
+  if (!own) return /\bEdg\//.test(navigator.userAgent) ? "Edge" : "Chrome";
+  return own.replace(/^(Google|Microsoft)\s+/, "");
+}
+
+/** The headers the browser sends, as best this worker can say, for a page
+ *  whose own were not caught (the worker had been stopped in between). */
+function ownHeaders() {
+  const out = { "user-agent": navigator.userAgent };
+  const data = navigator.userAgentData;
+  if (data) {
+    out["sec-ch-ua"] = data.brands.map((b) => `"${b.brand}";v="${b.version}"`).join(", ");
+    out["sec-ch-ua-mobile"] = data.mobile ? "?1" : "?0";
+    out["sec-ch-ua-platform"] = `"${data.platform}"`;
+  }
+  return out;
+}
+
+/** The cookies a page of *url*'s site carries (of Google's, only
+ *  GOOGLE_COOKIES).  CloudFlare's may be Partitioned, kept under the site
+ *  itself as the top-level site; Chrome sends a top-level page both kinds. */
+async function siteCookies(url) {
+  const domain = clearanceSite(url);
+  const topLevelSite = "https://" + domain.split(".").slice(-2).join(".");
+  const jar = new Map();
+  for (const cookie of await chrome.cookies.getAll({ url })) jar.set(cookie.name, cookie);
+  try {
+    const partitioned = await chrome.cookies.getAll({ url, partitionKey: { topLevelSite } });
+    for (const cookie of partitioned) jar.set(cookie.name, cookie);
+  } catch (e) {
+    // A Chrome before 119 has no partitioned cookies to ask for.
+  }
+  let cookies = [...jar.values()];
+  if (domain === "scholar.google.com") cookies = cookies.filter((c) => GOOGLE_COOKIES.includes(c.name));
+  return cookies.map((c) => ({ name: c.name, value: c.value, expires: c.expirationDate || 0 }));
+}
+
+/** The page in tab *tabId* as it arrived, before anything was linked in it
+ *  (content.js keeps it).  Asked a few times: the tab's content script may
+ *  not be listening yet as the page finishes loading. */
+async function arrivedPage(tabId) {
+  for (let i = 0; i < 12; i++) {
+    try {
+      const reply = await chrome.tabs.sendMessage(tabId, { type: "pageHtml" }, { frameId: 0 });
+      if (reply && reply.html) return reply.html;
+    } catch (e) {
+      // Not listening yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return "";
+}
+
+/** Hand GetCases the cookies a page of a site behind a check loaded with —
+ *  and the page itself, if GetCases opened it here to have a CAPTCHA
+ *  answered, closing its tab once GetCases has it. */
+async function sendClearance(details, headers) {
+  if (!(await appRunning())) return;
+  const { url, tabId } = details;
+  const cookies = await siteCookies(url);
+  // CommonLII's cookies are no use to GetCases without CloudFlare's.
+  if (clearanceSite(url) === "commonlii.org" && !cookies.some((c) => c.name === "cf_clearance")) return;
+  const reply = await appFetch("/clearance", {
+    body: {
+      url,
+      browser: browserName(),
+      cookies,
+      headers: headers && headers["user-agent"] ? headers : ownHeaders(),
+    },
+    timeout: 5000,
+  });
+  if (!reply || !reply.page || tabId < 0) return;
+  const html = await arrivedPage(tabId);
+  if (!html) return;
+  const taken = await appFetch("/page", { body: { url, html }, timeout: 15000 });
+  if (taken && taken.close) await chrome.tabs.remove(tabId);
+}

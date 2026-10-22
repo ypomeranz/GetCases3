@@ -1036,12 +1036,38 @@ class BridgeLifetimeTests(unittest.TestCase):
 
     def test_on_by_default_on_the_configured_port(self):
         win = self.app()
+        extension = self.gui.scholar_extension
         with patch.object(self.gui, "_load_config",
                           return_value={"browser_bridge_port": 31999}), \
-                patch.object(browser_bridge, "BrowserBridge") as bridge:
+                patch.object(browser_bridge, "BrowserBridge") as bridge, \
+                patch.object(extension, "bridge", None), \
+                patch.object(extension, "on_answered", None):
             self.assertIs(win._start_browser_bridge(), bridge.return_value)
+            # Scholar's CAPTCHA can be put to the reader in their browser.
+            self.assertIs(extension.bridge, bridge.return_value)
+            win._stop_browser_bridge()
+            self.assertIsNone(extension.bridge)
         self.assertEqual(bridge.call_args.kwargs["port"], 31999)
         bridge.return_value.start.assert_called_once_with()
+        # It takes what the extension hands over from a check passed in the
+        # browser too.
+        self.assertIs(bridge.call_args.kwargs["on_clearance"],
+                      self.gui.CourtListenerGUI._extension_clearance)
+        self.assertIs(bridge.call_args.kwargs["on_page"],
+                      extension.deliver_page)
+
+    def test_what_the_extension_hands_over_goes_to_its_site_s_module(self):
+        gui = self.gui
+        with patch.object(gui.scholar_extension, "accept_clearance",
+                          return_value={"ok": True}) as scholar, \
+                patch.object(gui.eng_rep_pdf, "accept_browser_clearance",
+                             return_value=True) as commonlii:
+            gui.CourtListenerGUI._extension_clearance(
+                {"url": "https://scholar.google.com/scholar?q=x"})
+            gui.CourtListenerGUI._extension_clearance(
+                {"url": "https://www.commonlii.org/uk/cases/EngR/1854/296.html"})
+        self.assertEqual(scholar.call_count, 1)
+        self.assertEqual(commonlii.call_count, 1)
 
     def test_a_newer_getcases_gets_the_port(self):
         win = self.app()

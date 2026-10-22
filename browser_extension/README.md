@@ -26,12 +26,16 @@ It also works in Chrome, Edge, Brave and other Chromium browsers.
 
 The extension is not in the Chrome Web Store; you load it from this folder.
 
-1. Open `chrome://extensions` in Chrome.
-2. Turn on **Developer mode** (top right).
+1. Open `chrome://extensions` in Chrome (`edge://extensions` in Edge).
+2. Turn on **Developer mode** (top right in Chrome; in the left-hand column
+   in Edge).
 3. Click **Load unpacked** and choose this `browser_extension` folder.
 4. Optional: to link citations in PDF files on your own computer (`file://`
    addresses), click **Details** on the extension and turn on **Allow access to
    file URLs**.
+
+GetCases finds the extension in Chrome or Edge, in whichever profile you
+loaded it into, and opens the pages it needs a check passed on there (below).
 
 After **Settings → Check for Updates…** updates GetCases, click the reload
 arrow on the extension's card in `chrome://extensions` to pick up any changes.
@@ -60,6 +64,22 @@ arrow on the extension's card in `chrome://extensions` to pick up any changes.
   the PDF in Chrome's own viewer instead (to print, fill in or annotate it).
   To open a linked PDF in the viewer by hand, right-click the link and choose
   **Open PDF with citation links**.
+
+- **English Reports scans from CommonLII.** CommonLII is behind a CloudFlare
+  "Just a moment…" check that GetCases can't pass by itself, and it can't read
+  Chrome's or Edge's cookies either. When GetCases asks for the check, click
+  **Open in Chrome** (or **Open in Edge**): the case's page opens in the
+  browser the extension is in, you pass the check there, and the extension
+  hands CommonLII's cookies to GetCases, which then loads the scan, and the
+  ones after it, in the app. Settings → Open Citations Clicked in Chrome Here
+  has to be on in GetCases for this.
+- **Google Scholar's CAPTCHA.** When Google stops answering GetCases ("unusual
+  traffic"), GetCases opens the page it wanted in the browser the extension is
+  in. Answer the CAPTCHA there if Google shows one (often it doesn't: your own
+  browser is trusted where GetCases isn't); the extension hands the page to
+  GetCases, the tab closes by itself, and the case opens in the app. GetCases's
+  own requests then go out with the CAPTCHA exemption Google gave your browser.
+  This needs Settings → Open Citations Clicked in Chrome Here too.
 
 The toolbar button shows whether GetCases is running ("on" on the icon), how
 many citations are linked on the page, and these settings:
@@ -120,6 +140,25 @@ you click a citation without GetCases, the web page for it opens like any link
 (the Library of Congress, GovInfo, the Caselaw Access Project) whether they
 have that one file: a request for its address alone, without cookies.
 
+The extension reads two sites' cookies, and only while GetCases is running:
+
+- **CommonLII's** (`commonlii.org`). When a CommonLII page has loaded past
+  CloudFlare's check, the extension gives GetCases those cookies and the
+  headers the browser sent with them (its User-Agent, client hints and
+  languages), so that GetCases can fetch the English Reports' scans as the
+  browser would. GetCases keeps them in
+  `~/.config/courtlistener/browser_clearances.json` until CloudFlare stops
+  accepting them.
+- **Google's, for Scholar**, and of those only Google's anti-abuse and
+  preference cookies: `GOOGLE_ABUSE_EXEMPTION`, `AEC`, `NID`, `__Secure-ENID`,
+  `GSP`, `SOCS` and `CONSENT`. Never the cookies that keep you signed in to
+  Google. They go to GetCases, with the same headers, when a Scholar page
+  loads. When GetCases itself opened a Scholar page for you to answer
+  Google's CAPTCHA, the extension also gives it that page, then closes the
+  tab.
+
+They go only to GetCases on your computer. No other site's cookies are read.
+
 GetCases answers only the extension: its door takes requests only with the
 extension's header, refuses anything a web page sends, and is reachable only
 from this computer.
@@ -143,6 +182,8 @@ from this computer.
 | No links on Westlaw, Lexis, … | They are among the **Sites left alone**; take one off the list to link it. |
 | A PDF says it can't be opened | Use **Open it in Chrome's viewer instead**. For PDFs on your computer, allow file access (step 4 above). |
 | A PDF has no links | It may be a scan with no text layer; the button on the viewer's toolbar says "No text to read". |
+| GetCases asks for CommonLII's check again after you passed it in Chrome | Check the popup says GetCases is running, and reload the extension in `chrome://extensions` if it is older than 1.3 (it needs the cookie permission). If it still asks, CloudFlare is turning GetCases away with Chrome's cookies: use **Open in Firefox**, or open the case in the browser instead. |
+| A Scholar page opened in the browser but the case never opened in GetCases | Reload the extension if it is older than 1.4. The page has to load past Google's CAPTCHA within five minutes; after that GetCases stops waiting, and won't open another for ten. |
 
 ## For developers
 

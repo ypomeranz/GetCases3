@@ -17,6 +17,7 @@ Token lookup order:
 
 from __future__ import annotations
 
+import bisect
 import datetime as _dt
 import difflib
 import gc
@@ -1286,6 +1287,7 @@ import us_code
 import pdfium_lock
 import scan_process
 import scholar_browser
+import scholar_extension
 import us_reports_pdf
 import brief_reader
 import browser_links
@@ -11706,16 +11708,43 @@ class CourtListenerGUI:
                 self.root.after(100, self._drain_browser_requests)
             except tk.TclError:
                 pass
-        bridge = browser_bridge.BrowserBridge(self._browser_requests.put,
-                                              port=port)
+        # The extension also hands over what passing a check for people in
+        # Chrome or Edge earns: CommonLII's CloudFlare clearance, for the
+        # English Reports' scans (eng_rep_pdf), and Google's CAPTCHA
+        # exemption, with the page it stood in front of, for Scholar
+        # (scholar_extension).
+        bridge = browser_bridge.BrowserBridge(
+            self._browser_requests.put, port=port,
+            on_clearance=self._extension_clearance,
+            on_page=scholar_extension.deliver_page)
         self._browser_bridge = bridge
+        scholar_extension.bridge = bridge
+        scholar_extension.on_answered = self._raise_after_browser
         bridge.start()
         return bridge
+
+    @staticmethod
+    def _extension_clearance(data: dict):
+        """What the extension hands over from a page that loaded past a check
+        for people (the bridge's /clearance): Scholar's to scholar_extension,
+        the rest (CommonLII's) to eng_rep_pdf."""
+        if scholar_extension.handles(str(data.get("url") or "")):
+            return scholar_extension.accept_clearance(data)
+        return eng_rep_pdf.accept_browser_clearance(data)
+
+    def _raise_after_browser(self) -> None:
+        """The reader has answered a CAPTCHA in their browser: the window the
+        page it stood in front of opens comes to the front (see
+        _on_window_mapped).  Called off the Tk thread; it only sets a time."""
+        self._browser_raise_until = (time.monotonic()
+                                     + self._BROWSER_RAISE_SECONDS)
 
     def _stop_browser_bridge(self) -> None:
         """Give the extension's port up.  Off the Tk thread: the server can
         take half a second to notice."""
         bridge, self._browser_bridge = self._browser_bridge, None
+        if scholar_extension.bridge is bridge:
+            scholar_extension.bridge = None
         if bridge is not None:
             threading.Thread(target=bridge.close, daemon=True).start()
 
@@ -21345,6 +21374,13 @@ def _bind_find_keys(win: tk.Misc, open_cb, next_cb, prev_cb) -> None:
         win.bind("<Command-Shift-g>", wrap(prev_cb))
 
 
+def _text_index_key(index: str) -> "tuple[int, int]":
+    """A Text widget's "line.char" index as numbers, to sort and compare
+    without asking Tk."""
+    line, _, col = str(index).partition(".")
+    return int(line), int(col or 0)
+
+
 def _find_pattern(needle: str) -> str:
     """*needle* as a Tk (Tcl) regular expression that matches it literally,
     save that each space matches an ordinary or a non-breaking one."""
@@ -21376,6 +21412,7 @@ class _TextFinder:
         self._matches: list[tuple[str, str]] = []
         self._cur = -1
         self._pending: Optional[str] = None  # debounce timer id
+        self._tagging: Optional[str] = None  # the next batch of highlights
 
         txt.tag_configure("findmatch", background="#fff3b0")
         txt.tag_configure("findcur", background="#ffb347")
@@ -21444,8 +21481,35 @@ class _TextFinder:
         self._txt.focus_set()
 
     def _clear_tags(self) -> None:
+        if self._tagging is not None:
+            try:
+                self._win.after_cancel(self._tagging)
+            except tk.TclError:
+                pass
+            self._tagging = None
         self._txt.tag_remove("findmatch", "1.0", "end")
         self._txt.tag_remove("findcur", "1.0", "end")
+
+    #: Matches highlighted at a time.  A letter or two in a long opinion
+    #: matches tens of thousands of times, and highlighting them all at once
+    #: held the window up for half a second; a batch at a time, the reader
+    #: types on in between.
+    _TAG_BATCH = 2000
+
+    def _highlight(self, spans: list) -> None:
+        """Highlight *spans* (``[(start, end), …]``): the first batch now,
+        the rest a batch at a time as the window has a moment."""
+        batch, rest = spans[:self._TAG_BATCH], spans[self._TAG_BATCH:]
+        self._tagging = None
+        if batch:
+            self._txt.tag_add("findmatch",
+                              *(i for span in batch for i in span))
+        if rest:
+            try:
+                self._tagging = self._win.after(
+                    1, lambda: self._highlight(rest))
+            except tk.TclError:
+                pass
 
     def _on_key(self, event) -> None:
         if event.keysym in ("Return", "Escape", "F3"):
@@ -21455,7 +21519,13 @@ class _TextFinder:
         self._pending = self._win.after(250, self.refresh)
 
     def refresh(self) -> None:
-        """Re-run the search (also called after the text is re-rendered)."""
+        """Re-run the search (also called after the text is re-rendered).
+
+        The whole text is searched in one call to Tk, and what it finds is
+        highlighted in one more.  A long opinion holds tens of thousands of
+        matches for a letter or two, and asked for one at a time, each then
+        tagged on its own, they froze the window: 13 seconds for "t" in Dred
+        Scott, the first key typed."""
         self._pending = None
         if not self._visible:
             return
@@ -21466,29 +21536,37 @@ class _TextFinder:
             self._count_var.set("")
             return
         txt = self._txt
-        idx = "1.0"
-        n = tk.IntVar()
         # A space typed finds a non-breaking one too, as the text binds a
         # section or paragraph sign to its number with one: "§ 1983", "¶ 12".
         spaced = " " in needle or "\u00a0" in needle
         if spaced:
             needle = _find_pattern(needle)
-        while True:
-            idx = txt.search(needle, idx, stopindex="end", nocase=True,
-                             count=n, regexp=spaced)
-            if not idx or not n.get():
-                break
-            end = f"{idx}+{n.get()}c"
-            self._matches.append((idx, end))
-            txt.tag_add("findmatch", idx, end)
-            idx = end
+        counts = tk.Variable(txt)
+        args = ["-all", "-nocase", "-count", str(counts)]
+        if spaced:
+            args.append("-regexp")
+        try:
+            found = txt.tk.splitlist(txt.tk.call(
+                txt._w, "search", *args, "--", needle, "1.0", "end"))
+            lengths = txt.tk.splitlist(txt.tk.globalgetvar(str(counts)))
+        except tk.TclError:
+            found, lengths = (), ()
+        # A match lies within its line (the needle has no newline), so its
+        # end is so many index positions along that line.
+        for start, length in zip(found, lengths):
+            line, col = _text_index_key(start)
+            n = int(length)
+            if n:
+                self._matches.append((f"{line}.{col}", f"{line}.{col + n}"))
         if self._matches:
             # start at the first match at or below the current view
-            top = txt.index("@0,0")
-            first = next(
-                (i for i, (s, _e) in enumerate(self._matches)
-                 if txt.compare(s, ">=", top)), 0,
-            )
+            top = _text_index_key(txt.index("@0,0"))
+            first = bisect.bisect_left(
+                [_text_index_key(s) for s, _e in self._matches], top)
+            if first >= len(self._matches):
+                first = 0
+            # Those from the view on are highlighted first.
+            self._highlight(self._matches[first:] + self._matches[:first])
             self._goto(first)
         else:
             self._count_var.set("no matches")
@@ -21496,6 +21574,15 @@ class _TextFinder:
     def step(self, delta: int) -> None:
         if not self._visible:
             self.open()
+            return
+        if self._pending:
+            # Enter pressed before typing paused: search for what was typed
+            # (not step through what was found for the word before it).
+            try:
+                self._win.after_cancel(self._pending)
+            except tk.TclError:
+                pass
+            self.refresh()
             return
         if not self._matches:
             self.refresh()
@@ -24061,6 +24148,7 @@ class _PdfPane(ttk.Frame):
         self._search_ids: dict[int, list] = {}
         self._find_bar = None
         self._find_showing = False
+        self._find_after = None     # the search waiting for typing to pause
         # Mouse text selection (enabled with the text layer, see enable_find):
         # the anchor and range are (page_index, char_index) pairs.
         self._sel_bound = False
@@ -25238,6 +25326,7 @@ class _PdfPane(ttk.Frame):
         return "break"
 
     def _close_find(self) -> str:
+        self._cancel_pending_find()
         self._search_matches = []
         self._search_cur = -1
         self._redraw_search()
@@ -25250,13 +25339,36 @@ class _PdfPane(ttk.Frame):
             pass
         return "break"
 
+    #: How long typing must pause before the pages are searched.
+    _FIND_DELAY_MS = 250
+
     def _on_find_key(self, event: tk.Event) -> None:
         if event.keysym in ("Return", "Escape", "Up", "Down",
                              "Shift_L", "Shift_R"):
             return
-        self._run_find()
+        # Searched once the reader pauses, not at every key: every page of a
+        # long scan is searched, and its first letter or two match
+        # thousands of times over.
+        self._cancel_pending_find()
+        try:
+            self._find_after = self.after(self._FIND_DELAY_MS, self._run_find)
+        except tk.TclError:
+            self._find_after = None
+
+    def _cancel_pending_find(self) -> bool:
+        """Drop the search waiting for typing to pause; whether there was
+        one."""
+        pending, self._find_after = getattr(self, "_find_after", None), None
+        if pending is None:
+            return False
+        try:
+            self.after_cancel(pending)
+        except tk.TclError:
+            pass
+        return True
 
     def _run_find(self) -> None:
+        self._find_after = None
         query = self._find_var.get() if self._find_bar is not None else ""
         self._search_matches = self._compute_matches(query)
         self._search_cur = 0 if self._search_matches else -1
@@ -25273,7 +25385,33 @@ class _PdfPane(ttk.Frame):
         if not qn or not self._search_pages:
             return []
         matches: list = []
-        for pi, chars in enumerate(self._search_pages):
+        for pi, (ntext, idxmap) in enumerate(self._search_text()):
+            chars = self._search_pages[pi]
+            start = 0
+            while True:
+                k = ntext.find(qn, start)
+                if k < 0:
+                    break
+                boxes = [chars[idxmap[j]][1] for j in range(k, k + len(qn))
+                         if chars[idxmap[j]][1] is not None]
+                rects = _union_line_runs(boxes) if boxes else []
+                if rects:
+                    matches.append((pi, rects))
+                start = k + len(qn)
+        return matches
+
+    def _search_text(self) -> list:
+        """Each page's text as find reads it — a run of white space as one
+        space, in lower case — with, for each of its characters, where it
+        stands among the page's own: ``[(text, index_map), …]``.  Worked out
+        once for the document, not at every search: a long scan's pages are
+        a few hundred thousand characters to go through."""
+        pages = self._search_pages or []
+        cached = getattr(self, "_search_norm", None)
+        if cached is not None and cached[0] is pages:
+            return cached[1]
+        out: list = []
+        for chars in pages:
             norm: list = []        # normalized chars
             idxmap: list = []      # normalized index -> original char index
             prev_ws = False
@@ -25287,19 +25425,9 @@ class _PdfPane(ttk.Frame):
                     norm.append(ch)
                     idxmap.append(li)
                     prev_ws = False
-            ntext = "".join(norm).lower()
-            start = 0
-            while True:
-                k = ntext.find(qn, start)
-                if k < 0:
-                    break
-                boxes = [chars[idxmap[j]][1] for j in range(k, k + len(qn))
-                         if chars[idxmap[j]][1] is not None]
-                rects = _union_line_runs(boxes) if boxes else []
-                if rects:
-                    matches.append((pi, rects))
-                start = k + len(qn)
-        return matches
+            out.append(("".join(norm).lower(), idxmap))
+        self._search_norm = (pages, out)
+        return out
 
     def _draw_search(self, i: int) -> None:
         """(Re)draw the search-match highlights for page *i*; the current match
@@ -25338,6 +25466,11 @@ class _PdfPane(ttk.Frame):
             self._find_count.set(f"{self._search_cur + 1} of {n}")
 
     def _find_step(self, direction: int) -> str:
+        if self._cancel_pending_find():
+            # Enter pressed before typing paused: search for what was typed,
+            # and show its first match.
+            self._run_find()
+            return "break"
         if not self._search_matches:
             return "break"
         self._search_cur = (self._search_cur + direction) % len(self._search_matches)
@@ -41233,38 +41366,42 @@ def _open_sec(parent: tk.Misc, spec: str,
 
 
 # ---------------------------------------------------------------------------
-# Pages behind a CloudFlare check: fetched with Firefox's clearance, or not
+# Pages behind a CloudFlare check: fetched with a browser's clearance, or not
 # ---------------------------------------------------------------------------
 
 class _CloudflarePdfWindow(_PdfWindow):
     """A viewer for pages kept behind a CloudFlare check that admits people,
     not scripts — the English Reports on CommonLII.  The pages are fetched
-    with the clearance the reader obtained by passing the check in Firefox
-    (see eng_rep_pdf).  With none CloudFlare accepts, the window asks: open
-    the page in Firefox and pass the check there — the pages then load here
-    by themselves — or open it in the browser instead.  A subclass names its
-    site, says where its page is, and words the panels."""
+    with the clearance the reader obtained by passing the check in a
+    browser: Firefox, whose cookies the app reads itself, or Chrome or Edge
+    with the GetCases extension, which hands the browser's to the app (see
+    eng_rep_pdf).  With none CloudFlare accepts, the window asks: open the
+    page in one of them and pass the check there — the pages then load here
+    by themselves — or open it in the browser instead.  A subclass names
+    its site, says where its page is, and words the panels."""
 
     #: The site, as the reader knows it: "CommonLII".
     _SITE_NAME = ""
 
     def _site_url(self) -> str:
-        """The page to open outside the app — in Firefox, to pass the
-        check, or in the browser instead."""
+        """The page to open outside the app — in a browser the app can get
+        a clearance from, to pass the check, or in the browser instead."""
         return self._url
 
     def _clearance_mark(self) -> tuple:
-        """What changes when the reader passes the site's check in Firefox
-        (see eng_rep_pdf.clearance_mark)."""
+        """What changes when the reader passes the site's check in Firefox,
+        or in Chrome or Edge with the extension (see
+        eng_rep_pdf.clearance_mark)."""
         return eng_rep_pdf.clearance_mark()
 
-    def _handoff_text(self) -> str:
-        """The CloudFlare panel's explanation."""
+    def _handoff_text(self, browsers=("Firefox",)) -> str:
+        """The CloudFlare panel's explanation; *browsers* are the ones it
+        offers to open the page in, by name."""
         return ""
 
-    def _handoff_waiting_text(self) -> str:
-        """The status once Firefox is open on the check."""
-        return "Pass the check in Firefox — the scan loads here then."
+    def _handoff_waiting_text(self, browser: str = "Firefox") -> str:
+        """The status once *browser* is open on the check."""
+        return f"Pass the check in {browser} — the scan loads here then."
 
     def _link_out_text(self, has_ff: bool) -> str:
         """The explanation when the pages can't be fetched here at all."""
@@ -41274,33 +41411,71 @@ class _CloudflarePdfWindow(_PdfWindow):
         for child in self._body.winfo_children():
             child.destroy()
 
-    def _need_clearance(self, web_url: str, refused_ua: str = "") -> None:
-        """Show the CloudFlare hand-off panel (open in Firefox, then Retry) —
-        and try again by itself the moment Firefox holds a new clearance.
-        *refused_ua*: see eng_rep_pdf.CloudflareChallenge."""
+    def _extension_listening(self) -> bool:
+        """Whether the GetCases extension can hand a clearance to this app
+        now: the app has the port it knocks on (browser_bridge)."""
+        bridge = getattr(getattr(self, "_app", None), "_browser_bridge", None)
+        return bool(getattr(bridge, "bound", False))
+
+    def _extension_browsers(self) -> "list[eng_rep_pdf.ExtensionBrowser]":
+        """The browsers with the GetCases extension that can hand this app a
+        clearance — one profile of each, the one used last — or none while
+        the app isn't listening for the extension."""
+        if not self._extension_listening():
+            return []
+        out, seen = [], set()
+        for browser in eng_rep_pdf.extension_browsers():
+            if browser.name not in seen:
+                seen.add(browser.name)
+                out.append(browser)
+        return out
+
+    def _need_clearance(self, web_url: str, refused_ua: str = "",
+                        refused_by: str = "") -> None:
+        """Show the CloudFlare hand-off panel — open the page in Chrome or
+        Edge (where the GetCases extension is) or Firefox, then Retry — and
+        try again by itself the moment the app holds a new clearance.
+        *refused_ua*, *refused_by*: see eng_rep_pdf.CloudflareChallenge."""
         self._reveal()
         self._clear_body()
         self._status_var.set(f"{self._SITE_NAME} needs a CloudFlare check.")
         frame = ttk.Frame(self._body)
         frame.pack(fill="both", expand=True, padx=24, pady=24)
-        text = self._handoff_text()
+        extension = self._extension_browsers()
+        has_ff = eng_rep_pdf.firefox_available()
+        names = [b.name for b in extension] + (["Firefox"] if has_ff else [])
+        text = self._handoff_text(names)
         if refused_ua:
             # CloudFlare stops honouring a clearance long before its cookie
             # says it expires.
-            text += ("\n\nFirefox holds a clearance from an earlier check, but "
-                     "CloudFlare no longer accepts it from the app: pass the "
-                     "check again in Firefox.")
+            by = refused_by or "Firefox"
+            if by == "Firefox":
+                text += ("\n\nFirefox holds a clearance from an earlier check, "
+                         "but CloudFlare no longer accepts it from the app: "
+                         "pass the check again in Firefox.")
+            else:
+                text += (f"\n\nCloudFlare no longer accepts the clearance "
+                         f"{by} handed over from an earlier check: pass the "
+                         f"check again in {by}"
+                         + (", or in Firefox." if has_ff else "."))
+        if not extension and eng_rep_pdf.extension_browsers():
+            # The extension is there, but the app isn't listening for it.
+            text += ("\n\nThe GetCases extension in your browser can pass the "
+                     "check to the app too: turn on Settings ▸ Open Citations "
+                     "Clicked in Chrome Here.")
         ttk.Label(
             frame, wraplength=560, justify="left", text=text,
         ).pack(anchor="w", pady=(0, 16))
         row = ttk.Frame(frame)
         row.pack(anchor="w")
 
-        def open_ff() -> None:
-            if eng_rep_pdf.open_in_firefox(web_url):
-                self._status_var.set(self._handoff_waiting_text())
-            else:
-                eng_rep_pdf.open_in_browser(web_url)
+        def opener(name: str, launch):
+            def go() -> None:
+                if launch(web_url):
+                    self._status_var.set(self._handoff_waiting_text(name))
+                else:
+                    eng_rep_pdf.open_in_browser(web_url)
+            return go
 
         def retry() -> None:
             self._clearance_watch = None
@@ -41309,8 +41484,19 @@ class _CloudflarePdfWindow(_PdfWindow):
 
         self._watch_for_clearance(retry)
 
-        ttk.Button(row, text="Open in Firefox", command=open_ff).pack(side="left")
-        ttk.Button(row, text="Retry", command=retry).pack(side="left", padx=8)
+        for browser in extension:
+            ttk.Button(
+                row, text=f"Open in {browser.name}",
+                command=opener(browser.name, lambda url, b=browser:
+                               eng_rep_pdf.open_in_extension_browser(url, b)),
+            ).pack(side="left", padx=(0, 8))
+        if has_ff:
+            ttk.Button(row, text="Open in Firefox",
+                       command=opener("Firefox", lambda url:
+                                      eng_rep_pdf.open_in_firefox(url)),
+                       ).pack(side="left", padx=(0, 8))
+        ttk.Button(row, text="Retry", command=retry).pack(side="left",
+                                                          padx=(0, 8))
         ttk.Button(row, text="Open in browser instead",
                    command=lambda: (eng_rep_pdf.open_in_browser(self._site_url()),
                                     self._win.destroy())).pack(side="left")
@@ -41321,11 +41507,11 @@ class _CloudflarePdfWindow(_PdfWindow):
     _CLEARANCE_POLL = 3.0
 
     def _watch_for_clearance(self, retry) -> None:
-        """Call *retry* once Firefox holds a clearance for the site it did
-        not hold when the panel went up — the reader has passed the check —
-        for as long as the panel is showing (up to ten minutes).  Only the
-        clearance the reader obtains is used; nothing here answers the
-        check."""
+        """Call *retry* once the app holds a clearance for the site it did
+        not hold when the panel went up — the reader has passed the check,
+        in Firefox or in a browser with the extension — for as long as the
+        panel is showing (up to ten minutes).  Only the clearance the reader
+        obtains is used; nothing here answers the check."""
         token = object()
         self._clearance_watch = token
 
@@ -41350,7 +41536,7 @@ class _CloudflarePdfWindow(_PdfWindow):
             try:
                 mark = self._clearance_mark()
             except Exception as exc:
-                print(f"[cloudflare] can't watch Firefox's cookies: {exc}")
+                print(f"[cloudflare] can't watch for a clearance: {exc}")
                 return
             deadline = time.monotonic() + self._CLEARANCE_WAIT
             while watching() and time.monotonic() < deadline:
@@ -41366,9 +41552,9 @@ class _CloudflarePdfWindow(_PdfWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _link_out(self) -> None:
-        """In-app fetch isn't possible here (Firefox or a dependency
-        missing).  Offer the page on the site instead — in Firefox, when
-        it's installed, or the browser."""
+        """In-app fetch isn't possible here (no browser to get a clearance
+        from, or a dependency missing).  Offer the page on the site instead
+        — in Firefox, when it's installed, or the browser."""
         self._reveal()
         self._clear_body()
         web_url = self._site_url()
@@ -41403,8 +41589,10 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
     """The in-app viewer for an English Reports scan from CommonLII.  Reuses the
     Statutes-at-Large PDF pane (centered, zoomable, Download/Print) but fetches
     through :mod:`eng_rep_pdf` — disk cache first, then a ``curl_cffi`` fetch
-    using Firefox's CloudFlare clearance.  When there is no clearance yet it
-    shows a hand-off panel that opens the case in Firefox and offers Retry."""
+    using a browser's CloudFlare clearance (Firefox's, or what the GetCases
+    extension hands over from Chrome or Edge).  When there is no clearance
+    yet it shows a hand-off panel that opens the case in one of those
+    browsers and offers Retry."""
 
     _SITE_NAME = "CommonLII"
 
@@ -41489,7 +41677,8 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
                     meta = _measure_pdf_pages(data)
                 self._post(self._show, data, meta)
             except eng_rep_pdf.CloudflareChallenge as exc:
-                self._post(self._need_clearance, exc.web_url, exc.refused_ua)
+                self._post(self._need_clearance, exc.web_url, exc.refused_ua,
+                           exc.refused_by)
             except eng_rep_pdf.FetchUnavailable:
                 self._post(self._link_out)
             except eng_rep_pdf.OriginError as exc:
@@ -41540,10 +41729,19 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
         # it is clicked from there.
         return self._case.web_url
 
-    def _handoff_text(self) -> str:  # overrides _CloudflarePdfWindow
+    def _handoff_text(self, browsers=("Firefox",)) -> str:  # overrides _CloudflarePdfWindow
+        if browsers:
+            first, *others = browsers
+            how = f"click “Open in {first}”"
+            if others:
+                how += (" (or " + " or ".join(f"“Open in {b}”" for b in others)
+                        + ")")
+            how += " and pass the “Just a moment…” check there"
+        else:
+            how = ("pass the “Just a moment…” check in Firefox, or in Chrome "
+                   "or Edge with the GetCases extension")
         return ("CommonLII is behind a CloudFlare check.\n\n"
-                "To view this scan in the app, click “Open in Firefox” and "
-                "pass the “Just a moment…” check there — the scan loads here "
+                f"To view this scan in the app, {how} — the scan loads here "
                 "as soon as you have (or click “Retry”).  Once cleared, this "
                 "and other English Reports cases load straight in the app "
                 "(and are cached so you won't be asked again).")
@@ -41554,9 +41752,13 @@ class _EngRepPdfWindow(_CloudflarePdfWindow):
                "scan there: the site only serves the PDF when you arrive from "
                "a link on its own pages, so opening the case page first gets "
                "you past that block.")
-        if not has_ff:
-            msg += ("\n\nFor in-app viewing (cached, no repeat checks), install "
-                    "Firefox and run:\n\n    pip install curl_cffi browser_cookie3")
+        if not eng_rep_pdf.deps_present():
+            msg += ("\n\nFor in-app viewing (cached, no repeat checks), "
+                    "run:\n\n    pip install curl_cffi")
+        elif not has_ff:
+            msg += ("\n\nFor in-app viewing (cached, no repeat checks), "
+                    "install Firefox, or the GetCases extension in Chrome or "
+                    "Edge.")
         return msg
 
     def _error(self, msg: str) -> None:  # overrides _PdfWindow._error

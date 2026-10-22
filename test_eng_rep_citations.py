@@ -94,6 +94,48 @@ class ReportersByNameTests(unittest.TestCase):
                          [f"n:mcle:0:{first}"])
         self.assertTrue(specs("Dewitt v. Post, 2 Williams's Saunders, 101"))
 
+    def test_a_reporter_s_reports_and_its_possessive(self):
+        # "2 Dow's Rep. 519" was read as an American citation and searched
+        # for on Scholar: the matcher knew Dow only as "Dow." and "Dow. P.C."
+        for text in ("Shand v. Henderson, 2 Dow's Rep. 519",
+                     "Shand v. Henderson, 2 Dow’s Rep. 519",
+                     "Shand v. Henderson, 2 Dow Rep. 519",
+                     "Shand v. Henderson, 2 Dow's R. 519",
+                     "Shand v. Henderson, 2 Dow's P.C. 519",
+                     "Shand v. Henderson, 2 Dow's Parl. Cas. 519",
+                     "Shand v. Henderson, 2 Dow. Parl. Cas. 519"):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), ["n:dowpc:2:519"])
+                self.assertEqual(
+                    [action for _s, _e, action in citations.detect_links(text)],
+                    [("engrep", "n:dowpc:2:519")])
+        self.assertEqual([(c.vol, c.page) for c in eng_rep.resolve(
+            "n:dowpc:2:519")], [(3, 952)])
+        # The span runs over the whole of it, "Rep." and all.
+        text = "Shand v. Henderson, 2 Dow's Rep. 519, 525."
+        (start, _end, spec), = eng_rep.iter_cites(text)
+        self.assertEqual((text[start:].split(",")[0], spec),
+                         ("2 Dow's Rep. 519", "n:dowpc:2:519@525"))
+
+    def test_so_too_the_other_reporters(self):
+        for text, spec in (("1 Bligh's Rep. 1", "n:blighpc:1:1"),
+                           ("2 Burr. Rep. 1046", "n:burr:2:1046"),
+                           ("3 Taunt. Rep. 1", "n:taunt:3:1"),
+                           ("Smith v. Jones, Lofft's Rep. 1", "n:lofft:0:1"),
+                           ("1 Dow N.S. 1", "n:dowcl:1:1")):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), [spec])
+        # A form that carries "Rep." itself is still that form.
+        self.assertEqual(specs("3 Co. Rep. 7"), ["n:corep:3:7"])
+        self.assertEqual(specs("1 Bl. Rep. 665"), ["n:blackw:1:665"])
+
+    def test_but_an_american_reporter_s_reports_are_its_own(self):
+        for text in ("Warren v. Lynch, 5 Johns. R. 289, the",
+                     "Commonwealth v. Pleasants, 10 Leigh Rep., 697",
+                     "Smith's Rep. 100"):
+            with self.subTest(text=text):
+                self.assertEqual(specs(text), [])
+
     def test_a_case_name_does_not_swallow_the_volume(self):
         # "Hobart" is a reporter too; "Hobart, 3" is turned away, and the
         # citation after it is read whole.
@@ -416,9 +458,10 @@ class ViewerTests(unittest.TestCase):
         with mock.patch.object(gui.threading, "Thread", Inline), \
                 mock.patch.object(eng_rep_pdf, "fetch_pdf", side_effect=
                                   eng_rep_pdf.CloudflareChallenge(
-                                      "https://c/296.html", ua)):
+                                      "https://c/296.html", ua, "Firefox")):
             win._fetch()
-        win._need_clearance.assert_called_once_with("https://c/296.html", ua)
+        win._need_clearance.assert_called_once_with(
+            "https://c/296.html", ua, "Firefox")
 
     def test_passing_the_check_in_firefox_loads_the_scan(self):
         win = object.__new__(gui._EngRepPdfWindow)
@@ -501,6 +544,23 @@ class PanelTests(unittest.TestCase):
         win._watch_for_clearance = mock.Mock()
         win._fetch = mock.Mock()
         self.win = win
+        # Firefox here, and no extension, unless a test says otherwise.
+        for name, value in (("firefox_available", True),
+                            ("extension_browsers", [])):
+            p = mock.patch.object(eng_rep_pdf, name, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    CHROME = eng_rep_pdf.ExtensionBrowser("Chrome", r"C:\chrome.exe",
+                                          "Default", 2.0)
+
+    def _with_extension(self, *browsers):
+        """The GetCases extension in *browsers*, and the app listening."""
+        self.win._app = mock.Mock(_browser_bridge=mock.Mock(bound=True))
+        p = mock.patch.object(eng_rep_pdf, "extension_browsers",
+                              return_value=list(browsers))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_it_offers_firefox_retry_and_the_browser(self):
         self.win._need_clearance(self.WEB)
@@ -537,6 +597,52 @@ class PanelTests(unittest.TestCase):
         text = _labels(self.win._body)[0]
         self.assertIn("pass the check again in Firefox", text)
         self.assertNotIn("curl_cffi", text)
+
+    def test_it_offers_the_browser_with_the_extension_first(self):
+        edge = eng_rep_pdf.ExtensionBrowser("Edge", r"C:\msedge.exe",
+                                            "Profile 1", 1.0)
+        old_chrome = self.CHROME._replace(profile="Profile 2", used=0.5)
+        self._with_extension(self.CHROME, edge, old_chrome)
+        self.win._need_clearance(self.WEB)
+        self.assertIn("click “Open in Chrome” (or “Open in Edge” or "
+                      "“Open in Firefox”)", _labels(self.win._body)[0])
+        buttons = _buttons(self.win._body)
+        # One button a browser: its profile used last.
+        self.assertEqual(list(buttons), ["Open in Chrome", "Open in Edge",
+                                         "Open in Firefox", "Retry",
+                                         "Open in browser instead"])
+        with mock.patch.object(eng_rep_pdf, "open_in_extension_browser",
+                               return_value=True) as launch:
+            buttons["Open in Chrome"].invoke()
+        launch.assert_called_once_with(self.WEB, self.CHROME)
+        self.win._status_var.set.assert_called_with(
+            "Pass the check in Chrome — the scan loads here then.")
+
+    def test_without_firefox_the_extension_is_the_way(self):
+        self._with_extension(self.CHROME)
+        with mock.patch.object(eng_rep_pdf, "firefox_available",
+                               return_value=False):
+            self.win._need_clearance(self.WEB)
+        self.assertEqual(sorted(_buttons(self.win._body)),
+                         ["Open in Chrome", "Open in browser instead", "Retry"])
+
+    def test_not_while_the_app_isnt_listening_for_the_extension(self):
+        # Settings ▸ Open Citations Clicked in Chrome Here is off: a check
+        # passed in Chrome would never reach the app.
+        self._with_extension(self.CHROME)
+        self.win._app._browser_bridge = None
+        self.win._need_clearance(self.WEB)
+        self.assertNotIn("Open in Chrome", _buttons(self.win._body))
+        self.assertIn("turn on Settings ▸ Open Citations Clicked in Chrome "
+                      "Here", _labels(self.win._body)[0])
+
+    def test_a_refused_clearance_from_chrome_names_chrome(self):
+        self._with_extension(self.CHROME)
+        self.win._need_clearance(self.WEB, "Mozilla/5.0 … Chrome/155.0.0.0",
+                                 "Chrome")
+        text = _labels(self.win._body)[0]
+        self.assertIn("the clearance Chrome handed over", text)
+        self.assertIn("pass the check again in Chrome, or in Firefox.", text)
 
 
 if __name__ == "__main__":

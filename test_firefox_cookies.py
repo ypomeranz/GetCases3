@@ -491,6 +491,9 @@ class FetchTests(unittest.TestCase):
         patches = [
             mock.patch.object(eng_rep_pdf, "CACHE_DIR", self.tmp / "cache"),
             mock.patch.object(eng_rep_pdf, "can_fetch", return_value=True),
+            mock.patch.object(eng_rep_pdf, "firefox_available",
+                              return_value=True),
+            mock.patch.object(eng_rep_pdf, "_BROWSER_CLEARANCES", {}),
             mock.patch.object(eng_rep_pdf, "_get", side_effect=self._answer),
         ]
         for p in patches:
@@ -498,7 +501,7 @@ class FetchTests(unittest.TestCase):
             self.addCleanup(p.stop)
         self.addCleanup(setattr, eng_rep_pdf, "_LAST_GOOD", None)
 
-    def _answer(self, url, headers, cookies):
+    def _answer(self, url, headers, cookies, impersonate=""):
         self.requests.append((url, headers, cookies))
         reply = self.replies[cookies["cf_clearance"]]
         if isinstance(reply, Exception):

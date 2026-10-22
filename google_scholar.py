@@ -19,10 +19,13 @@ handshake.  Requests go out through curl_cffi impersonating a real browser
 hard IP flag on the search endpoint — the fetch goes straight to driving the
 user's *actual* Firefox, whose genuine handshake plus their google.com cookies
 is the only thing that gets through, and where the user can answer a CAPTCHA
-should Google set one there too.  Only without Selenium/Firefox are the other
-fingerprints tried in turn.  Everything degrades gracefully: no curl_cffi →
-plain requests; no Selenium/Firefox → the local opinion DB and CourtListener
-answer instead.
+should Google set one there too.  With the GetCases extension in Chrome or
+Edge (:mod:`scholar_extension`), the CAPTCHA is put to the user there instead:
+the page opens in their own browser, the extension hands it back, and the
+app's own requests then go out as that browser, with the CAPTCHA exemption
+Google gave it.  Only without any of these are the other fingerprints tried
+in turn.  Everything degrades gracefully: no curl_cffi → plain requests; no
+real browser → the local opinion DB and CourtListener answer instead.
 
 The raw opinion HTML can be turned into a lightweight structured document
 with ``parse_opinion_blocks``, which preserves paragraphs, centering,
@@ -260,6 +263,11 @@ class _Persona:
     target: str  # curl_cffi impersonation target; "" = plain requests
     ua: str
     accept_language: str
+    #: The reader's Chrome or Edge, as the GetCases extension handed it over
+    #: (see scholar_extension): its other headers and its Google cookies, as
+    #: (name, value) pairs.  Empty for the canned personas.
+    headers: tuple = ()
+    cookies: tuple = ()
 
 
 class _BrowserResponse:
@@ -351,16 +359,17 @@ _CACHE_PATH = Path.home() / ".cache" / "courtlistener_scholar.db"
 _COOKIE_STORE = Path.home() / ".cache" / "courtlistener_scholar_state.json"
 
 _CAPTCHA_TIP = (
-    "[scholar] Google Scholar is challenging this computer and the real "
-    "Firefox fallback isn't available (install `selenium` + Firefox to enable "
-    "it). Meanwhile the app serves results from the local opinion database and "
-    "CourtListener; the block clears on its own in a while."
+    "[scholar] Google Scholar is challenging this computer and there is no "
+    "real browser to fall back on (install `selenium` + Firefox, or the "
+    "GetCases extension in Chrome or Edge, to enable one). Meanwhile the app "
+    "serves results from the local opinion database and CourtListener; the "
+    "block clears on its own in a while."
 )
 _CAPTCHA_UNANSWERED_TIP = (
-    "[scholar] Google Scholar is challenging this computer and Firefox did "
-    "not get past the challenge either. Meanwhile the app serves results from "
-    "the local opinion database and CourtListener; Firefox offers the CAPTCHA "
-    "again in a few minutes."
+    "[scholar] Google Scholar is challenging this computer and the real "
+    "browser did not get past the challenge either. Meanwhile the app serves "
+    "results from the local opinion database and CourtListener; the CAPTCHA "
+    "is offered again in a few minutes."
 )
 
 
@@ -3565,8 +3574,12 @@ class GoogleScholarFetcher:
             "Accept": _ACCEPT,
             "Accept-Language": p.accept_language,
         })
+        # The reader's Chrome or Edge: its client hints too (curl_cffi's own
+        # name another version, and macOS).
+        session.headers.update(dict(p.headers))
         merged = dict(self._stored_cookies)
         merged.update(_browser_google_cookies())
+        merged.update(dict(p.cookies))
         for name, value in merged.items():
             try:
                 session.cookies.set(name, value, domain=".google.com")
@@ -3759,6 +3772,66 @@ class GoogleScholarFetcher:
             print(f"[scholar] real-Firefox fetch failed: {exc}")
             return None
 
+    def _extension_usable(self) -> bool:
+        """Whether a challenge can be put to the reader in Chrome or Edge,
+        where the GetCases extension is (:mod:`scholar_extension`)."""
+        try:
+            import scholar_extension
+            return scholar_extension.available()
+        except Exception:
+            return False
+
+    def _extension_get(self, url: str):
+        """Fetch *url* through the reader's Chrome or Edge, where the GetCases
+        extension is, for a challenge only they can answer: the page opens
+        there, and once it loads past Google's check the extension hands it
+        back (:mod:`scholar_extension`).  What it hands over besides --
+        Google's cookies, the CAPTCHA exemption among them, and the
+        browser's headers -- becomes the persona the app's own requests
+        wear next.  Returns a :class:`_BrowserResponse`, or None when the
+        page wasn't answered."""
+        import scholar_extension
+        got = scholar_extension.fetch(url)
+        if got is None:
+            return None
+        html, final_url = got
+        self._adopt_browser_identity()
+        return _BrowserResponse(html, final_url)
+
+    def _adopt_browser_identity(self) -> None:
+        """Wear the identity of the reader's Chrome or Edge, as the extension
+        last handed it over: Chrome's fingerprint, the browser's own
+        User-Agent and client hints, and Google's cookies from it -- put
+        first, so the next request goes out as the browser that answered the
+        CAPTCHA.  The hidden Firefox, if one is used, starts with the
+        cookies too."""
+        import scholar_extension
+        ident = scholar_extension.identity()
+        if ident is None or _curl_requests is None:
+            return
+        chrome = sorted((t for t in _available_targets()
+                         if re.fullmatch(r"chrome\d+", str(t))),
+                        key=lambda t: int(str(t)[6:]))
+        if not chrome:
+            return
+        persona = _Persona(
+            str(chrome[-1]), ident.user_agent,
+            ident.headers.get("accept-language", "en-US,en;q=0.9"),
+            headers=tuple(sorted((k, v) for k, v in ident.headers.items()
+                                 if k != "accept-language")),
+            cookies=tuple(sorted(ident.cookies.items())))
+        self._personas = [persona] + [p for p in self._personas
+                                      if not p.cookies]
+        self._persona_ix = 0
+        self._session = self._build_session()
+        if self._browser is not None:
+            self._browser._earned = [
+                {"name": name, "value": value, "domain": ".google.com",
+                 "path": "/", "secure": True}
+                for name, value in ident.cookies.items()]
+        print(f"[scholar] now asking as {ident.browser} "
+              f"(its cookies and headers, from the GetCases extension)")
+
     def _get(self, url: str, referer: str = "", once: bool = False):
         """GET a Scholar page, in order of increasing weight:
 
@@ -3766,9 +3839,16 @@ class GoogleScholarFetcher:
           2. the user's real Firefox, at the first challenge — the only
              channel that beats a hard IP flag, and where the user can answer
              a CAPTCHA if Google sets one there too.  Only when Firefox can't
-             be driven (no Selenium or no Firefox) are the other fingerprints
-             tried in turn instead;
-          3. a fail-fast cooldown, so the local-DB / CourtListener fallbacks
+             be driven (no Selenium or no Firefox), and there is no Chrome or
+             Edge with the GetCases extension either, are the other
+             fingerprints tried in turn instead;
+          3. the reader's Chrome or Edge, where the GetCases extension is
+             (:mod:`scholar_extension`), when the hidden Firefox is
+             challenged too or there is none: the page opens there, the
+             reader answers the CAPTCHA if Google asks, and the extension
+             hands the page back.  With it to hand, that is where a CAPTCHA
+             is put to the reader, rather than a Firefox window;
+          4. a fail-fast cooldown, so the local-DB / CourtListener fallbacks
              answer instantly instead of hammering Google.
 
         Once the browser becomes the working channel (curl_cffi blocked, or a
@@ -3786,10 +3866,18 @@ class GoogleScholarFetcher:
                 f"blocked (cooling down {int(self._blocked_until - now)}s)")
         browser_preferred = self._browser_first or now < self._blocked_until
         if browser_preferred:
-            resp = self._browser_get(url, solve=not once)
+            # A CAPTCHA goes to the reader's Chrome or Edge when the
+            # extension is there, not to a Firefox window.
+            extension = not once and self._extension_usable()
+            resp = (self._browser_get(url, solve=False) if extension
+                    else self._browser_get(url, solve=not once))
             if resp is not None:
                 self._mark_browser_working()
                 return resp
+            if extension:
+                resp = self._extension_get(url)
+                if resp is not None:
+                    return resp
             if once:
                 raise ScholarError("the real Firefox didn't return the page")
             if now < self._blocked_until:
@@ -3818,8 +3906,9 @@ class GoogleScholarFetcher:
                           "back to the usual pacing for opinion pages")
                     self._save_state()
                 self._rotate_persona()
-                if not once and self._browser_usable():
-                    break  # straight to the real Firefox, below
+                if not once and (self._browser_usable()
+                                 or self._extension_usable()):
+                    break  # straight to the real browser, below
                 continue
             if resp.status_code in _RETRY_STATUSES:
                 if once:
@@ -3836,15 +3925,27 @@ class GoogleScholarFetcher:
         # Challenged — the real browser is the way through.  Not asked twice
         # for one page: where it was asked first, above, and failed, it would
         # only fail again (or put the same CAPTCHA to the user again).
-        resp = None if browser_preferred else self._browser_get(url)
-        if resp is not None:
-            print("[scholar] fetched via real Firefox (curl_cffi was blocked)")
-            self._mark_browser_working()
-            return resp
+        extension = False
+        if not browser_preferred:
+            extension = self._extension_usable()
+            resp = (self._browser_get(url, solve=False) if extension
+                    else self._browser_get(url))
+            if resp is not None:
+                print("[scholar] fetched via real Firefox (curl_cffi was "
+                      "blocked)")
+                self._mark_browser_working()
+                return resp
+            if extension:
+                resp = self._extension_get(url)
+                if resp is not None:
+                    print("[scholar] fetched through the reader's browser "
+                          "(curl_cffi was blocked)")
+                    return resp
 
         self._blocked_until = time.monotonic() + _BLOCK_COOLDOWN
         self._save_state()  # the cooldown survives an app restart
-        print(_CAPTCHA_TIP if self._browser_dead else _CAPTCHA_UNANSWERED_TIP)
+        print(_CAPTCHA_TIP if self._browser_dead and not extension
+              else _CAPTCHA_UNANSWERED_TIP)
         raise ScholarError(f"{last_status} blocked")
 
     def _mark_browser_working(self) -> None:

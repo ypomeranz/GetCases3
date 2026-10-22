@@ -12,7 +12,16 @@ arrangement: a small HTTP server on this machine's loopback address that
   its action and the web page it opens when the app is not running (see
   :mod:`browser_links`); and
 * ``POST /open`` hands a clicked citation to the app, which opens it the way a
-  link in one of its own windows opens.
+  link in one of its own windows opens;
+* ``POST /clearance`` hands over the browser's cookies for a site behind a
+  check for people, and the headers it sent them with, once a page of it
+  has loaded past the check there -- which the app, unable to read
+  Chrome's or Edge's cookie store, fetches with: CommonLII's CloudFlare
+  clearance for the English Reports' scans (see
+  :func:`eng_rep_pdf.accept_browser_clearance`), Google's CAPTCHA
+  exemption for Scholar (see :mod:`scholar_extension`); and
+* ``POST /page`` hands over a page the app opened in the browser to have a
+  CAPTCHA answered, once it has been (see :mod:`scholar_extension`).
 
 Only the extension may use it.  Web pages can reach a loopback server too, so
 every request must carry the ``X-GetCases`` header (a page cannot add one
@@ -48,6 +57,15 @@ _MAX_BODY = 4 * MAX_TEXT + 65_536       # UTF-8 at its widest, plus JSON
 #: The most of a refused request's body read (and thrown away) before the
 #: refusal is sent; see the handler's _discard_body.
 _DISCARD_MAX = 1_048_576
+#: The most cookies, and headers, one /clearance may carry, and the longest
+#: any one may be: a site's cookies are few, and a cookie is at most 4 KB.
+_MAX_COOKIES = 50
+_MAX_COOKIE = 8192
+_MAX_HEADERS = 20
+_MAX_HEADER = 2048
+#: The longest page /page may carry, in characters: a long opinion on
+#: Scholar runs to a couple of million.
+MAX_PAGE = 2 * MAX_TEXT
 
 #: The origins a browser gives an extension's own requests.
 _EXTENSION_SCHEMES = ("chrome-extension://", "moz-extension://",
@@ -206,14 +224,25 @@ class BrowserBridge:
     *on_open* receives each ``/open`` request's JSON object — ``{"kind",
     "value", "text"}`` for a link the app detected, ``{"text"}`` for one the
     extension found itself — on a server thread, so it must not touch Tk.
+
+    *on_clearance* receives each ``/clearance`` — ``{"url", "browser",
+    "cookies": [{"name", "value", "expires"}], "headers": {name: value}}``,
+    in those shapes — on a server thread too, and says whether it took it:
+    True or False, or the reply itself, a dict with ``"ok"`` in it.
+    *on_page* receives each ``/page`` — ``{"url", "html"}`` — likewise.
+    Without them, those paths are not found.
     """
 
     def __init__(self, on_open: Callable[[dict], None], *,
                  port: int = DEFAULT_PORT, version: str = "",
-                 detector: Callable = detect) -> None:
+                 detector: Callable = detect,
+                 on_clearance: Optional[Callable[[dict], object]] = None,
+                 on_page: Optional[Callable[[dict], object]] = None) -> None:
         self.port = int(port)
         self.version = version
         self._on_open = on_open
+        self._on_clearance = on_clearance
+        self._on_page = on_page
         self._detector = detector
         # One page's detection at a time: a burst of tabs queues rather than
         # taking every core from the app.
@@ -373,7 +402,12 @@ class BrowserBridge:
                     self._reply(403, {"error": "forbidden"})
                     return
                 path = self.path.split("?")[0]
-                if path not in ("/detect", "/open"):
+                known = ["/detect", "/open"]
+                if bridge._on_clearance is not None:
+                    known.append("/clearance")
+                if bridge._on_page is not None:
+                    known.append("/page")
+                if path not in known:
                     self._discard_body()
                     self._reply(404, {"error": "not found"})
                     return
@@ -383,8 +417,12 @@ class BrowserBridge:
                     return
                 if path == "/detect":
                     self._detect(data)
-                else:
+                elif path == "/open":
                     self._open(data)
+                elif path == "/clearance":
+                    self._clearance(data)
+                else:
+                    self._page(data)
 
             def _detect(self, data: dict) -> None:
                 text = data.get("text")
@@ -428,5 +466,70 @@ class BrowserBridge:
                     self._reply(500, {"error": "could not open"})
                     return
                 self._reply(200, {"ok": True})
+
+            def _clearance(self, data: dict) -> None:
+                def text(value, limit: int) -> bool:
+                    return isinstance(value, str) and len(value) <= limit
+
+                url, browser = data.get("url"), data.get("browser", "")
+                cookies, headers = data.get("cookies"), data.get("headers")
+                # No cookies is a clearance too: Scholar's page, opened in a
+                # browser that holds none of the Google cookies asked for.
+                if not (text(url, 2048) and url and text(browser, 100)
+                        and isinstance(cookies, list)
+                        and len(cookies) <= _MAX_COOKIES
+                        and isinstance(headers, dict)
+                        and len(headers) <= _MAX_HEADERS):
+                    self._reply(400, {"error": "not a clearance"})
+                    return
+                jar = []
+                for cookie in cookies:
+                    if not (isinstance(cookie, dict)
+                            and text(cookie.get("name"), 256)
+                            and text(cookie.get("value"), _MAX_COOKIE)):
+                        self._reply(400, {"error": "not a cookie"})
+                        return
+                    expires = cookie.get("expires")
+                    if not isinstance(expires, (int, float)) \
+                            or isinstance(expires, bool):
+                        expires = 0
+                    jar.append({"name": cookie["name"],
+                                "value": cookie["value"],
+                                "expires": expires})
+                sent = {}
+                for name, value in headers.items():
+                    if not (text(name, 100) and text(value, _MAX_HEADER)):
+                        self._reply(400, {"error": "not a header"})
+                        return
+                    sent[name] = value
+                self._hand_on(bridge._on_clearance, {
+                    "url": url, "browser": browser, "cookies": jar,
+                    "headers": sent}, "the browser's clearance")
+
+            def _page(self, data: dict) -> None:
+                url, html = data.get("url"), data.get("html")
+                if not (isinstance(url, str) and 0 < len(url) <= 2048
+                        and isinstance(html, str) and html):
+                    self._reply(400, {"error": "not a page"})
+                    return
+                if len(html) > MAX_PAGE:
+                    self._reply(413, {"error": "too much page"})
+                    return
+                self._hand_on(bridge._on_page, {"url": url, "html": html},
+                              "a page from the browser")
+
+            def _hand_on(self, take, request: dict, what: str) -> None:
+                """Give *request* to *take* and answer with what it says:
+                whether it took it, or a reply of its own."""
+                try:
+                    said = take(request)
+                except Exception as exc:
+                    print(f"[browser] taking {what} failed: {exc}")
+                    self._reply(500, {"error": "could not take it"})
+                    return
+                if isinstance(said, dict):
+                    self._reply(200, {**said, "ok": bool(said.get("ok"))})
+                else:
+                    self._reply(200, {"ok": bool(said)})
 
         return Handler

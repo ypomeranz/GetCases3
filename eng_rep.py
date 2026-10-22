@@ -423,6 +423,12 @@ _NOM_ALIASES: "dict[str, tuple[str, ...]]" = {
     "House of Lords Cases": ("HLC",),
     "HL Cas": ("HLC",),
     "Dow": ("Dow PC",),
+    # Dow's House of Lords cases as American opinions cite them, "2 Dow's
+    # Parl. Cas. 519" (Dow's Rep. and Dow's P.C. are read as Dow), and his
+    # new series with Clark as "Dow N.S.".
+    "Dow Parl Cas": ("Dow PC",),
+    "Dow Parl": ("Dow PC",),
+    "Dow NS": ("Dow & Cl",),
     "Bligh": ("Bligh PC",),
     "Bligh NS": ("Bligh NS PC",),
     "Bro Parl Cas": ("Bro PC",),
@@ -600,15 +606,25 @@ _NOM_ALIASES: "dict[str, tuple[str, ...]]" = {
 
 def _nom_key(rep: str) -> str:
     """Lookup key for a reporter abbreviation, ignoring case, periods and
-    spacing ('Cro Jac' == 'Cro. Jac.' == 'cro jac' -> 'crojac')."""
-    return re.sub(r"[^a-z0-9]+", "", (rep or "").lower())
+    spacing ('Cro Jac' == 'Cro. Jac.' == 'cro jac' -> 'crojac'), and a
+    reporter's name in the possessive ("Dow's" == "Dow")."""
+    rep = re.sub(r"(?<=[A-Za-z])['’]s\b", "", rep or "")
+    return re.sub(r"[^a-z0-9]+", "", rep.lower())
+
+
+#: "Reports" written after a reporter's name, whole or cut short, as older
+#: opinions write it: "2 Dow's Rep. 519", "4 East's R. 51" — the suffix
+#: citations._REPORTS_SUFFIX_RE drops from American reporters.  A form that
+#: carries it itself ("Co. Rep.", "Bl. Rep.") is the longer one, and wins.
+_NOM_REPORTS_SUFFIX = r"(?:\s+(?:R\.|Rep\.?|Reps\.?|Reports))?"
 
 
 def _nom_token_pattern(tok: str) -> str:
     """Period/spacing-tolerant pattern for one reporter token.  An all-caps
     token allows periods between the letters ('TR' -> 'T.R.', 'CC' -> 'C.C.'),
     since briefs write the dotted Bluebook forms; other tokens take an optional
-    trailing period ('Exch' -> 'Exch.', 'Cro' -> 'Cro.')."""
+    trailing period ('Exch' -> 'Exch.', 'Cro' -> 'Cro.'), or are written in
+    the possessive, as older opinions name a reporter ("Dow's", "East's")."""
     if tok == "&":
         return r"&"
     if tok == "NS":
@@ -620,7 +636,9 @@ def _nom_token_pattern(tok: str) -> str:
     # Either apostrophe, in one pass: replacing "'" and then "’" would rewrite
     # the class the first replacement just wrote ("M'Cle" never matched).
     esc = re.sub(r"['’]", "['’]", re.escape(tok))
-    return esc + r"\.?"
+    if re.search(r"['’]s$", tok):
+        return esc + r"\.?"         # in the possessive already
+    return esc + r"(?:['’]s)?\.?"
 
 
 def _nom_form_pattern(form: str) -> str:
@@ -708,12 +726,14 @@ def _load_nominate() -> None:
             # length in name order, so the pattern is the same every run.
             alt = "|".join(_nom_form_pattern(f)
                            for f in sorted(forms, key=lambda f: (-len(f), f)))
+            suffix = _NOM_REPORTS_SUFFIX
             _NOM_RE = re.compile(
-                r"\b(?:(\d{1,3})\s+)?(" + alt
-                + r"),?\s+(\d{1,5})(?:\s*[ab])?\b")
+                r"\b(?:(\d{1,3})\s+)?(" + alt + r")" + suffix
+                + r",?\s+(\d{1,5})(?:\s*[ab])?\b")
             _NOM_SHORT_RE = re.compile(
-                r"\b(\d{1,3})\s+(" + alt + r"),?\s+at\s+\*?(\d{1,5})\b")
-            _NOM_FORM_RE = re.compile("(?:" + alt + ")")
+                r"\b(\d{1,3})\s+(" + alt + r")" + suffix
+                + r",?\s+at\s+\*?(\d{1,5})\b")
+            _NOM_FORM_RE = re.compile("(?:" + alt + ")" + suffix)
         _NOM_PAGES = pages
         _NOM_ALIAS_KEYS = alias_keys
         _NOM_INDEX = idx
@@ -917,7 +937,8 @@ def iter_nominate_cites(text: str) -> "list[tuple[int, int, str, list[ERCase]]]"
             vol = int(m.group(1) or 0)
             key = _nom_key(m.group(2))
             page = int(m.group(3))
-            dotted = bool(re.search(r"[.&]", m.group(2)))
+            # The reporter as written, a "Rep." after its name included.
+            dotted = bool(re.search(r"[.&]", text[m.start(2):m.start(3)]))
             # A reporter named with neither a volume nor a period ("Skinner,
             # 120", "Lane, 3") has the shape of prose and of a case name too
             # ("B. F. Skinner 120", "Fisher v. Lane, 3 Wils. 297"), and so has
