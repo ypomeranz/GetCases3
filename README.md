@@ -183,7 +183,9 @@ Every citation, whether in a scan, in the text or in a brief you open, is a link
   when the citation gives CourtListener's RECAP archive of PACER enough to
   find it by: a federal court's docket and the day it was decided (`No.
   12-6371, 2024 WL 1327972 (D.N.J. Mar. 28, 2024)`), or, with no docket
-  printed, the case's full name, federal court and day. Dated by its year
+  printed, the case's full name, federal court and day. A bankruptcy court
+  is a federal court here too (`In re …, No. 08-13141 (KJC), 2015 WL …
+  (Bankr. D. Del. Nov. 19, 2015)`): PACER keeps its dockets. Dated by its year
   alone (`No. 05-cv-1234, 2008 WL 465653 (D.N.J. 2008)`), it opens the
   case's docket instead. Any other is left unlinked — a state court's
   (`2021 WL 123456 (N.J. Super. Ct. App. Div. …)`, `2019 Tex. App. LEXIS

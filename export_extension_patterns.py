@@ -245,6 +245,7 @@ def patterns() -> "dict[str, re.Pattern]":
         "courtYearParen": c._COURT_YEAR_PAREN_RE,
         "docketCite": c._DOCKET_CITE_RE,
         "docketAfterName": c._DOCKET_AFTER_NAME_RE,
+        "bankruptcyCaption": c._BANKRUPTCY_CAPTION_RE,
         "nameNoV": c._NAME_NO_V_RE,
         "nameToken": c._NAME_TOKEN_RE,
         "nameAbbrev": c._NAME_ABBREV_RE,

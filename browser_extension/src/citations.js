@@ -591,6 +591,11 @@
     const docket = rx("docketAfterName", "").exec(head);
     if (docket) head = head.slice(0, docket.index);
     if (!head.trim()) return null;
+    // "Smith v. Jones (In re Smith)": read from the proceeding's own caption.
+    const bankruptcy = rx("bankruptcyCaption", "").exec(head);
+    if (bankruptcy && /(?<=[\p{L}\p{N}_.'’)\]])\s+vs?\.\s+/u.test(head.slice(0, bankruptcy.index))) {
+      head = head.slice(0, bankruptcy.index);
+    }
     const nov = rx("nameNoV", "").exec(head);
     if (nov) return base + nov.index;
     let leftEnd = null;

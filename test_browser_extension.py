@@ -724,6 +724,8 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
             "1249947 (E.D. Va. Apr. 30, 2025).",
             "TABLE OF AUTHORITIES\nFederal Cases\nBarnes v. E-Systems, Inc., "
             "No. 4:90-cv-1, 1991 WL 11111 (S.D. Tex. Feb. 1, 1991) ..... 3",
+            # A bankruptcy court's, in its own forms of docket and caption.
+            briefs.BankruptcyCourtTests.BRIEF,
         ]
         got = run_node(
             "process.stdout.write(JSON.stringify(input.map(t => "
@@ -733,7 +735,7 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
                  for s, e, a in citations.detect_links(t) if a[0] == "recap"]
                 for t in texts]
         self.assertEqual(got, want)
-        self.assertEqual(sum(map(len, want)), 13)
+        self.assertEqual(sum(map(len, want)), 18)
 
     def test_the_original_reports_open_the_reprint_s_case(self):
         # Bray, Prosecuting Contempt, nn. 16, 142, 149 and 176.

@@ -762,12 +762,21 @@ _NAME_TOKEN_RE = re.compile(
 _NAME_LOOKBEHIND = 200
 
 # The docket number a citation may carry between the case name and the cite:
-# ", No. A-61210-05T3", ", Nos. 12-6371, 12-6372", ", Civ. A. No. 96-3837".
+# ", No. A-61210-05T3", ", Nos. 12-6371, 12-6372", ", Civ. A. No. 96-3837",
+# a bankruptcy court's ", Bankr. No. 18-12345", ", Adv. Pro. No. 19-50001",
+# and the judge's initials it may carry: ", No. 08-13141 (KJC)".
 _DOCKET_AFTER_NAME_RE = re.compile(
-    r",\s*(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+)?Nos?\.\s*"
+    r",\s*(?:Civ(?:il)?\.?\s*(?:A(?:ction)?\.?\s*)?|Case\s+"
+    r"|Bankr(?:uptcy)?\.?\s*(?:Case\s+)?"
+    r"|Adv(?:ersary)?\.?\s*(?:Pro(?:c(?:eeding)?)?\.?\s*)?)?Nos?\.\s*"
     # (A hyphen may end a line inside the number: "No. 1:21-⏎cv-3".)
-    r"(?:[\w:().]|-(?:[ \t]*\r?\n[ \t]*)?){2,30}"
-    r"(?:\s*(?:,|&|and)\s*[\w:().-]{2,30})*\s*$")
+    r"(?:[\w:().]|-(?:[ \t]*\r?\n[ \t]*)?){2,30}(?:\s*\([A-Z]{2,4}\))?"
+    r"(?:\s*(?:,|&|and)\s*[\w:().-]{2,30}(?:\s*\([A-Z]{2,4}\))?)*\s*$")
+
+# The bankruptcy an adversary proceeding is part of, named after the
+# proceeding's own caption: "Smith v. Jones (In re Smith)".
+_BANKRUPTCY_CAPTION_RE = re.compile(
+    r"\s*\((?:In\s+re|In\s+the\s+Matter\s+of|Matter\s+of)\s+[^()]{1,80}\)\s*$")
 
 # "In re Winship", "Ex parte Young", "Matter of Doe", "In the Interest of
 # J.W." — a case name with no "v." in it, anchored to the end of the window
@@ -912,6 +921,12 @@ def _case_name_start(
         head = head[:docket.start()]
     if not head.strip():
         return None
+    # "Smith v. Jones (In re Smith)": the name is read from the proceeding's
+    # own caption, and runs on over the bankruptcy's.
+    bankruptcy = _BANKRUPTCY_CAPTION_RE.search(head)
+    if bankruptcy and re.search(r"(?<=[\w.'’)\]])\s+vs?\.\s+",
+                                head[:bankruptcy.start()]):
+        head = head[:bankruptcy.start()]
 
     nov = _NAME_NO_V_RE.search(head)
     if nov:
@@ -2326,10 +2341,12 @@ WL_CITE_RE = re.compile(
     r"\b(\d{4})\s+(WL|U\.\s?S\.\s?(?:Dist\.|App\.)\s?LEXIS)\s+(\d{2,10})\b")
 
 # The docket number written immediately before the WL cite: "No. 12-6371,",
-# "Nos. 12-6371, 12-6372,", "Civ. A. No. 96-3837,", "Case No. 2:13-cv-7779,".
+# "Nos. 12-6371, 12-6372,", "Civ. A. No. 96-3837,", "Case No. 2:13-cv-7779,"
+# — without the judge's initials a bankruptcy court's may carry, "No.
+# 08-13141 (KJC),".
 _RECAP_DOCKET_RE = re.compile(
     r"(?:Nos?\.|Civ(?:il)?\.?\s?(?:A(?:ction)?\.?)?\s?Nos?\.?|Case\s+No\.)\s*"
-    r"([A-Za-z]{0,4}\s?[\w:().-]{3,30}?)\s*,\s*$"
+    r"([A-Za-z]{0,4}\s?[\w:().-]{3,30}?)(?:\s*\([A-Z]{2,4}\))?\s*,\s*$"
 )
 
 
@@ -2457,6 +2474,8 @@ _DOCKET_CITE_RE = re.compile(
     # _join_line_broken_hyphens.)
     r"([A-Za-z]{0,4}\s?(?:[\w:.]|-(?:[ \t]*\r?\n[ \t]*)?){3,30}?)"
     r"((?:,\s*[\w:.-]{3,30})*?)"
+    # (A bankruptcy court's judge's initials: "No. 18-12345 (LSS)".)
+    r"(?:\s*\([A-Z]{2,4}\))?"
     r"(?:,\s*slip\s+op\.(?:\s+at\s+\d{1,4}(?:\s*[-–—]\s*\d{1,4})?)?)?"
     r"\s*\(([^()]{2,45}?)\s+"
     r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)[a-z]*\.?)\s+"
@@ -2467,12 +2486,16 @@ _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
 
 # Bluebook court abbreviation → CourtListener court id, federal courts only
-# (RECAP is the PACER archive; state-court WL cites keep the Scholar path).
-# Keyed with spacing/periods squashed so "D.N.J.", "D. N.J." both hit.
+# (RECAP is the PACER archive; a state court's unpublished opinion is not
+# linked).  Keyed with spacing/periods squashed so "D.N.J.", "D. N.J." both
+# hit.  The bankruptcy courts are PACER's too: "Bankr. D. Del." is "deb".
 _FED_COURT_IDS: dict[str, str] = {}
 for _map in (court_catalog.CIRCUIT_COURTS, court_catalog.DISTRICT_COURTS,
              court_catalog.SPECIAL_COURTS):
     for _cid, _abbr in _map.items():
+        _FED_COURT_IDS[re.sub(r"[^a-z0-9]", "", _abbr.lower())] = _cid
+for _cid, _abbr in court_catalog.HISTORICAL_FEDERAL_BLUEBOOK.items():
+    if _abbr.startswith("Bankr. "):
         _FED_COURT_IDS[re.sub(r"[^a-z0-9]", "", _abbr.lower())] = _cid
 
 # A state court's unpublished opinion is not linked at all.  A federal one is
