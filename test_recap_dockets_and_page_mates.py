@@ -205,6 +205,33 @@ class RecapClickTests(unittest.TestCase):
         app._get_scholar.return_value.fetch_by_name.assert_called_once_with(
             "United States v. Braxton", "2001")
 
+    def test_a_year_alone_opens_the_docket(self):
+        # "No. 05-cv-1234, 2008 WL 465653 (D.N.J. 2008)": no day to tell the
+        # opinion from the docket's other filings by, so no document is
+        # looked for — the docket is.
+        app = self._app()
+        app._try_open_citation.return_value = False
+        spec = json.dumps({"cite": "2008 WL 465653", "docket": "05-cv-1234",
+                           "court": "njd", "year": "2008",
+                           "name": "Foxtons, Inc. v. Cirri Germain Realty"})
+        found = {"web_url": "https://www.courtlistener.com/docket/1/foxtons/",
+                 "case_name": "Foxtons, Inc. v. Cirri Germain Realty",
+                 "docket_number": "2:05-cv-01234", "count": 1}
+        with mock.patch.object(gui.cl_api, "find_recap_document") as document, \
+                mock.patch.object(gui.cl_api, "find_recap_docket",
+                                  return_value=found) as docket, \
+                mock.patch.object(gui.threading, "Thread", _NowThread), \
+                mock.patch.object(gui.webbrowser, "open") as browser:
+            gui._open_recap_citation(app, "parent", spec)
+        document.assert_not_called()
+        self.assertEqual(docket.call_args.args[:3],
+                         ("05-cv-1234", "njd",
+                          "Foxtons, Inc. v. Cirri Germain Realty"))
+        browser.assert_called_once_with(found["web_url"])
+        self.assertEqual(app._try_open_citation.call_args.kwargs["year"],
+                         "2008")
+        app._notify_lookup_miss.assert_not_called()
+
     def test_nothing_anywhere_is_said(self):
         app = self._app()
         _lookup, browser = self._click(app, None)

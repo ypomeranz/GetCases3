@@ -15,8 +15,10 @@ import re
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
-from brief_compiler import collect_authorities, compile_to_zip
+import brief_compiler
+from brief_compiler import Authority, collect_authorities, compile_to_zip
 
 
 def _cases(text):
@@ -94,10 +96,37 @@ class RunningTextTests(unittest.TestCase):
 
     def test_a_docket_number_is_not_the_name(self):
         text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, "
-                "2008 WL 465653 (D.N.J. 2008).")
+                "100 F. Supp. 2d 8 (D.N.J. 2008).")
         self.assertEqual(_cases(text), [
-            ("2008 WL 465653", "Foxtons, Inc. v. Cirri Germain Realty",
+            ("100 F. Supp. 2d 8", "Foxtons, Inc. v. Cirri Germain Realty",
              "2008")])
+        # Nor of an unpublished opinion's, cited by its WL number.
+        text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, "
+                "2008 WL 465653 (D.N.J. 2008).")
+        self.assertEqual(
+            [(a.kind, a.name) for a in collect_authorities(text)],
+            [("recap", "Foxtons, Inc. v. Cirri Germain Realty")])
+
+    def test_a_wl_number_recap_cannot_find_is_not_collected(self):
+        # Neither a docket nor the day: nothing finds it by its number.
+        text = ("But Foxtons, Inc. v. Cirri Germain Realty, 2008 WL 465653 "
+                "(D.N.J. 2008).")
+        self.assertEqual(collect_authorities(text), [])
+
+    def test_a_year_alone_finds_no_opinion_to_bundle(self):
+        # Its docket is on RECAP, but which filing is the opinion is not
+        # known: no document is guessed at.
+        resolver = mock.Mock()
+        resolver.recap_pdf.return_value = None
+        got = brief_compiler._resolve_recap(resolver, Authority(
+            "recap", '{"cite": "2008 WL 465653", "docket": "05-cv-1234", '
+                     '"court": "njd", "year": "2008"}'))
+        self.assertIn("year alone", got.note)
+        got = brief_compiler._resolve_recap(resolver, Authority(
+            "recap", '{"cite": "2024 WL 1327972", "date": "2024-03-28", '
+                     '"docket": "12-6371", "court": "njd"}'))
+        self.assertEqual(got.note, "unpublished opinion not available on "
+                                   "RECAP")
 
     def test_a_state_court_s_unpublished_opinion_is_not_collected(self):
         # There is nowhere to fetch it from (see citations.state_court).

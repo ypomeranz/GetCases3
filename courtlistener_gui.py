@@ -42579,7 +42579,9 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
     then the case name, court and date carry the lookup.  When RECAP hasn't
     the document (or its PDF), falls back to the ordinary citation path
     (Google Scholar — by number, or by name for a docket-only citation —
-    then the CourtListener opinion text)."""
+    then the CourtListener opinion text).  A citation dated by its year
+    alone names no day to tell the opinion from the docket's other filings
+    by, so only its docket is looked for."""
     try:
         spec = json.loads(spec_json)
     except Exception:
@@ -42609,11 +42611,13 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
     def run() -> None:
         info = None
         try:
-            info = cl_api.find_recap_document(
-                docket, spec.get("court"), spec.get("date", ""),
-                session=(client._session if client is not None else None),
-                case_name=name or None,
-            )
+            if spec.get("date"):
+                info = cl_api.find_recap_document(
+                    docket, spec.get("court"), spec["date"],
+                    session=(client._session if client is not None
+                             else None),
+                    case_name=name or None,
+                )
         except Exception as exc:
             print(f"[recap] lookup failed for {label!r}: {exc}")
         if info and info.get("pdf_url"):
@@ -42626,14 +42630,18 @@ def _open_recap_citation(app: "CourtListenerGUI", parent: tk.Misc,
             return
         # RECAP doesn't have the PDF — fall back to the regular citation
         # path; failing that, at least point the browser at the docket.
-        safe_status(f"RECAP hasn't {label} — trying Google Scholar…")
+        safe_status(f"RECAP hasn't {label} — trying Google Scholar…"
+                    if spec.get("date") else
+                    f"Trying Google Scholar for {label}…")
         ok = False
         if cite and (fetcher is not None or client is not None):
             try:
                 ok = app._try_open_citation(name, cite, "", fetcher, client,
                                             prefetch_pdf=False,
                                             view_parent=parent,
-                                            year=(spec.get("date") or "")[:4])
+                                            year=(spec.get("date")
+                                                  or spec.get("year")
+                                                  or "")[:4])
             except Exception as exc:
                 print(f"[recap] scholar fallback failed for {label!r}: {exc}")
         elif name and fetcher is not None:
@@ -43325,6 +43333,8 @@ class _BriefCompileResolver:
         court = spec.get("court")
         date = spec.get("date", "")
         cite = spec.get("cite") or ""
+        if not date:
+            return None  # its year alone can't tell the opinion from the rest
         try:
             info = cl_api.find_recap_document(
                 docket, court, date,

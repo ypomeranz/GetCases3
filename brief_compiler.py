@@ -393,6 +393,15 @@ def _resolve_recap(resolver, auth: Authority) -> _Resolved:
     if got:
         data, stem = got
         return _Resolved(data, ".pdf", "RECAP/PACER", stem=stem)
+    try:
+        dated = bool(json.loads(auth.value).get("date"))
+    except (ValueError, AttributeError):
+        dated = True
+    if not dated:
+        # Cited by docket, dated by its year alone: no day to tell the
+        # opinion from the docket's other filings by.
+        return _Resolved(note="unpublished opinion dated by its year alone "
+                              "— RECAP can find its docket, not the opinion")
     return _Resolved(note="unpublished opinion not available on RECAP")
 
 

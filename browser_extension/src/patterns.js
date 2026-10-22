@@ -124,7 +124,7 @@ globalThis.GetCasesPatterns = {
   },
   "recapAfter": {
    "flags": "",
-   "source": "^(?:,\\s*(?:at\\s+)?\\*?\\d{1,6}(?:\\s*[-–—]\\s*\\*?\\d{1,6})?)?\\s*\\(([^()]{2,45}?)\\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)[a-z]*\\.?)\\s+(\\d{1,2}),\\s+(\\d{4})\\)"
+   "source": "^(?:,\\s*(?:at\\s+)?\\*?\\d{1,6}(?:\\s*[-–—]\\s*\\*?\\d{1,6})?)?\\s*\\(([^()]{2,45}?)\\s+(?:((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)[a-z]*\\.?)\\s+(\\d{1,2}),\\s+)?(\\d{4})\\)"
   },
   "recapDocket": {
    "flags": "",

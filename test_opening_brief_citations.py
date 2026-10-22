@@ -337,6 +337,47 @@ class UnpublishedOpinionTests(unittest.TestCase):
             "2016 WL 777777 (Del. Ch. June 1, 2016).")
         self.assertEqual(_links(text), [])
 
+    def test_a_wl_number_recap_cannot_find_is_not_linked(self):
+        # A federal court's, but with neither its docket nor the day it was
+        # decided — or no court at all, or only a short form's lone party
+        # for a name: RECAP has nothing to find it by, and nothing else
+        # finds an opinion by its Westlaw or LEXIS number.
+        text = (
+            "Doe v. Roe, 2019 WL 123456, at *3 (S.D.N.Y. 2019); Moe v. Zoe, "
+            "2018 WL 999999, at *2; Care One, 2024 WL 1327972, at *7 (D.N.J. "
+            "Mar. 28, 2024); Kim v. Lee, 2017 U.S. Dist. LEXIS 4321 (D. Md. "
+            "2017).")
+        self.assertEqual(_links(text), [])
+
+    def test_an_id_after_an_unlinked_one_does_not_reach_past_it(self):
+        text = ("Roe v. Wade, 410 U.S. 113 (1973). Doe v. Roe, 2019 WL 123456 "
+                "(S.D.N.Y. 2019). Id. at 115.")
+        self.assertEqual([a for _t, a in _links(text)],
+                         [("cite", "410 U.S. 113")])
+
+    def test_a_wl_number_beside_a_reporter_cite_is_that_case_s(self):
+        # Written in parallel, it is no authority of its own: the "Id." is
+        # the reported case's.
+        text = ("Doe v. Roe, 100 F. Supp. 3d 200, 205, 2015 WL 1249947 "
+                "(S.D.N.Y. 2015). Id. at 206.")
+        self.assertEqual([a for _t, a in _links(text)],
+                         [("cite", "100 F. Supp. 3d 200@205"),
+                          ("cite", "100 F. Supp. 3d 200@206")])
+
+    def test_a_year_alone_still_finds_the_docket(self):
+        # The docket printed in the first citation carries to the short
+        # form, and finds the docket in its court.
+        text = ("Ray v. Ford, No. 3:20-cv-5, 2016 WL 666666, at *2 (W.D. Va. "
+                "2016). Later, Ray, 2016 WL 666666, at *4.")
+        got = _recap(text)
+        self.assertEqual([t for t, _s in got],
+                         ["Ray v. Ford, No. 3:20-cv-5, 2016 WL 666666, at *2 "
+                          "(W.D. Va. 2016)", "Ray, 2016 WL 666666, at *4"])
+        for _t, spec in got:
+            self.assertEqual(spec, {"cite": "2016 WL 666666",
+                                    "docket": "3:20-cv-5", "court": "vawd",
+                                    "year": "2016", "name": "Ray v. Ford"})
+
     def test_a_federal_court_named_like_a_state_still_links(self):
         # "N.D." alone is North Dakota's court; "N.D. Cal." is a federal
         # district.

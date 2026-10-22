@@ -350,6 +350,12 @@
         // none printed, the case's name), the court and the opinion's date.
         let spec = {};
         try { spec = JSON.parse(value); } catch (e) { /* no spec: an empty search */ }
+        if (spec.docket && !spec.date) {
+          // Dated by its year alone: the search of RECAP's dockets for it.
+          const dockets = [["type", "r"], ["q", ""], ["docket_number", spec.docket]];
+          if (spec.court) dockets.push(["court", spec.court]);
+          return "https://www.courtlistener.com/?" + dockets.map(([k, v]) => `${pyQuotePlus(k)}=${pyQuotePlus(v)}`).join("&");
+        }
         const params = [["type", "rd"], ["q", ""],
           ["entry_date_filed_after", spec.date || ""], ["entry_date_filed_before", spec.date || ""]];
         if (spec.docket) params.push(["docket_number", spec.docket]);
@@ -661,8 +667,8 @@
   const wlKey = (m) => `${m[1]}|${m[2].replace(/\s+/g, "").toLowerCase()}|${m[3]}`;
 
   /** citations.iter_recap_cites: each Westlaw/LEXIS citation as [start,
-   *  end, spec] — the RECAP lookup's JSON spec; "" for a state court's,
-   *  left unlinked; null when it is no RECAP lookup (an ordinary cite). */
+   *  end, spec] — the RECAP lookup's JSON spec; "" for a state court's, and
+   *  null when RECAP has too little to find it by, both left unlinked. */
   function recapCites(text) {
     const index = new Map();
     const occurrences = [];
@@ -682,7 +688,8 @@
       const am = rx("recapAfter", "").exec(text.slice(end, end + 180).replace(/\s+/g, " "));
       if (am) {
         if (!("court" in info)) info.court = squash(am[1]);
-        const month = MONTHS[am[2].slice(0, 3).toLowerCase()];
+        if (!("year" in info)) info.year = am[4];
+        const month = MONTHS[(am[2] || "").slice(0, 3).toLowerCase()];
         if (month && !("date" in info)) info.date = isoDate(am[4], month, am[3]);
       }
       occurrences.push([m.index, end, key]);
@@ -697,6 +704,11 @@
         const fields = { cite: info.cite, date: info.date };
         if (info.docket) fields.docket = info.docket;
         if (courtId) fields.court = courtId;
+        if (info.name) fields.name = info.name;
+        spec = pyJson(fields);
+      } else if (info.docket && courtId) {
+        // No day to find the opinion by: the docket, by its number.
+        const fields = { cite: info.cite, docket: info.docket, court: courtId, year: info.year };
         if (info.name) fields.name = info.name;
         spec = pyJson(fields);
       }
@@ -824,19 +836,14 @@
       }
     }
     // Unpublished opinions by Westlaw/LEXIS number (citations.iter_recap_cites):
-    // a federal court's opens CourtListener's search of RECAP for it; a
-    // state court's is left unlinked, but claimed so no other reading links
-    // it; the rest are ordinary citations.  Then a federal slip opinion
-    // cited by docket alone.
+    // one RECAP can find opens CourtListener's search of RECAP for it; the
+    // rest — a state court's, or one cited by its number and little else —
+    // are left unlinked, but claimed so no other reading links them.  Then a
+    // federal slip opinion cited by docket alone.
     for (const [start, numberEnd, spec] of recapCites(text)) {
       if (overlaps(claimed, start, numberEnd)) continue;
-      if (spec === "") { claimed.push([start, recapEnd(text, numberEnd)]); continue; }
-      if (spec) { claim(start, recapEnd(text, numberEnd), "recap", spec); continue; }
-      let end = numberEnd;
-      let value = squash(text.slice(start, numberEnd));
-      const p = matchAt("pinAfter", text, end);         // ", at *12"
-      if (p) { value += "@" + p[1]; end = p.index + p[0].length; }
-      claim(start, end, "cite", value);
+      if (spec) claim(start, recapEnd(text, numberEnd), "recap", spec);
+      else claimed.push([start, recapEnd(text, numberEnd)]);
     }
     for (const [start, end, spec] of docketCites(text)) {
       if (!overlaps(claimed, start, end)) claim(start, end, "recap", spec);

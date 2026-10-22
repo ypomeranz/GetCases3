@@ -158,14 +158,19 @@ class CaseCiteSpanTests(unittest.TestCase):
 
     def test_a_docket_number_before_the_cite_is_part_of_it(self):
         # The number is no name: the name is the caption before it.  (Dated
-        # by year alone, the opinion is no RECAP lookup, but a citation.)
+        # by year alone, the opinion can't be told from the docket's other
+        # filings, but its docket is found: the link opens that.)
+        import json
         text = ("But Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, "
                 "2008 WL 465653 (D.N.J. 2008) is a federal case.")
+        (span, (kind, spec)), = _spans(text)
         self.assertEqual(
-            _spans(text),
-            [("Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, 2008 "
-              "WL 465653 (D.N.J. 2008)",
-              ("cite", "2008 WL 465653"))])
+            span, "Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, "
+                  "2008 WL 465653 (D.N.J. 2008)")
+        self.assertEqual(kind, "recap")
+        self.assertEqual(json.loads(spec), {
+            "cite": "2008 WL 465653", "docket": "05-cv-1234", "court": "njd",
+            "year": "2008", "name": "Foxtons, Inc. v. Cirri Germain Realty"})
         # A state court's unpublished opinion is not linked at all.
         self.assertEqual(
             _spans("But Foxtons, Inc. v. Cirri Germain Realty, No. "
