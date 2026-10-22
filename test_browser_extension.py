@@ -571,7 +571,6 @@ class FallbackReaderTests(unittest.TestCase):
              "https://www.govinfo.gov/link/fr/88/382?link-type=pdf"),
             ("156 Eng. Rep. 145", "engrep", "156:145"),
             ("8 S.E.C. 893, 915", "sec", '{"page":893,"pin":915,"vol":8}'),
-            ("2022 WL 2373418, at *12", "cite", "2022 WL 2373418@12"),
             ("5 U.S. (1 Cranch) 137 (1803)", "cite", "5 U.S. 137"),
             ("Article III, § 2", "const", "art:3:2"),
             ("Rule 404 of the Federal Rules of Evidence", "rule", "fre:404:"),
@@ -583,6 +582,8 @@ class FallbackReaderTests(unittest.TestCase):
         self.assertFalse(any("Yale" in text for text, _k, _v in found))
         # "the Fifth Amendment" names a provision; it does not cite it.
         self.assertFalse(any("Fifth" in text for text, _k, _v in found))
+        # A WL number with neither docket nor court: nothing finds it.
+        self.assertFalse(any("WL" in text for text, _k, _v in found))
 
     def test_the_same_actions_as_the_app(self):
         # Where both read a citation, they mean the same thing by it: the
@@ -682,10 +683,33 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
         links = run_node(
             "process.stdout.write(JSON.stringify("
             "GetCasesCitations.detect(input)));", text)
+        # Nor is a federal court's that names neither its docket nor its
+        # whole caption ("Care One", a short form's party): RECAP has
+        # nothing to find it by.
         self.assertEqual(
             [(l["kind"], json.loads(l["value"]).get("court")
               if l["kind"] == "recap" else l["value"]) for l in links],
-            [("recap", "cand"), ("cite", "2024 WL 1327972@7")])
+            [("recap", "cand")])
+
+    def test_a_year_alone_opens_the_docket(self):
+        # The app's spec and the same search of RECAP's dockets.
+        text = ("Foxtons, Inc. v. Cirri Germain Realty, No. 05-cv-1234, 2008 "
+                "WL 465653, at *2 (D.N.J. 2008); Foxtons, 2008 WL 465653, at "
+                "*3; Doe v. Roe, 2019 WL 123456 (S.D.N.Y. 2019).")
+        links = run_node(
+            "process.stdout.write(JSON.stringify("
+            "GetCasesCitations.detect(input)));", text)
+        self.assertEqual(
+            [(l["kind"], l["value"]) for l in links],
+            [a for _s, _e, a in citations.detect_links(text)])
+        self.assertEqual([l["kind"] for l in links], ["recap", "recap"])
+        for link in links:
+            self.assertEqual(
+                link["url"],
+                browser_links.browser_url((link["kind"], link["value"])))
+            self.assertIn("type=r&", link["url"])
+            self.assertIn("docket_number=05-cv-1234", link["url"])
+            self.assertIn("court=njd", link["url"])
 
     def test_a_federal_unpublished_opinion_opens_its_recap_search(self):
         # The app's RECAP spec, character for character, and the same
@@ -700,6 +724,8 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
             "1249947 (E.D. Va. Apr. 30, 2025).",
             "TABLE OF AUTHORITIES\nFederal Cases\nBarnes v. E-Systems, Inc., "
             "No. 4:90-cv-1, 1991 WL 11111 (S.D. Tex. Feb. 1, 1991) ..... 3",
+            # A bankruptcy court's, in its own forms of docket and caption.
+            briefs.BankruptcyCourtTests.BRIEF,
         ]
         got = run_node(
             "process.stdout.write(JSON.stringify(input.map(t => "
@@ -709,7 +735,7 @@ class FallbackCaseAndEnglishTests(unittest.TestCase):
                  for s, e, a in citations.detect_links(t) if a[0] == "recap"]
                 for t in texts]
         self.assertEqual(got, want)
-        self.assertEqual(sum(map(len, want)), 13)
+        self.assertEqual(sum(map(len, want)), 18)
 
     def test_the_original_reports_open_the_reprint_s_case(self):
         # Bray, Prosecuting Contempt, nn. 16, 142, 149 and 176.

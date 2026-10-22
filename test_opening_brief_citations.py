@@ -337,6 +337,47 @@ class UnpublishedOpinionTests(unittest.TestCase):
             "2016 WL 777777 (Del. Ch. June 1, 2016).")
         self.assertEqual(_links(text), [])
 
+    def test_a_wl_number_recap_cannot_find_is_not_linked(self):
+        # A federal court's, but with neither its docket nor the day it was
+        # decided — or no court at all, or only a short form's lone party
+        # for a name: RECAP has nothing to find it by, and nothing else
+        # finds an opinion by its Westlaw or LEXIS number.
+        text = (
+            "Doe v. Roe, 2019 WL 123456, at *3 (S.D.N.Y. 2019); Moe v. Zoe, "
+            "2018 WL 999999, at *2; Care One, 2024 WL 1327972, at *7 (D.N.J. "
+            "Mar. 28, 2024); Kim v. Lee, 2017 U.S. Dist. LEXIS 4321 (D. Md. "
+            "2017).")
+        self.assertEqual(_links(text), [])
+
+    def test_an_id_after_an_unlinked_one_does_not_reach_past_it(self):
+        text = ("Roe v. Wade, 410 U.S. 113 (1973). Doe v. Roe, 2019 WL 123456 "
+                "(S.D.N.Y. 2019). Id. at 115.")
+        self.assertEqual([a for _t, a in _links(text)],
+                         [("cite", "410 U.S. 113")])
+
+    def test_a_wl_number_beside_a_reporter_cite_is_that_case_s(self):
+        # Written in parallel, it is no authority of its own: the "Id." is
+        # the reported case's.
+        text = ("Doe v. Roe, 100 F. Supp. 3d 200, 205, 2015 WL 1249947 "
+                "(S.D.N.Y. 2015). Id. at 206.")
+        self.assertEqual([a for _t, a in _links(text)],
+                         [("cite", "100 F. Supp. 3d 200@205"),
+                          ("cite", "100 F. Supp. 3d 200@206")])
+
+    def test_a_year_alone_still_finds_the_docket(self):
+        # The docket printed in the first citation carries to the short
+        # form, and finds the docket in its court.
+        text = ("Ray v. Ford, No. 3:20-cv-5, 2016 WL 666666, at *2 (W.D. Va. "
+                "2016). Later, Ray, 2016 WL 666666, at *4.")
+        got = _recap(text)
+        self.assertEqual([t for t, _s in got],
+                         ["Ray v. Ford, No. 3:20-cv-5, 2016 WL 666666, at *2 "
+                          "(W.D. Va. 2016)", "Ray, 2016 WL 666666, at *4"])
+        for _t, spec in got:
+            self.assertEqual(spec, {"cite": "2016 WL 666666",
+                                    "docket": "3:20-cv-5", "court": "vawd",
+                                    "year": "2016", "name": "Ray v. Ford"})
+
     def test_a_federal_court_named_like_a_state_still_links(self):
         # "N.D." alone is North Dakota's court; "N.D. Cal." is a federal
         # district.
@@ -381,6 +422,72 @@ class UnpublishedOpinionTests(unittest.TestCase):
             "Hoffman v. Board of Regents of the University of Wisconsin System",
             "Melgaard v. Wisconsin Dep’t of Nat. Res.",
         ])
+
+
+class BankruptcyCourtTests(unittest.TestCase):
+    """A bankruptcy court's unpublished opinion is in RECAP too — PACER
+    keeps the bankruptcy courts' dockets — and is found the way a district
+    court's is, by its docket, court and date.  Its docket is written in its
+    own ways: with the judge's initials, "No. 08-13141 (KJC)"; as a
+    bankruptcy or adversary proceeding's number, "Bankr. No.", "Adv. Pro.
+    No."; and an adversary proceeding is captioned with the bankruptcy it is
+    part of, "Smith v. Jones (In re Smith)"."""
+
+    BRIEF = (
+        "See In re Acme Widget Co., No. 08-13141 (KJC), 2015 WL 7300001, at "
+        "*5 (Bankr. D. Del. Nov. 19, 2015); In re Brightline Holdings Inc., "
+        "No. 08-13555 (JMP), 2011 WL 700002 (Bankr. S.D.N.Y. 2011); Grant v. "
+        "Hale (In re Grant), Adv. Pro. No. 19-50001, 2020 WL 100003, at *2 "
+        "(Bankr. D. N.J. Mar. 3, 2020); In re Orchard Farms LLC, Bankr. No. "
+        "18-12345, 2019 WL 100004 (Bankr. D. Ariz. 2019); In re Pell Mfg. "
+        "Co., No. 18-12346 (LSS) (Bankr. D. Del. Mar. 4, 2019)."
+    )
+
+    def test_each_opens_its_recap_search(self):
+        self.assertEqual([spec for _t, spec in _recap(self.BRIEF)], [
+            {"cite": "2015 WL 7300001", "date": "2015-11-19",
+             "docket": "08-13141", "court": "deb",
+             "name": "In re Acme Widget Co."},
+            {"cite": "2011 WL 700002", "docket": "08-13555", "court": "nysb",
+             "year": "2011", "name": "In re Brightline Holdings Inc."},
+            {"cite": "2020 WL 100003", "date": "2020-03-03",
+             "docket": "19-50001", "court": "njb",
+             "name": "Grant v. Hale (In re Grant)"},
+            {"cite": "2019 WL 100004", "docket": "18-12345", "court": "arb",
+             "year": "2019", "name": "In re Orchard Farms LLC"},
+            {"docket": "18-12346", "date": "2019-03-04", "court": "deb",
+             "name": "In re Pell Mfg. Co."},
+        ])
+
+    def test_each_link_covers_the_whole_citation(self):
+        self.assertEqual([t for t, _spec in _recap(self.BRIEF)], [
+            "In re Acme Widget Co., No. 08-13141 (KJC), 2015 WL 7300001, at "
+            "*5 (Bankr. D. Del. Nov. 19, 2015)",
+            "In re Brightline Holdings Inc., No. 08-13555 (JMP), 2011 WL "
+            "700002 (Bankr. S.D.N.Y. 2011)",
+            "Grant v. Hale (In re Grant), Adv. Pro. No. 19-50001, 2020 WL "
+            "100003, at *2 (Bankr. D. N.J. Mar. 3, 2020)",
+            "In re Orchard Farms LLC, Bankr. No. 18-12345, 2019 WL 100004 "
+            "(Bankr. D. Ariz. 2019)",
+            "In re Pell Mfg. Co., No. 18-12346 (LSS) (Bankr. D. Del. Mar. 4, "
+            "2019)",
+        ])
+
+    def test_an_adversary_proceeding_s_reported_opinion_too(self):
+        text = ("Off. Comm. of Unsecured Creditors v. Bay Mgmt. L.C. (In re "
+                "BH Holdings LLC), 420 B.R. 112, 130 (Bankr. S.D.N.Y. 2009).")
+        self.assertEqual(_links(text), [(text[:-1], ("cite", "420 B.R. 112@130"))])
+
+    def test_one_recap_cannot_find_is_still_not_linked(self):
+        # Neither docket nor day.
+        self.assertEqual(_links("In re Acme Widget Co., 2019 WL 100005 "
+                                "(Bankr. D. Del. 2019)."), [])
+
+    def test_the_bankruptcy_courts_are_federal(self):
+        for court in ("Bankr. D. Del.", "Bankr. S.D.N.Y.", "Bankr. D. N.J.",
+                      "Bankr. N.D. Cal."):
+            with self.subTest(court=court):
+                self.assertFalse(citations.state_court(court))
 
 
 # ---------------------------------------------------------------------------

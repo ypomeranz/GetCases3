@@ -13,12 +13,14 @@ you read in Chrome. Click one and:
   5 U.S. 137), the Caselaw Access Project's scan for any other reporter —
   and otherwise Google Scholar's search of case law; a federal court's
   unpublished opinion (cited by Westlaw or LEXIS number, or by docket) on
-  CourtListener's search of its RECAP archive, by docket, court and date;
+  CourtListener's search of its RECAP archive, by docket, court and date
+  (dated by its year alone, the search of its dockets);
   uscode.house.gov for the U.S. Code, eCFR for the C.F.R., Cornell LII for
   the federal rules, the Library of Congress for the Constitution, GovInfo
-  for the Statutes at Large and the Federal Register. A state court's
-  unpublished opinion is not linked: there is no archive of state dockets
-  to find it in.
+  for the Statutes at Large and the Federal Register. An unpublished opinion
+  RECAP can't find is not linked — a state court's, with no archive of
+  state dockets to find it in, or one cited by its Westlaw or LEXIS number
+  with no docket or court to look it up by.
 
 It also works in Chrome, Edge, Brave and other Chromium browsers.
 

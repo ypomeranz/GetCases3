@@ -268,6 +268,13 @@ def browser_url(action: "tuple[str, str]", text: str = "") -> str:
             spec = json.loads(value)
         except Exception:
             spec = {}
+        if spec.get("docket") and not spec.get("date"):
+            # Dated by its year alone: the search of RECAP's dockets for it.
+            params = {"type": "r", "q": "", "docket_number": spec["docket"]}
+            if spec.get("court"):
+                params["court"] = spec["court"]
+            return ("https://www.courtlistener.com/?"
+                    + urllib.parse.urlencode(params))
         params = {"type": "rd", "q": "",
                   "entry_date_filed_after": spec.get("date", ""),
                   "entry_date_filed_before": spec.get("date", "")}
