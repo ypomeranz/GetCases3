@@ -302,18 +302,92 @@ _FILED_BY_JUDGE_RE = re.compile(
     r"(?:Circuit\s+|District\s+)?Judges?\s+"
     r"(?P<name>[A-Z][\w'’.-]*(?:\s+[A-Z][\w'’.-]*)*)")
 
+# A judge the front matter names by title and surname, as the Fourth Circuit
+# lists its writings and votes ("Judge Motz wrote a concurring opinion.
+# Judge Wilkinson and Judge Agee wrote a dissenting opinion") and the Ninth
+# Circuit its ("Opinion by Judge Wardlaw; Dissent by Judge Bea") — the name
+# the byline's "DIANA GRIBBON MOTZ" is cited by.  "Judges Wilkinson and
+# Agee" names both.
+_PARTICLE = r"(?:de|del|della|van|von|der|la|le|da|di|du)\s+"
+_MENTIONED_NAME = (r"(?:" + _PARTICLE + r")?[A-Z][\w'’.-]*"
+                   r"(?:\s+(?:" + _PARTICLE + r")?[A-Z][\w'’.-]*)*")
+_JUDGE_MENTION_RE = re.compile(
+    r"\bJudge\s+(?P<one>" + _MENTIONED_NAME + r")"
+    r"|\bJudges\s+(?P<many>" + _MENTIONED_NAME + r"(?:\s*,\s*(?:and\s+)?"
+    + _MENTIONED_NAME + r")*(?:\s*,?\s*(?:and|&)\s+" + _MENTIONED_NAME
+    + r")?)")
+
+
+def mentioned_judges(text: str) -> list[str]:
+    """The judges *text* names as "Judge Motz" or "Judges Wilkinson and
+    Agee", by the names it gives them."""
+    names = []
+    for m in _JUDGE_MENTION_RE.finditer(text or ""):
+        for name in re.split(r"\s*,\s*(?:and\s+)?|\s+(?:and|&)\s+",
+                             m.group("one") or m.group("many")):
+            # "Judge Dever’s TRO" names Judge Dever.
+            name = re.split(r"['’]s\b", name.strip())[0].rstrip(".,;:")
+            if name:
+                names.append(name)
+    return names
+
+
+# …but only where it lists who wrote or voted what — "Judge Motz wrote a
+# concurring opinion", "in which Judge Niemeyer joined", "Opinion by Judge
+# Wardlaw" — not wherever an opinion's prose speaks of a judge ("Judge
+# Wood’s opinion for the panel", in Jansen v. Packaging Corp. of Am., 123
+# F.3d 490 (7th Cir. 1997) (en banc), which names Diane P. Wood so to tell
+# her from Harlington Wood).
+_TITLED_NAME = (r"(?:(?:Chief|Senior|Circuit|District)\s+)*Judges?\s+"
+                + _MENTIONED_NAME)
+_WRITING_RE = re.compile(
+    r"(?P<run>\bJudges?\s+" + _MENTIONED_NAME
+    + r"(?:\s*,\s*(?:and\s+)?(?:" + _TITLED_NAME + r"|" + _MENTIONED_NAME
+    + r")|\s*,?\s*(?:and|&)\s+(?:" + _TITLED_NAME + r"|" + _MENTIONED_NAME
+    + r"))*)\s+(?:wrote|joined|joins|voted|concurred|concurs|dissented|"
+    r"dissents|filed|authored|delivered)\b"
+    r"|\b(?:[Oo]pinion|[Dd]issent|[Cc]oncurrence|[Ss]tatement)\s+by\s+"
+    r"(?P<by>" + _TITLED_NAME + r")")
+
 
 def judges_named(front_matter: Iterable[str]) -> set[str]:
     """The judges the opinion's front matter names, as it names them, in
-    lower case: its bench, and the authors of the writings it lists ("…
-    filed by Circuit Judge Henderson")."""
+    lower case: its bench, the authors of the writings it lists ("… filed
+    by Circuit Judge Henderson", "Judge Motz wrote a concurring opinion"),
+    and the judges it says voted."""
     found: set[str] = set()
     for text in front_matter:
         line = _front_line(text)
         found.update(n.lower() for n in bench_names(line))
         found.update(m.group("name").rstrip(".,;:").lower()
                      for m in _FILED_BY_JUDGE_RE.finditer(line))
+        found.update(n.lower() for m in _WRITING_RE.finditer(line)
+                     for n in mentioned_judges(m.group("run")
+                                               or m.group("by")))
     return found
+
+
+# An order of the whole court may say how each of its judges voted, and
+# nothing else of its bench: "Chief Judge Gregory, Judge Motz, Judge King, …,
+# and Judge Rushing voted to deny the motions for injunction.  Judge
+# Wilkinson, Judge Niemeyer, and Judge Agee voted to grant the motions for
+# injunction." — Wise v. Circosta, 978 F.3d 93 (4th Cir. 2020) (en banc),
+# whose front matter says "en banc" nowhere.  A vote on whether to rehear a
+# case en banc, and the poll that asks it, are not the full court's hearing
+# of it (see _EN_BANC_REFUSED_RES).
+_VOTE_RE = re.compile(
+    r"(?P<who>[^.;]*?)\bvoted\s+(?:to|in\s+favor\s+of|against)\b"
+    r"(?P<what>[^.;]*)", re.IGNORECASE)
+_REHEARING_RE = re.compile(r"\brehear|\ben\s+banc\b|\bpoll", re.IGNORECASE)
+
+
+def voting_judges(text: str) -> set[str]:
+    """The judges *text* says voted on the case itself — not on rehearing
+    it — in lower case."""
+    return {name.lower()
+            for m in _VOTE_RE.finditer(text or "")
+            if not _REHEARING_RE.search(m.group("what"))
+            for name in mentioned_judges(m.group("who"))}
 
 
 def _front_line(text: str) -> str:
@@ -352,6 +426,13 @@ def decided_en_banc(front_matter: Iterable[str],
     bench_lines = [t for t in lines + [_front_line(t) for t in benches]
                    if _BENCH_LINE_RE.match(t) and len(t) <= 600]
     if any(_BENCH_EN_BANC_RE.search(t) for t in bench_lines):
+        return True
+    # More judges voting on the case than a panel holds (see _VOTE_RE) —
+    # read across the opening blocks, which a text kept line by line
+    # (CourtListener's of a slip opinion) breaks a sentence over.
+    if panel_court and len(voting_judges(" ".join(
+            t for t in lines + [_front_line(t) for t in benches]
+            if len(t) <= 2000))) > 3:
         return True
     for t in lines:
         if len(t) > 300:

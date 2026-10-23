@@ -270,6 +270,32 @@ class FootnoteMarkerTests(unittest.TestCase):
 class ScanPartLabelTests(unittest.TestCase):
     """What the parts rail calls the writings it finds on a scan."""
 
+    def test_an_opinion_in_chambers(self):
+        # Morison v. United States, 486 U.S. 1306 (1988): every page heads
+        # "Opinion in Chambers", the syllabus's too, and the whole scan had
+        # been called its syllabus.  The opinion opens partway down the
+        # first page, at its Circuit Justice's byline.
+        first = ["1306 OCTOBER TERM, 1987", "Opinion in Chambers 486 U. S.",
+                 "MORISON v. UNITED STATES",
+                 "ON APPLICATION FOR CONTINUED RELEASE FROM DETENTION",
+                 "No. A-896. Decided June 2, 1988",
+                 "Application for continued release from detention is "
+                 "denied.",
+                 "CHIEF JUSTICE REHNQUIST, Circuit Justice.",
+                 "Samuel Loring Morison was convicted in the District Court"]
+        secs = so.detect_sections([
+            _page(first),
+            _page(["MORISON v. UNITED STATES 1307",
+                   "1306 Opinion in Chambers",
+                   "States v. Bayko, 774 F. 2d 516, 522 (CA1 1985), his "
+                   "application is denied."])])
+        self.assertEqual([(s.label, s.kind, s.start_page) for s in secs],
+                         [("Syllabus", "syllabus", 0),
+                          ("Rehnquist, C.J., in chambers", "majority", 0)])
+        byline = next(ln for ln in so.group_lines(_page(first))
+                      if ln.text.startswith("CHIEF JUSTICE"))
+        self.assertEqual(secs[1].start_at, (0, byline.y))
+
     def test_a_justice_who_took_no_part_is_not_the_writer(self):
         # Hemi Group, LLC v. City of New York, 559 U.S. 1: the one-page
         # concurrence, named by its byline, had been named for Justice
@@ -316,6 +342,12 @@ class ScanPartLabelTests(unittest.TestCase):
                          "O’Connor")
         # A lower court's judge is no Justice: read as printed.
         self.assertEqual(so._names_display(("BLACKMAN",)), "Blackman")
+
+    def test_justices_writing_together_as_the_bluebook_names_them(self):
+        # Dobbs v. Jackson Women’s Health Org., 597 U.S. 215 (2022).
+        self.assertEqual(
+            so._names_display(("BREYER", "SOTOMAYOR", "KAGAN"), roster=True),
+            "Breyer, Sotomayor & Kagan")
 
     def test_in_the_judgment_as_the_byline_says_it(self):
         self.assertEqual(

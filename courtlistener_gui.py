@@ -1277,6 +1277,7 @@ import eng_rep
 import eng_rep_pdf
 import fed_cas
 import fed_rules
+import federal_judges
 import federal_register
 import legislative_history
 import leghist_fetch
@@ -1319,6 +1320,7 @@ from citations import (
     reporter_citation_variants as _reporter_citation_variants,
     reporter_key as _canonical_reporter_key,
     reporter_family as _reporter_family,
+    reporter_family_in_folder as _reporter_family_in_folder,
     is_federal_nominative as _is_federal_nominative,
     case_match_text as _case_match_text,
     build_short_cite_index as _build_short_cite_index_here,
@@ -2804,17 +2806,28 @@ def _slugify_reporter(reporter: str) -> str:
     return s
 
 
+def _names_two_books(citation: str) -> bool:
+    """Whether *citation* names its reporter by a name two books share —
+    "1 Charlton 13" (R.M. Charlton's or T.U.P. Charlton's), "1 Dud. 7"
+    (Georgia's Dudley or South Carolina's), "4 Met. 111" (45 Mass. or 61
+    Ky.).  static.case.law is asked only by its readings (see
+    _readings_to_ask): the "charlton" folder the bare name would point to is
+    R.M.'s alone."""
+    return len(_state_nominative_cites(citation)) > 1
+
+
 def _static_case_law_url(citation: str) -> Optional[str]:
     """
     Return the PDF URL candidate on static.case.law for a citation string
-    such as '410 F.2d 1234', or None if the citation cannot be parsed.
+    such as '410 F.2d 1234', or None if the citation cannot be parsed — or
+    names a reporter two books share (see :func:`_names_two_books`).
 
     URL pattern:
       https://static.case.law/{reporter-slug}/{volume}/case-pdfs/{page:04d}-01.pdf
     """
     citation = re.sub(r"<[^>]+>", "", citation).strip()
     m = _CITE_PARSE_RE.match(citation)
-    if not m:
+    if not m or _names_two_books(citation):
         return None
     vol, reporter, page = m.group(1), m.group(2).strip(), m.group(3)
     slug = _slugify_reporter(reporter)
@@ -2833,10 +2846,25 @@ _CASE_LAW_FILE_URL_RE = re.compile(
 _CASE_LAW_VOLUMES: dict = {}
 
 
+#: "vol reporter page", or "vol reporter " — the start of a volume's keys.
+_CASE_LAW_KEY_RE = re.compile(r"\s*(\d+)\s+(.+?)(?:\s+(\d+))?\s*")
+
+
 def _case_law_cite_key(cite: str) -> str:
     """A citation reduced to what CAP's spelling and a brief's agree on:
-    "237 N. Y. 193" and "237 N.Y. 193" are both "237ny193"."""
-    return re.sub(r"[\s.]", "", str(cite or "")).lower()
+    "237 N. Y. 193" and "237 N.Y. 193" are both "237ny193".  A reporter that
+    goes by more than one name is read by its Bluebook one, and CAP's own
+    name for a folder's reporter as that reporter, so CAP's "1 Charlton 1"
+    (in its "charlton" folder) and an opinion's "1 R. Charlton 1" are both
+    "1rmcharlt1"."""
+    cite = str(cite or "")
+    m = _CASE_LAW_KEY_RE.fullmatch(cite)
+    family = (_reporter_family(m.group(2))
+              or _reporter_family_in_folder(_slugify_reporter(m.group(2)))
+              if m else None)
+    if family is not None:
+        cite = f"{m.group(1)} {family.canonical} {m.group(3) or ''}"
+    return re.sub(r"[\s.]", "", cite).lower()
 
 
 def _case_law_volume(slug: str, vol: str) -> "tuple[dict, dict, dict]":
@@ -3094,6 +3122,12 @@ class _CaseLawPageOpinion:
     court_id: str = ""
     #: How many pages it runs, where the volume's list says (0 where not).
     pages: int = 0
+    #: Its own citation and "(Ga. 1811)", where the cases to choose among
+    #: are in different books — the readings of a reporter's name two books
+    #: share (see _readings_to_ask) — and the case's name alone can't say
+    #: which book each is in.
+    cite: str = ""
+    paren: str = ""
 
 
 _CASE_LAW_NUMBERED_PDF_RE = re.compile(
@@ -3601,6 +3635,65 @@ def _official_series_for(cite: str, name: str = "", year: str = "") -> list:
     return ordered
 
 
+def _readings_to_ask(cite: str, name: str = "", year: str = "",
+                     cited_in: str = "") -> list:
+    """The cases a citation may be, for the reader to choose among, when it
+    names its reporter by a name two books share (see _names_two_books) and
+    a case begins at the page in more than one of them: "1 Charlton 13" is
+    Wakefield v. Limbert, 1 R.M. Charlt. 13 (Ga. 1811), or State v.
+    Cuthbert, 1 T.U.P. Charlt. 13 (Ga. 1805).  Each comes as a
+    _CaseLawPageOpinion carrying its own citation and "(Ga. 1811)", as the
+    chooser lists it.
+
+    [] where the case's *name* picks out one of them (or none: the lookup
+    then goes by the name, see _case_law_named_url), where the *year* it was
+    decided does, or where only one book has a case there.  A case decided
+    after *cited_in*, the year of the opinion citing it, is no reading of
+    it.  The first reading used to open, whichever case was meant."""
+    readings = _official_series_cites(cite)
+    if len(readings) < 2:
+        return []
+    name = re.sub(r"<[^>]+>", "", name or "").strip()
+    year = str(year or "")[:4]
+    cited_in = str(cited_in or "")[:4]
+    held: list = []     # (year decided, the case)
+    for reading in readings:
+        meta = _case_law_metadata(reading)
+        if not meta:
+            continue
+        decided = str(meta.get("decision_date") or "")[:4]
+        if (cited_in.isdigit() and decided.isdigit()
+                and int(decided) > int(cited_in)):
+            continue
+        where = str((meta.get("jurisdiction") or {}).get("name") or "")
+        paren = " ".join(p for p in (where, decided) if p)
+        url = _case_law_listed_url(reading, _static_case_law_url(reading))
+        cases = _case_law_page_cases(reading) or [_CaseLawPageOpinion(
+            url, _case_law_json_for_pdf_url(url) or "",
+            str(meta.get("name_abbreviation") or meta.get("name") or ""))]
+        held += [(decided, _dc_replace(case, cite=reading, paren=paren))
+                 for case in cases]
+    if name:
+        named = [(decided, case) for decided, case in held
+                 if max(_match_tier(name, case.name),
+                        _match_tier(case.name, name)) >= 1]
+        if len(named) <= 1:
+            return []
+        held = named
+    if year:
+        dated = [(decided, case) for decided, case in held if decided == year]
+        if len(dated) == 1:
+            return []
+        held = dated or held
+    # Cases of one book only are the page's own, told apart as any page's
+    # are (_case_law_pdf_choices_for_cites).
+    if len({case.cite for _decided, case in held}) < 2:
+        return []
+    print(f"[nominative] {cite!r} may be any of "
+          f"{', '.join(c.cite for _d, c in held)}, and nothing says which")
+    return [case for _decided, case in held]
+
+
 def _take_page_mates(fetcher) -> list:
     """The cases Google Scholar's last citation lookup on this thread could
     not choose among (GoogleScholarFetcher.take_page_mates), or []."""
@@ -3686,10 +3779,11 @@ def _case_law_json_url(citation: str) -> Optional[str]:
     ``https://static.case.law/f-appx/1/cases/0002-01.json`` for ``1 F. App'x
     2``), or None when the citation can't be parsed.  The JSON carries the
     opinion text and metadata — used for Federal Appendix cases, whose scans
-    have no reliable text layer."""
+    have no reliable text layer.  None, too, for a reporter two books share
+    (see :func:`_names_two_books`)."""
     citation = re.sub(r"<[^>]+>", "", citation).strip()
     m = _CITE_PARSE_RE.match(citation)
-    if not m:
+    if not m or _names_two_books(citation):
         return None
     vol, reporter, page = m.group(1), m.group(2).strip(), m.group(3)
     slug = _slugify_reporter(reporter)
@@ -13741,7 +13835,7 @@ class CourtListenerGUI:
                         ask_orders=ask_orders, race=race, year=year,
                         scholar_url=scholar_url, known_item=known_item,
                         race_fallback=race_fallback, prefer_scan=prefer_scan,
-                        inside_checked=True)
+                        context_year=context_year, inside_checked=True)
 
                 self._post_root(go_on)
 
@@ -13799,6 +13893,22 @@ class CourtListenerGUI:
             url = ""
             item: dict = {}
             racing = lanes["race"]
+            # A reporter named by a name two books share — "1 Charlton 13",
+            # "1 Dud. 7" — with a case at the page in more than one, and
+            # nothing to say which: the reader picks.  The first used to
+            # open, whichever case was meant.
+            try:
+                readings = _readings_to_ask(cite, name, year, year_read)
+            except Exception as exc:
+                print(f"[cite-pdf] reading {cite!r}'s books failed: {exc}")
+                readings = []
+            if watch.cancelled:
+                return
+            if readings:
+                mates = [_CaseLawPdfChoice(cite=o.cite, url=o.url, pick=True,
+                                           opinion=o) for o in readings]
+                self._post_root(lambda: ask(mates, {"citation": [cite]}))
+                return
             try:
                 # Racing, a U.S. cite that came with its case's name has its
                 # official scan looked for before CourtListener answers; the
@@ -13857,7 +13967,8 @@ class CourtListenerGUI:
                 return
             open_scan(url, item)
 
-        def open_scan(url: str, item: dict, picked: str = "") -> None:
+        def open_scan(url: str, item: dict, picked: str = "",
+                      picked_cite: str = "") -> None:
             racing = lanes["race"]
             fetched = None
             if url:
@@ -13889,14 +14000,19 @@ class CourtListenerGUI:
             if racing is not None:
                 racing.scan_found(data, final_url, meta, item, shown_name)
                 return
+            # A case picked from the books a shared reporter name may mean is
+            # shown by its own book's citation (see _readings_to_ask).
+            shown_cite = picked_cite or cite
+            shown_action = (("cite", f"{picked_cite}@{pin}" if pin
+                             else picked_cite) if picked_cite else action)
             # The cluster this scan was found through is worth keeping: it is
             # what the T button falls back to when Google Scholar has no copy
             # of the case, and it saves looking the citation up a second time.
             self._post_root(
                 lambda: self._show_cited_case_pdf(
-                    parent, data, final_url, cite, pin, shown_name, action,
-                    snippet, safe_status, cl_item=item, watch=watch,
-                    page_meta=meta,
+                    parent, data, final_url, shown_cite, pin, shown_name,
+                    shown_action, snippet, safe_status, cl_item=item,
+                    watch=watch, page_meta=meta,
                 )
             )
 
@@ -13935,11 +14051,16 @@ class CourtListenerGUI:
                         if not known or _is_the_named_case(picked, known)
                         else {"citation": list(item.get("citation") or []),
                               "caseName": picked})
+            # One of the books a shared name may mean: by its own citation
+            # ("1 T.U.P. Charlt. 13"), not the name it shares ("1 Charlton").
+            picked_cite = str(getattr(chosen, "cite", "") or "")
+            if picked_cite:
+                item = dict(item, citation=[picked_cite])
 
             def go() -> None:
                 with _watching(watch):
                     try:
-                        open_scan(chosen.url, item, picked)
+                        open_scan(chosen.url, item, picked, picked_cite)
                     except Exception as exc:
                         print(f"[cite-pdf] opening {chosen.url} failed: {exc}")
                         problem = str(exc) or type(exc).__name__
@@ -14084,7 +14205,7 @@ class CourtListenerGUI:
         tells a recent decision from the one below it by name (see
         _cl_unreported_case)."""
         item: dict = {}
-        official = _official_series_for(cite, name)
+        official = _official_series_for(cite, name, year)
         if known and (known.get("cluster_id") or known.get("id")):
             item = dict(known)
         elif client is not None:
@@ -19025,6 +19146,101 @@ def _fix_name_case(name: str) -> str:
         return out
 
     return " ".join(fix(w) for w in name.split())
+
+
+#: A byline's title for the judges named before it: "Circuit Judges", "JJ.",
+#: "Chief Judge", "Senior Circuit Judge", "United States District Judge".
+_BYLINE_TITLE_RE = re.compile(
+    r"(?:the\s+)?(?:united\s+states\s+)?"
+    r"(?:(?:chief|senior|presiding|associate|acting)\s+)*"
+    r"(?:circuit\s+|district\s+|bankruptcy\s+|magistrate\s+)?"
+    r"(?:judges?|justices?)"
+    r"|c\.\s?j\.|ch\.\s?j\.|jj?\.|p\.\s?j\.",
+    re.IGNORECASE)
+_BYLINE_CHIEF_RE = re.compile(r"(?:the\s+)?chief\b|c\.\s?j\.|ch\.\s?j\.",
+                              re.IGNORECASE)
+
+# A Justice's byline as Circuit Justice, deciding an application alone in
+# chambers: "CHIEF JUSTICE ROBERTS, Circuit Justice." (Maryland v. King, 567
+# U.S. 1301), "Chief Justice Rehnquist, Circuit Justice." (Morison v. United
+# States, 486 U.S. 1306), "MR. JUSTICE DOUGLAS, Circuit Justice.".
+_JUSTICE_NAME = (r"(?:\*\d+[A-Za-z]{0,2}\s+)?(?:(?:MR|MRS|MS)\.\s+)?"
+                 r"(?:THE\s+)?(?P<chief>CHIEF\s+)?JUSTICE\s+"
+                 r"(?P<name>[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*)*?)")
+_IN_CHAMBERS_BYLINE_RE = re.compile(
+    _JUSTICE_NAME + r",?\s+(?:as\s+)?Circuit\s+Justice\b", re.IGNORECASE)
+# …or a bare byline, "MR. JUSTICE DOUGLAS.", under the heading the reports
+# give such an opinion: "Opinion in Chambers", "IN CHAMBERS".
+_JUSTICE_BYLINE_RE = re.compile(_JUSTICE_NAME + r"\s*[.:]?", re.IGNORECASE)
+_IN_CHAMBERS_HEADING_RE = re.compile(
+    r"(?:\*\d+[A-Za-z]{0,2}\s+)?(?:Opinion\s+)?in\s+chambers\.?",
+    re.IGNORECASE)
+
+
+def _byline_writers(head: str) -> "list[tuple[str, bool]]":
+    """The judges a byline names as writing together, each with whether
+    the Chief: "WILKINSON and AGEE, Circuit Judges, with whom NIEMEYER,
+    Circuit Judge, joins" is [("WILKINSON", False), ("AGEE", False)];
+    "JUSTICE BREYER, JUSTICE SOTOMAYOR, and JUSTICE KAGAN" the three.
+    *head* is the byline up to its role ("dissenting").  [] for a byline of
+    one writer, or one not read as names and titles alone."""
+    head = re.split(r",?\s+(?:with\s+whom|joined\s+by|in\s+which)\b", head,
+                    maxsplit=1, flags=re.IGNORECASE)[0]
+    writers: list = []
+    pending: list = []      # [name, chief, styled "JUSTICE"], title to come
+    for seg in re.split(r"\s*,\s*", head):
+        seg = re.sub(r"^(?:and|&)\s+", "", seg.strip(), flags=re.IGNORECASE)
+        # "MILAN D. SMITH, JR., Circuit Judge": the name's own, no writer.
+        if not seg or re.fullmatch(r"(?:Jr|Sr)\.?|I{2,3}|IV", seg,
+                                   re.IGNORECASE):
+            continue
+        # "KETHLEDGE, Circuit Judge. concurring." closes its title so.
+        if (_BYLINE_TITLE_RE.fullmatch(seg)
+                or _BYLINE_TITLE_RE.fullmatch(seg.rstrip("."))):
+            # "KING, Chief Judge, and …": the title is the name's before it.
+            if pending and _BYLINE_CHIEF_RE.match(seg):
+                pending[-1][1] = True
+            writers += pending
+            pending = []
+            continue
+        for piece in re.split(r"\s+(?:and|&)\s+", seg, flags=re.IGNORECASE):
+            m = re.fullmatch(r"(?:(?:MR|MRS|MS)\.\s+)?(?:(THE\s+)?(CHIEF\s+)?"
+                             r"(JUSTICE)\s+)?([A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*)*)",
+                             piece.strip(), re.IGNORECASE)
+            if (not m or not m.group(4)[:1].isupper()
+                    or re.search(r"\b(?:judges?|justices?)\b", m.group(4),
+                                 re.IGNORECASE)):
+                return []
+            pending.append([m.group(4), bool(m.group(2)),
+                            bool(m.group(3))])
+    # A name no title follows is a writer only as "JUSTICE KAGAN" is —
+    # "BIRCH, J., Separate Dissenting Opinion." is Birch's alone.
+    if pending and not all(styled for _n, _c, styled in pending):
+        return []
+    writers += pending
+    return ([(name, chief) for name, chief, _styled in writers]
+            if len(writers) > 1 else [])
+
+
+def _joint_writers(writers: "list[tuple[str, bool]]") -> str:
+    """Judges writing together as rule 10.6.1 names them: "Wilkinson &
+    Agee, JJ.", "Breyer, Sotomayor & Kagan, JJ." — an ampersand before the
+    last, no comma before it — and a Chief first, apart: "Roberts, C.J.,
+    Thomas & Gorsuch, JJ.", "Rehnquist, C.J., & White, J."."""
+    def amp(names: list) -> str:
+        return (names[0] if len(names) == 1
+                else ", ".join(names[:-1]) + " & " + names[-1])
+
+    chiefs = [name for name, chief in writers if chief]
+    rest = [name for name, chief in writers if not chief]
+    if not chiefs:
+        return f"{amp(rest)}, JJ."
+    lead = ", ".join(f"{name}, C.J." for name in chiefs)
+    if not rest:
+        return lead
+    if len(rest) == 1:
+        return f"{lead}, & {rest[0]}, J."
+    return f"{lead}, {amp(rest)}, JJ."
 
 
 _CAPTION_SMALL_WORDS = {
@@ -32873,6 +33089,42 @@ class _ScholarTextWindow:
         self._en_banc_known = (key, found)
         return found
 
+    def _in_chambers(self) -> str:
+        """The writer parenthetical of an opinion a Justice wrote alone, in
+        chambers — "Roberts, C.J., in chambers" for Maryland v. King, 567
+        U.S. 1301 (2012), whose byline reads "CHIEF JUSTICE ROBERTS, Circuit
+        Justice." (rule 10.6.1) — or "".  The byline says so, or a Justice's
+        byline under the heading "Opinion in Chambers".  Read once for each
+        set of parts on show; it is the whole decision's, so a citation
+        carries it wherever it is taken from."""
+        parts = (getattr(self, "_rendered_parts", None)
+                 or getattr(self, "_parts", None) or [])
+        key = tuple(id(p) for p in parts)
+        known = getattr(self, "_in_chambers_known", None)
+        if known is not None and known[0] == key:
+            return known[1]
+        header = [b for p in parts if getattr(p, "kind", "") == "header"
+                  for b in p.blocks]
+        lead = next((p for p in parts
+                     if getattr(p, "kind", "") == "majority"), None)
+        lines = [re.sub(r"\s+", " ", b.text()).strip()
+                 for b in header[:40] + (lead.blocks[:6] if lead else [])]
+        headed = any(_IN_CHAMBERS_HEADING_RE.fullmatch(t) for t in lines)
+        found = ""
+        for t in lines:
+            m = (_IN_CHAMBERS_BYLINE_RE.match(t)
+                 or (_JUSTICE_BYLINE_RE.fullmatch(t) if headed else None))
+            if m:
+                surname = self._judge_surname(_fix_name_case(
+                    m.group("name").replace("’", "'").rstrip(".:")))
+                if surname:
+                    found = (f"{surname}, "
+                             f"{'C.J.' if m.group('chief') else 'J.'}, "
+                             "in chambers")
+                break
+        self._in_chambers_known = (key, found)
+        return found
+
     def _writer_parenthetical(self, part) -> str:
         """
         Bluebook writer parenthetical for a separate opinion (rule 10.6.1):
@@ -32897,6 +33149,9 @@ class _ScholarTextWindow:
             return re.sub(r"^(?:\*\d+[A-Za-z]{0,2}\s+)+", "", t)
 
         if part.kind == "majority":
+            chambers = self._in_chambers()
+            if chambers:
+                return chambers
             for b in part.blocks[:3]:
                 bt = block_text(b)
                 if re.match(r"PER\s+CURIAM\b", bt, re.IGNORECASE):
@@ -33110,6 +33365,17 @@ class _ScholarTextWindow:
             if sm and sm.group(0):
                 head = head[sm.end():] + (", Chief Judge" if sm.group(1)
                                           else "")
+        # Judges writing together, each named (rule 10.6.1): "WILKINSON and
+        # AGEE, Circuit Judges, with whom NIEMEYER, Circuit Judge, joins,
+        # dissenting" is (Wilkinson & Agee, JJ., dissenting); Dobbs's
+        # "JUSTICE BREYER, JUSTICE SOTOMAYOR, and JUSTICE KAGAN, dissenting"
+        # (Breyer, Sotomayor & Kagan, JJ., dissenting).
+        writers = [(self._judge_surname(_fix_name_case(n)), chief)
+                   for n, chief in _byline_writers(head)]
+        if writers and all(n for n, _chief in writers):
+            joint = _joint_writers(writers)
+            return (f"statement of {joint}, {phrase}" if statement
+                    else f"{joint}, {phrase}")
         # The chief-justice test must look only at the author's own
         # designation — "JUSTICE THOMAS, with whom THE CHIEF JUSTICE and
         # JUSTICE ALITO join, dissenting" is Thomas, J., not C.J.
@@ -33126,8 +33392,6 @@ class _ScholarTextWindow:
             )
         )
         title = ("C.J." if is_chief
-                 # Judges writing together: "SHRIVER and CROWNOVER, JJ.,
-                 # concurring" is (Shriver and Crownover, JJ., concurring).
                  else "JJ." if re.fullmatch(r"JJ\.?", role_seg, re.IGNORECASE)
                  else "J.")
         name = re.sub(
@@ -33166,12 +33430,23 @@ class _ScholarTextWindow:
         # HENDERSON, RANDOLPH and GARLAND", its list of writings naming
         # "KAREN LeCRAFT HENDERSON" in full.
         surnamed = sum(1 for k in known if " " not in k)
+        # A federal judge the opinion names no other way goes by the surname
+        # the Federal Judicial Center records: "DIANA GRIBBON MOTZ" is Motz,
+        # Gribbon her maiden name; "PEDRO A. DELGADO HERNÁNDEZ" is Delgado
+        # Hernández, "AMY J. ST. EVE" St. Eve (see federal_judges).  Not a
+        # lone initial before the surname, which tells two judges of the
+        # name apart: "R. NELSON" is R. Nelson.
+        federal = ("" if len(tokens) == 2 and re.fullmatch(r"[A-Z]\.",
+                                                           tokens[0])
+                   else federal_judges.surname(tokens))
         if (len(tokens) > 1 and name.lower() in known
                 and surnamed > len(known) / 2
                 and tokens[-1].lower() not in known):
             pass
         elif listed:
             name = listed
+        elif federal:
+            name = federal
         elif len(tokens) > 1 and (
                 _judge_given_name(tokens[0])
                 # An initial goes before a given name — "E. RILEY ANDERSON"
@@ -33306,6 +33581,10 @@ class _ScholarTextWindow:
         has_concurrence = any(p.kind == "concurrence" for p in parts)
         has_separate = any(p.kind == "separate" for p in parts)
         signal = self._writer_parenthetical(maj)  # "" | per curiam | plurality
+        if signal.endswith(", in chambers"):
+            # "Opinion in Chambers (Roberts, C.J.)", as the reports head it.
+            maj.label = f"Opinion in Chambers ({signal[:-13]})"
+            return
         if signal == "plurality opinion" and self._is_scotus:
             base = "Plurality Opinion"
         elif not has_dissent and not has_concurrence and not has_separate:
@@ -33651,6 +33930,9 @@ class _ScholarTextWindow:
         of giving it a paragraph of its own.  ``textual`` gives the case
         the name a textual sentence gives it (see _text_case_name), and no
         closing period: the sentence goes on around it."""
+        # An opinion in chambers is cited so from anywhere in it — its
+        # caption and syllabus too (see _in_chambers).
+        writer = writer or self._in_chambers()
         edited = getattr(self, "_base_citation_override", "")
         if edited:
             name, rest, history = edited_citation_parts(
@@ -39520,7 +39802,13 @@ def _choose_case_law_page_opinion(
     sb.pack(side="right", fill="y", pady=pad, padx=(0, pad))
     lb.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=pad)
     for i, opinion in enumerate(opinions, 1):
-        lb.insert("end", _case_law_opinion_name(opinion) or f"Opinion {i}")
+        label = _case_law_opinion_name(opinion) or f"Opinion {i}"
+        # Cases in different books (see _readings_to_ask): which book each
+        # is in, and when and where it was decided.
+        if getattr(opinion, "cite", ""):
+            paren = getattr(opinion, "paren", "")
+            label += f", {opinion.cite}" + (f" ({paren})" if paren else "")
+        lb.insert("end", label)
     lb.selection_set(0)
     chosen: dict[str, Optional[_CaseLawPageOpinion]] = {"opinion": None}
 

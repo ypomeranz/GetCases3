@@ -152,7 +152,12 @@ def edited_citation_parts(
     core, own, history = split_trailing_parentheticals(
         value, match.end() if match else 0)
     name, rest = split_name_from_citation(core)
-    rest += join_parentheticals((*own, *suffix_parentheticals))
+    # One the edited base already gives is not given again: an opinion in
+    # chambers edited to read "… (2012) (Roberts, C.J., in chambers)".
+    given = {re.sub(r"\s+", " ", p).strip().lower() for p in own}
+    rest += join_parentheticals((*own, *(
+        p for p in suffix_parentheticals
+        if re.sub(r"\s+", " ", p or "").strip().lower() not in given)))
     return name, rest, history
 
 

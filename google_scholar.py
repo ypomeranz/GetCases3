@@ -1219,7 +1219,15 @@ _JUSTICE_NAMED = (
     r"(?!(?<![,:])\s+(?!(?:concurring|dissenting|concurs|dissents|with|and"
     r"|joins?|joined)\b)(?-i:[a-z]))")
 _SEP_HEADER_RE = re.compile(
-    r"^\s*(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
+    # A line that closes a parenthesis it never opened is the tail of a
+    # citation's parenthetical wrapped onto a line of its own, as a text
+    # kept line by line wraps it: "(Wilkinson and" / "Agee, JJ., dissenting)
+    # (internal quotation marks omitted)." in CourtListener's text of Wise v.
+    # Circosta, 978 F.3d 93 (4th Cir. 2020) (en banc), which opened a
+    # phantom dissent.  A byline closes only its own: "ABRAHAMSON, J.
+    # (dissenting).", "… joined by CUMMINGS, BAUER (in No. 96-1361), …".
+    r"^(?![^()]*\))"
+    r"\s*(?:MR\.\s+|MRS\.\s+|MS\.\s+)?"
     r"(?:" + _JUSTICE_NAMED + r"|"
     r"[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*){0,3}\s*,\s*"
     r"(?:C\.\s*J\.|JJ?\.|(?:Chief\s+|Senior\s+|Presiding\s+)?"
@@ -2103,6 +2111,18 @@ def segment_blocks(blocks: list[Block]) -> list[OpinionPart]:
                 # disposition text ("AFFIRMED"); the byline opens a later
                 # block, which will claim the boundary itself.
                 joined_role = None
+        # So, too, where the judge's name the window found — the byline's
+        # "BRESS," — lies past this block: the filing stamp set above a
+        # Ninth Circuit dissent ("Whitfield v. Mullin, 25-5220  MOLLY C.
+        # DWYER, CLERK" / "U.S. COURT OF APPEALS") is no writing's start.
+        for found in ("filed", "joined"):
+            m_found = filed_role if found == "filed" else joined_role
+            if (m_found is not None and joined_text.find(
+                    ",", m_found.start("label")) >= len(t)):
+                if found == "filed":
+                    filed_role = None
+                else:
+                    joined_role = None
         if filed_role or public_role or inline_role or joined_role:
             role_text = (filed_role.group("role") if filed_role else
                          public_role.group("role") if public_role else

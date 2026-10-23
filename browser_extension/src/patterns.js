@@ -207,6 +207,9 @@ globalThis.GetCasesPatterns = {
    "cair": "cai",
    "cal": "cal",
    "california": "cal",
+   "charltonrep": "charlton-rep",
+   "charltrm": "charlton",
+   "charlttup": "charlton-rep",
    "colo": "colo",
    "colorado": "colo",
    "conn": "conn",
@@ -236,7 +239,9 @@ globalThis.GetCasesPatterns = {
    "florida": "fla",
    "fsupp": "f-supp",
    "ga": "ga",
+   "gadec": "georgia-decisions",
    "georgia": "ga",
+   "georgiadecisions": "georgia-decisions",
    "harmch": "h-mch",
    "harrismchenry": "h-mch",
    "haw": "haw",
@@ -332,8 +337,12 @@ globalThis.GetCasesPatterns = {
    "pennstate": "pa",
    "pennsylvania": "pa",
    "pennsylvaniastate": "pa",
+   "rcharlt": "charlton",
+   "rcharlton": "charlton",
    "rhodeisland": "ri",
    "ri": "ri",
+   "rmcharlt": "charlton",
+   "rmcharlton": "charlton",
    "sandch": "sand-ch",
    "sandchan": "sand-ch",
    "sandchy": "sand-ch",
@@ -351,6 +360,8 @@ globalThis.GetCasesPatterns = {
    "southcarolina": "sc",
    "southdakota": "sd",
    "supct": "s-ct",
+   "tcharlt": "charlton-rep",
+   "tcharlton": "charlton-rep",
    "tenn": "tenn",
    "tennessee": "tenn",
    "tex": "tex",
@@ -360,6 +371,8 @@ globalThis.GetCasesPatterns = {
    "texcrim": "tex-crim",
    "texcrimapp": "tex-crim",
    "texcrr": "tex-crim",
+   "tupcharlt": "charlton-rep",
+   "tupcharlton": "charlton-rep",
    "va": "va",
    "vermont": "vt",
    "virginia": "va",
@@ -2419,6 +2432,9 @@ globalThis.GetCasesPatterns = {
    "cair": "Cai.",
    "cal": "Cal.",
    "california": "Cal.",
+   "charltonrep": "T.U.P. Charlt.",
+   "charltrm": "R.M. Charlt.",
+   "charlttup": "T.U.P. Charlt.",
    "cliff": "Cliff.",
    "clifford": "Cliff.",
    "colo": "Colo.",
@@ -2457,10 +2473,12 @@ globalThis.GetCasesPatterns = {
    "florida": "Fla.",
    "fsupp": "F. Supp.",
    "ga": "Ga.",
+   "gadec": "Ga. Dec.",
    "gall": "Gall.",
    "gallis": "Gall.",
    "gallison": "Gall.",
    "georgia": "Ga.",
+   "georgiadecisions": "Ga. Dec.",
    "harmch": "H. & McH.",
    "harrismchenry": "H. & McH.",
    "haw": "Haw.",
@@ -2565,8 +2583,12 @@ globalThis.GetCasesPatterns = {
    "pennsylvaniastate": "Pa.",
    "phila": "Phila.",
    "philadelphia": "Phila.",
+   "rcharlt": "R.M. Charlt.",
+   "rcharlton": "R.M. Charlt.",
    "rhodeisland": "R.I.",
    "ri": "R.I.",
+   "rmcharlt": "R.M. Charlt.",
+   "rmcharlton": "R.M. Charlt.",
    "sandch": "Sand. Ch.",
    "sandchan": "Sand. Ch.",
    "sandchy": "Sand. Ch.",
@@ -2592,6 +2614,8 @@ globalThis.GetCasesPatterns = {
    "sumn": "Sumn.",
    "sumner": "Sumn.",
    "supct": "S. Ct.",
+   "tcharlt": "T.U.P. Charlt.",
+   "tcharlton": "T.U.P. Charlt.",
    "tenn": "Tenn.",
    "tennessee": "Tenn.",
    "tex": "Tex.",
@@ -2601,6 +2625,8 @@ globalThis.GetCasesPatterns = {
    "texcrim": "Tex. Crim.",
    "texcrimapp": "Tex. Crim.",
    "texcrr": "Tex. Crim.",
+   "tupcharlt": "T.U.P. Charlt.",
+   "tupcharlton": "T.U.P. Charlt.",
    "va": "Va.",
    "vermont": "Vt.",
    "virginia": "Va.",
@@ -2868,6 +2894,30 @@ globalThis.GetCasesPatterns = {
      12
     ]
    ],
+   "charlt": [
+    [
+     "R.M. Charlt.",
+     0,
+     1
+    ],
+    [
+     "T.U.P. Charlt.",
+     0,
+     1
+    ]
+   ],
+   "charlton": [
+    [
+     "R.M. Charlt.",
+     0,
+     1
+    ],
+    [
+     "T.U.P. Charlt.",
+     0,
+     1
+    ]
+   ],
    "coldw": [
     [
      "Tenn.",
@@ -2936,6 +2986,25 @@ globalThis.GetCasesPatterns = {
      "Ky.",
      30,
      9
+    ]
+   ],
+   "dud": [
+    [
+     "S.C.L.",
+     22,
+     1
+    ],
+    [
+     "Dudley Rep.",
+     0,
+     1
+    ]
+   ],
+   "dudeq": [
+    [
+     "S.C. Eq.",
+     12,
+     1
     ]
    ],
    "dutch": [
@@ -3599,6 +3668,7 @@ globalThis.GetCasesPatterns = {
    "gaapp",
    "gallison",
    "georgia",
+   "georgiadecisions",
    "harrismchenry",
    "haw",
    "hawaii",

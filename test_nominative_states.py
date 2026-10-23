@@ -104,6 +104,71 @@ class NameAndYearTests(unittest.TestCase):
 
 
 @unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class ReadingsToAskTests(unittest.TestCase):
+    """With nothing to say which series a shared name means, the reader is
+    asked — the first series' case opened, whichever was meant.  "1 Dud. 7"
+    is Cole v. Broom in South Carolina's Dudley (23 S.C.L. 7) and Heirs of
+    Early v. Sherwood in Georgia's (1 Dudley Rep. 7)."""
+
+    META = {
+        "23 S.C.L. 7": {"name_abbreviation": "Cole v. Broom",
+                        "decision_date": "1837-12",
+                        "jurisdiction": {"name": "S.C."}},
+        "1 Dudley Rep. 7": {"name_abbreviation": "Heirs of Early v. Sherwood",
+                            "decision_date": "1831-07",
+                            "jurisdiction": {"name": "Ga."}},
+    }
+
+    def _readings(self, cite="1 Dud. 7", name="", year="", cited_in="",
+                  meta=None):
+        meta = self.META if meta is None else meta
+
+        def page_cases(reading):
+            m = meta.get(reading)
+            return [gui._CaseLawPageOpinion(
+                f"https://static.case.law/x/{reading}.pdf", "",
+                m["name_abbreviation"])] if m else []
+
+        with mock.patch.object(gui, "_case_law_metadata",
+                               side_effect=lambda c: meta.get(c)), \
+                mock.patch.object(gui, "_case_law_page_cases",
+                                  side_effect=page_cases):
+            return [(o.cite, o.name, o.paren) for o in gui._readings_to_ask(
+                cite, name, year, cited_in)]
+
+    def test_bare_the_reader_is_asked(self):
+        self.assertEqual(self._readings(), [
+            ("23 S.C.L. 7", "Cole v. Broom", "S.C. 1837"),
+            ("1 Dudley Rep. 7", "Heirs of Early v. Sherwood", "Ga. 1831")])
+
+    def test_the_case_s_name_says_which(self):
+        self.assertEqual(self._readings(name="Cole v. Broom"), [])
+
+    def test_or_the_year_it_was_decided(self):
+        self.assertEqual(self._readings(year="1831"), [])
+
+    def test_or_the_year_of_the_opinion_citing_it(self):
+        # An opinion of 1835 cannot cite a case of 1837.
+        self.assertEqual(self._readings(cited_in="1835"), [])
+
+    def test_or_a_case_at_the_page_in_one_book_only(self):
+        self.assertEqual(self._readings(
+            meta={"23 S.C.L. 7": self.META["23 S.C.L. 7"]}), [])
+
+    def test_a_citation_of_one_book_is_never_looked_up(self):
+        with mock.patch.object(gui, "_case_law_metadata") as meta:
+            self.assertEqual(gui._readings_to_ask("1 Dudley Rep. 7"), [])
+            self.assertEqual(gui._readings_to_ask("19 Pick. 234"), [])
+        meta.assert_not_called()
+
+    def test_a_state_parenthetical_settles_it_before_anything_is_asked(self):
+        self.assertEqual(_links("Doe v. Roe, 1 Dud. (Ga.) 7."),
+                         [("cite", "1 Dudley Rep. 7")])
+        self.assertEqual(_links("Doe v. Roe, 1 Dud. (S.C.) 7."),
+                         [("cite", "23 S.C.L. 7")])
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
 class CourtListenerRecordTests(unittest.TestCase):
 
     def test_a_record_naming_another_case_is_refused(self):
