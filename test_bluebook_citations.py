@@ -2533,6 +2533,35 @@ class EnBancTests(unittest.TestCase):
         # A court that sits whole in any case says nothing by it.
         self.assertFalse(decided_en_banc(front, panel_court=False))
 
+    def test_or_the_judges_its_order_says_voted(self):
+        # Wise v. Circosta, 978 F.3d 93 (4th Cir. 2020) (en banc), says "en
+        # banc" nowhere in its front matter, and lists no bench: the court's
+        # fifteen judges are named in the vote.
+        votes = ("Chief Judge Gregory, Judge Motz, Judge King, Judge Keenan, "
+                 "Judge Wynn, Judge Diaz, Judge Floyd, Judge Thacker, Judge "
+                 "Harris, Judge Richardson, Judge Quattlebaum, and Judge "
+                 "Rushing voted to deny the motions for injunction. Judge "
+                 "Wilkinson, Judge Niemeyer, and Judge Agee voted to grant "
+                 "the motions for injunction.")
+        front = ["UNITED STATES COURT OF APPEALS FOR THE FOURTH CIRCUIT",
+                 "ORDER", votes]
+        self.assertTrue(decided_en_banc(front, panel_court=True))
+        self.assertFalse(decided_en_banc(front, panel_court=False))
+        # Broken over lines, as CourtListener's text of it is.
+        words = votes.split()
+        lines = [" ".join(words[k:k + 12]) for k in range(0, len(words), 12)]
+        self.assertTrue(decided_en_banc(front[:2], benches=lines,
+                                        panel_court=True))
+        # A vote on whether to rehear the case is no hearing by the court.
+        self.assertFalse(decided_en_banc(
+            ["Judge Smith, Judge Jones, Judge Brown, and Judge Green voted "
+             "to grant rehearing en banc. Judge White voted against the "
+             "poll."], panel_court=True))
+        # Nor are three judges a court.
+        self.assertFalse(decided_en_banc(
+            ["Judge Smith and Judge Jones voted to affirm. Judge Brown "
+             "voted to reverse."], panel_court=True))
+
     def test_a_bench_of_three_is_a_panel(self):
         for bench, judges in (
                 ("Before CANBY, JR., NOONAN, and THOMAS, Circuit Judges.", 3),
@@ -5281,6 +5310,33 @@ class CitationParentheticalOrderTests(unittest.TestCase):
                          "United States v. Skoien, 614 F.3d 638 "
                          "(7th Cir. 2010).")
 
+    def test_in_chambers_wherever_the_citation_is_taken(self):
+        # Maryland v. King, 567 U.S. 1301 (2012): from its caption as from
+        # its opinion, the writer's place in rule 1.5(b)'s order.
+        win = self._window()
+        win._bb.update({"name": "Maryland v. King", "cite": "567 U.S. 1301",
+                        "display_cite": "567 U.S. 1301", "year": "2012"})
+        head = OpinionPart("Header", "header", [
+            Block("para", [Span("Opinion in Chambers")])])
+        lead = OpinionPart("Majority Opinion", "majority", [
+            Block("para", [Span("CHIEF JUSTICE ROBERTS, Circuit Justice.")])])
+        win._parts = [head, lead]
+        plain, _rtf = win._bluebook_citation(
+            "1303", "", ("footnote omitted",),
+            explanatory=("granting a stay", "granting a stay"))
+        self.assertEqual(
+            plain,
+            "Maryland v. King, 567 U.S. 1301, 1303 (2012) (Roberts, C.J., in "
+            "chambers) (footnote omitted) (granting a stay).")
+        # An edited citation that says so already is not told twice.
+        win._base_citation_override = (
+            "Maryland v. King, 567 U.S. 1301 (2012) (Roberts, C.J., in "
+            "chambers)")
+        self.assertEqual(
+            win._bluebook_citation("1303")[0],
+            "Maryland v. King, 567 U.S. 1301, 1303 (2012) (Roberts, C.J., in "
+            "chambers).")
+
     def test_writer_then_omission(self):
         plain, rtf = self._window()._bluebook_citation(
             "47", "Rutledge, J., dissenting", ("footnote omitted",))
@@ -7493,15 +7549,147 @@ class WriterParentheticalTests(unittest.TestCase):
         win._parts = [header, dissent]
         self.assertEqual(win._writer_parenthetical(dissent),
                          "Henderson, J., dissenting")
-        # Where neither names the judge, only a given name goes: "Yvonne
-        # Gonzalez Rogers" is Gonzalez Rogers.
+        # The Ninth Circuit's list of writings names her as she is cited:
+        # "Yvonne Gonzalez Rogers" is Gonzalez Rogers, though the Federal
+        # Judicial Center files her as Rogers.
         win = self._win()
+        header = OpinionPart("Header", "header", [Block("para", [Span(
+            "Opinion by Judge Wardlaw; Concurrence by Judge Gonzalez "
+            "Rogers")])])
         rogers = self._part(
             "concurrence",
             "YVONNE GONZALEZ ROGERS, District Judge, concurring:")
-        win._parts = [rogers]
+        win._parts = [header, rogers]
         self.assertEqual(win._writer_parenthetical(rogers),
                          "Gonzalez Rogers, J., concurring")
+
+    def test_the_surname_the_court_s_list_of_writings_gives(self):
+        # Wise v. Circosta, 978 F.3d 93 (4th Cir. 2020) (en banc): the
+        # byline prints "DIANA GRIBBON MOTZ", the Fourth Circuit's list of
+        # writings "Judge Motz" — she had been "Gribbon Motz, J.".
+        win = self._win()
+        header = OpinionPart("Header", "header", [Block("para", [Span(
+            "Judge Wynn wrote an opinion on the denial of emergency "
+            "injunctive relief. Judge Motz wrote a concurring opinion. Judge "
+            "Wilkinson and Judge Agee wrote a dissenting opinion in which "
+            "Judge Niemeyer joined.")])])
+        motz = self._part(
+            "concurrence", "DIANA GRIBBON MOTZ, Circuit Judge, concurring in "
+            "the denial of emergency injunctive relief:")
+        win._parts = [header, motz]
+        self.assertEqual(win._writer_parenthetical(motz),
+                         "Motz, J., concurring in the denial of emergency "
+                         "injunctive relief")
+
+    def test_or_failing_that_the_federal_judicial_center_s(self):
+        # A middle name that is a maiden name is no part of the surname, and
+        # a surname of two words keeps both (see federal_judges).
+        for line, cited in (
+                ("DIANA GRIBBON MOTZ, Circuit Judge, concurring.",
+                 "Motz, J., concurring"),
+                ("KIM McLANE WARDLAW, Circuit Judge, dissenting:",
+                 "Wardlaw, J., dissenting"),
+                ("J. HARVIE WILKINSON III, Circuit Judge, concurring:",
+                 "Wilkinson, J., concurring"),
+                ("PEDRO A. DELGADO HERNÁNDEZ, District Judge, concurring:",
+                 "Delgado Hernández, J., concurring"),
+                ("FRANKLIN S. VAN ANTWERPEN, Circuit Judge, dissenting.",
+                 "Van Antwerpen, J., dissenting"),
+                ("ANA DE ALBA, Circuit Judge, concurring:",
+                 "de Alba, J., concurring"),
+                ("AMY J. ST. EVE, Circuit Judge, concurring.",
+                 "St. Eve, J., concurring"),
+                # An initial alone tells two judges of the name apart.
+                ("R. NELSON, Circuit Judge, dissenting:",
+                 "R. Nelson, J., dissenting"),
+                # Not a federal judge: the given names go, as before.
+                ("ROSEMARY T. QUILLFEATHER, J., dissenting.",
+                 "Quillfeather, J., dissenting")):
+            with self.subTest(line=line[:30]):
+                part = self._part("dissent" if "dissent" in line
+                                  else "concurrence", line)
+                win = self._win()
+                win._parts = [part]
+                self.assertEqual(win._writer_parenthetical(part), cited)
+
+    def test_an_opinion_in_chambers(self):
+        # Rule 10.6.1: Maryland v. King, 567 U.S. 1301 (2012) (Roberts,
+        # C.J., in chambers); Morison v. United States, 486 U.S. 1306 (1988)
+        # (Rehnquist, C.J., in chambers).  Each had been cited as though the
+        # Court's own opinion.
+        for header, byline, cited in (
+                ("Opinion in Chambers", "CHIEF JUSTICE ROBERTS, Circuit "
+                 "Justice.", "Roberts, C.J., in chambers"),
+                ("ON APPLICATION FOR CONTINUED RELEASE FROM DETENTION",
+                 "Chief Justice Rehnquist, Circuit Justice.",
+                 "Rehnquist, C.J., in chambers"),
+                ("ON APPLICATION FOR STAY", "MR. JUSTICE DOUGLAS, Circuit "
+                 "Justice.", "Douglas, J., in chambers"),
+                # A bare byline under the reports' heading.
+                ("IN CHAMBERS", "MR. JUSTICE DOUGLAS.",
+                 "Douglas, J., in chambers")):
+            with self.subTest(byline=byline):
+                win = self._win()
+                head = OpinionPart("Header", "header", [
+                    Block("para", [Span(header)])])
+                lead = OpinionPart("Majority Opinion", "majority", [
+                    Block("para", [Span(byline)]),
+                    Block("para", [Span("The application is denied.")])])
+                win._parts = [head, lead]
+                self.assertEqual(win._writer_parenthetical(lead), cited)
+                win._refine_part_labels(win._parts)
+                self.assertEqual(
+                    lead.label,
+                    f"Opinion in Chambers ({cited[:-len(', in chambers')]})")
+        # A Justice's byline alone is the Court's opinion's.
+        win = self._win()
+        lead = OpinionPart("Majority Opinion", "majority", [
+            Block("para", [Span("MR. JUSTICE DOUGLAS.")])])
+        win._parts = [lead]
+        self.assertEqual(win._writer_parenthetical(lead), "")
+
+    def test_judges_writing_together(self):
+        # Rule 10.6.1, as the Bluebook names several: an ampersand before
+        # the last, and a Chief first, apart.
+        for line, cited in (
+                # Wise v. Circosta, 978 F.3d 93 (4th Cir. 2020) (en banc):
+                # it had been (Wilkinson and Agee, J., dissenting).
+                ("WILKINSON and AGEE, Circuit Judges, with whom NIEMEYER, "
+                 "Circuit Judge, joins, dissenting:",
+                 "Wilkinson & Agee, JJ., dissenting"),
+                # Dobbs v. Jackson Women’s Health Org., 597 U.S. 215 (2022):
+                # it had been (Breyer, J., dissenting).
+                ("JUSTICE BREYER, JUSTICE SOTOMAYOR, and JUSTICE KAGAN, "
+                 "dissenting.", "Breyer, Sotomayor & Kagan, JJ., dissenting"),
+                ("Justice BREYER, Justice SOTOMAYOR, and Justice KAGAN, "
+                 "dissenting.", "Breyer, Sotomayor & Kagan, JJ., dissenting"),
+                ("SMITH, JONES and BROWN, JJ., concurring.",
+                 "Smith, Jones & Brown, JJ., concurring"),
+                ("KING, Circuit Judge, and HAMILTON, Senior Circuit Judge, "
+                 "concurring:", "King & Hamilton, JJ., concurring"),
+                ("CHIEF JUSTICE REHNQUIST and JUSTICE WHITE, dissenting.",
+                 "Rehnquist, C.J., & White, J., dissenting"),
+                # Two dissents under one heading (United States v. Reese, 92
+                # U.S. 214), each Justice styled so.
+                ("MR. JUSTICE CLIFFORD and MR. JUSTICE HUNT dissenting.",
+                 "Clifford & Hunt, JJ., dissenting"),
+                # One writer, whoever joins, and whatever ends the name or
+                # follows its title (Wilson v. Wilson, 984 S.W.2d 898; Acad.
+                # of Allergy & Asthma in Primary Care v. Amerigroup Tenn.,
+                # Inc., 164 F.4th 529).
+                ("JUSTICE THOMAS, with whom THE CHIEF JUSTICE and JUSTICE "
+                 "ALITO join, dissenting.", "Thomas, J., dissenting"),
+                ("MILAN D. SMITH, JR., Circuit Judge, dissenting:",
+                 "Smith, J., dissenting"),
+                ("BIRCH, J., Separate Dissenting Opinion.",
+                 "Birch, J., Dissenting Opinion"),
+                ("KETHLEDGE, Circuit Judge. concurring.",
+                 "Kethledge, J., concurring")):
+            with self.subTest(line=line[:30]):
+                part = self._part("dissent" if "dissent" in line
+                                  else "concurrence", line)
+                self.assertEqual(self._win()._writer_parenthetical(part),
+                                 cited)
 
     def test_the_judges_joining_are_left_out(self):
         # Rule 10.6.1 names the writer alone, wherever the byline names
@@ -7520,7 +7708,7 @@ class WriterParentheticalTests(unittest.TestCase):
                  "Abrahamson, J., dissenting"),
                 # Judges writing together (rule 10.6.1).
                 ("SHRIVER and CROWNOVER, JJ., concurring.",
-                 "Shriver and Crownover, JJ., concurring"),
+                 "Shriver & Crownover, JJ., concurring"),
                 ("WILLIAM A. BABLITCH, J. (concurring in part, dissenting "
                  "in part).",
                  "Bablitch, J., concurring in part, dissenting in part"),
@@ -7549,7 +7737,12 @@ class WriterParentheticalTests(unittest.TestCase):
         wood = self._part(
             "dissent", "DIANE P. WOOD, Circuit Judge, joined by EASTERBROOK "
             "and ROVNER, Circuit Judges, concurring and dissenting.")
-        win._parts = [header, wood]
+        # The opinions speak of her as "Judge Wood", which says nothing of
+        # the name she is cited by.
+        lead = OpinionPart("Majority Opinion", "majority", [Block("para", [
+            Span("Judge Wood’s opinion for the panel had held that "
+                 "Ellerth could proceed.")])])
+        win._parts = [header, lead, wood]
         self.assertEqual(win._writer_parenthetical(wood),
                          "Diane P. Wood, J., concurring and dissenting")
         # A bench that prints every name in full sets none apart, and the

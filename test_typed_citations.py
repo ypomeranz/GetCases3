@@ -1,7 +1,7 @@
 """A citation typed by hand, however its reporter is spelled.
 
 "486 us 1306" — Morison v. United States, 486 U.S. 1306 (1988) (Rehnquist,
-J., in chambers), whose only copy is its scan — was no citation at all to
+C.J., in chambers), whose only copy is its scan — was no citation at all to
 Spotlight, which searched for it as words and found nothing; "486 US 1306"
 was one, but not the U.S. Reports', so its official scan went unasked.
 """

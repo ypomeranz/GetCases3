@@ -1277,6 +1277,7 @@ import eng_rep
 import eng_rep_pdf
 import fed_cas
 import fed_rules
+import federal_judges
 import federal_register
 import legislative_history
 import leghist_fetch
@@ -19147,6 +19148,101 @@ def _fix_name_case(name: str) -> str:
     return " ".join(fix(w) for w in name.split())
 
 
+#: A byline's title for the judges named before it: "Circuit Judges", "JJ.",
+#: "Chief Judge", "Senior Circuit Judge", "United States District Judge".
+_BYLINE_TITLE_RE = re.compile(
+    r"(?:the\s+)?(?:united\s+states\s+)?"
+    r"(?:(?:chief|senior|presiding|associate|acting)\s+)*"
+    r"(?:circuit\s+|district\s+|bankruptcy\s+|magistrate\s+)?"
+    r"(?:judges?|justices?)"
+    r"|c\.\s?j\.|ch\.\s?j\.|jj?\.|p\.\s?j\.",
+    re.IGNORECASE)
+_BYLINE_CHIEF_RE = re.compile(r"(?:the\s+)?chief\b|c\.\s?j\.|ch\.\s?j\.",
+                              re.IGNORECASE)
+
+# A Justice's byline as Circuit Justice, deciding an application alone in
+# chambers: "CHIEF JUSTICE ROBERTS, Circuit Justice." (Maryland v. King, 567
+# U.S. 1301), "Chief Justice Rehnquist, Circuit Justice." (Morison v. United
+# States, 486 U.S. 1306), "MR. JUSTICE DOUGLAS, Circuit Justice.".
+_JUSTICE_NAME = (r"(?:\*\d+[A-Za-z]{0,2}\s+)?(?:(?:MR|MRS|MS)\.\s+)?"
+                 r"(?:THE\s+)?(?P<chief>CHIEF\s+)?JUSTICE\s+"
+                 r"(?P<name>[A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*)*?)")
+_IN_CHAMBERS_BYLINE_RE = re.compile(
+    _JUSTICE_NAME + r",?\s+(?:as\s+)?Circuit\s+Justice\b", re.IGNORECASE)
+# …or a bare byline, "MR. JUSTICE DOUGLAS.", under the heading the reports
+# give such an opinion: "Opinion in Chambers", "IN CHAMBERS".
+_JUSTICE_BYLINE_RE = re.compile(_JUSTICE_NAME + r"\s*[.:]?", re.IGNORECASE)
+_IN_CHAMBERS_HEADING_RE = re.compile(
+    r"(?:\*\d+[A-Za-z]{0,2}\s+)?(?:Opinion\s+)?in\s+chambers\.?",
+    re.IGNORECASE)
+
+
+def _byline_writers(head: str) -> "list[tuple[str, bool]]":
+    """The judges a byline names as writing together, each with whether
+    the Chief: "WILKINSON and AGEE, Circuit Judges, with whom NIEMEYER,
+    Circuit Judge, joins" is [("WILKINSON", False), ("AGEE", False)];
+    "JUSTICE BREYER, JUSTICE SOTOMAYOR, and JUSTICE KAGAN" the three.
+    *head* is the byline up to its role ("dissenting").  [] for a byline of
+    one writer, or one not read as names and titles alone."""
+    head = re.split(r",?\s+(?:with\s+whom|joined\s+by|in\s+which)\b", head,
+                    maxsplit=1, flags=re.IGNORECASE)[0]
+    writers: list = []
+    pending: list = []      # [name, chief, styled "JUSTICE"], title to come
+    for seg in re.split(r"\s*,\s*", head):
+        seg = re.sub(r"^(?:and|&)\s+", "", seg.strip(), flags=re.IGNORECASE)
+        # "MILAN D. SMITH, JR., Circuit Judge": the name's own, no writer.
+        if not seg or re.fullmatch(r"(?:Jr|Sr)\.?|I{2,3}|IV", seg,
+                                   re.IGNORECASE):
+            continue
+        # "KETHLEDGE, Circuit Judge. concurring." closes its title so.
+        if (_BYLINE_TITLE_RE.fullmatch(seg)
+                or _BYLINE_TITLE_RE.fullmatch(seg.rstrip("."))):
+            # "KING, Chief Judge, and …": the title is the name's before it.
+            if pending and _BYLINE_CHIEF_RE.match(seg):
+                pending[-1][1] = True
+            writers += pending
+            pending = []
+            continue
+        for piece in re.split(r"\s+(?:and|&)\s+", seg, flags=re.IGNORECASE):
+            m = re.fullmatch(r"(?:(?:MR|MRS|MS)\.\s+)?(?:(THE\s+)?(CHIEF\s+)?"
+                             r"(JUSTICE)\s+)?([A-Z][\w.'’-]*(?:\s+[A-Z][\w.'’-]*)*)",
+                             piece.strip(), re.IGNORECASE)
+            if (not m or not m.group(4)[:1].isupper()
+                    or re.search(r"\b(?:judges?|justices?)\b", m.group(4),
+                                 re.IGNORECASE)):
+                return []
+            pending.append([m.group(4), bool(m.group(2)),
+                            bool(m.group(3))])
+    # A name no title follows is a writer only as "JUSTICE KAGAN" is —
+    # "BIRCH, J., Separate Dissenting Opinion." is Birch's alone.
+    if pending and not all(styled for _n, _c, styled in pending):
+        return []
+    writers += pending
+    return ([(name, chief) for name, chief, _styled in writers]
+            if len(writers) > 1 else [])
+
+
+def _joint_writers(writers: "list[tuple[str, bool]]") -> str:
+    """Judges writing together as rule 10.6.1 names them: "Wilkinson &
+    Agee, JJ.", "Breyer, Sotomayor & Kagan, JJ." — an ampersand before the
+    last, no comma before it — and a Chief first, apart: "Roberts, C.J.,
+    Thomas & Gorsuch, JJ.", "Rehnquist, C.J., & White, J."."""
+    def amp(names: list) -> str:
+        return (names[0] if len(names) == 1
+                else ", ".join(names[:-1]) + " & " + names[-1])
+
+    chiefs = [name for name, chief in writers if chief]
+    rest = [name for name, chief in writers if not chief]
+    if not chiefs:
+        return f"{amp(rest)}, JJ."
+    lead = ", ".join(f"{name}, C.J." for name in chiefs)
+    if not rest:
+        return lead
+    if len(rest) == 1:
+        return f"{lead}, & {rest[0]}, J."
+    return f"{lead}, {amp(rest)}, JJ."
+
+
 _CAPTION_SMALL_WORDS = {
     "of", "the", "and", "on", "in", "for", "a", "an", "ex", "rel", "re", "et", "al",
 }
@@ -32993,6 +33089,42 @@ class _ScholarTextWindow:
         self._en_banc_known = (key, found)
         return found
 
+    def _in_chambers(self) -> str:
+        """The writer parenthetical of an opinion a Justice wrote alone, in
+        chambers — "Roberts, C.J., in chambers" for Maryland v. King, 567
+        U.S. 1301 (2012), whose byline reads "CHIEF JUSTICE ROBERTS, Circuit
+        Justice." (rule 10.6.1) — or "".  The byline says so, or a Justice's
+        byline under the heading "Opinion in Chambers".  Read once for each
+        set of parts on show; it is the whole decision's, so a citation
+        carries it wherever it is taken from."""
+        parts = (getattr(self, "_rendered_parts", None)
+                 or getattr(self, "_parts", None) or [])
+        key = tuple(id(p) for p in parts)
+        known = getattr(self, "_in_chambers_known", None)
+        if known is not None and known[0] == key:
+            return known[1]
+        header = [b for p in parts if getattr(p, "kind", "") == "header"
+                  for b in p.blocks]
+        lead = next((p for p in parts
+                     if getattr(p, "kind", "") == "majority"), None)
+        lines = [re.sub(r"\s+", " ", b.text()).strip()
+                 for b in header[:40] + (lead.blocks[:6] if lead else [])]
+        headed = any(_IN_CHAMBERS_HEADING_RE.fullmatch(t) for t in lines)
+        found = ""
+        for t in lines:
+            m = (_IN_CHAMBERS_BYLINE_RE.match(t)
+                 or (_JUSTICE_BYLINE_RE.fullmatch(t) if headed else None))
+            if m:
+                surname = self._judge_surname(_fix_name_case(
+                    m.group("name").replace("’", "'").rstrip(".:")))
+                if surname:
+                    found = (f"{surname}, "
+                             f"{'C.J.' if m.group('chief') else 'J.'}, "
+                             "in chambers")
+                break
+        self._in_chambers_known = (key, found)
+        return found
+
     def _writer_parenthetical(self, part) -> str:
         """
         Bluebook writer parenthetical for a separate opinion (rule 10.6.1):
@@ -33017,6 +33149,9 @@ class _ScholarTextWindow:
             return re.sub(r"^(?:\*\d+[A-Za-z]{0,2}\s+)+", "", t)
 
         if part.kind == "majority":
+            chambers = self._in_chambers()
+            if chambers:
+                return chambers
             for b in part.blocks[:3]:
                 bt = block_text(b)
                 if re.match(r"PER\s+CURIAM\b", bt, re.IGNORECASE):
@@ -33230,6 +33365,17 @@ class _ScholarTextWindow:
             if sm and sm.group(0):
                 head = head[sm.end():] + (", Chief Judge" if sm.group(1)
                                           else "")
+        # Judges writing together, each named (rule 10.6.1): "WILKINSON and
+        # AGEE, Circuit Judges, with whom NIEMEYER, Circuit Judge, joins,
+        # dissenting" is (Wilkinson & Agee, JJ., dissenting); Dobbs's
+        # "JUSTICE BREYER, JUSTICE SOTOMAYOR, and JUSTICE KAGAN, dissenting"
+        # (Breyer, Sotomayor & Kagan, JJ., dissenting).
+        writers = [(self._judge_surname(_fix_name_case(n)), chief)
+                   for n, chief in _byline_writers(head)]
+        if writers and all(n for n, _chief in writers):
+            joint = _joint_writers(writers)
+            return (f"statement of {joint}, {phrase}" if statement
+                    else f"{joint}, {phrase}")
         # The chief-justice test must look only at the author's own
         # designation — "JUSTICE THOMAS, with whom THE CHIEF JUSTICE and
         # JUSTICE ALITO join, dissenting" is Thomas, J., not C.J.
@@ -33246,8 +33392,6 @@ class _ScholarTextWindow:
             )
         )
         title = ("C.J." if is_chief
-                 # Judges writing together: "SHRIVER and CROWNOVER, JJ.,
-                 # concurring" is (Shriver and Crownover, JJ., concurring).
                  else "JJ." if re.fullmatch(r"JJ\.?", role_seg, re.IGNORECASE)
                  else "J.")
         name = re.sub(
@@ -33286,12 +33430,23 @@ class _ScholarTextWindow:
         # HENDERSON, RANDOLPH and GARLAND", its list of writings naming
         # "KAREN LeCRAFT HENDERSON" in full.
         surnamed = sum(1 for k in known if " " not in k)
+        # A federal judge the opinion names no other way goes by the surname
+        # the Federal Judicial Center records: "DIANA GRIBBON MOTZ" is Motz,
+        # Gribbon her maiden name; "PEDRO A. DELGADO HERNÁNDEZ" is Delgado
+        # Hernández, "AMY J. ST. EVE" St. Eve (see federal_judges).  Not a
+        # lone initial before the surname, which tells two judges of the
+        # name apart: "R. NELSON" is R. Nelson.
+        federal = ("" if len(tokens) == 2 and re.fullmatch(r"[A-Z]\.",
+                                                           tokens[0])
+                   else federal_judges.surname(tokens))
         if (len(tokens) > 1 and name.lower() in known
                 and surnamed > len(known) / 2
                 and tokens[-1].lower() not in known):
             pass
         elif listed:
             name = listed
+        elif federal:
+            name = federal
         elif len(tokens) > 1 and (
                 _judge_given_name(tokens[0])
                 # An initial goes before a given name — "E. RILEY ANDERSON"
@@ -33426,6 +33581,10 @@ class _ScholarTextWindow:
         has_concurrence = any(p.kind == "concurrence" for p in parts)
         has_separate = any(p.kind == "separate" for p in parts)
         signal = self._writer_parenthetical(maj)  # "" | per curiam | plurality
+        if signal.endswith(", in chambers"):
+            # "Opinion in Chambers (Roberts, C.J.)", as the reports head it.
+            maj.label = f"Opinion in Chambers ({signal[:-13]})"
+            return
         if signal == "plurality opinion" and self._is_scotus:
             base = "Plurality Opinion"
         elif not has_dissent and not has_concurrence and not has_separate:
@@ -33771,6 +33930,9 @@ class _ScholarTextWindow:
         of giving it a paragraph of its own.  ``textual`` gives the case
         the name a textual sentence gives it (see _text_case_name), and no
         closing period: the sentence goes on around it."""
+        # An opinion in chambers is cited so from anywhere in it — its
+        # caption and syllabus too (see _in_chambers).
+        writer = writer or self._in_chambers()
         edited = getattr(self, "_base_citation_override", "")
         if edited:
             name, rest, history = edited_citation_parts(

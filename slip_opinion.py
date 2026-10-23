@@ -340,6 +340,11 @@ def _parse_head_line(text: str):
         return _Head("percuriam", "percuriam")
     if _sim(squash, "OPINIONOFTHECOURT") >= 0.82:
         return _Head("majority", "majority")
+    # The U.S. Reports' head over an opinion a Justice wrote alone, as
+    # Circuit Justice: "Opinion in Chambers" (Morison v. United States, 486
+    # U.S. 1306), the page's citation printed beside it.
+    if _sim("".join(toks[:3]), "OPINIONINCHAMBERS") >= 0.8:
+        return _Head("chambers", "chambers")
     if _sim(squash, "STATEMENTOFTHECASE") >= 0.8:
         return _Head("statement", "statement")
     if _sim(squash[:8], "APPENDIX") >= 0.8:
@@ -617,6 +622,26 @@ def _attribution_start(pages: list, page_lines: list, pg: int, li: int):
     return (pg, line.y)
 
 
+_CHAMBERS_BYLINE_RE = re.compile(
+    r"^(?:\d{1,4}\s+)?(?:(?:MR|MRS|MS)\.?\s+)?(?:THE\s+)?(CHIEF\s+)?"
+    r"JUSTICE\s+([A-Z][A-Z'’.\- ]*?),?\s+(?:as\s+)?Circuit\s+Justice\b",
+    re.IGNORECASE)
+
+
+def _chambers_byline(page_lines: list, pi: int):
+    """The byline of an opinion in chambers, on page *pi* or the next:
+    ``((name groups, whether the Chief), (page, line))``, or ``None``."""
+    for pg in (pi, pi + 1):
+        for li, ln in enumerate(page_lines[pg] if pg < len(page_lines)
+                                else ()):
+            m = _CHAMBERS_BYLINE_RE.match(re.sub(r"\s+", " ", ln.text))
+            if m:
+                groups = _name_groups(_head_tokens(m.group(2)))
+                if groups:
+                    return (groups, bool(m.group(1))), (pg, li)
+    return None
+
+
 def _find_attribution_near(page_lines: list, pi: int, head=None,
                            used: "set | None" = None):
     """The opening attribution proving a separate opinion starts on page *pi*
@@ -708,10 +733,12 @@ def _justice_name(squashed: str) -> str:
 
 
 def _names_display(groups: tuple, roster: bool = False) -> str:
+    """Justices writing together as rule 10.6.1 names them: "Breyer,
+    Sotomayor & Kagan"."""
     names = [_justice_name(g) if roster else _title_name(g) for g in groups]
     if len(names) <= 1:
         return "".join(names)
-    return ", ".join(names[:-1]) + " and " + names[-1]
+    return ", ".join(names[:-1]) + " & " + names[-1]
 
 
 def _new_sec(head: _Head, pi: int, att=None) -> dict:
@@ -745,7 +772,8 @@ def _continues(sec: dict, head: _Head) -> bool:
     """Whether *head* is (an OCR variant of) the running head of *sec*."""
     if head.kind != sec["kind"]:
         return False
-    if head.kind in ("syllabus", "statement", "majority", "percuriam"):
+    if head.kind in ("syllabus", "statement", "majority", "percuriam",
+                     "chambers"):
         return True
     thresh = 0.7 if head.kind == "argument" else 0.6
     return any(_sim(head.key, k) >= thresh for k in sec["keys"])
@@ -766,6 +794,14 @@ def _finalize(sec: dict) -> SlipSection:
         return SlipSection("Per Curiam", "majority", sec["start"])
     if kind == "majority":
         return SlipSection("Opinion of the Court", "majority", sec["start"])
+    if kind == "chambers":
+        # Cited (Rehnquist, C.J., in chambers) (rule 10.6.1).
+        who = sec.get("chambers")
+        label = (f"{_names_display(who[0], roster=True)}, "
+                 f"{'C.J.' if who[1] else 'J.'}, in chambers"
+                 if who else "Opinion in Chambers")
+        return SlipSection(label, "majority", sec["start"],
+                           sec.get("start_at"))
     # Separate opinion: names from the modal head variant — or, when no two
     # pages agree on the head's spelling (heavy OCR garble), from the
     # opening attribution, which is typeset larger and survives better.
@@ -811,15 +847,27 @@ def _merge_heads(heads: list, page_lines: list, pages: list,
         if cur is not None and _continues(cur, h):
             _vote(cur, h)
             continue
-        opinion_seen = any(s["kind"] in ("majority", "percuriam", "separate")
+        opinion_seen = any(s["kind"] in ("majority", "percuriam", "separate",
+                                         "chambers")
                            for s in secs)
         if h.kind in ("syllabus", "statement", "argument", "majority",
-                      "percuriam"):
+                      "percuriam", "chambers"):
             # Front matter never follows the Court's opinion, and the
             # Court's opinion never restarts — such a head is OCR noise.
             if opinion_seen:
                 continue
             cur = _new_sec(h, pi)
+            if h.kind == "chambers":
+                # The head runs over the syllabus too: the opinion opens at
+                # the Justice's byline, "CHIEF JUSTICE REHNQUIST, Circuit
+                # Justice.", which names its writer.
+                found = _chambers_byline(page_lines, pi)
+                if found is not None:
+                    who, (bpg, bli) = found
+                    cur["chambers"] = who
+                    cur["start"] = bpg
+                    cur["start_at"] = _attribution_start(
+                        pages, page_lines, bpg, bli)
             secs.append(cur)
         else:  # a separate opinion — require its opening attribution
             found = _find_attribution_near(page_lines, pi, h, used)
@@ -1107,8 +1155,10 @@ def detect_sections(pages: list, between_pages=None) -> list[SlipSection]:
     sections = deduped
 
     # Guarantee a first part starting at page 0 (the syllabus, or — for a
-    # PDF with none — the opinion), so the navigator covers the whole PDF.
-    if not sections or sections[0].start_page != 0:
+    # PDF with none — the opinion), so the navigator covers the whole PDF —
+    # above an opinion in chambers opening partway down it, too.
+    if (not sections or sections[0].start_page != 0
+            or sections[0].start_at is not None):
         body0 = _body_after_head(page_lines[0])
         if _PER_CURIAM_RE.match(body0):
             first = SlipSection("Per Curiam", "majority", 0)

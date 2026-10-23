@@ -5,7 +5,7 @@ a = Analysis(
     ['courtlistener_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('data/opinions.jsonl', 'data'), ('person_names.tsv.gz', '.'), ('eng_rep_index.tsv.gz', '.'), ('eng_rep_nominate.tsv.gz', '.'), ('sec_index.tsv.gz', '.'), ('crecb_index.tsv.gz', '.'), ('debates_index.tsv.gz', '.')],
+    datas=[('data/opinions.jsonl', 'data'), ('person_names.tsv.gz', '.'), ('federal_judges.tsv.gz', '.'), ('eng_rep_index.tsv.gz', '.'), ('eng_rep_nominate.tsv.gz', '.'), ('sec_index.tsv.gz', '.'), ('crecb_index.tsv.gz', '.'), ('debates_index.tsv.gz', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
