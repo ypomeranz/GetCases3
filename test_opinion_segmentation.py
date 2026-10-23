@@ -941,3 +941,57 @@ class TitledWritingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LineBrokenTextTests(unittest.TestCase):
+    """A text kept line by line, as CourtListener's of a PDF can be, breaks
+    a citation's parenthetical over two lines and sets a court's filing
+    stamp above a byline — neither of which opens a writing."""
+
+    BODY = ("The district court denied the injunction, and nothing in the "
+            "record suggests that it abused its discretion in doing so. ")
+
+    def test_a_parenthetical_s_tail_is_no_byline(self):
+        # Wise v. Circosta, 978 F.3d 93 (4th Cir. 2020) (en banc): "(Wilkinson
+        # and" / "Agee, JJ., dissenting) (internal quotation marks omitted)."
+        # opened a phantom dissent.
+        parts = segment_blocks([
+            _block("WYNN, Circuit Judge, denying emergency injunctive relief:"),
+            _block(self.BODY * 3),
+            _block("See Andino, 2020 WL 5752607, at *1 (Wilkinson and"),
+            _block("Agee, JJ., dissenting) (internal quotation marks "
+                   "omitted)."),
+            _block(self.BODY * 3),
+            _block("NIEMEYER, Circuit Judge, dissenting:"),
+            _block(self.BODY * 3),
+        ])
+        self.assertEqual([p.kind for p in parts], ["majority", "dissent"])
+        self.assertTrue(parts[1].label.startswith("NIEMEYER"))
+        # A byline closes only the parentheses it opens.
+        parts = segment_blocks([
+            _block("PROSSER, J., delivered the opinion of the court."),
+            _block(self.BODY * 3),
+            _block("SHIRLEY S. ABRAHAMSON, J. (dissenting)."),
+            _block(self.BODY * 3),
+        ])
+        self.assertEqual([p.kind for p in parts], ["majority", "dissent"])
+
+    def test_a_filing_stamp_above_a_byline_opens_nothing(self):
+        # Whitfield v. Mullin (9th Cir. 2026), dissents from the denial of
+        # rehearing en banc: each opened three times, at each line of the
+        # stamp and at the byline.
+        parts = segment_blocks([
+            _block("ORDER"),
+            _block("The petition for rehearing en banc is DENIED."),
+            _block("FILED OCT 16 2026"),
+            _block("Whitfield v. Mullin, 25-5220 MOLLY C. DWYER, CLERK"),
+            _block("U.S. COURT OF APPEALS"),
+            _block("BRESS, Circuit Judge, joined by CALLAHAN, BENNETT, R. "
+                   "NELSON, BADE, COLLINS, LEE, BUMATAY, VANDYKE, and TUNG, "
+                   "Circuit Judges, dissenting from the denial of rehearing "
+                   "en banc:"),
+            _block(self.BODY * 3),
+        ])
+        dissents = [p for p in parts if p.kind == "dissent"]
+        self.assertEqual(len(dissents), 1)
+        self.assertTrue(dissents[0].blocks[0].text().startswith("BRESS"))

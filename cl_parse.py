@@ -45,6 +45,160 @@ _CL_STARS_RE = re.compile(r"^\*(?:\s*\*){1,4}$")  # a "* * *" break
 # into spaces) reflows CourtListener's plain-text opinions like Scholar's.
 _CL_PARA_BREAK_RE = re.compile(r"\n[ \t]*\n\s*")
 
+# A slip opinion's page footer, as the plain text keeps it: the page's number
+# alone on a line, then a form feed.  Folded into the next page's first line,
+# it read "18 DIANA GRIBBON MOTZ, Circuit Judge, concurring …", which opens
+# no opinion (Wise v. Circosta, 978 F.3d 93 (4th Cir. 2020) (en banc)).
+_CL_PAGE_FOOTER_RE = re.compile(r"\n[ \t]*\d{1,4}[ \t]*\n\x0c")
+_CL_TAG_RE = re.compile(r"<[^>]*>")
+# A line opening a writing of its own — "DIANA GRIBBON MOTZ, Circuit Judge,
+# …", "WILKINSON and AGEE, …", "RICHARD J. SULLIVAN, Circuit Judge, …" —
+# its writer's name in capitals, then a comma.
+_CL_CAPS_OPENING_RE = re.compile(
+    r"(?:[A-Z]\.\s*)*[A-Z][A-Z'’-]+(?:\s+(?:[A-Z]\.|[A-Z][A-Z'’-]+|and))*,")
+# …which, with a judge's title after the name, is a byline wherever it
+# stands: under "25-2357 / Santos v. Lidl", heading the dissent's page.
+_CL_BYLINE_RE = re.compile(
+    _CL_CAPS_OPENING_RE.pattern
+    + r"\s+(?:(?:Chief|Senior|Presiding)\s+)?(?:Circuit\s+|District\s+)?"
+    r"(?:Judges?\b|Justices?\b|JJ?\.|C\.\s?J\.)")
+# The running head a court sets atop every page: the case's name, the part
+# ("Opinion of the Court by Groban, J.", "TYSON, J., concurring in part …"),
+# an e-filing stamp ("Appellate Case: 24-7030  Document: 115-1 …").  Each
+# reads as itself on page after page, the page numbers aside.
+_CL_HEAD_KEY_RE = re.compile(r"[\d\s]+")
+
+
+def _drop_running_heads(html: str) -> str:
+    """*html* without the lines that open two pages or more after a form
+    feed — the running heads, which read as bylines once the page number
+    glued to them is gone ("PEOPLE v. ESQUIVIAS / Evans, J., dissenting"
+    opened a phantom dissent on every page of People v. Esquivias)."""
+    pages = html.split("\x0c")
+    if len(pages) < 3:
+        return html
+
+    def tops(page: str) -> list:
+        """The keys of a page's first lines, up to its first three."""
+        keys = []
+        for line in page.split("\n"):
+            text = _CL_TAG_RE.sub("", line).strip()
+            if text:
+                keys.append(_CL_HEAD_KEY_RE.sub(" ", text).strip().lower())
+                if len(keys) == 3:
+                    break
+        return keys
+
+    seen: dict = {}
+    for page in pages[1:]:
+        for key in set(tops(page)):
+            seen[key] = seen.get(key, 0) + 1
+    # Not a section's mark ("A.", "II."), which may open two pages.
+    heads = {k for k, n in seen.items() if n >= 2 and len(k) >= 6}
+    if not heads:
+        return html
+    out = [pages[0]]
+    for page in pages[1:]:
+        lines = page.split("\n")
+        kept = []
+        dropping = True
+        for line in lines:
+            text = _CL_TAG_RE.sub("", line).strip()
+            key = _CL_HEAD_KEY_RE.sub(" ", text).strip().lower()
+            if dropping and text and key in heads:
+                continue        # a head line, gone
+            if text:
+                dropping = False
+            kept.append(line)
+        out.append("\n".join(kept))
+    return "\x0c".join(out)
+
+
+def _double_spaced(lines: list) -> bool:
+    """Whether a plain text is typed double-spaced — a blank line after
+    every line, as the Fourth Circuit's slip opinions are — so that a blank
+    line says nothing of where a paragraph ends: most lines a blank line
+    apart, and short, as a typed page's are (a text of one long line to a
+    paragraph is spaced so too)."""
+    gaps: list = []
+    lengths: list = []
+    blank = None
+    for line in lines:
+        text = _CL_TAG_RE.sub("", line).replace("\x0c", "")
+        if not text.strip():
+            if blank is not None:
+                blank += 1
+            continue
+        if blank is not None:
+            gaps.append(blank)
+        lengths.append(len(text.strip()))
+        blank = 0
+    if len(gaps) < 30:
+        return False
+    lengths.sort()
+    return (sum(1 for g in gaps if g >= 1) >= 0.6 * len(gaps)
+            and lengths[len(lengths) // 2] <= 110)
+
+
+def _reflow_plain_text(html: str) -> str:
+    """CourtListener's text of a PDF opinion (``<pre>`` chunks), with its
+    page footers dropped and — where it is typed double-spaced — its
+    paragraphs found by their indentation, as the blank lines no longer
+    say: a paragraph's first line is indented, its others are not; a
+    single-spaced run of lines indented alike is a block quote; a centered
+    line stands alone; two blank lines end a paragraph; and a paragraph
+    carries over a page break unless the new page opens, after a finished
+    sentence, on a writer's name in capitals.  Out come the single newlines
+    that fold into a paragraph and the blank lines that end one, as
+    :func:`emit_pre` reads them."""
+    html = _drop_running_heads(_CL_PAGE_FOOTER_RE.sub("\n\x0c", html))
+    lines = html.split("\n")
+    if not _double_spaced(lines):
+        return html.replace("\x0c", "")
+    paragraphs: list = []       # [first line's indent, [lines]]
+    blank = 0
+    page_break = False
+    for raw in lines:
+        if "\x0c" in raw:
+            page_break = True
+            blank = 0
+            raw = raw.replace("\x0c", "")
+        text = _CL_TAG_RE.sub("", raw)
+        if not text.strip():
+            if raw.strip() and paragraphs:
+                # Markup alone ("</pre>") stays where it was.
+                paragraphs[-1][1].append(raw.strip())
+            else:
+                blank += 1
+            continue
+        indent = len(text) - len(text.lstrip(" \t"))
+        prev = paragraphs[-1] if paragraphs else None
+        # A writer's byline, set flush, after a finished sentence — or
+        # wherever it stands, once its title says so.
+        byline = prev is not None and bool(
+            _CL_BYLINE_RE.match(text.lstrip())
+            or (re.search(r"[.:;?!”\")]\s*$",
+                          _CL_TAG_RE.sub("", prev[1][-1]))
+                and _CL_CAPS_OPENING_RE.match(text.lstrip())))
+        if prev is None:
+            new = True
+        elif page_break:
+            # A line set apart stands alone across a page too: "/s/
+            # Patricia S. Connor, Clerk" above "WYNN, Circuit Judge, …".
+            new = indent >= 2 or prev[0] >= 10 or byline
+        else:
+            quote = (blank == 0 and indent >= 2 and indent == prev[0]
+                     and len(prev[1]) >= 1)
+            new = (not quote and (indent >= 2 or blank >= 2
+                                  or prev[0] >= 10 or byline))
+        if new:
+            paragraphs.append([indent, [raw.strip()]])
+        else:
+            prev[1].append(raw.strip())
+        blank = 0
+        page_break = False
+    return "\n\n".join("\n".join(p[1]) for p in paragraphs)
+
 
 def parse_cl_html(html: str, fn_prefix: str = ""):
     """Parse CourtListener opinion HTML/XML into ``(body_blocks, footnotes)``.
@@ -68,6 +222,8 @@ def parse_cl_html(html: str, fn_prefix: str = ""):
     _CL_OPINION_RE = re.compile(r"/opinion/\d+/")
 
     html = re.sub(r"^\s*<\?xml[^>]*\?>", "", html or "")
+    if "<pre" in html:
+        html = _reflow_plain_text(html)
     soup = BeautifulSoup(html, "html.parser")
     for bad in soup.find_all(["script", "style"]):
         bad.decompose()
