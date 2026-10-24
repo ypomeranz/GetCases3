@@ -11102,6 +11102,10 @@ class CourtListenerGUI:
             label="Spotlight Shortcut…",
             command=self._show_spotlight_shortcut_dialog,
         )
+        settings_menu.add_command(
+            label="Print & Download Margins…",
+            command=self._show_output_margins_dialog,
+        )
         # Whether a citation clicked in Chrome, through the GetCases browser
         # extension, opens here (see browser_bridge).
         self._browser_link_var = tk.BooleanVar(
@@ -16106,6 +16110,83 @@ class CourtListenerGUI:
 
         dlg.bind("<KeyPress>", on_key, add="+")
         dlg.protocol("WM_DELETE_WINDOW", close)
+        dlg.after(50, dlg.focus_force)
+
+    @staticmethod
+    def _margin_choice_label(scale: float) -> str:
+        """How a margin multiple reads in the margins dialog: "2×", the
+        on-screen one marked."""
+        text = f"{scale:g}×"
+        if scale == 1.0:
+            text += " (as on screen)"
+        return text
+
+    def _show_output_margins_dialog(self) -> None:
+        """Settings ▸ Print & Download Margins…: how wide the margins of a
+        cropped PDF are when it is saved or printed — the sides, and the top
+        and foot — as multiples of the margin the viewer shows on screen
+        (see :func:`_output_margins`)."""
+        dlg = _ui_toplevel(self.root)
+        dlg.title("Print & Download Margins")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        _ensure_modern_ttk_styles(dlg)
+
+        outer = _ui_frame(dlg)
+        outer.pack(fill="both", expand=True, padx=16, pady=14)
+        _ui_label(outer, "Margins of saved and printed pages", size=14,
+                  weight="bold", anchor="w").pack(fill="x")
+        _ui_label(
+            outer,
+            "For PDFs cropped to their text: opinions, the U.S. Reports, "
+            "the Statutes at Large.\nEach is a multiple of the margin the "
+            "viewer shows on screen.",
+            size=11, muted=True, anchor="w",
+        ).pack(fill="x", pady=(2, 10))
+
+        labels = [self._margin_choice_label(s) for s in _OUTPUT_MARGIN_CHOICES]
+        by_label = dict(zip(labels, _OUTPUT_MARGIN_CHOICES))
+        sides, ends = _output_margins()
+        variables = []
+        for title, value in (("Side margins", sides),
+                             ("Top and bottom margins", ends)):
+            row = _ui_frame(outer)
+            row.pack(fill="x", pady=(0, 8))
+            _ui_label(row, title, anchor="w").pack(side="left")
+            var = tk.StringVar(master=dlg,
+                               value=self._margin_choice_label(value))
+            ttk.Combobox(
+                row, textvariable=var, values=labels, state="readonly",
+                width=18,
+                style="Modern.TCombobox" if _CTK_AVAILABLE else "TCombobox",
+            ).pack(side="right")
+            variables.append(var)
+
+        def chosen(var, fallback: float) -> float:
+            return by_label.get(var.get(), fallback)
+
+        def save() -> None:
+            new = (chosen(variables[0], sides), chosen(variables[1], ends))
+            _save_output_margins(*new)
+            self._status_var.set(
+                "Print and download margins: sides "
+                f"{new[0]:g}×, top and bottom {new[1]:g}×")
+            dlg.destroy()
+
+        def reset() -> None:
+            for var, value in zip(variables, _OUTPUT_MARGINS_DEFAULT):
+                var.set(self._margin_choice_label(value))
+
+        btns = _ui_frame(dlg)
+        btns.pack(fill="x", padx=16, pady=(0, 14))
+        _ui_button(btns, "Save", command=save, primary=True,
+                   width=88).pack(side="right")
+        _ui_button(btns, "Cancel", command=dlg.destroy, width=88).pack(
+            side="right", padx=(0, 8))
+        _ui_button(btns, "Reset to Default", command=reset,
+                   width=132).pack(side="left")
+        dlg.bind("<Return>", lambda _e: save())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.after(50, dlg.focus_force)
 
     # ------------------------------------------------------------------
@@ -23369,7 +23450,9 @@ def _head_line_room(page, head: tuple, block: tuple) -> tuple:
 
 def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
                         header_text: str = "", margin_pt: float = 7.0,
-                        margin_ratio: Optional[float] = None) -> bytes:
+                        margin_ratio: Optional[float] = None,
+                        side_scale: float = 1.0,
+                        end_scale: float = 1.0) -> bytes:
     """Each scanned page cut down to its block of print and set, with every
     other, on a page of one size: the block centered across it and at one
     top margin, so the margins are even however the volume lay on the
@@ -23377,7 +23460,9 @@ def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
     top, ``(l, t, r, b)``), None to leave a page be; everything about a
     block — a reader's notes, what is left of the border — is painted out.
     The margin is *margin_pt*, or the viewer's own share of the block's
-    width (*margin_ratio*) when wider.
+    width (*margin_ratio*) when wider — *side_scale* times that at the
+    sides and *end_scale* times it at the top and foot (see
+    :func:`_output_margins`).
 
     *heads* are the whitened boxes of the running heads a redaction took
     the reporter's citation from (see :func:`_header_redaction_box`), and
@@ -23422,6 +23507,7 @@ def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
             block_h = max(b[3] - b[1] for b, _h in laid)
             margin = max(margin_pt, block_w * margin_ratio
                          if margin_ratio else 0.0)
+            side, end = margin * side_scale, margin * end_scale
 
             # Where the citation goes, the same on every page.
             where, size = "", 0.0
@@ -23461,15 +23547,15 @@ def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
                             where = "above"
                             size = max(_HEAD_CITE_MIN_PT, wide)
             above = 1.8 * size if where == "above" else 0.0
-            page_w = block_w + 2 * margin
-            page_h = block_h + 2 * margin + above
+            page_w = block_w + 2 * side
+            page_h = block_h + 2 * end + above
             pad = 1.5
             for i, entry in enumerate(pts):
                 if not entry:
                     continue
                 (bl, bb, br, bt), head = entry
-                left = bl - margin - (block_w - (br - bl)) / 2
-                top = bt + margin + above
+                left = bl - side - (block_w - (br - bl)) / 2
+                top = bt + end + above
                 right, bottom = left + page_w, top - page_h
                 page = doc[i]
                 try:
@@ -23508,15 +23594,47 @@ def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
             doc.close()
 
 
+#: The margins a page is saved and printed with, as multiples of the one the
+#: viewer draws around it on screen: ``(sides, top and foot)``.  Saved as
+#: the viewer showed it, the type came out close to the paper's edges; the
+#: sides are twice as wide unless the reader chooses otherwise (Settings ▸
+#: Print & Download Margins…).
+_OUTPUT_MARGINS_DEFAULT = (2.0, 1.0)
+#: The multiples offered for each.
+_OUTPUT_MARGIN_CHOICES = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+
+
+def _output_margins() -> tuple:
+    """The margins the reader chose for saving and printing — ``(sides, top
+    and foot)``, multiples of the viewer's own (see
+    :data:`_OUTPUT_MARGINS_DEFAULT`)."""
+    chosen = _load_config().get("output_margins")
+    try:
+        sides, ends = float(chosen["sides"]), float(chosen["ends"])
+    except (KeyError, TypeError, ValueError):
+        return _OUTPUT_MARGINS_DEFAULT
+    return (min(max(sides, 0.0), 6.0), min(max(ends, 0.0), 6.0))
+
+
+def _save_output_margins(sides: float, ends: float) -> None:
+    config = _load_config()
+    config["output_margins"] = {"sides": sides, "ends": ends}
+    _save_config(config)
+
+
 def _crop_pdf_to_content(
     pdf_bytes: bytes,
     frac_boxes: Optional[list] = None,
     margin_pt: float = 7.0,
     margin_ratio: Optional[float] = None,
+    side_scale: float = 1.0,
+    end_scale: float = 1.0,
 ) -> bytes:
     """Return *pdf_bytes* cropped to each page's content by tightening the page
     boxes — a lossless crop that removes the wide blank borders while leaving
-    the original (selectable) text untouched.
+    the original (selectable) text untouched.  The margin is *side_scale*
+    times as wide at the sides and *end_scale* times as deep at the top and
+    foot (see :func:`_output_margins`).
 
     Content is detected from the page objects (:func:`_page_content_box_pts`),
     which is exact for a born-digital file.  A *scan* is different: the page's
@@ -23612,8 +23730,9 @@ def _crop_pdf_to_content(
                 m = margin_pt
                 if margin_ratio:
                     m = max(m, (r - l) * margin_ratio)
-                l, b = max(mb[0], l - m), max(mb[1], b - m)
-                r, t = min(mb[2], r + m), min(mb[3], t + m)
+                side, end = m * side_scale, m * end_scale
+                l, b = max(mb[0], l - side), max(mb[1], b - end)
+                r, t = min(mb[2], r + side), min(mb[3], t + end)
                 if r - l < 1 or t - b < 1:
                     continue  # implausibly tight — skip rather than clip
                 page = doc[i]
@@ -24517,6 +24636,16 @@ def _whiten_pdf_redactions(img, _ds: int = 4) -> list:
     W, H = img.size
     w, h = max(1, W // _ds), max(1, H // _ds)
     small = img.convert("L").resize((w, h), Image.BOX)
+
+    def full(box: tuple) -> tuple:
+        """Reduced pixels *box* ``(l, t, r, b)`` on the full page, by its
+        true scale — a shade over *_ds* where the page's size is no multiple
+        of it, which, rounded down, put a box 2 or 3 pixels short of its bar
+        at the far side of the page."""
+        l, t, r, b = box
+        return (max(0, int(l * W / w)), max(0, int(t * H / h)),
+                min(W, -int(-r * W // w)), min(H, -int(-b * H // h)))
+
     black = [v <= 48 for v in small.tobytes()]
     seen = bytearray(w * h)
     min_w = max(6, int(0.08 * w))
@@ -24554,8 +24683,7 @@ def _whiten_pdf_redactions(img, _ds: int = 4) -> list:
         if (not keep and 2 <= bh <= max_key_h and 2 <= bw <= int(0.3 * w)
                 and n >= 0.72 * bw * bh):
             keep = _region_mostly_black(
-                img, (lo_x * _ds, lo_y * _ds,
-                      (hi_x + 1) * _ds, (hi_y + 1) * _ds))
+                img, full((lo_x, lo_y, hi_x + 1, hi_y + 1)))
         if keep:
             boxes.append((lo_x, lo_y, hi_x, hi_y))
     fill = 255 if img.mode == "L" else (255,) * len(img.getbands())
@@ -24568,10 +24696,8 @@ def _whiten_pdf_redactions(img, _ds: int = 4) -> list:
         # took the tops off the line printed just under a running head's
         # bar (Milburn ex rel. Milburn v. Anne Arundel Cnty. Dep't of Soc.
         # Servs., 871 F.2d 474, 475).
-        box = _solid_extent(gray, (max(0, (lo_x - 1) * _ds),
-                                   max(0, (lo_y - 1) * _ds),
-                                   min(W, (hi_x + 2) * _ds),
-                                   min(H, (hi_y + 2) * _ds)), 2 * _ds)
+        box = _solid_extent(gray, full((lo_x - 1, lo_y - 1,
+                                        hi_x + 2, hi_y + 2)), 2 * _ds)
         img.paste(fill, box)
         out.append(box)
     return out
@@ -24579,11 +24705,13 @@ def _whiten_pdf_redactions(img, _ds: int = 4) -> list:
 
 def _solid_extent(gray, box: tuple, band: int) -> tuple:
     """*box*, on the grayscale page *gray*, its edges drawn in — by at most
-    *band* pixels — to where the bar it was found around is dark, and a
-    pixel wider for the bar's soft edge.  Each side is measured against the
-    line just within the band: where the bar is dark there, the band's
-    lines are the bar's as far out as they are dark too, so a bar's notch
-    is kept and the print beside it is not."""
+    *band* pixels — to where the bar it was found around ends, and a pixel
+    wider for the bar's soft edge.  Each side is followed out from the line
+    just within the band, where the bar is dark, to the first line white
+    where that one is dark: so a bar's notch is kept, and its edge where
+    the scan set it askew (the faint lines left down the redacted caption
+    of Frigaliment Importing Co. v. B.N.S. Int'l Sales Corp., 190 F. Supp.
+    116), and the print beside it, past a gap, is not."""
     from PIL import ImageChops
 
     l, t, r, b = box
@@ -24599,10 +24727,11 @@ def _solid_extent(gray, box: tuple, band: int) -> tuple:
         need = core.histogram()[255]
         if not need:
             return 0
-        for k in range(band):
-            if ImageChops.multiply(line(k), core).histogram()[255] * 2 >= need:
-                return k
-        return band
+        for k in range(band - 1, -1, -1):
+            hit = ImageChops.multiply(line(k), core).histogram()[255]
+            if hit <= 0.02 * need:
+                return k + 1
+        return 0
 
     top = drawn_in(lambda k: dark.crop((0, k, w, k + 1)))
     bottom = drawn_in(lambda k: dark.crop((0, h - 1 - k, w, h - k)))
@@ -26511,8 +26640,10 @@ class _PdfPane(ttk.Frame):
         Returns how many rectangles were erased (0 without the flag)."""
         from PIL import Image, ImageDraw
         scale = dpi / 72.0
-        # Keep the same margin-to-content proportion the viewer displays.
+        # Keep the same margin-to-content proportion the viewer displays,
+        # widened as the reader chose (see _output_margins).
         margin_ratio = self._margin_ratio()
+        sides, ends = _output_margins()
         whitened = 0
         omitted = 0
         pages: list = []
@@ -26577,11 +26708,13 @@ class _PdfPane(ttk.Frame):
                 W, H = full.size
                 content = full.crop((int(fl * W), int(ft * H),
                                      int(round(fr * W)), int(round(fb * H))))
-                m = max(1, int(round(content.width * margin_ratio)))
+                m = max(1, content.width * margin_ratio)
+                side, end = int(round(m * sides)), int(round(m * ends))
                 sheet = Image.new(
-                    "RGB", (content.width + 2 * m, content.height + 2 * m),
+                    "RGB",
+                    (content.width + 2 * side, content.height + 2 * end),
                     "white")
-                sheet.paste(content, (m, m))
+                sheet.paste(content, (side, end))
                 pages.append(sheet)
             if not pages:
                 raise ValueError("the PDF has no pages")
@@ -26752,9 +26885,11 @@ class _PdfPane(ttk.Frame):
         running head's citation lettered at a reading size where its box
         would hold it only small.  ``black_and_white`` makes the scan's
         paper white and its print black, its text layer kept (see
-        :func:`_pdf_ink_on_white`)."""
+        :func:`_pdf_ink_on_white`).  The margins are the reader's choice
+        (see :func:`_output_margins`)."""
         data = self._pdf_bytes
         frac_boxes = [m[2] for m in self._meta]
+        sides, ends = _output_margins()
         if black_and_white:
             data = _pdf_ink_on_white(data)
         plan = (self._redaction_plan(header_cite) if whiten_redactions
@@ -26793,12 +26928,14 @@ class _PdfPane(ttk.Frame):
                       else None for i in kept]
             data = _lay_out_scan_pages(
                 data, blocks, heads=[plan[i].get("head") for i in kept],
-                header_text=header_cite, margin_ratio=self._margin_ratio())
+                header_text=header_cite, margin_ratio=self._margin_ratio(),
+                side_scale=sides, end_scale=ends)
             # A page laid out is boxed already; the rest crop as before.
             frac_boxes = [None if block else frac
                           for block, frac in zip(blocks, frac_boxes)]
         out = _crop_pdf_to_content(data, frac_boxes=frac_boxes,
-                                   margin_ratio=self._margin_ratio())
+                                   margin_ratio=self._margin_ratio(),
+                                   side_scale=sides, end_scale=ends)
         with open(path, "wb") as fh:
             fh.write(out)
 

@@ -1046,6 +1046,16 @@ class RedactionBarTrimTests(unittest.TestCase):
         self.assertEqual(img.getpixel((110, 82)), 0)   # still printed
         self.assertEqual(min(img.crop((95, 45, 605, 82)).tobytes()), 255)
 
+    def test_a_bar_at_the_far_side_of_the_page_goes_to_its_edge(self):
+        # A page 690 pixels wide is reduced to 172, a shade over 4 to one;
+        # scaled back by 4, the box fell 2 pixels short of the bar's right
+        # edge, a hairline left down the redacted caption of Frigaliment
+        # Importing Co. v. B.N.S. Int'l Sales Corp., 190 F. Supp. 116.
+        img = Image.new("L", (690, 300), 255)
+        ImageDraw.Draw(img).rectangle((388, 116, 632, 158), fill=0)
+        g._whiten_pdf_redactions(img)
+        self.assertEqual(min(img.crop((380, 110, 640, 165)).tobytes()), 255)
+
     def test_a_notched_bar_goes_entirely(self):
         img = Image.new("L", (700, 300), 255)
         d = ImageDraw.Draw(img)
@@ -1053,6 +1063,100 @@ class RedactionBarTrimTests(unittest.TestCase):
         d.rectangle((60, 100, 100, 120), fill=0)       # a key-number box
         g._whiten_pdf_redactions(img)
         self.assertEqual(min(img.crop((55, 45, 605, 125)).tobytes()), 255)
+
+
+@unittest.skipUnless(_HAVE_PDFIUM, "needs pypdfium2 and tkinter")
+class OutputMarginTests(unittest.TestCase):
+    """Saved and printed, a cropped page's side margins are twice the
+    viewer's own unless the reader chooses otherwise (Settings ▸ Print &
+    Download Margins…); its top and foot as on screen."""
+
+    def _config(self, config: dict):
+        from unittest import mock
+        return mock.patch.object(g, "_load_config", return_value=config)
+
+    def test_the_sides_are_twice_by_default(self):
+        with self._config({}):
+            self.assertEqual(g._output_margins(), (2.0, 1.0))
+
+    def test_the_readers_choice_is_read_and_kept_in_bounds(self):
+        for chosen, read in (({"sides": 3, "ends": 0.5}, (3.0, 0.5)),
+                             ({"sides": 99, "ends": -1}, (6.0, 0.0)),
+                             ({"sides": "wide"}, (2.0, 1.0)),
+                             ("wide", (2.0, 1.0))):
+            with self.subTest(chosen=chosen), \
+                    self._config({"output_margins": chosen}):
+                self.assertEqual(g._output_margins(), read)
+
+    def test_the_choice_is_saved_with_the_rest_of_the_config(self):
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.json"
+            path.write_text('{"token": "abc"}', encoding="utf-8")
+            with mock.patch.object(g, "_CONFIG_PATH", path):
+                g._save_output_margins(1.5, 2.0)
+                self.assertEqual(g._output_margins(), (1.5, 2.0))
+                self.assertEqual(g._load_config()["token"], "abc")
+
+    def test_the_choices_read_plainly(self):
+        self.assertEqual(g.CourtListenerGUI._margin_choice_label(2.0), "2×")
+        self.assertEqual(g.CourtListenerGUI._margin_choice_label(0.5),
+                         "0.5×")
+        self.assertEqual(g.CourtListenerGUI._margin_choice_label(1.0),
+                         "1× (as on screen)")
+
+    def test_a_crop_widens_only_the_sides(self):
+        data = _born_digital(slug=False)
+        doc = pdfium.PdfDocument(io.BytesIO(data))
+        cl, cb, cr, ct = g._page_content_box_pts(doc[0])
+        l, b, r, t = _box(g._crop_pdf_to_content(data, side_scale=2.0))
+        self.assertAlmostEqual(cl - l, 14.0, places=1)
+        self.assertAlmostEqual(r - cr, 14.0, places=1)
+        self.assertAlmostEqual(t - ct, 7.0, places=1)
+
+    def test_a_layout_widens_only_the_sides(self):
+        block = (100, 120, 420, 640)
+        img = Image.new("L", (612, 792), 255)
+        ImageDraw.Draw(img).rectangle(block, fill=40)
+        out = g._lay_out_scan_pages(
+            _ocr_page([], img), [(100 / 612, 120 / 792, 420 / 612,
+                                  640 / 792)],
+            margin_pt=10, side_scale=2.0)
+        page = pdfium.PdfDocument(io.BytesIO(out))[0].render(
+            scale=1).to_pil().convert("L")
+        self.assertEqual(page.size, (360, 540))
+        box = page.point(lambda v: 255 if v < 128 else 0).getbbox()
+        for got, want in zip(box, (20, 10, 340, 530)):
+            self.assertAlmostEqual(got, want, delta=1.5)
+
+    def _saved_sizes(self, margins: tuple, raster: bool = False) -> tuple:
+        """The first page's size, saved through the viewer with the reader's
+        *margins*."""
+        from unittest import mock
+
+        fh = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        pane = _stand_in_pane(_scan_of(_bordered_picture()))
+        with mock.patch.object(g, "_output_margins", return_value=margins):
+            if raster:
+                pane.export_pdf(fh.name, clean_borders=True)
+            else:
+                pane.export_cropped_pdf(fh.name, clean_borders=True)
+        with open(fh.name, "rb") as saved:
+            doc = pdfium.PdfDocument(io.BytesIO(saved.read()))
+            return tuple(doc[0].get_size())
+
+    def test_saving_and_printing_take_the_readers_margins(self):
+        for raster in (False, True):
+            with self.subTest(raster=raster):
+                narrow = self._saved_sizes((1.0, 1.0), raster)
+                wide = self._saved_sizes((3.0, 1.0), raster)
+                # Four more margins' width, and no more height.
+                self.assertGreater(wide[0] - narrow[0], 10)
+                self.assertAlmostEqual(wide[1], narrow[1], delta=1)
 
 
 def _merged(files: list) -> bytes:
