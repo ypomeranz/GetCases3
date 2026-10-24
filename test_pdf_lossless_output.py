@@ -903,6 +903,7 @@ class ScanLayoutTests(unittest.TestCase):
             size = ctypes.c_float()
             raw.FPDFTextObj_GetFontSize(obj.raw, ctypes.byref(size))
             l, b, r, t = obj.get_bounds()
+            self.lettered = (l, b, r, t)
             return top - bottom, size.value, ((l + r) / 2, (b + t) / 2)
         self.fail("no citation lettered")
 
@@ -929,6 +930,129 @@ class ScanLayoutTests(unittest.TestCase):
         self.assertAlmostEqual(x, 300, delta=1.5)
         self.assertGreater(y, 792 - 100)             # over the block
         self.assertAlmostEqual(height, 620 + 1.8 * 9, delta=0.01)
+
+    def test_a_little_short_of_room_it_is_made_smaller_to_fit_the_line(self):
+        # Milburn ex rel. Milburn v. Anne Arundel Cnty. Dep't of Soc.
+        # Servs., 871 F.2d 474: its long name went above at 9 points, though
+        # it fit beside the page number at 8.3.
+        height, size, (x, y) = self._headed((250, 104, 290, 116), 330)
+        self.assertLess(size, 9.0)
+        self.assertGreaterEqual(size, g._HEAD_CITE_MIN_PT)
+        self.assertAlmostEqual(x, 300, delta=1.5)
+        self.assertAlmostEqual(y, 792 - 110, delta=2.5)
+        self.assertEqual(height, 620)
+        self.assertLess(self.lettered[2], 330)       # clear of the number
+
+
+@unittest.skipUnless(_HAVE_PDFIUM, "needs pypdfium2 and tkinter")
+class RedactedScanLayoutTests(unittest.TestCase):
+    """A redacted case.law scan cut down to its print: the redaction bars
+    count as print, so a page whose one column is all bars keeps its other
+    column where it was printed; a blot of border at the page's edge is
+    none of them."""
+
+    LINE = "the national banking system and"
+
+    def _width(self) -> float:
+        """The width of an OCR line of :attr:`LINE` (points)."""
+        import pypdfium2.raw as raw
+
+        doc = pdfium.PdfDocument.new()
+        obj, (width, _h) = g._pdf_new_text(doc, self.LINE, size=10)
+        raw.FPDFPageObj_Destroy(obj)
+        return width
+
+    def _page(self, bar: "Optional[tuple]", column_x: float,
+              ocr: list = ()) -> tuple:
+        """A scan: a black *bar* (points from the top-left), and a column
+        of print at *column_x* under an OCR line for each of its lines;
+        and the lines' width."""
+        width = self._width()
+        img = Image.new("L", (612, 792), 255)
+        d = ImageDraw.Draw(img)
+        if bar:
+            d.rectangle(bar, fill=0)
+        lines = []
+        for k in range(20):
+            y = 150 + 20 * k
+            for x in range(int(column_x), int(column_x + width) - 6, 12):
+                d.rectangle((x, y, x + 7, y + 7), fill=90)   # words
+            lines.append((column_x, 792 - y - 8, self.LINE, 10))
+        return _ocr_page(lines + list(ocr), img), width
+
+    def _saved(self, data: bytes) -> bytes:
+        fh = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        _stand_in_pane(data).export_cropped_pdf(
+            fh.name, whiten_redactions=True, clean_borders=True)
+        with open(fh.name, "rb") as saved:
+            return saved.read()
+
+    def test_a_column_of_bars_keeps_its_place(self):
+        # K.H. ex rel. Murphy v. Morgan, 914 F.2d 846, 847: the headnotes
+        # blacked out in the left column, the opinion in the right.
+        data, width = self._page((60, 150, 290, 550), 320)
+        page = pdfium.PdfDocument(io.BytesIO(self._saved(data)))[0]
+        l, b, r, t = page.get_mediabox()
+        self.assertGreater(r - l, (320 + width - 60) + 10)
+        img = page.render(scale=1).to_pil().convert("L")
+        dark = img.point(lambda v: 255 if v < 160 else 0).getbbox()
+        self.assertIsNotNone(dark)
+        # The bar painted out, the column at the page's right, not set in
+        # its middle.
+        self.assertGreater(dark[0], 0.45 * img.width)
+        self.assertLess(img.width - dark[2], 0.1 * img.width)
+
+    def test_print_the_recognizer_misplaced_past_the_ink_is_not_kept(self):
+        # K.H. ex rel. Murphy v. Morgan, 914 F.2d 846, 848: "87)," read
+        # beyond the column, where nothing is printed.
+        width = self._width()
+        data, _width = self._page(None, 100, ocr=[
+            (100 + width + 60, 792 - 158, "87),", 10)])
+        block = _stand_in_pane(data)._scan_plan()[0]["block"]
+        self.assertLess(block[2], (100 + width + 10) / 612)
+
+    def test_a_blot_at_the_edge_is_no_running_head(self):
+        size = (612, 792)
+        self.assertIsNone(g._header_redaction_box([(300, 0, 500, 12)], size))
+        self.assertEqual(g._header_redaction_box(
+            [(300, 0, 500, 12), (150, 40, 450, 60)], size), (150, 40, 450, 60))
+        self.assertTrue(g._box_at_edge((0, 300, 20, 330), size))
+        self.assertFalse(g._box_at_edge((60, 150, 290, 550), size))
+
+
+class RedactionBarTrimTests(unittest.TestCase):
+    """A redaction bar is painted out to its own edge, found at full size:
+    padded as it was found on the reduced page, it took the tops off the
+    line printed under it (Milburn ex rel. Milburn v. Anne Arundel Cnty.
+    Dep't of Soc. Servs., 871 F.2d 474, 475)."""
+
+    def setUp(self):
+        if not _HAVE_PDFIUM:
+            self.skipTest("needs the app")
+
+    def test_the_line_under_a_bar_keeps_its_tops(self):
+        img = Image.new("L", (700, 300), 255)
+        d = ImageDraw.Draw(img)
+        d.rectangle((100, 50, 600, 80), fill=0)
+        for x in range(110, 590, 12):                  # letters, 2 px under
+            d.rectangle((x, 82, x + 3, 93), fill=0)
+        boxes = g._whiten_pdf_redactions(img)
+        self.assertEqual(len(boxes), 1)
+        l, t, r, b = boxes[0]
+        self.assertLessEqual(b, 82)
+        self.assertGreaterEqual(b, 81)
+        self.assertEqual(img.getpixel((110, 82)), 0)   # still printed
+        self.assertEqual(min(img.crop((95, 45, 605, 82)).tobytes()), 255)
+
+    def test_a_notched_bar_goes_entirely(self):
+        img = Image.new("L", (700, 300), 255)
+        d = ImageDraw.Draw(img)
+        d.rectangle((100, 50, 600, 120), fill=0)
+        d.rectangle((60, 100, 100, 120), fill=0)       # a key-number box
+        g._whiten_pdf_redactions(img)
+        self.assertEqual(min(img.crop((55, 45, 605, 125)).tobytes()), 255)
 
 
 def _merged(files: list) -> bytes:
