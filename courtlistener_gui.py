@@ -11102,6 +11102,10 @@ class CourtListenerGUI:
             label="Spotlight Shortcut…",
             command=self._show_spotlight_shortcut_dialog,
         )
+        settings_menu.add_command(
+            label="Print & Download Margins…",
+            command=self._show_output_margins_dialog,
+        )
         # Whether a citation clicked in Chrome, through the GetCases browser
         # extension, opens here (see browser_bridge).
         self._browser_link_var = tk.BooleanVar(
@@ -14922,7 +14926,8 @@ class CourtListenerGUI:
             except Exception as exc:
                 print(f"[cite-pdf] header citation failed: {exc}")
         try:
-            _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+            _write_output_pdf(path, data, pane, whiten=whiten, header=header,
+                              clean_borders=not _is_us_reports_pdf(url))
         except Exception as exc:
             messagebox.showerror("Download PDF", str(exc), parent=self.root)
             return
@@ -14956,7 +14961,8 @@ class CourtListenerGUI:
         path = _named_temp_pdf_path(
             (named.get("cite") or "orders") if named.get("orders_page")
             else _build_default_filename(item))
-        _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+        _write_output_pdf(path, data, pane, whiten=whiten, header=header,
+                          clean_borders=not _is_us_reports_pdf(url))
         _print_pdf_file(self.root, path, status)
 
     def _request_cited_pdf_analysis(self, window, data: bytes, url: str,
@@ -16104,6 +16110,83 @@ class CourtListenerGUI:
 
         dlg.bind("<KeyPress>", on_key, add="+")
         dlg.protocol("WM_DELETE_WINDOW", close)
+        dlg.after(50, dlg.focus_force)
+
+    @staticmethod
+    def _margin_choice_label(scale: float) -> str:
+        """How a margin multiple reads in the margins dialog: "2×", the
+        on-screen one marked."""
+        text = f"{scale:g}×"
+        if scale == 1.0:
+            text += " (as on screen)"
+        return text
+
+    def _show_output_margins_dialog(self) -> None:
+        """Settings ▸ Print & Download Margins…: how wide the margins of a
+        cropped PDF are when it is saved or printed — the sides, and the top
+        and foot — as multiples of the margin the viewer shows on screen
+        (see :func:`_output_margins`)."""
+        dlg = _ui_toplevel(self.root)
+        dlg.title("Print & Download Margins")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        _ensure_modern_ttk_styles(dlg)
+
+        outer = _ui_frame(dlg)
+        outer.pack(fill="both", expand=True, padx=16, pady=14)
+        _ui_label(outer, "Margins of saved and printed pages", size=14,
+                  weight="bold", anchor="w").pack(fill="x")
+        _ui_label(
+            outer,
+            "For PDFs cropped to their text: opinions, the U.S. Reports, "
+            "the Statutes at Large.\nEach is a multiple of the margin the "
+            "viewer shows on screen.",
+            size=11, muted=True, anchor="w",
+        ).pack(fill="x", pady=(2, 10))
+
+        labels = [self._margin_choice_label(s) for s in _OUTPUT_MARGIN_CHOICES]
+        by_label = dict(zip(labels, _OUTPUT_MARGIN_CHOICES))
+        sides, ends = _output_margins()
+        variables = []
+        for title, value in (("Side margins", sides),
+                             ("Top and bottom margins", ends)):
+            row = _ui_frame(outer)
+            row.pack(fill="x", pady=(0, 8))
+            _ui_label(row, title, anchor="w").pack(side="left")
+            var = tk.StringVar(master=dlg,
+                               value=self._margin_choice_label(value))
+            ttk.Combobox(
+                row, textvariable=var, values=labels, state="readonly",
+                width=18,
+                style="Modern.TCombobox" if _CTK_AVAILABLE else "TCombobox",
+            ).pack(side="right")
+            variables.append(var)
+
+        def chosen(var, fallback: float) -> float:
+            return by_label.get(var.get(), fallback)
+
+        def save() -> None:
+            new = (chosen(variables[0], sides), chosen(variables[1], ends))
+            _save_output_margins(*new)
+            self._status_var.set(
+                "Print and download margins: sides "
+                f"{new[0]:g}×, top and bottom {new[1]:g}×")
+            dlg.destroy()
+
+        def reset() -> None:
+            for var, value in zip(variables, _OUTPUT_MARGINS_DEFAULT):
+                var.set(self._margin_choice_label(value))
+
+        btns = _ui_frame(dlg)
+        btns.pack(fill="x", padx=16, pady=(0, 14))
+        _ui_button(btns, "Save", command=save, primary=True,
+                   width=88).pack(side="right")
+        _ui_button(btns, "Cancel", command=dlg.destroy, width=88).pack(
+            side="right", padx=(0, 8))
+        _ui_button(btns, "Reset to Default", command=reset,
+                   width=132).pack(side="left")
+        dlg.bind("<Return>", lambda _e: save())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.after(50, dlg.focus_force)
 
     # ------------------------------------------------------------------
@@ -19427,9 +19510,14 @@ _cut_companion_cases = cut_companion_cases
 
 def _scholar_source_segments(source: str) -> list[str]:
     """A Scholar result byline reads "<citations> - <court>, <year> -
-    Google Scholar"; split it on the dashes and drop the publisher tail."""
+    Google Scholar"; split it on the dashes and drop the publisher tail —
+    Scholar's own, or the site a result links to instead ("504 US 428, 112
+    S. Ct. 2059, … - Supreme Court, 1992 - law.cornell.edu" is Burdick v.
+    Takushi's, which had been dated by its S. Ct. page, 2059)."""
     segs = [s.strip() for s in re.split(r"\s+-\s+", source or "") if s.strip()]
-    while segs and segs[-1].lower() == "google scholar":
+    while segs and (segs[-1].lower() == "google scholar"
+                    or re.fullmatch(r"[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}",
+                                    segs[-1].lower())):
         segs.pop()
     return segs
 
@@ -20217,7 +20305,9 @@ def _dump_statute_rtf(txt: tk.Text, start: str, end: str) -> str:
             codes.append("\\b")
         if "credit" in active or "notebody" in active:
             codes.append("\\fs18")
-        esc = _rtf_escape(seg)
+        # "§ 1983" held together, as an opinion's text holds it.
+        from google_scholar import bind_signs_to_numbers
+        esc = _rtf_escape(bind_signs_to_numbers(seg))
         return "{" + "".join(codes) + " " + esc + "}" if codes else esc
 
     for key, value, _index in txt.dump(start, end, text=True, tag=True):
@@ -22907,19 +22997,21 @@ def _paint_out_pdf_redactions(pdf_bytes: bytes, plan: list,
                 try:
                     ml, mb, mr, mt = page.get_mediabox()
                     w_pt, h_pt = mr - ml, mt - mb
-                    # The detector measures a bar on a downsampled render, so
-                    # its box can stop a shade inside the ink.  Paint a little
-                    # wider than asked: a sliver of surviving bar is far more
-                    # noticeable than a hair of extra white.
-                    pad = max(1.5, 0.003 * w_pt)
-                    for fl, ft, fr, fb in entry.get("boxes", ()):
-                        # Fractions are measured from the top of the page; PDF
-                        # coordinates count up from the bottom.
-                        _pdf_fill_rect(
-                            page,
-                            ml + fl * w_pt - pad, mt - fb * h_pt - pad,
-                            ml + fr * w_pt + pad, mt - ft * h_pt + pad,
-                        )
+                    # The detector measures a bar on a render coarser than
+                    # the scan, so its box can stop a shade inside the ink.
+                    # Paint a hair wider than asked: a sliver of surviving
+                    # bar is noticeable — but so are the tops of the line
+                    # printed just under a running head's bar, which a
+                    # wider pad cut off.
+                    pad = 0.75
+                    # Fractions are measured from the top of the page; PDF
+                    # coordinates count up from the bottom.  A scan's border
+                    # comes as a box to each run of each row, so all of them
+                    # go on as one shape (see _pdf_fill_rects).
+                    _pdf_fill_rects(page, [
+                        (ml + fl * w_pt - pad, mt - fb * h_pt - pad,
+                         ml + fr * w_pt + pad, mt - ft * h_pt + pad)
+                        for fl, ft, fr, fb in entry.get("boxes", ())])
                     head = entry.get("head")
                     if head and header_text and scale > 0:
                         obj, _size = _pdf_new_text(doc, header_text)
@@ -22944,15 +23036,605 @@ def _paint_out_pdf_redactions(pdf_bytes: bytes, plan: list,
             doc.close()
 
 
+def _pdf_fill_rects(page, rects: list, rgb: tuple = (255, 255, 255)) -> None:
+    """Paint *rects* (each ``(x0, y0, x1, y1)`` in the page's own points) on
+    to *page* as one filled shape — a scan's border is a box to each run of
+    each of its rows, hundreds of them, and an object apiece would bloat the
+    page and slow every reader that draws it."""
+    import pypdfium2.raw as pdfium_c
+
+    if not rects:
+        return
+    x0, y0, x1, y1 = rects[0]
+    obj = pdfium_c.FPDFPageObj_CreateNewPath(x0, y0)
+    for x0, y0, x1, y1 in rects:
+        pdfium_c.FPDFPath_MoveTo(obj, x0, y0)
+        pdfium_c.FPDFPath_LineTo(obj, x1, y0)
+        pdfium_c.FPDFPath_LineTo(obj, x1, y1)
+        pdfium_c.FPDFPath_LineTo(obj, x0, y1)
+        pdfium_c.FPDFPath_Close(obj)
+    pdfium_c.FPDFPageObj_SetFillColor(obj, rgb[0], rgb[1], rgb[2], 255)
+    pdfium_c.FPDFPath_SetDrawMode(obj, pdfium_c.FPDF_FILLMODE_WINDING, False)
+    pdfium_c.FPDFPage_InsertObject(page.raw, obj)
+
+
+# ---------------------------------------------------------------------------
+# A scan's black border, and its paper made white
+# ---------------------------------------------------------------------------
+# A page scanned from a bound volume comes with the dark of what lay around
+# it: the scanner's lid, the binding, the shadow of the page's own edge —
+# uneven, as on every page of the static.case.law scan of Palsgraf v. Long
+# Island R.R. Co., 248 N.Y. 339.  Saved or printed, it is an ink-drinking
+# frame around the opinion.  What belongs to it is the dark joined to the
+# image's edge, and the gray that fades off that dark; the print never
+# touches the edge.
+
+#: A border pixel's darkness: the dark that starts one, the gray that may
+#: carry it on (0 black, 255 white).
+_BORDER_DARK = 110
+_BORDER_GRAY = 200
+#: The resolution a border is looked for at.
+_BORDER_SCAN_DPI = 100
+
+
+def _scan_border_mask(gray):
+    """The border of a scanned page's render *gray* (mode "L") as a mask —
+    255 where it is, 0 elsewhere — or None where it has none worth the
+    name.
+
+    Flooded from every dark pixel on the image's edge, through the dark and
+    gray joined to it.  Where that runs into the page's middle, the border
+    has reached the print (a shadow over the lines nearest the binding),
+    and it is kept to a band along the edges instead."""
+    from PIL import ImageDraw, ImageFilter
+
+    W, H = gray.size
+    if W < 16 or H < 16:
+        return None
+    marked = 60     # what a flooded pixel becomes: neither dark nor gray
+    work = gray.point(lambda v: 0 if v < _BORDER_DARK
+                      else 30 if v < _BORDER_GRAY else 255)
+    px = work.load()
+    edge = ([(x, 0) for x in range(W)] + [(x, H - 1) for x in range(W)]
+            + [(0, y) for y in range(H)] + [(W - 1, y) for y in range(H)])
+    for xy in edge:
+        if px[xy] == 0:
+            # Seeded on black, it takes in the gray (30) joined to it.
+            ImageDraw.floodfill(work, xy, marked, thresh=30)
+    mask = work.point(lambda v: 255 if v == marked else 0)
+    if mask.histogram()[255] < 0.001 * W * H:
+        return None
+    # The soft edge left around it.
+    mask = mask.filter(ImageFilter.MaxFilter(3))
+    middle = (int(W * 0.2), int(H * 0.12), int(W * 0.8), int(H * 0.88))
+    if mask.crop(middle).getbbox() is not None:
+        band = mask.copy()
+        band.paste(0, (int(W * 0.12), int(H * 0.08),
+                       int(W * 0.88), int(H * 0.92)))
+        mask = band
+    return mask if mask.getbbox() is not None else None
+
+
+def _mask_boxes(mask) -> tuple:
+    """*mask* as boxes of fractions of the image, ``(l, t, r, b)``: a box to
+    each run of each row, the runs of rows alike taken together."""
+    W, H = mask.size
+    data = mask.tobytes()
+    boxes: list = []
+    open_runs: dict = {}        # (x0, x1) -> top row
+    for y in range(H + 1):
+        row = data[y * W:(y + 1) * W] if y < H else b""
+        runs = set()
+        x = 0
+        while x < len(row):
+            if row[x]:
+                start = x
+                while x < len(row) and row[x]:
+                    x += 1
+                runs.add((start, x))
+            else:
+                x += 1
+        for run in list(open_runs):
+            if run not in runs:
+                top = open_runs.pop(run)
+                boxes.append((run[0] / W, top / H, run[1] / W, y / H))
+        for run in runs:
+            open_runs.setdefault(run, y)
+    return tuple(boxes)
+
+
+def _reads_as_print(text: str) -> bool:
+    """Whether *text*, the recognizer's reading of a few marks, reads as
+    print rather than a scrawl: a number — a page number — or letters and
+    figures, two at least, making up half of it.  A reader's note comes out
+    a letter or two of stray punctuation ("w", "^^")."""
+    text = "".join(text.split())
+    alnum = sum(ch.isalnum() for ch in text)
+    return text.isdigit() or (alnum >= 2 and 2 * alnum >= len(text))
+
+
+def _ocr_text_block(page) -> "Optional[tuple]":
+    """The block of print on a scanned *page*, as fractions of it measured
+    from the top, ``(l, t, r, b)`` — read off its OCR layer, which knows
+    the print from a reader's notes in the margin, a stray mark or what is
+    left of the border, as the ink alone does not (on Palsgraf v. Long
+    Island R.R. Co., 248 N.Y. 339, the ink fills nearly every page).  Lines
+    of fewer than four characters do not count: a printer's signature mark
+    at the foot, a scribble the recognizer read as letters.  None for a
+    page with no OCR layer, or one that reads fewer than five lines of the
+    page — too little to tell where its print is, when the print outside
+    them would be cut away."""
+    try:
+        ml, mb, mr, mt = page.get_mediabox()
+        w, h = mr - ml, mt - mb
+        tp = page.get_textpage()
+    except Exception:
+        return None
+    try:
+        lines: list = []        # each line's characters, (box, character)
+        line: list = []
+        for k in range(tp.count_chars()):
+            ch = tp.get_text_range(k, 1)
+            if ch in "\r\n":
+                if line:
+                    lines.append(line)
+                line = []
+                continue
+            box = tp.get_charbox(k)
+            if not ch.isspace() and box[2] - box[0] > 0.2:
+                line.append((box, ch))
+        if line:
+            lines.append(line)
+    finally:
+        tp.close()
+    lines = [ln for ln in lines if len(ln) >= 4]
+    boxes = [(min(b[0] for b, _ch in ln), min(b[1] for b, _ch in ln),
+              max(b[2] for b, _ch in ln), max(b[3] for b, _ch in ln))
+             for ln in lines]
+    if len(boxes) < 5 or w <= 0 or h <= 0:
+        return None
+    # A reader's note the recognizer ran on to a printed line ("… if a
+    # wrong in No") makes that line long; the print's edges are where most
+    # lines start and end — a justified column's within a hair of each
+    # other — not where the longest do.
+    slack = 0.015 * w
+    lefts = sorted(x[0] for x in boxes)
+    rights = sorted(x[2] for x in boxes)
+    inner = [x for x in boxes
+             if x[0] >= lefts[len(lefts) // 5] - slack
+             and x[2] <= rights[(4 * len(rights)) // 5] + slack] or boxes
+    l, r = min(x[0] for x in inner), max(x[2] for x in inner)
+    # What lies past those edges is the page's all the same where it reads
+    # as print: a second column, most of it redacted, that the recognizer
+    # ran on to lines of the first (Frigaliment Importing Co. v. B.N.S.
+    # Int'l Sales Corp., 190 F. Supp. 116); a statute's side notes; the
+    # page number at the running head's far end.
+    low, high = l - slack, r + slack
+    for ln in lines:
+        middles = [((b[0] + b[2]) / 2, b, ch) for b, ch in ln]
+        for past in ([m for m in middles if m[0] < low],
+                     [m for m in middles if m[0] > high]):
+            if past and _reads_as_print("".join(m[2] for m in past)):
+                l = min(l, min(m[1][0] for m in past))
+                r = max(r, max(m[1][2] for m in past))
+    # Its top and bottom: the lines that lie mostly within it, a short last
+    # one too.
+    rows = [x for x in boxes
+            if min(x[2], r) - max(x[0], l) >= 0.6 * (x[2] - x[0])] or boxes
+    b, t = min(x[1] for x in rows), max(x[3] for x in rows)
+    return ((l - ml) / w, (mt - t) / h, (r - ml) / w, (mt - b) / h)
+
+
+def _page_is_scan(page) -> bool:
+    """Whether a picture fills most of *page* — a scan, with or without an
+    OCR layer — rather than the page being typeset."""
+    import pypdfium2.raw as pdfium_c
+
+    try:
+        ml, mb, mr, mt = page.get_mediabox()
+        area = max(1.0, (mr - ml) * (mt - mb))
+        for obj in page.get_objects():
+            if obj.type != pdfium_c.FPDF_PAGEOBJ_IMAGE:
+                continue
+            l, b, r, t = obj.get_bounds()
+            if (r - l) * (t - b) >= 0.5 * area:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _ink_on_white(img):
+    """A scanned page's paper made white and its print black — the yellow
+    of an old volume of the Statutes at Large and the gray of its type
+    gone — keeping the soft edge of each letter, as grayscale.
+
+    The paper is the page's commonest light (its 60th percentile), the ink
+    its darkest; what is near the paper goes white, what is within the
+    darker part of the way to the ink goes black, and between them the
+    tones are spread out."""
+    gray = img.convert("L")
+    hist = gray.histogram()
+    total = max(1, sum(hist))
+
+    def level(share: float) -> int:
+        seen = 0
+        for value, count in enumerate(hist):
+            seen += count
+            if seen >= share * total:
+                return value
+        return 255
+
+    paper, ink = level(0.60), level(0.01)
+    span = max(paper - ink, 1)
+    lo, hi = ink + 0.40 * span, paper - 0.12 * span
+    if hi <= lo:
+        return gray
+    return gray.point([0 if v <= lo else 255 if v >= hi
+                       else round(255 * (v - lo) / (hi - lo))
+                       for v in range(256)])
+
+
+def _pdf_ink_on_white(pdf_bytes: bytes) -> bytes:
+    """*pdf_bytes* with each page's scan made black on white (see
+    :func:`_ink_on_white`), its OCR text left as it was — the file still
+    searchable and selectable.
+
+    The pictures are replaced in the file itself (see
+    :func:`_pdf_replace_images`), not through PDFium, which would rewrite
+    the pages' content to show them: rewritten, an OCR layer loses the
+    spacing that set each word where it was printed, and comes out "PUBLI C
+    LAW 89-110-AUGUS T 6, 196 5" — the file no longer found by what it
+    says.  A picture already black and white, one bit deep, is left be."""
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    pictures: dict = {}     # a picture's bytes in the file -> made over
+    with _PDFIUM_LOCK:
+        doc = pdfium.PdfDocument(pdf_bytes)
+        try:
+            for i in range(len(doc)):
+                page = doc[i]
+                try:
+                    for image in page.get_objects(
+                            filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]):
+                        if image.get_metadata().bits_per_pixel == 1:
+                            continue
+                        stored = bytes(image.get_data())
+                        if not stored or stored in pictures:
+                            continue
+                        source = image.get_bitmap(render=False)
+                        try:
+                            pictures[stored] = _ink_on_white(source.to_pil())
+                        finally:
+                            source.close()
+                finally:
+                    page.close()
+        finally:
+            doc.close()
+    return _pdf_replace_images(pdf_bytes, pictures)
+
+
+def _pdf_replace_images(pdf_bytes: bytes, pictures: dict) -> bytes:
+    """*pdf_bytes* with each image whose stream holds the bytes of a key of
+    *pictures* replaced by that grayscale picture — written as an update
+    appended to the file, as an editor saving in place does, so all the
+    rest, the pages' content and their text included, stays byte for byte
+    as it was.  An image that cannot be found plainly in the file (an
+    encrypted one, say) is left as it was."""
+    import re
+    import struct
+    import zlib
+
+    from PIL import Image
+
+    if not pictures or b"/Encrypt" in pdf_bytes:
+        return pdf_bytes
+    at = pdf_bytes.rfind(b"startxref")
+    found = at >= 0 and re.match(rb"startxref\s+(\d+)", pdf_bytes[at:])
+    if not found:
+        return pdf_bytes
+    prev = int(found.group(1))
+    # The last cross-reference section — a table and its trailer, or a
+    # stream — whose entries the update's trailer carries on.
+    table = pdf_bytes[prev:prev + 4] == b"xref"
+    if table:
+        start = pdf_bytes.find(b"trailer", prev)
+        trailer = pdf_bytes[start:pdf_bytes.find(b"startxref", start)]
+    else:
+        start = pdf_bytes.find(b"stream", prev)
+        trailer = pdf_bytes[prev:start]
+        if b"/XRef" not in trailer:
+            return pdf_bytes
+    root = re.search(rb"/Root\s*(\d+\s+\d+\s+R)", trailer)
+    size = re.search(rb"/Size\s+(\d+)", trailer)
+    if start < 0 or not root or not size:
+        return pdf_bytes
+    carried = b"/Root " + root.group(1)
+    for key, value in ((b"/Info", rb"\d+\s+\d+\s+R"),
+                       (b"/ID", rb"\[[^\]]*\]")):
+        entry = re.search(re.escape(key) + rb"\s*(" + value + rb")", trailer)
+        if entry:
+            carried += key + b" " + entry.group(1)
+
+    heads = [(m.start(), int(m.group(1)), int(m.group(2))) for m in
+             re.finditer(rb"(?<![0-9])(\d+)\s+(\d+)\s+obj\b", pdf_bytes)]
+    out = bytearray(pdf_bytes)
+    if not out.endswith(b"\n"):
+        out += b"\n"
+    written: dict = {}      # object number -> (offset, generation)
+    for stored, picture in pictures.items():
+        where = pdf_bytes.find(stored)
+        before = [h for h in heads if h[0] < where] if where > 0 else []
+        if not before:
+            continue
+        head, number, generation = before[-1]
+        # The bytes are the image's own stream, begun just after its
+        # dictionary — not text that happens to match within another.
+        object_ = re.fullmatch(rb"\d+\s+\d+\s+obj\s*<<(.*)>>\s*stream\r?\n",
+                               pdf_bytes[head:where], re.DOTALL)
+        held = object_.group(1) if object_ else b""
+        if (not re.search(rb"/Subtype\s*/Image", held)
+                or re.search(rb"/(?:S?Mask|ImageMask)\b", held)):
+            continue
+        # Sixteen grays, which a page of print made black on white needs
+        # no more than, at four bits a pixel: no bigger than the scan was.
+        gray = picture.convert("L").point(
+            [(v * 15 + 127) // 255 for v in range(256)])
+        data = zlib.compress(Image.frombytes(
+            "P", gray.size, gray.tobytes()).tobytes("raw", "P;4"), 9)
+        written[number] = (len(out), generation)
+        out += (b"%d %d obj\n<</Type/XObject/Subtype/Image/Width %d/Height %d"
+                b"/ColorSpace/DeviceGray/BitsPerComponent 4/Filter/FlateDecode"
+                b"/Length %d>>\nstream\n" % (number, generation, gray.width,
+                                             gray.height, len(data)))
+        out += data + b"\nendstream\nendobj\n"
+    if not written:
+        return pdf_bytes
+    count = max(int(size.group(1)), max(written) + 1)
+    xref_at = len(out)
+    if table:
+        out += b"xref\n"
+        for number in sorted(written):
+            out += b"%d 1\n%010d %05d n\r\n" % ((number,) + written[number])
+        out += (b"trailer\n<</Size %d%s/Prev %d>>\n" % (count, carried, prev))
+    else:
+        # A cross-reference stream answers one.
+        number_x, count = count, count + 1
+        written[number_x] = (xref_at, 0)
+        numbers = sorted(written)
+        rows = b"".join(struct.pack(">BIH", 1, *written[n]) for n in numbers)
+        out += (b"%d 0 obj\n<</Type/XRef/Size %d%s/Prev %d/W[1 4 2]"
+                b"/Index[%s]/Length %d>>\nstream\n"
+                % (number_x, count, carried, prev,
+                   b" ".join(b"%d 1" % n for n in numbers), len(rows)))
+        out += rows + b"\nendstream\nendobj\n"
+    out += b"startxref\n%d\n%%%%EOF\n" % xref_at
+    return bytes(out)
+
+
+#: The size a running head's citation is lettered at where its box allows
+#: (points) — the reporters' own running heads are set about so — and the
+#: least it is shrunk to, to fit the block of print.
+_HEAD_CITE_PT = 9.0
+_HEAD_CITE_MIN_PT = 6.5
+
+
+def _head_line_room(page, head: tuple, block: tuple) -> tuple:
+    """How far the running-head line leaves room either side of the block
+    of print's middle — ``(left, right)`` in the page's points, the nearest
+    print (a page number, the case's name) on each side of the whitened
+    box *head*; the block's own edges where there is none.  *head* and
+    *block* are ``(l, b, r, t)`` points."""
+    hl, hb, hr, ht = head
+    bl, _bb, br, _bt = block
+    middle = (bl + br) / 2
+    left, right = bl, br
+    tp = page.get_textpage()
+    try:
+        for k in range(tp.count_chars()):
+            if tp.get_text_range(k, 1).isspace():
+                continue
+            cl, cb, cr, ct = tp.get_charbox(k)
+            overlap = min(ct, ht) - max(cb, hb)
+            if overlap < 0.4 * max(ct - cb, 0.1) or hl <= (cl + cr) / 2 <= hr:
+                continue
+            if (cl + cr) / 2 < middle:
+                left = max(left, cr)
+            else:
+                right = min(right, cl)
+    finally:
+        tp.close()
+    return left, right
+
+
+def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
+                        header_text: str = "", margin_pt: float = 7.0,
+                        margin_ratio: Optional[float] = None,
+                        side_scale: float = 1.0,
+                        end_scale: float = 1.0) -> bytes:
+    """Each scanned page cut down to its block of print and set, with every
+    other, on a page of one size: the block centered across it and at one
+    top margin, so the margins are even however the volume lay on the
+    scanner.  *blocks* are each page's block (fractions of it from the
+    top, ``(l, t, r, b)``), None to leave a page be; everything about a
+    block — a reader's notes, what is left of the border — is painted out.
+    The margin is *margin_pt*, or the viewer's own share of the block's
+    width (*margin_ratio*) when wider — *side_scale* times that at the
+    sides and *end_scale* times it at the top and foot (see
+    :func:`_output_margins`).
+
+    *heads* are the whitened boxes of the running heads a redaction took
+    the reporter's citation from (see :func:`_header_redaction_box`), and
+    *header_text* the citation lettered back.  Where its box holds it at a
+    reading size (:data:`_HEAD_CITE_PT`) it goes there, as it always has;
+    where the box would hold it only small, it goes on the running-head
+    line itself, centered on the block and clear of the page number, made
+    as small as it must be for that — down to :data:`_HEAD_CITE_MIN_PT`;
+    and failing that on a line of its own above the running head, on every
+    page alike."""
+    import io
+
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    with _PDFIUM_LOCK:
+        doc = pdfium.PdfDocument(pdf_bytes)
+        try:
+            pts: list = []      # each page's block, then its head, in points
+            for i in range(len(doc)):
+                frac = blocks[i] if i < len(blocks) else None
+                head = heads[i] if i < len(heads) else None
+                if not frac:
+                    pts.append(None)
+                    continue
+                page = doc[i]
+                try:
+                    ml, mb, mr, mt = page.get_mediabox()
+                finally:
+                    page.close()
+                w, h = mr - ml, mt - mb
+
+                def points(f: tuple) -> tuple:
+                    return (ml + f[0] * w, mt - f[3] * h,
+                            ml + f[2] * w, mt - f[1] * h)
+
+                pts.append((points(frac), points(head) if head else None))
+            laid = [p for p in pts if p]
+            if not laid:
+                return pdf_bytes
+            block_w = max(b[2] - b[0] for b, _h in laid)
+            block_h = max(b[3] - b[1] for b, _h in laid)
+            margin = max(margin_pt, block_w * margin_ratio
+                         if margin_ratio else 0.0)
+            side, end = margin * side_scale, margin * end_scale
+
+            # Where the citation goes, the same on every page.
+            where, size = "", 0.0
+            headed = [(i, p) for i, p in enumerate(pts) if p and p[1]]
+            if header_text and headed:
+                probe, (unit_w, unit_h) = _pdf_new_text(doc, header_text,
+                                                        size=1.0)
+                if probe is not None:
+                    pdfium_c.FPDFPageObj_Destroy(probe)
+                if unit_w > 0:
+                    in_box = min(min(0.92 * (hd[2] - hd[0]) / unit_w,
+                                     0.80 * (hd[3] - hd[1]) / max(unit_h,
+                                                                   0.01))
+                                 for _i, (_b, hd) in headed)
+                    if in_box >= 0.85 * _HEAD_CITE_PT:
+                        where, size = "box", min(in_box, _HEAD_CITE_PT)
+                    else:
+                        # On the line, the size every page's line has room
+                        # for, a little clear of the page number each side:
+                        # Milburn ex rel. Milburn v. Anne Arundel Cnty.
+                        # Dep't of Soc. Servs., 871 F.2d 474, went above at
+                        # 9 points, where it fit beside 475 at 8.3.
+                        wide = min(_HEAD_CITE_PT, 0.96 * block_w / unit_w)
+                        size = wide
+                        for i, (block, head) in headed:
+                            page = doc[i]
+                            try:
+                                left, right = _head_line_room(page, head,
+                                                              block)
+                            finally:
+                                page.close()
+                            middle = (block[0] + block[2]) / 2
+                            size = min(size, min(middle - left, right - middle)
+                                       / (unit_w / 2 + 0.6))
+                        where = "line"
+                        if size < _HEAD_CITE_MIN_PT:
+                            where = "above"
+                            size = max(_HEAD_CITE_MIN_PT, wide)
+            above = 1.8 * size if where == "above" else 0.0
+            page_w = block_w + 2 * side
+            page_h = block_h + 2 * end + above
+            pad = 1.5
+            for i, entry in enumerate(pts):
+                if not entry:
+                    continue
+                (bl, bb, br, bt), head = entry
+                left = bl - side - (block_w - (br - bl)) / 2
+                top = bt + end + above
+                right, bottom = left + page_w, top - page_h
+                page = doc[i]
+                try:
+                    # All but the print, white — the page's own edge too,
+                    # where the new one reaches past it.
+                    _pdf_fill_rects(page, [
+                        r for r in ((left, bottom, right, bb - pad),
+                                    (left, bt + pad, right, top),
+                                    (left, bb - pad, bl - pad, bt + pad),
+                                    (br + pad, bb - pad, right, bt + pad))
+                        if r[2] > r[0] and r[3] > r[1]])
+                    if where and head:
+                        obj, (text_w, text_h) = _pdf_new_text(
+                            doc, header_text, size=size)
+                        if obj is not None:
+                            if where == "box":
+                                x = (head[0] + head[2]) / 2 - text_w / 2
+                            else:
+                                x = (bl + br) / 2 - text_w / 2
+                            if where == "above":
+                                y = bt + 0.6 * size
+                            else:
+                                y = (head[1] + head[3]) / 2 - text_h / 2
+                            pdfium_c.FPDFPageObj_Transform(obj, 1, 0, 0, 1,
+                                                           x, y)
+                            pdfium_c.FPDFPage_InsertObject(page.raw, obj)
+                    pdfium_c.FPDFPage_GenerateContent(page.raw)
+                    page.set_mediabox(left, bottom, right, top)
+                    page.set_cropbox(left, bottom, right, top)
+                finally:
+                    page.close()
+            buf = io.BytesIO()
+            doc.save(buf)
+            return buf.getvalue()
+        finally:
+            doc.close()
+
+
+#: The margins a page is saved and printed with, as multiples of the one the
+#: viewer draws around it on screen: ``(sides, top and foot)``.  Saved as
+#: the viewer showed it, the type came out close to the paper's edges; the
+#: sides are twice as wide unless the reader chooses otherwise (Settings ▸
+#: Print & Download Margins…).
+_OUTPUT_MARGINS_DEFAULT = (2.0, 1.0)
+#: The multiples offered for each.
+_OUTPUT_MARGIN_CHOICES = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+
+
+def _output_margins() -> tuple:
+    """The margins the reader chose for saving and printing — ``(sides, top
+    and foot)``, multiples of the viewer's own (see
+    :data:`_OUTPUT_MARGINS_DEFAULT`)."""
+    chosen = _load_config().get("output_margins")
+    try:
+        sides, ends = float(chosen["sides"]), float(chosen["ends"])
+    except (KeyError, TypeError, ValueError):
+        return _OUTPUT_MARGINS_DEFAULT
+    return (min(max(sides, 0.0), 6.0), min(max(ends, 0.0), 6.0))
+
+
+def _save_output_margins(sides: float, ends: float) -> None:
+    config = _load_config()
+    config["output_margins"] = {"sides": sides, "ends": ends}
+    _save_config(config)
+
+
 def _crop_pdf_to_content(
     pdf_bytes: bytes,
     frac_boxes: Optional[list] = None,
     margin_pt: float = 7.0,
     margin_ratio: Optional[float] = None,
+    side_scale: float = 1.0,
+    end_scale: float = 1.0,
 ) -> bytes:
     """Return *pdf_bytes* cropped to each page's content by tightening the page
     boxes — a lossless crop that removes the wide blank borders while leaving
-    the original (selectable) text untouched.
+    the original (selectable) text untouched.  The margin is *side_scale*
+    times as wide at the sides and *end_scale* times as deep at the top and
+    foot (see :func:`_output_margins`).
 
     Content is detected from the page objects (:func:`_page_content_box_pts`),
     which is exact for a born-digital file.  A *scan* is different: the page's
@@ -23048,8 +23730,9 @@ def _crop_pdf_to_content(
                 m = margin_pt
                 if margin_ratio:
                     m = max(m, (r - l) * margin_ratio)
-                l, b = max(mb[0], l - m), max(mb[1], b - m)
-                r, t = min(mb[2], r + m), min(mb[3], t + m)
+                side, end = m * side_scale, m * end_scale
+                l, b = max(mb[0], l - side), max(mb[1], b - end)
+                r, t = min(mb[2], r + side), min(mb[3], t + end)
                 if r - l < 1 or t - b < 1:
                     continue  # implausibly tight — skip rather than clip
                 page = doc[i]
@@ -23953,6 +24636,16 @@ def _whiten_pdf_redactions(img, _ds: int = 4) -> list:
     W, H = img.size
     w, h = max(1, W // _ds), max(1, H // _ds)
     small = img.convert("L").resize((w, h), Image.BOX)
+
+    def full(box: tuple) -> tuple:
+        """Reduced pixels *box* ``(l, t, r, b)`` on the full page, by its
+        true scale — a shade over *_ds* where the page's size is no multiple
+        of it, which, rounded down, put a box 2 or 3 pixels short of its bar
+        at the far side of the page."""
+        l, t, r, b = box
+        return (max(0, int(l * W / w)), max(0, int(t * H / h)),
+                min(W, -int(-r * W // w)), min(H, -int(-b * H // h)))
+
     black = [v <= 48 for v in small.tobytes()]
     seen = bytearray(w * h)
     min_w = max(6, int(0.08 * w))
@@ -23990,19 +24683,62 @@ def _whiten_pdf_redactions(img, _ds: int = 4) -> list:
         if (not keep and 2 <= bh <= max_key_h and 2 <= bw <= int(0.3 * w)
                 and n >= 0.72 * bw * bh):
             keep = _region_mostly_black(
-                img, (lo_x * _ds, lo_y * _ds,
-                      (hi_x + 1) * _ds, (hi_y + 1) * _ds))
+                img, full((lo_x, lo_y, hi_x + 1, hi_y + 1)))
         if keep:
             boxes.append((lo_x, lo_y, hi_x, hi_y))
     fill = 255 if img.mode == "L" else (255,) * len(img.getbands())
+    gray = img.convert("L") if boxes else None
     out: list = []
     for lo_x, lo_y, hi_x, hi_y in boxes:
-        # One reduced pixel of outward pad erases the anti-aliased fringe.
-        box = (max(0, (lo_x - 1) * _ds), max(0, (lo_y - 1) * _ds),
-               min(W, (hi_x + 2) * _ds), min(H, (hi_y + 2) * _ds))
+        # Found on the reduced page, a box is known only to a reduced
+        # pixel; at full size it is trimmed to the bar itself, and a
+        # pixel more for its soft edge.  Padded a reduced pixel instead, it
+        # took the tops off the line printed just under a running head's
+        # bar (Milburn ex rel. Milburn v. Anne Arundel Cnty. Dep't of Soc.
+        # Servs., 871 F.2d 474, 475).
+        box = _solid_extent(gray, full((lo_x - 1, lo_y - 1,
+                                        hi_x + 2, hi_y + 2)), 2 * _ds)
         img.paste(fill, box)
         out.append(box)
     return out
+
+
+def _solid_extent(gray, box: tuple, band: int) -> tuple:
+    """*box*, on the grayscale page *gray*, its edges drawn in — by at most
+    *band* pixels — to where the bar it was found around ends, and a pixel
+    wider for the bar's soft edge.  Each side is followed out from the line
+    just within the band, where the bar is dark, to the first line white
+    where that one is dark: so a bar's notch is kept, and its edge where
+    the scan set it askew (the faint lines left down the redacted caption
+    of Frigaliment Importing Co. v. B.N.S. Int'l Sales Corp., 190 F. Supp.
+    116), and the print beside it, past a gap, is not."""
+    from PIL import ImageChops
+
+    l, t, r, b = box
+    w, h = r - l, b - t
+    if w <= 2 * band or h <= 2 * band:
+        return box
+    dark = gray.crop(box).point(lambda v: 255 if v < 128 else 0)
+
+    def drawn_in(line) -> int:
+        """How many of the band's lines, *line(k)* the k-th from outside,
+        lie outside the bar."""
+        core = line(band)
+        need = core.histogram()[255]
+        if not need:
+            return 0
+        for k in range(band - 1, -1, -1):
+            hit = ImageChops.multiply(line(k), core).histogram()[255]
+            if hit <= 0.02 * need:
+                return k + 1
+        return 0
+
+    top = drawn_in(lambda k: dark.crop((0, k, w, k + 1)))
+    bottom = drawn_in(lambda k: dark.crop((0, h - 1 - k, w, h - k)))
+    left = drawn_in(lambda k: dark.crop((k, 0, k + 1, h)))
+    right = drawn_in(lambda k: dark.crop((w - 1 - k, 0, w - k, h)))
+    return (l + max(0, left - 1), t + max(0, top - 1),
+            r - max(0, right - 1), b - max(0, bottom - 1))
 
 
 def _page_fully_redacted(text: str, boxes: list, size: tuple) -> bool:
@@ -25881,7 +26617,8 @@ class _PdfPane(ttk.Frame):
 
     def export_pdf(self, path: str, dpi: int = 150,
                    whiten_redactions: bool = False,
-                   header_cite: str = "") -> int:
+                   header_cite: str = "", *, clean_borders: bool = False,
+                   black_and_white: bool = False) -> int:
         """Write a PDF that matches what's shown — each page cropped to its
         content box and re-centered on a clean white page with the viewer's
         uniform margin — rather than the original scan with its wide, uneven
@@ -25897,14 +26634,20 @@ class _PdfPane(ttk.Frame):
         gets the largest fit any of them would choose.  A page the redaction
         left with nothing but boxes and its page number (see
         :func:`_page_fully_redacted`) is omitted from the output altogether.
+        ``clean_borders`` paints out a scan's black border and crops to what
+        it framed (see :meth:`_scan_plan`); ``black_and_white`` makes its
+        paper white and its print black (see :func:`_ink_on_white`).
         Returns how many rectangles were erased (0 without the flag)."""
-        from PIL import Image
+        from PIL import Image, ImageDraw
         scale = dpi / 72.0
-        # Keep the same margin-to-content proportion the viewer displays.
+        # Keep the same margin-to-content proportion the viewer displays,
+        # widened as the reader chose (see _output_margins).
         margin_ratio = self._margin_ratio()
+        sides, ends = _output_margins()
         whitened = 0
         omitted = 0
         pages: list = []
+        borders = self._scan_plan() if clean_borders else []
         try:
             # Pass 1 — render and whiten, keeping each page's header line.
             rendered: list = []   # [(full image, frac box, header box), …]
@@ -25925,6 +26668,17 @@ class _PdfPane(ttk.Frame):
                                 page_text = ""
                     finally:
                         page.close()
+                if black_and_white:
+                    full = _ink_on_white(full).convert("RGB")
+                border = borders[i] if i < len(borders) else None
+                if border and border["boxes"]:
+                    W, H = full.size
+                    draw = ImageDraw.Draw(full)
+                    for fl, ft, fr, fb in border["boxes"]:
+                        draw.rectangle((fl * W - 1, ft * H - 1,
+                                        fr * W + 1, fb * H + 1),
+                                       fill="white")
+                    frac = border["frac"] or frac
                 hbox = None
                 if whiten_redactions:
                     boxes = _whiten_pdf_redactions(full)
@@ -25954,11 +26708,13 @@ class _PdfPane(ttk.Frame):
                 W, H = full.size
                 content = full.crop((int(fl * W), int(ft * H),
                                      int(round(fr * W)), int(round(fb * H))))
-                m = max(1, int(round(content.width * margin_ratio)))
+                m = max(1, content.width * margin_ratio)
+                side, end = int(round(m * sides)), int(round(m * ends))
                 sheet = Image.new(
-                    "RGB", (content.width + 2 * m, content.height + 2 * m),
+                    "RGB",
+                    (content.width + 2 * side, content.height + 2 * end),
                     "white")
-                sheet.paste(content, (m, m))
+                sheet.paste(content, (side, end))
                 pages.append(sheet)
             if not pages:
                 raise ValueError("the PDF has no pages")
@@ -26052,8 +26808,68 @@ class _PdfPane(ttk.Frame):
             plan.append(entry)
         return plan
 
+    #: How far past the OCR layer's block of print the ink may run and still
+    #: be the print's — a rule, an italic's overhang — as a share of the
+    #: page.  Farther out it is a reader's note, a mark, a leftover shadow.
+    _BLOCK_INK_REACH = 0.04
+
+    def _scan_plan(self) -> list:
+        """What saving makes of each scanned page: ``{"boxes": its black
+        border as fractions of the page (see :func:`_scan_border_mask`) —
+        () where it has none, "frac": its content box without it, "block":
+        its block of print (see :func:`_ocr_text_block`), or None}`` — and
+        None for a page typeset rather than scanned, which is left as it
+        is."""
+        from PIL import ImageChops
+
+        plan: list = []
+        scale = _BORDER_SCAN_DPI / 72.0
+        reach = self._BLOCK_INK_REACH
+        for i in range(len(self._meta)):
+            try:
+                with _PDFIUM_LOCK:
+                    page = self._doc[i]
+                    try:
+                        scan = _page_is_scan(page)
+                        gray = (page.render(scale=scale).to_pil().convert("L")
+                                if scan else None)
+                        block = _ocr_text_block(page) if scan else None
+                    finally:
+                        page.close()
+                mask = _scan_border_mask(gray) if gray is not None else None
+            except Exception as exc:
+                print(f"[pdf] reading page {i + 1} as a scan: {exc}")
+                gray = None
+            if gray is None:
+                plan.append(None)
+                continue
+            # What the border framed — the thin lines of the paper's edge
+            # go with it.
+            frac = self._content_frac(
+                ImageChops.lighter(gray, mask) if mask is not None else gray)
+            full = frac == (0.0, 0.0, 1.0, 1.0)
+            if block is None and not full:
+                block = frac
+            elif block is not None and not full:
+                # The print's own ink a little past what the OCR read; and
+                # nothing past the ink, where the recognizer misplaced a
+                # word or two ("87)," beyond the column of K.H. ex rel.
+                # Murphy v. Morgan, 914 F.2d 846, 848).
+                block = (frac[0] if frac[0] >= block[0] - reach else block[0],
+                         frac[1] if frac[1] >= block[1] - reach else block[1],
+                         frac[2] if frac[2] <= block[2] + reach else block[2],
+                         frac[3] if frac[3] <= block[3] + reach else block[3])
+            plan.append({
+                "boxes": _mask_boxes(mask) if mask is not None else (),
+                "frac": frac, "block": block})
+        found = sum(1 for p in plan if p and p["boxes"])
+        if found:
+            print(f"[pdf] a scan border on {found} of {len(plan)} pages")
+        return plan
+
     def export_cropped_pdf(self, path: str, *, whiten_redactions: bool = False,
-                           header_cite: str = "") -> None:
+                           header_cite: str = "", clean_borders: bool = False,
+                           black_and_white: bool = False) -> None:
         """Write a PDF cropped to each page's content with the selectable text
         layer preserved (see :func:`_crop_pdf_to_content`).  The viewer's
         ink-detected boxes are passed as the per-page fallback so scanned pages
@@ -26062,15 +26878,64 @@ class _PdfPane(ttk.Frame):
         ``whiten_redactions`` paints out a case.law scan's black bars and
         letters ``header_cite`` back on to the running head they took the
         citation from — drawn on to the page, so the crop stays lossless and
-        the text survives."""
+        the text survives.  ``clean_borders`` paints out a scan's black
+        border the same way, cuts each scanned page down to its block of
+        print and sets the blocks on pages of one size, with even margins
+        (see :meth:`_scan_plan`, :func:`_lay_out_scan_pages`) — the
+        running head's citation lettered at a reading size where its box
+        would hold it only small.  ``black_and_white`` makes the scan's
+        paper white and its print black, its text layer kept (see
+        :func:`_pdf_ink_on_white`).  The margins are the reader's choice
+        (see :func:`_output_margins`)."""
         data = self._pdf_bytes
         frac_boxes = [m[2] for m in self._meta]
-        if whiten_redactions:
+        sides, ends = _output_margins()
+        if black_and_white:
+            data = _pdf_ink_on_white(data)
+        plan = (self._redaction_plan(header_cite) if whiten_redactions
+                else [{"boxes": (), "head": None, "drop": False}
+                      for _ in frac_boxes])
+        scans = self._scan_plan() if clean_borders else []
+        for i, scan in enumerate(scans):
+            if scan and i < len(plan):
+                # The redactions stand in for print, so the block reaches
+                # over them, as if cut down before they were painted out.
+                # Left to the print alone, a page whose headnotes beside
+                # the opinion were blacked out came out one column, set
+                # in the middle of its page and its page number cut off
+                # (K.H. ex rel. Murphy v. Morgan, 914 F.2d 846, 847).
+                fl, ft, fr, fb = (v + d for v, d in zip(
+                    scan["frac"], (-0.01, -0.01, 0.01, 0.01)))
+                for l, t, r, b in plan[i]["boxes"] if scan["block"] else ():
+                    if (fl <= l and ft <= t and r <= fr and b <= fb
+                            and not _box_at_edge((l, t, r, b), (1, 1))):
+                        bl, bt, br, bb = scan["block"]
+                        scan["block"] = (min(bl, l), min(bt, t),
+                                         max(br, r), max(bb, b))
+                plan[i]["boxes"] = tuple(plan[i]["boxes"]) + scan["boxes"]
+                frac_boxes[i] = scan["frac"] or frac_boxes[i]
+        lay_out = any(scan and scan["block"] for scan in scans)
+        if whiten_redactions or any(entry["boxes"] for entry in plan):
             data, frac_boxes = _paint_out_pdf_redactions(
-                data, self._redaction_plan(header_cite), frac_boxes,
-                header_text=header_cite)
+                data, plan, frac_boxes,
+                header_text="" if lay_out else header_cite)
+        if lay_out:
+            # The pages the redaction left, as _paint_out_pdf_redactions
+            # left them.
+            kept = [i for i, entry in enumerate(plan)
+                    if not entry.get("drop")]
+            blocks = [scans[i]["block"] if i < len(scans) and scans[i]
+                      else None for i in kept]
+            data = _lay_out_scan_pages(
+                data, blocks, heads=[plan[i].get("head") for i in kept],
+                header_text=header_cite, margin_ratio=self._margin_ratio(),
+                side_scale=sides, end_scale=ends)
+            # A page laid out is boxed already; the rest crop as before.
+            frac_boxes = [None if block else frac
+                          for block, frac in zip(blocks, frac_boxes)]
         out = _crop_pdf_to_content(data, frac_boxes=frac_boxes,
-                                   margin_ratio=self._margin_ratio())
+                                   margin_ratio=self._margin_ratio(),
+                                   side_scale=sides, end_scale=ends)
         with open(path, "wb") as fh:
             fh.write(out)
 
@@ -26132,6 +26997,14 @@ class _PdfPane(ttk.Frame):
 def _is_us_reports_pdf(url: str) -> bool:
     u = (url or "").lower()
     return "usrep" in u or "usreports-" in u
+
+
+def _is_statutes_at_large_pdf(url: str) -> bool:
+    """Whether *url* is GovInfo's scan of a page of the Statutes at Large —
+    its stable link (``/link/statute/79/437``) or the file it leads to
+    (``STATUTE-79-Pg437.pdf``)."""
+    return bool(re.search(r"/link/statute/|/STATUTE-\d", url or "",
+                          re.IGNORECASE))
 
 
 # The Harvard CAP scans on static.case.law redact still-copyrighted West
@@ -28626,13 +29499,26 @@ def _print_header_font(px: int):
         return ImageFont.load_default()
 
 
+def _box_at_edge(box: tuple, size: tuple, share: float = 0.01) -> bool:
+    """Whether *box* (``(l, t, r, b)`` on a page of *size*) runs to within
+    *share* of the page's edge — a blot of the scan's border, not a bar
+    over print, which stops short of the margin."""
+    W, H = size
+    l, t, r, b = box
+    return (l <= share * W or t <= share * H
+            or r >= (1 - share) * W or b >= (1 - share) * H)
+
+
 def _header_redaction_box(boxes: list, size: tuple) -> "Optional[tuple]":
     """The page's whitened running-head line: the topmost erased box that is
     header-shaped (in the top 12% of the page and at least 15% of its
-    width); None when the page has no such box."""
+    width) and clear of the page's edge — on Palsgraf v. Long Island R.R.
+    Co., 248 N.Y. 339, a blot of the border along the top was taken for
+    one; None when the page has no such box."""
     W, H = size
     heads = [b for b in boxes
-             if b[1] < 0.12 * H and (b[2] - b[0]) >= 0.15 * W]
+             if b[1] < 0.12 * H and (b[2] - b[0]) >= 0.15 * W
+             and not _box_at_edge(b, size)]
     return min(heads, key=lambda bx: bx[1]) if heads else None
 
 
@@ -39376,7 +40262,9 @@ class _ScholarTextWindow:
             return
         whiten, header = self._pdf_print_header(data)
         try:
-            _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+            _write_output_pdf(
+                path, data, pane, whiten=whiten, header=header,
+                clean_borders=not _is_us_reports_pdf(self._pdf_url))
         except Exception as exc:
             messagebox.showerror("Download PDF", str(exc), parent=parent)
             return
@@ -39399,7 +40287,8 @@ class _ScholarTextWindow:
         # from the viewer already carries the Bluebook citation.
         path = _named_temp_pdf_path(
             _build_default_filename(self._pdf_filename_item()))
-        _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+        _write_output_pdf(path, data, pane, whiten=whiten, header=header,
+                          clean_borders=not _is_us_reports_pdf(self._pdf_url))
         _print_pdf_file(self._live_parent(), path, self._safe_status)
 
     def _open_pdf_cite(self, action: tuple, snippet: str) -> None:
@@ -40716,15 +41605,30 @@ class _PdfWindow:
         stem = re.sub(r"[^\w.-]+", "_", self._title).strip("_") or "statute"
         path = _named_temp_pdf_path(stem)
         _write_output_pdf(path, data, pane if pane is not None else self._pane,
-                          whiten=whiten, header=header)
+                          whiten=whiten, header=header,
+                          clean_borders=not _is_us_reports_pdf(self._url))
         _print_pdf_file(self._dialog_parent(), path, self._say)
 
     def _download(self, pane=None) -> None:
         """Save the pages as this window shows them — the same file Print
-        produces, rather than the document as it was fetched."""
+        produces, rather than the document as it was fetched.  A volume of
+        the Statutes at Large may be saved in black and white: its yellowed
+        paper white, its print black (see :func:`_ink_on_white`)."""
         data = self._bytes
         if not data:
             return
+        black_and_white = False
+        if _is_statutes_at_large_pdf(self._url):
+            answer = messagebox.askyesnocancel(
+                "Download PDF",
+                "Save these Statutes at Large pages in black and white?\n\n"
+                "The yellowed paper is made white and the print black, "
+                "which reads and prints more cleanly.  The text stays "
+                "searchable.",
+                parent=self._dialog_parent())
+            if answer is None:
+                return
+            black_and_white = answer
         safe = re.sub(r"[^\w.-]+", "_", self._title).strip("_") or "statute"
         path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
@@ -40746,7 +41650,9 @@ class _PdfWindow:
                 print(f"[pdf] header citation failed: {exc}")
         try:
             _write_output_pdf(path, data, pane if pane is not None
-                              else self._pane, whiten=whiten, header=header)
+                              else self._pane, whiten=whiten, header=header,
+                              clean_borders=not _is_us_reports_pdf(self._url),
+                              black_and_white=black_and_white)
         except Exception as exc:
             messagebox.showerror("Download PDF", str(exc),
                                  parent=self._dialog_parent())
@@ -40778,7 +41684,9 @@ class _PdfWindow:
 # the reader a way to print.
 
 def _write_output_pdf(path: str, data: bytes, pane, *,
-                      whiten: bool = False, header: str = "") -> bool:
+                      whiten: bool = False, header: str = "",
+                      clean_borders: bool = False,
+                      black_and_white: bool = False) -> bool:
     """Write the document cropped to its content the way the viewer shows it.
 
     Two ways of doing that, and the first is much the better one.  Tightening
@@ -40796,18 +41704,26 @@ def _write_output_pdf(path: str, data: bytes, pane, *,
     Both saving and printing come through here, so the file that comes off Save
     is the file that would come off the printer.  Returns whether the document
     was written from the pane at all; the original bytes are written when there
-    is no pane, or when both routes fail."""
+    is no pane, or when both routes fail.
+
+    ``clean_borders``: a scan's black border painted out (see
+    :func:`_scan_border_mask`) — every scan but the U.S. Reports', which are
+    clean.  ``black_and_white``: its paper made white and its print black
+    (see :func:`_ink_on_white`)."""
     if pane is not None:
         try:
             pane.export_cropped_pdf(path, whiten_redactions=whiten,
-                                    header_cite=header)
+                                    header_cite=header,
+                                    clean_borders=clean_borders,
+                                    black_and_white=black_and_white)
             return True
         except Exception as exc:
             print(f"[pdf] the lossless crop failed ({exc}); rendering instead")
     try:
         if pane is not None:
             pane.export_pdf(path, whiten_redactions=whiten,
-                            header_cite=header)
+                            header_cite=header, clean_borders=clean_borders,
+                            black_and_white=black_and_white)
             return True
     except Exception as exc:
         print(f"[pdf] rendering the page for output failed: {exc}")
@@ -44926,11 +45842,16 @@ class _StatuteWindow:
             self._status_var.set(f"Copied {what} as {how}.")
             return
         subs = self._pin_for(start) if selected else ()
-        cite = self._doc.bluebook_cite(subs) + "."
+        # The section sign bound to its number with a non-breaking space,
+        # so "42 U.S.C. § 1983" never breaks after the "§" where it is
+        # pasted.
+        from google_scholar import bind_signs_to_numbers
+        cite = bind_signs_to_numbers(self._doc.bluebook_cite(subs) + ".")
         body = _dump_statute_rtf(txt, start, end)
         rtf = _rtf_document(body + "\\pard\\sa120 " + _rtf_escape(cite)
                             + "\\par\n")
-        plain = txt.get(start, end).rstrip() + "\n\n" + cite + "\n"
+        plain = (bind_signs_to_numbers(txt.get(start, end).rstrip())
+                 + "\n\n" + cite + "\n")
         how = _copy_rich_clipboard(self._win, rtf, plain)
         what = "selection" if selected else "full text"
         self._status_var.set(f"Copied {what} as {how}; citation appended.")

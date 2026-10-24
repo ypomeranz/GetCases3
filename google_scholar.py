@@ -635,6 +635,47 @@ def _cited_by_link(div) -> tuple[int, str]:
     return 0, ""
 
 
+# A result whose title links to another source of the case — "Burdick v.
+# Takushi" to Cornell's Legal Information Institute — while Scholar holds its
+# own copy among the case's other versions: its "All 5 versions" page
+# (``/scholar?cluster=<id>``) lists it, "- Google Scholar" in its byline.
+# The cluster's id is not the copy's ``case=`` id (Burdick's are
+# 2203153069610266193 and 5954330685109690289), so the page is read.
+_VERSIONS_RE = re.compile(r"All\s+[\d,]+\s+versions", re.IGNORECASE)
+_CLUSTER_ID_RE = re.compile(r"[?&]cluster=(\d+)")
+
+
+def _versions_link(div) -> str:
+    """A result's "All N versions" page, as an absolute URL, or ""."""
+    for link in div.find_all("a", href=True):
+        href = link["href"]
+        if (_VERSIONS_RE.fullmatch(_WS_RE.sub(" ", link.get_text()).strip())
+                and _CLUSTER_ID_RE.search(href)):
+            return SCHOLAR_BASE + href if href.startswith("/") else href
+    return ""
+
+
+def is_versions_url(url: str) -> bool:
+    """Whether *url* is a case's "All N versions" page (see
+    :func:`_versions_link`), which :meth:`GoogleScholarFetcher.fetch_by_url`
+    follows to Scholar's own copy."""
+    return ("/scholar?" in (url or "")
+            and bool(_CLUSTER_ID_RE.search(url or "")))
+
+
+def scholar_version_url(versions_html: str) -> str:
+    """Scholar's own copy among those a versions page lists — its
+    ``scholar_case?case=`` URL, absolute — or "" where it lists none."""
+    soup = BeautifulSoup(versions_html or "", "html.parser")
+    for div in soup.find_all("div", class_="gs_r"):
+        h3 = div.find("h3", class_="gs_rt")
+        a = h3.find("a", href=True) if h3 else None
+        if a and "scholar_case?case=" in a["href"]:
+            href = a["href"]
+            return SCHOLAR_BASE + href if href.startswith("/") else href
+    return ""
+
+
 def _bare_result_title(h3) -> str:
     """The title of a result Scholar holds no opinion for — "[CITATION]
     Smith v. Jones" — without the bracketed label."""
@@ -754,6 +795,10 @@ def parse_citing_page(html: str, start: int = 0) -> CitingPage:
             url = a["href"]
             if url.startswith("/"):
                 url = SCHOLAR_BASE + url
+            title = _WS_RE.sub(" ", a.get_text()).strip()
+        elif a and _versions_link(div):
+            # Linked to another source; Scholar's copy is among its versions.
+            url = _versions_link(div)
             title = _WS_RE.sub(" ", a.get_text()).strip()
         else:
             url, title = "", _bare_result_title(h3)
@@ -3335,6 +3380,13 @@ class GoogleScholarFetcher:
                 if href.startswith("/"):
                     href = SCHOLAR_BASE + href
                 title = _WS_RE.sub(" ", a.get_text()).strip()
+            elif a and _versions_link(div):
+                # Linked to another source of the case — Burdick v. Takushi
+                # to Cornell's — and listed where its citing cases put it;
+                # opened, its versions page leads to Scholar's own copy
+                # (see fetch_by_url).
+                href = _versions_link(div)
+                title = _WS_RE.sub(" ", a.get_text()).strip()
             elif bare:
                 href = ""
                 title = _bare_result_title(h3)
@@ -3410,10 +3462,37 @@ class GoogleScholarFetcher:
             self._store_opinion(*cached)  # back the cached opinion up in the DB
             return cached
 
+        if is_versions_url(url):
+            # A result linked to another source (see _versions_link): its
+            # versions page names Scholar's own copy, which is what opens.
+            own = self._own_version(url)
+            if not own:
+                self._note_absent(True)
+                return None
+            result = self.fetch_by_url(own)
+            if result:
+                self._cache_put(key, *result)
+            return result
+
         result = self._fetch_case_page(url)
         if result:
             self._cache_put(key, *result)
         return result
+
+    def _own_version(self, versions_url: str) -> str:
+        """Scholar's own copy of a case, from its "All N versions" page
+        (see :func:`scholar_version_url`): its URL, or "" where the page
+        lists none or cannot be had.  Read once a session."""
+        known = self.__dict__.setdefault("_own_versions", {})
+        if versions_url not in known:
+            print(f"[scholar] Scholar's own copy among {versions_url}")
+            try:
+                own = scholar_version_url(self._get(versions_url).text)
+            except Exception as exc:
+                print(f"[scholar] reading the versions failed: {exc}")
+                return ""
+            known[versions_url] = own
+        return known[versions_url]
 
     # ------------------------------------------------------------------
     # Internal helpers
