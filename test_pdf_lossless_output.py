@@ -659,6 +659,287 @@ class BlackAndWhiteTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertEqual(g._is_statutes_at_large_pdf(url), offered)
 
+    def test_the_text_keeps_its_spacing(self):
+        # GovInfo's OCR sets each word in runs with their own character
+        # spacing.  A page PDFium rewrote lost it, and 79 Stat. 437 read
+        # "PUBLI C LA W 89-110-AUGUS T" — not found by what it says.
+        picture = _bordered_picture(self.YELLOWED, self.GRAY_INK,
+                                    shadow=False)
+        for xref_stream in (False, True):
+            with self.subTest(xref_stream=xref_stream):
+                data = _hand_made_scan(picture, xref_stream=xref_stream)
+                self.assertEqual(_first_page_text(data),
+                                 "PUBLIC LAW 89-110-AUGUST")
+                out = g._pdf_ink_on_white(data)
+                # An update appended; the file as it was before it.
+                self.assertTrue(out.startswith(data))
+                self.assertEqual(_first_page_text(out),
+                                 "PUBLIC LAW 89-110-AUGUST")
+                img = pdfium.PdfDocument(io.BytesIO(out))[0].render(
+                    scale=1).to_pil().convert("L")
+                self.assertEqual(img.getpixel((450, 760)), 255)
+                self.assertLess(min(img.crop((170, 200, 600, 260))
+                                    .tobytes()), 40)
+                # Saved again whole, as every export ends, the picture it
+                # replaced is gone and the text still as it was.
+                buf = io.BytesIO()
+                pdfium.PdfDocument(io.BytesIO(out)).save(buf)
+                self.assertEqual(_first_page_text(buf.getvalue()),
+                                 "PUBLIC LAW 89-110-AUGUST")
+                self.assertLess(len(buf.getvalue()), len(out))
+
+    def test_a_file_it_cannot_update_is_left_as_it_was(self):
+        data = _hand_made_scan(_bordered_picture(shadow=False))
+        picture = _bordered_picture(shadow=False).convert("L")
+        self.assertEqual(g._pdf_replace_images(
+            data, {b"bytes found nowhere in it": picture}), data)
+        self.assertEqual(g._pdf_replace_images(
+            data.replace(b"/Root 1 0 R", b"/Root 1 0 R /Encrypt 9 0 R"),
+            {data[data.index(b"\xff\xd8"):][:64]: picture}),
+            data.replace(b"/Root 1 0 R", b"/Root 1 0 R /Encrypt 9 0 R"))
+
+
+def _hand_made_scan(picture: "Image.Image",
+                    xref_stream: bool = False) -> bytes:
+    """A one-page scan as a scanner's software writes it, by hand: *picture*
+    as a JPEG, and over it an invisible OCR line set in runs, each with its
+    own character and word spacing, as GovInfo's are.  *xref_stream* indexes
+    it with a cross-reference stream (PDF 1.5) rather than a table."""
+    import struct
+
+    buf = io.BytesIO()
+    picture.convert("RGB").save(buf, "JPEG", quality=90)
+    jpeg = buf.getvalue()
+    content = (b"q 612 0 0 792 0 0 cm /Im1 Do Q\n"
+               b"BT 3 Tr /F1 11 Tf 1 0 0 1 120 640 Tm "
+               b"1.2 Tc (PUBLI) Tj 0 Tc (C) Tj 3 Tw 0.8 Tc ( LA) Tj "
+               b"0 Tc (W) Tj 0 Tw 0.9 Tc ( 89-110-AUGUS) Tj 0 Tc (T) Tj ET")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources "
+        b"<< /Font << /F1 3 0 R >> /XObject << /Im1 6 0 R >> >> "
+        b"/Contents 5 0 R >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+        b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+        b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
+        b"/Length %d >>\nstream\n%s\nendstream"
+        % (picture.width, picture.height, len(jpeg), jpeg),
+    ]
+    out, offsets = bytearray(b"%PDF-1.5\n"), []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref, size = len(out), len(objects) + 1
+    if xref_stream:
+        rows = struct.pack(">BIH", 0, 0, 65535) + b"".join(
+            struct.pack(">BIH", 1, o, 0) for o in offsets + [xref])
+        out += (b"%d 0 obj\n<< /Type /XRef /Size %d /W [1 4 2] /Root 1 0 R "
+                b"/Length %d >>\nstream\n%s\nendstream\nendobj\n"
+                % (size, size + 1, len(rows), rows))
+    else:
+        out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+        out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+        out += b"trailer\n<< /Size %d /Root 1 0 R >>\n" % size
+    out += b"startxref\n%d\n%%%%EOF\n" % xref
+    return bytes(out)
+
+
+def _first_page_text(data: bytes) -> str:
+    doc = pdfium.PdfDocument(io.BytesIO(data))
+    tp = doc[0].get_textpage()
+    try:
+        return tp.get_text_range()
+    finally:
+        tp.close()
+
+
+def _ocr_page(lines: list, picture: "Optional[Image.Image]" = None) -> bytes:
+    """A letter-size scan — *picture*, or blank paper — under an invisible
+    OCR layer of *lines*, each ``(x, y, text, size)`` in points from the
+    page's foot."""
+    import pypdfium2.raw as raw
+
+    doc = pdfium.PdfDocument.new()
+    page = doc.new_page(612, 792)
+    image = pdfium.PdfImage.new(doc)
+    bitmap = pdfium.PdfBitmap.from_pil(picture or Image.new("L", (612, 792),
+                                                             255))
+    image.set_bitmap(bitmap)
+    bitmap.close()
+    image.set_matrix(pdfium.PdfMatrix(612, 0, 0, 792, 0, 0))
+    page.insert_obj(image)
+    for x, y, text, size in lines:
+        obj, _size = g._pdf_new_text(doc, text, size=size)
+        raw.FPDFTextObj_SetTextRenderMode(obj, 3)
+        raw.FPDFPageObj_Transform(obj, 1, 0, 0, 1, x, y)
+        raw.FPDFPage_InsertObject(page.raw, obj)
+    page.gen_content()
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+@unittest.skipUnless(_HAVE_PDFIUM, "needs pypdfium2 and tkinter")
+class TextBlockTests(unittest.TestCase):
+    """A scanned page's block of print, read off its OCR layer: what is
+    printed beside its column with it, a reader's scrawl not."""
+
+    LINE = "the national banking system and Federal Reserve System"
+
+    def _block(self, lines: list) -> "Optional[tuple]":
+        doc = pdfium.PdfDocument(io.BytesIO(_ocr_page(lines)))
+        return g._ocr_text_block(doc[0])
+
+    def test_what_reads_as_print(self):
+        for text, reads in (("437", True), ("Judicial reme-", True),
+                            ("ff,", True), ("[S. 1564]", True),
+                            ("w", False), ("^^", False), (";';'", False),
+                            ("", False)):
+            with self.subTest(text=text):
+                self.assertEqual(g._reads_as_print(text), reads)
+
+    def test_side_notes_and_the_page_number_are_kept_a_scrawl_is_not(self):
+        import pypdfium2.raw as raw
+
+        doc = pdfium.PdfDocument.new()
+        obj, (width, _h) = g._pdf_new_text(doc, self.LINE, size=10)
+        raw.FPDFPageObj_Destroy(obj)
+        right = 150 + width
+        lines = [(150, 700 - 14 * k, self.LINE, 10) for k in range(12)]
+        lines += [
+            (60, 740, "438", 9), (250, 740, "PUBLIC LAW 89-110", 9),
+            (60, 651, "Judicial reme-", 7), (60, 645, "dies.", 7),
+            (right + 25, 644, "w", 10),        # a reader's mark
+            (right + 30, 588, "^^", 10),
+        ]
+        l, t, r, b = self._block(lines)
+        self.assertAlmostEqual(l, 60 / 612, delta=0.005)
+        self.assertGreater(r, (right - 3) / 612)
+        self.assertLess(r, (right + 20) / 612)
+        self.assertLess(t, (792 - 740) / 792)
+        self.assertGreater(b, (792 - 546) / 792)
+
+    def test_a_second_column_run_on_to_the_first_is_kept(self):
+        # Frigaliment Importing Co. v. B.N.S. Int'l Sales Corp., 190 F.
+        # Supp. 116: the caption's column mostly redacted, its few lines
+        # read on to the opinion's.
+        lines = [(60, 700 - 14 * k, self.LINE, 10) for k in range(14)]
+        lines += [(400, 700 - 14 * k, "United States District Court", 10)
+                  for k in range(2)]
+        l, _t, r, _b = self._block(lines)
+        self.assertAlmostEqual(l, 60 / 612, delta=0.005)
+        self.assertGreater(r, 500 / 612)
+
+    def test_too_few_lines_tell_nothing(self):
+        self.assertIsNone(self._block(
+            [(150, 700 - 14 * k, self.LINE, 10) for k in range(4)]))
+        self.assertIsNotNone(self._block(
+            [(150, 700 - 14 * k, self.LINE, 10) for k in range(5)]))
+
+
+@unittest.skipUnless(_HAVE_PDFIUM, "needs pypdfium2 and tkinter")
+class ScanLayoutTests(unittest.TestCase):
+    """Scanned pages cut down to their print and set on pages of one size,
+    with even margins — and a redacted running head's citation lettered
+    where it reads."""
+
+    def _picture(self, block: tuple, note: tuple = ()) -> "Image.Image":
+        img = Image.new("L", (612, 792), 255)
+        d = ImageDraw.Draw(img)
+        d.rectangle(block, fill=40)
+        if note:
+            d.rectangle(note, fill=40)
+        return img
+
+    def _dark_box(self, data: bytes, page: int) -> tuple:
+        img = pdfium.PdfDocument(io.BytesIO(data))[page].render(
+            scale=1).to_pil().convert("L")
+        return img.size, img.point(lambda v: 255 if v < 128 else 0).getbbox()
+
+    def test_one_size_with_even_margins(self):
+        first, second = (100, 120, 420, 640), (160, 100, 470, 600)
+        data = _merged([
+            _ocr_page([], self._picture(first)),
+            _ocr_page([], self._picture(second, note=(520, 300, 560, 320)))])
+        frac = [(x0 / 612, y0 / 792, x1 / 612, y1 / 792)
+                for x0, y0, x1, y1 in (first, second)]
+        out = g._lay_out_scan_pages(data, frac, margin_pt=10)
+        size, box = self._dark_box(out, 0)
+        self.assertEqual(size, (340, 540))
+        for got, want in zip(box, (10, 10, 330, 530)):
+            self.assertAlmostEqual(got, want, delta=1.5)
+        size, box = self._dark_box(out, 1)
+        self.assertEqual(size, (340, 540))
+        # The narrower block centered, at the same top margin; the note
+        # beside it gone.
+        for got, want in zip(box, (15, 10, 325, 510)):
+            self.assertAlmostEqual(got, want, delta=1.5)
+
+    CITE = "190 F. Supp. 116"
+
+    def _headed(self, head: tuple, number_x: float) -> tuple:
+        """One page laid out with *head* (its whitened running head, in
+        points from the top-left) and the page number printed on the head
+        line at *number_x*: the page's height, and the citation's font size
+        and center (points from the original page's foot)."""
+        import ctypes
+
+        import pypdfium2.raw as raw
+
+        block = (100, 100, 500, 700)
+        data = _ocr_page([(number_x, 792 - 116, "437", 9)],
+                         self._picture((100, 140, 500, 700)))
+        frac = lambda b: (b[0] / 612, b[1] / 792, b[2] / 612, b[3] / 792)
+        out = g._lay_out_scan_pages(data, [frac(block)], heads=[frac(head)],
+                                    header_text=self.CITE, margin_pt=10)
+        doc = pdfium.PdfDocument(io.BytesIO(out))
+        page = doc[0]
+        _l, bottom, _r, top = page.get_mediabox()
+        for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_TEXT]):
+            if raw.FPDFTextObj_GetTextRenderMode(obj.raw) == 3:
+                continue            # the OCR layer
+            size = ctypes.c_float()
+            raw.FPDFTextObj_GetFontSize(obj.raw, ctypes.byref(size))
+            l, b, r, t = obj.get_bounds()
+            return top - bottom, size.value, ((l + r) / 2, (b + t) / 2)
+        self.fail("no citation lettered")
+
+    # The citation's ink is centered to within a figure's side bearing.
+
+    def test_a_box_that_holds_it_has_it(self):
+        height, size, (x, y) = self._headed((220, 98, 420, 122), 470)
+        self.assertEqual(size, 9.0)
+        self.assertAlmostEqual(x, 320, delta=1.5)    # the box's middle
+        self.assertAlmostEqual(y, 792 - 110, delta=2.5)
+        self.assertEqual(height, 620)
+
+    def test_too_small_a_box_it_goes_on_the_line(self):
+        height, size, (x, y) = self._headed((250, 104, 290, 116), 470)
+        self.assertEqual(size, 9.0)
+        self.assertAlmostEqual(x, 300, delta=1.5)    # the block's middle
+        self.assertAlmostEqual(y, 792 - 110, delta=2.5)
+        self.assertEqual(height, 620)
+
+    def test_with_no_room_on_the_line_it_goes_above(self):
+        # The page number too near the middle of the line to clear.
+        height, size, (x, y) = self._headed((250, 104, 290, 116), 320)
+        self.assertEqual(size, 9.0)
+        self.assertAlmostEqual(x, 300, delta=1.5)
+        self.assertGreater(y, 792 - 100)             # over the block
+        self.assertAlmostEqual(height, 620 + 1.8 * 9, delta=0.01)
+
+
+def _merged(files: list) -> bytes:
+    """One PDF of the pages of *files*."""
+    doc = pdfium.PdfDocument.new()
+    for data in files:
+        doc.import_pages(pdfium.PdfDocument(io.BytesIO(data)))
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
 
 if __name__ == "__main__":
     unittest.main()

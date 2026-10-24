@@ -18,6 +18,13 @@ from google_scholar import (
     scholar_version_url,
 )
 
+try:  # the app itself needs tkinter, which a headless run may not have
+    import os
+    os.environ.setdefault("GETCASES_SKIP_DEPENDENCY_PROMPT", "1")
+    import courtlistener_gui as gui
+except Exception:  # pragma: no cover - depends on the machine
+    gui = None
+
 CLUSTER = "/scholar?cluster=2203153069610266193&hl=en&as_sdt=2006"
 OWN = "/scholar_case?case=5954330685109690289&hl=en&as_sdt=2006&scfhb=1"
 
@@ -125,6 +132,26 @@ class OtherSourceTests(unittest.TestCase):
         page = parse_citing_page(RESULTS)
         self.assertTrue(is_versions_url(page.results[0].url))
         self.assertEqual(page.results[2].url, "")
+
+
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class ItsBylineTests(unittest.TestCase):
+    """Its byline ends with the site it links to, not Scholar's name; it
+    was dated 2059 in Spotlight — the page of its S. Ct. citation."""
+
+    def test_its_year_court_and_citation(self):
+        source = ("504 US 428, 112 S. Ct. 2059, 119 L. Ed. 2d 245 - "
+                  "Supreme Court, 1992 - law.cornell.edu")
+        self.assertEqual(gui._scholar_source_year(source), "1992")
+        self.assertEqual(gui._scholar_source_to_court_id(source), "scotus")
+        self.assertEqual(gui._scholar_source_segments(source)[-1],
+                         "Supreme Court, 1992")
+        for tail in ("Google Scholar", "casetext.com",
+                     "supreme.justia.com"):
+            with self.subTest(tail=tail):
+                self.assertEqual(gui._scholar_source_year(
+                    f"937 F. 2d 415 - Court of Appeals, 9th Circuit, 1991 - "
+                    f"{tail}"), "1991")
 
 
 if __name__ == "__main__":
