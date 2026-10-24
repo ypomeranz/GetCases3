@@ -216,5 +216,60 @@ class MacReaderTextTests(unittest.TestCase):
                          sys.platform == "darwin")
 
 
+@unittest.skipIf(gui is None, "courtlistener_gui needs tkinter")
+class StatuteCopyTests(unittest.TestCase):
+    """Copy with citation in the statute and regulation viewer: the
+    citation it appends ("42 U.S.C. § 1983."), and the provision's own
+    references, keep the sign with the number where they are pasted."""
+
+    def setUp(self):
+        try:
+            self.root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("no display")
+        self.root.withdraw()
+        self.addCleanup(self.root.destroy)
+
+    def copied(self, cite: str) -> tuple:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        win = object.__new__(gui._StatuteWindow)
+        win._win = self.root
+        win._text = tk.Text(self.root)
+        win._text.insert("1.0", "Every person who, under color of any "
+                                "statute, … shall be liable; see § 1985.")
+        win._unit = None
+        win._doc = SimpleNamespace(bluebook_cite=lambda subs=(): cite)
+        win._pin_for = lambda start: ()
+        win._status_var = SimpleNamespace(set=lambda text: None)
+        got = {}
+
+        def clip(_win, rtf, plain):
+            got.update(rtf=rtf, plain=plain)
+            return "rich text"
+
+        with mock.patch.object(gui, "_copy_rich_clipboard", clip):
+            win._copy_cite()
+        return got["rtf"], got["plain"]
+
+    def test_the_citation_s_sign_is_bound_to_its_number(self):
+        for cite, bound in (
+                ("42 U.S.C. § 1983", "42 U.S.C. §" + NBSP + "1983."),
+                ("40 C.F.R. § 52.21(b)", "40 C.F.R. §" + NBSP + "52.21(b)."),
+                ("U.S. Const. art. I, § 8, cl. 3",
+                 "U.S. Const. art. I, §" + NBSP + "8, cl. 3.")):
+            with self.subTest(cite=cite):
+                rtf, plain = self.copied(cite)
+                self.assertTrue(plain.endswith(bound + "\n"), plain)
+                self.assertIn(gui._rtf_escape(bound), rtf)
+                self.assertIn("\\u167?\\~", rtf)
+
+    def test_and_the_provision_s_own(self):
+        rtf, plain = self.copied("42 U.S.C. § 1983")
+        self.assertIn("see §" + NBSP + "1985.", plain)
+        self.assertIn("see \\u167?\\~1985.", rtf)
+
+
 if __name__ == "__main__":
     unittest.main()

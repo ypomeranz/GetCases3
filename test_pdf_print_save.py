@@ -688,7 +688,8 @@ class WriteOutputTests(unittest.TestCase):
         pane = mock.Mock()
         self.assertTrue(self.write(self.path, b"%PDF-orig", pane))
         pane.export_cropped_pdf.assert_called_once_with(
-            self.path, whiten_redactions=False, header_cite="")
+            self.path, whiten_redactions=False, header_cite="",
+            clean_borders=False, black_and_white=False)
         pane.export_pdf.assert_not_called()
 
     def test_the_redaction_treatment_goes_through(self):
@@ -696,7 +697,16 @@ class WriteOutputTests(unittest.TestCase):
         self.write(self.path, b"%PDF", pane, whiten=True, header="410 U.S. 113")
         self.assertEqual(
             pane.export_cropped_pdf.call_args.kwargs,
-            {"whiten_redactions": True, "header_cite": "410 U.S. 113"})
+            {"whiten_redactions": True, "header_cite": "410 U.S. 113",
+             "clean_borders": False, "black_and_white": False})
+
+    def test_so_does_the_border_and_the_black_and_white(self):
+        pane = mock.Mock()
+        self.write(self.path, b"%PDF", pane, clean_borders=True,
+                   black_and_white=True)
+        kwargs = pane.export_cropped_pdf.call_args.kwargs
+        self.assertTrue(kwargs["clean_borders"])
+        self.assertTrue(kwargs["black_and_white"])
 
     def test_with_no_pane_the_original_is_written(self):
         self.assertFalse(self.write(self.path, b"%PDF-orig", None))
@@ -708,7 +718,8 @@ class WriteOutputTests(unittest.TestCase):
         self.assertTrue(self.write(self.path, b"%PDF-orig", pane,
                                    whiten=True, header="410 U.S. 113"))
         pane.export_pdf.assert_called_once_with(
-            self.path, whiten_redactions=True, header_cite="410 U.S. 113")
+            self.path, whiten_redactions=True, header_cite="410 U.S. 113",
+            clean_borders=False, black_and_white=False)
 
     def test_and_both_failing_falls_back_to_the_original(self):
         pane = mock.Mock()

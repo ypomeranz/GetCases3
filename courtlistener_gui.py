@@ -14922,7 +14922,8 @@ class CourtListenerGUI:
             except Exception as exc:
                 print(f"[cite-pdf] header citation failed: {exc}")
         try:
-            _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+            _write_output_pdf(path, data, pane, whiten=whiten, header=header,
+                              clean_borders=not _is_us_reports_pdf(url))
         except Exception as exc:
             messagebox.showerror("Download PDF", str(exc), parent=self.root)
             return
@@ -14956,7 +14957,8 @@ class CourtListenerGUI:
         path = _named_temp_pdf_path(
             (named.get("cite") or "orders") if named.get("orders_page")
             else _build_default_filename(item))
-        _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+        _write_output_pdf(path, data, pane, whiten=whiten, header=header,
+                          clean_borders=not _is_us_reports_pdf(url))
         _print_pdf_file(self.root, path, status)
 
     def _request_cited_pdf_analysis(self, window, data: bytes, url: str,
@@ -20217,7 +20219,9 @@ def _dump_statute_rtf(txt: tk.Text, start: str, end: str) -> str:
             codes.append("\\b")
         if "credit" in active or "notebody" in active:
             codes.append("\\fs18")
-        esc = _rtf_escape(seg)
+        # "§ 1983" held together, as an opinion's text holds it.
+        from google_scholar import bind_signs_to_numbers
+        esc = _rtf_escape(bind_signs_to_numbers(seg))
         return "{" + "".join(codes) + " " + esc + "}" if codes else esc
 
     for key, value, _index in txt.dump(start, end, text=True, tag=True):
@@ -22912,14 +22916,14 @@ def _paint_out_pdf_redactions(pdf_bytes: bytes, plan: list,
                     # wider than asked: a sliver of surviving bar is far more
                     # noticeable than a hair of extra white.
                     pad = max(1.5, 0.003 * w_pt)
-                    for fl, ft, fr, fb in entry.get("boxes", ()):
-                        # Fractions are measured from the top of the page; PDF
-                        # coordinates count up from the bottom.
-                        _pdf_fill_rect(
-                            page,
-                            ml + fl * w_pt - pad, mt - fb * h_pt - pad,
-                            ml + fr * w_pt + pad, mt - ft * h_pt + pad,
-                        )
+                    # Fractions are measured from the top of the page; PDF
+                    # coordinates count up from the bottom.  A scan's border
+                    # comes as a box to each run of each row, so all of them
+                    # go on as one shape (see _pdf_fill_rects).
+                    _pdf_fill_rects(page, [
+                        (ml + fl * w_pt - pad, mt - fb * h_pt - pad,
+                         ml + fr * w_pt + pad, mt - ft * h_pt + pad)
+                        for fl, ft, fr, fb in entry.get("boxes", ())])
                     head = entry.get("head")
                     if head and header_text and scale > 0:
                         obj, _size = _pdf_new_text(doc, header_text)
@@ -22940,6 +22944,226 @@ def _paint_out_pdf_redactions(pdf_bytes: bytes, plan: list,
             buf = io.BytesIO()
             doc.save(buf)
             return buf.getvalue(), kept
+        finally:
+            doc.close()
+
+
+def _pdf_fill_rects(page, rects: list, rgb: tuple = (255, 255, 255)) -> None:
+    """Paint *rects* (each ``(x0, y0, x1, y1)`` in the page's own points) on
+    to *page* as one filled shape — a scan's border is a box to each run of
+    each of its rows, hundreds of them, and an object apiece would bloat the
+    page and slow every reader that draws it."""
+    import pypdfium2.raw as pdfium_c
+
+    if not rects:
+        return
+    x0, y0, x1, y1 = rects[0]
+    obj = pdfium_c.FPDFPageObj_CreateNewPath(x0, y0)
+    for x0, y0, x1, y1 in rects:
+        pdfium_c.FPDFPath_MoveTo(obj, x0, y0)
+        pdfium_c.FPDFPath_LineTo(obj, x1, y0)
+        pdfium_c.FPDFPath_LineTo(obj, x1, y1)
+        pdfium_c.FPDFPath_LineTo(obj, x0, y1)
+        pdfium_c.FPDFPath_Close(obj)
+    pdfium_c.FPDFPageObj_SetFillColor(obj, rgb[0], rgb[1], rgb[2], 255)
+    pdfium_c.FPDFPath_SetDrawMode(obj, pdfium_c.FPDF_FILLMODE_WINDING, False)
+    pdfium_c.FPDFPage_InsertObject(page.raw, obj)
+
+
+# ---------------------------------------------------------------------------
+# A scan's black border, and its paper made white
+# ---------------------------------------------------------------------------
+# A page scanned from a bound volume comes with the dark of what lay around
+# it: the scanner's lid, the binding, the shadow of the page's own edge —
+# uneven, as on every page of the static.case.law scan of Palsgraf v. Long
+# Island R.R. Co., 248 N.Y. 339.  Saved or printed, it is an ink-drinking
+# frame around the opinion.  What belongs to it is the dark joined to the
+# image's edge, and the gray that fades off that dark; the print never
+# touches the edge.
+
+#: A border pixel's darkness: the dark that starts one, the gray that may
+#: carry it on (0 black, 255 white).
+_BORDER_DARK = 110
+_BORDER_GRAY = 200
+#: The resolution a border is looked for at.
+_BORDER_SCAN_DPI = 100
+
+
+def _scan_border_mask(gray):
+    """The border of a scanned page's render *gray* (mode "L") as a mask —
+    255 where it is, 0 elsewhere — or None where it has none worth the
+    name.
+
+    Flooded from every dark pixel on the image's edge, through the dark and
+    gray joined to it.  Where that runs into the page's middle, the border
+    has reached the print (a shadow over the lines nearest the binding),
+    and it is kept to a band along the edges instead."""
+    from PIL import ImageDraw, ImageFilter
+
+    W, H = gray.size
+    if W < 16 or H < 16:
+        return None
+    marked = 60     # what a flooded pixel becomes: neither dark nor gray
+    work = gray.point(lambda v: 0 if v < _BORDER_DARK
+                      else 30 if v < _BORDER_GRAY else 255)
+    px = work.load()
+    edge = ([(x, 0) for x in range(W)] + [(x, H - 1) for x in range(W)]
+            + [(0, y) for y in range(H)] + [(W - 1, y) for y in range(H)])
+    for xy in edge:
+        if px[xy] == 0:
+            # Seeded on black, it takes in the gray (30) joined to it.
+            ImageDraw.floodfill(work, xy, marked, thresh=30)
+    mask = work.point(lambda v: 255 if v == marked else 0)
+    if mask.histogram()[255] < 0.001 * W * H:
+        return None
+    # The soft edge left around it.
+    mask = mask.filter(ImageFilter.MaxFilter(3))
+    middle = (int(W * 0.2), int(H * 0.12), int(W * 0.8), int(H * 0.88))
+    if mask.crop(middle).getbbox() is not None:
+        band = mask.copy()
+        band.paste(0, (int(W * 0.12), int(H * 0.08),
+                       int(W * 0.88), int(H * 0.92)))
+        mask = band
+    return mask if mask.getbbox() is not None else None
+
+
+def _mask_boxes(mask) -> tuple:
+    """*mask* as boxes of fractions of the image, ``(l, t, r, b)``: a box to
+    each run of each row, the runs of rows alike taken together."""
+    W, H = mask.size
+    data = mask.tobytes()
+    boxes: list = []
+    open_runs: dict = {}        # (x0, x1) -> top row
+    for y in range(H + 1):
+        row = data[y * W:(y + 1) * W] if y < H else b""
+        runs = set()
+        x = 0
+        while x < len(row):
+            if row[x]:
+                start = x
+                while x < len(row) and row[x]:
+                    x += 1
+                runs.add((start, x))
+            else:
+                x += 1
+        for run in list(open_runs):
+            if run not in runs:
+                top = open_runs.pop(run)
+                boxes.append((run[0] / W, top / H, run[1] / W, y / H))
+        for run in runs:
+            open_runs.setdefault(run, y)
+    return tuple(boxes)
+
+
+def _page_is_scan(page) -> bool:
+    """Whether a picture fills most of *page* — a scan, with or without an
+    OCR layer — rather than the page being typeset."""
+    import pypdfium2.raw as pdfium_c
+
+    try:
+        ml, mb, mr, mt = page.get_mediabox()
+        area = max(1.0, (mr - ml) * (mt - mb))
+        for obj in page.get_objects():
+            if obj.type != pdfium_c.FPDF_PAGEOBJ_IMAGE:
+                continue
+            l, b, r, t = obj.get_bounds()
+            if (r - l) * (t - b) >= 0.5 * area:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _ink_on_white(img):
+    """A scanned page's paper made white and its print black — the yellow
+    of an old volume of the Statutes at Large and the gray of its type
+    gone — keeping the soft edge of each letter, as grayscale.
+
+    The paper is the page's commonest light (its 60th percentile), the ink
+    its darkest; what is near the paper goes white, what is within the
+    darker part of the way to the ink goes black, and between them the
+    tones are spread out."""
+    gray = img.convert("L")
+    hist = gray.histogram()
+    total = max(1, sum(hist))
+
+    def level(share: float) -> int:
+        seen = 0
+        for value, count in enumerate(hist):
+            seen += count
+            if seen >= share * total:
+                return value
+        return 255
+
+    paper, ink = level(0.60), level(0.01)
+    span = max(paper - ink, 1)
+    lo, hi = ink + 0.40 * span, paper - 0.12 * span
+    if hi <= lo:
+        return gray
+    return gray.point([0 if v <= lo else 255 if v >= hi
+                       else round(255 * (v - lo) / (hi - lo))
+                       for v in range(256)])
+
+
+def _pdf_ink_on_white(pdf_bytes: bytes) -> bytes:
+    """*pdf_bytes* with each page's scan made black on white (see
+    :func:`_ink_on_white`), its OCR text left as it was — the file still
+    searchable and selectable.  A scan set alone in a form object, as
+    GovInfo's are, comes out of the form to be replaced, where it stood."""
+    import io
+
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    def clean(image, target) -> None:
+        """*image*'s picture, made black on white, set into *target*."""
+        source = image.get_bitmap(render=False)
+        try:
+            picture = _ink_on_white(source.to_pil())
+        finally:
+            source.close()
+        bitmap = pdfium.PdfBitmap.from_pil(picture)
+        try:
+            target.set_bitmap(bitmap)
+        finally:
+            bitmap.close()
+
+    with _PDFIUM_LOCK:
+        doc = pdfium.PdfDocument(pdf_bytes)
+        try:
+            for i in range(len(doc)):
+                page = doc[i]
+                try:
+                    changed = False
+                    for obj in list(page.get_objects(max_depth=0)):
+                        if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+                            clean(obj, obj)
+                            changed = True
+                        elif (obj.type == pdfium_c.FPDF_PAGEOBJ_FORM
+                              and pdfium_c.FPDFFormObj_CountObjects(
+                                  obj.raw) == 1):
+                            raw = pdfium_c.FPDFFormObj_GetObject(obj.raw, 0)
+                            if (pdfium_c.FPDFPageObj_GetType(raw)
+                                    != pdfium_c.FPDF_PAGEOBJ_IMAGE):
+                                continue
+                            inner = pdfium.PdfImage(raw, page=page, pdf=doc,
+                                                    level=1)
+                            new = pdfium.PdfImage.new(doc)
+                            clean(inner, new)
+                            new.set_matrix(inner.get_matrix().multiply(
+                                obj.get_matrix()))
+                            page.remove_obj(obj)
+                            # Taken off the page, the form is ours to free.
+                            obj.close()
+                            page.insert_obj(new)
+                            changed = True
+                    if changed:
+                        page.gen_content()
+                finally:
+                    page.close()
+            buf = io.BytesIO()
+            doc.save(buf)
+            return buf.getvalue()
         finally:
             doc.close()
 
@@ -25881,7 +26105,8 @@ class _PdfPane(ttk.Frame):
 
     def export_pdf(self, path: str, dpi: int = 150,
                    whiten_redactions: bool = False,
-                   header_cite: str = "") -> int:
+                   header_cite: str = "", *, clean_borders: bool = False,
+                   black_and_white: bool = False) -> int:
         """Write a PDF that matches what's shown — each page cropped to its
         content box and re-centered on a clean white page with the viewer's
         uniform margin — rather than the original scan with its wide, uneven
@@ -25897,14 +26122,18 @@ class _PdfPane(ttk.Frame):
         gets the largest fit any of them would choose.  A page the redaction
         left with nothing but boxes and its page number (see
         :func:`_page_fully_redacted`) is omitted from the output altogether.
+        ``clean_borders`` paints out a scan's black border and crops to what
+        it framed (see :meth:`_border_plan`); ``black_and_white`` makes its
+        paper white and its print black (see :func:`_ink_on_white`).
         Returns how many rectangles were erased (0 without the flag)."""
-        from PIL import Image
+        from PIL import Image, ImageDraw
         scale = dpi / 72.0
         # Keep the same margin-to-content proportion the viewer displays.
         margin_ratio = self._margin_ratio()
         whitened = 0
         omitted = 0
         pages: list = []
+        borders = self._border_plan() if clean_borders else []
         try:
             # Pass 1 — render and whiten, keeping each page's header line.
             rendered: list = []   # [(full image, frac box, header box), …]
@@ -25925,6 +26154,17 @@ class _PdfPane(ttk.Frame):
                                 page_text = ""
                     finally:
                         page.close()
+                if black_and_white:
+                    full = _ink_on_white(full).convert("RGB")
+                border = borders[i] if i < len(borders) else None
+                if border:
+                    W, H = full.size
+                    draw = ImageDraw.Draw(full)
+                    for fl, ft, fr, fb in border["boxes"]:
+                        draw.rectangle((fl * W - 1, ft * H - 1,
+                                        fr * W + 1, fb * H + 1),
+                                       fill="white")
+                    frac = border["frac"] or frac
                 hbox = None
                 if whiten_redactions:
                     boxes = _whiten_pdf_redactions(full)
@@ -26052,8 +26292,46 @@ class _PdfPane(ttk.Frame):
             plan.append(entry)
         return plan
 
+    def _border_plan(self) -> list:
+        """Each page's black scan border, if it has one (see
+        :func:`_scan_border_mask`): ``{"boxes": the border as fractions of
+        the page, "frac": the content box of the page without it}``, or None
+        for a page with none — or no scan at all, which is typeset to its
+        edges."""
+        from PIL import ImageChops
+
+        plan: list = []
+        scale = _BORDER_SCAN_DPI / 72.0
+        for i in range(len(self._meta)):
+            try:
+                with _PDFIUM_LOCK:
+                    page = self._doc[i]
+                    try:
+                        gray = (page.render(scale=scale).to_pil().convert("L")
+                                if _page_is_scan(page) else None)
+                    finally:
+                        page.close()
+                mask = _scan_border_mask(gray) if gray is not None else None
+            except Exception as exc:
+                print(f"[pdf] reading page {i + 1} for its border: {exc}")
+                mask = None
+            if mask is None:
+                plan.append(None)
+                continue
+            plan.append({
+                "boxes": _mask_boxes(mask),
+                # What the border framed, which is what the page crops to:
+                # the thin lines of the paper's edge go with it.
+                "frac": self._content_frac(ImageChops.lighter(gray, mask)),
+            })
+        found = sum(1 for p in plan if p)
+        if found:
+            print(f"[pdf] a scan border on {found} of {len(plan)} pages")
+        return plan
+
     def export_cropped_pdf(self, path: str, *, whiten_redactions: bool = False,
-                           header_cite: str = "") -> None:
+                           header_cite: str = "", clean_borders: bool = False,
+                           black_and_white: bool = False) -> None:
         """Write a PDF cropped to each page's content with the selectable text
         layer preserved (see :func:`_crop_pdf_to_content`).  The viewer's
         ink-detected boxes are passed as the per-page fallback so scanned pages
@@ -26062,13 +26340,26 @@ class _PdfPane(ttk.Frame):
         ``whiten_redactions`` paints out a case.law scan's black bars and
         letters ``header_cite`` back on to the running head they took the
         citation from — drawn on to the page, so the crop stays lossless and
-        the text survives."""
+        the text survives.  ``clean_borders`` paints out a scan's black
+        border the same way (see :meth:`_border_plan`), and crops to what it
+        framed.  ``black_and_white`` makes the scan's paper white and its
+        print black, its text layer kept (see :func:`_pdf_ink_on_white`)."""
         data = self._pdf_bytes
         frac_boxes = [m[2] for m in self._meta]
-        if whiten_redactions:
+        if black_and_white:
+            data = _pdf_ink_on_white(data)
+        plan = (self._redaction_plan(header_cite) if whiten_redactions
+                else [{"boxes": (), "head": None, "drop": False}
+                      for _ in frac_boxes])
+        if clean_borders:
+            for i, border in enumerate(self._border_plan()):
+                if border and i < len(plan):
+                    plan[i]["boxes"] = (tuple(plan[i]["boxes"])
+                                        + border["boxes"])
+                    frac_boxes[i] = border["frac"] or frac_boxes[i]
+        if whiten_redactions or any(entry["boxes"] for entry in plan):
             data, frac_boxes = _paint_out_pdf_redactions(
-                data, self._redaction_plan(header_cite), frac_boxes,
-                header_text=header_cite)
+                data, plan, frac_boxes, header_text=header_cite)
         out = _crop_pdf_to_content(data, frac_boxes=frac_boxes,
                                    margin_ratio=self._margin_ratio())
         with open(path, "wb") as fh:
@@ -26132,6 +26423,14 @@ class _PdfPane(ttk.Frame):
 def _is_us_reports_pdf(url: str) -> bool:
     u = (url or "").lower()
     return "usrep" in u or "usreports-" in u
+
+
+def _is_statutes_at_large_pdf(url: str) -> bool:
+    """Whether *url* is GovInfo's scan of a page of the Statutes at Large —
+    its stable link (``/link/statute/79/437``) or the file it leads to
+    (``STATUTE-79-Pg437.pdf``)."""
+    return bool(re.search(r"/link/statute/|/STATUTE-\d", url or "",
+                          re.IGNORECASE))
 
 
 # The Harvard CAP scans on static.case.law redact still-copyrighted West
@@ -39376,7 +39675,9 @@ class _ScholarTextWindow:
             return
         whiten, header = self._pdf_print_header(data)
         try:
-            _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+            _write_output_pdf(
+                path, data, pane, whiten=whiten, header=header,
+                clean_borders=not _is_us_reports_pdf(self._pdf_url))
         except Exception as exc:
             messagebox.showerror("Download PDF", str(exc), parent=parent)
             return
@@ -39399,7 +39700,8 @@ class _ScholarTextWindow:
         # from the viewer already carries the Bluebook citation.
         path = _named_temp_pdf_path(
             _build_default_filename(self._pdf_filename_item()))
-        _write_output_pdf(path, data, pane, whiten=whiten, header=header)
+        _write_output_pdf(path, data, pane, whiten=whiten, header=header,
+                          clean_borders=not _is_us_reports_pdf(self._pdf_url))
         _print_pdf_file(self._live_parent(), path, self._safe_status)
 
     def _open_pdf_cite(self, action: tuple, snippet: str) -> None:
@@ -40716,15 +41018,30 @@ class _PdfWindow:
         stem = re.sub(r"[^\w.-]+", "_", self._title).strip("_") or "statute"
         path = _named_temp_pdf_path(stem)
         _write_output_pdf(path, data, pane if pane is not None else self._pane,
-                          whiten=whiten, header=header)
+                          whiten=whiten, header=header,
+                          clean_borders=not _is_us_reports_pdf(self._url))
         _print_pdf_file(self._dialog_parent(), path, self._say)
 
     def _download(self, pane=None) -> None:
         """Save the pages as this window shows them — the same file Print
-        produces, rather than the document as it was fetched."""
+        produces, rather than the document as it was fetched.  A volume of
+        the Statutes at Large may be saved in black and white: its yellowed
+        paper white, its print black (see :func:`_ink_on_white`)."""
         data = self._bytes
         if not data:
             return
+        black_and_white = False
+        if _is_statutes_at_large_pdf(self._url):
+            answer = messagebox.askyesnocancel(
+                "Download PDF",
+                "Save these Statutes at Large pages in black and white?\n\n"
+                "The yellowed paper is made white and the print black, "
+                "which reads and prints more cleanly.  The text stays "
+                "searchable.",
+                parent=self._dialog_parent())
+            if answer is None:
+                return
+            black_and_white = answer
         safe = re.sub(r"[^\w.-]+", "_", self._title).strip("_") or "statute"
         path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
@@ -40746,7 +41063,9 @@ class _PdfWindow:
                 print(f"[pdf] header citation failed: {exc}")
         try:
             _write_output_pdf(path, data, pane if pane is not None
-                              else self._pane, whiten=whiten, header=header)
+                              else self._pane, whiten=whiten, header=header,
+                              clean_borders=not _is_us_reports_pdf(self._url),
+                              black_and_white=black_and_white)
         except Exception as exc:
             messagebox.showerror("Download PDF", str(exc),
                                  parent=self._dialog_parent())
@@ -40778,7 +41097,9 @@ class _PdfWindow:
 # the reader a way to print.
 
 def _write_output_pdf(path: str, data: bytes, pane, *,
-                      whiten: bool = False, header: str = "") -> bool:
+                      whiten: bool = False, header: str = "",
+                      clean_borders: bool = False,
+                      black_and_white: bool = False) -> bool:
     """Write the document cropped to its content the way the viewer shows it.
 
     Two ways of doing that, and the first is much the better one.  Tightening
@@ -40796,18 +41117,26 @@ def _write_output_pdf(path: str, data: bytes, pane, *,
     Both saving and printing come through here, so the file that comes off Save
     is the file that would come off the printer.  Returns whether the document
     was written from the pane at all; the original bytes are written when there
-    is no pane, or when both routes fail."""
+    is no pane, or when both routes fail.
+
+    ``clean_borders``: a scan's black border painted out (see
+    :func:`_scan_border_mask`) — every scan but the U.S. Reports', which are
+    clean.  ``black_and_white``: its paper made white and its print black
+    (see :func:`_ink_on_white`)."""
     if pane is not None:
         try:
             pane.export_cropped_pdf(path, whiten_redactions=whiten,
-                                    header_cite=header)
+                                    header_cite=header,
+                                    clean_borders=clean_borders,
+                                    black_and_white=black_and_white)
             return True
         except Exception as exc:
             print(f"[pdf] the lossless crop failed ({exc}); rendering instead")
     try:
         if pane is not None:
             pane.export_pdf(path, whiten_redactions=whiten,
-                            header_cite=header)
+                            header_cite=header, clean_borders=clean_borders,
+                            black_and_white=black_and_white)
             return True
     except Exception as exc:
         print(f"[pdf] rendering the page for output failed: {exc}")
@@ -44926,11 +45255,16 @@ class _StatuteWindow:
             self._status_var.set(f"Copied {what} as {how}.")
             return
         subs = self._pin_for(start) if selected else ()
-        cite = self._doc.bluebook_cite(subs) + "."
+        # The section sign bound to its number with a non-breaking space,
+        # so "42 U.S.C. § 1983" never breaks after the "§" where it is
+        # pasted.
+        from google_scholar import bind_signs_to_numbers
+        cite = bind_signs_to_numbers(self._doc.bluebook_cite(subs) + ".")
         body = _dump_statute_rtf(txt, start, end)
         rtf = _rtf_document(body + "\\pard\\sa120 " + _rtf_escape(cite)
                             + "\\par\n")
-        plain = txt.get(start, end).rstrip() + "\n\n" + cite + "\n"
+        plain = (bind_signs_to_numbers(txt.get(start, end).rstrip())
+                 + "\n\n" + cite + "\n")
         how = _copy_rich_clipboard(self._win, rtf, plain)
         what = "selection" if selected else "full text"
         self._status_var.set(f"Copied {what} as {how}; citation appended.")
