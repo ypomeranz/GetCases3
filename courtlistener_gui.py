@@ -22916,11 +22916,13 @@ def _paint_out_pdf_redactions(pdf_bytes: bytes, plan: list,
                 try:
                     ml, mb, mr, mt = page.get_mediabox()
                     w_pt, h_pt = mr - ml, mt - mb
-                    # The detector measures a bar on a downsampled render, so
-                    # its box can stop a shade inside the ink.  Paint a little
-                    # wider than asked: a sliver of surviving bar is far more
-                    # noticeable than a hair of extra white.
-                    pad = max(1.5, 0.003 * w_pt)
+                    # The detector measures a bar on a render coarser than
+                    # the scan, so its box can stop a shade inside the ink.
+                    # Paint a hair wider than asked: a sliver of surviving
+                    # bar is noticeable — but so are the tops of the line
+                    # printed just under a running head's bar, which a
+                    # wider pad cut off.
+                    pad = 0.75
                     # Fractions are measured from the top of the page; PDF
                     # coordinates count up from the bottom.  A scan's border
                     # comes as a box to each run of each row, so all of them
@@ -23382,9 +23384,10 @@ def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
     *header_text* the citation lettered back.  Where its box holds it at a
     reading size (:data:`_HEAD_CITE_PT`) it goes there, as it always has;
     where the box would hold it only small, it goes on the running-head
-    line itself, centered on the block, if the line leaves it room clear of
-    the page number; and failing that on a line of its own above the
-    running head, on every page alike."""
+    line itself, centered on the block and clear of the page number, made
+    as small as it must be for that — down to :data:`_HEAD_CITE_MIN_PT`;
+    and failing that on a line of its own above the running head, on every
+    page alike."""
     import io
 
     import pypdfium2 as pdfium
@@ -23436,9 +23439,13 @@ def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
                     if in_box >= 0.85 * _HEAD_CITE_PT:
                         where, size = "box", min(in_box, _HEAD_CITE_PT)
                     else:
-                        size = max(_HEAD_CITE_MIN_PT, min(
-                            _HEAD_CITE_PT, 0.96 * block_w / unit_w))
-                        where = "line"
+                        # On the line, the size every page's line has room
+                        # for, a little clear of the page number each side:
+                        # Milburn ex rel. Milburn v. Anne Arundel Cnty.
+                        # Dep't of Soc. Servs., 871 F.2d 474, went above at
+                        # 9 points, where it fit beside 475 at 8.3.
+                        wide = min(_HEAD_CITE_PT, 0.96 * block_w / unit_w)
+                        size = wide
                         for i, (block, head) in headed:
                             page = doc[i]
                             try:
@@ -23447,10 +23454,12 @@ def _lay_out_scan_pages(pdf_bytes: bytes, blocks: list, heads: list = (),
                             finally:
                                 page.close()
                             middle = (block[0] + block[2]) / 2
-                            half = unit_w * size / 2 + 0.6 * size
-                            if middle - half < left or middle + half > right:
-                                where = "above"
-                                break
+                            size = min(size, min(middle - left, right - middle)
+                                       / (unit_w / 2 + 0.6))
+                        where = "line"
+                        if size < _HEAD_CITE_MIN_PT:
+                            where = "above"
+                            size = max(_HEAD_CITE_MIN_PT, wide)
             above = 1.8 * size if where == "above" else 0.0
             page_w = block_w + 2 * margin
             page_h = block_h + 2 * margin + above
@@ -24550,14 +24559,57 @@ def _whiten_pdf_redactions(img, _ds: int = 4) -> list:
         if keep:
             boxes.append((lo_x, lo_y, hi_x, hi_y))
     fill = 255 if img.mode == "L" else (255,) * len(img.getbands())
+    gray = img.convert("L") if boxes else None
     out: list = []
     for lo_x, lo_y, hi_x, hi_y in boxes:
-        # One reduced pixel of outward pad erases the anti-aliased fringe.
-        box = (max(0, (lo_x - 1) * _ds), max(0, (lo_y - 1) * _ds),
-               min(W, (hi_x + 2) * _ds), min(H, (hi_y + 2) * _ds))
+        # Found on the reduced page, a box is known only to a reduced
+        # pixel; at full size it is trimmed to the bar itself, and a
+        # pixel more for its soft edge.  Padded a reduced pixel instead, it
+        # took the tops off the line printed just under a running head's
+        # bar (Milburn ex rel. Milburn v. Anne Arundel Cnty. Dep't of Soc.
+        # Servs., 871 F.2d 474, 475).
+        box = _solid_extent(gray, (max(0, (lo_x - 1) * _ds),
+                                   max(0, (lo_y - 1) * _ds),
+                                   min(W, (hi_x + 2) * _ds),
+                                   min(H, (hi_y + 2) * _ds)), 2 * _ds)
         img.paste(fill, box)
         out.append(box)
     return out
+
+
+def _solid_extent(gray, box: tuple, band: int) -> tuple:
+    """*box*, on the grayscale page *gray*, its edges drawn in — by at most
+    *band* pixels — to where the bar it was found around is dark, and a
+    pixel wider for the bar's soft edge.  Each side is measured against the
+    line just within the band: where the bar is dark there, the band's
+    lines are the bar's as far out as they are dark too, so a bar's notch
+    is kept and the print beside it is not."""
+    from PIL import ImageChops
+
+    l, t, r, b = box
+    w, h = r - l, b - t
+    if w <= 2 * band or h <= 2 * band:
+        return box
+    dark = gray.crop(box).point(lambda v: 255 if v < 128 else 0)
+
+    def drawn_in(line) -> int:
+        """How many of the band's lines, *line(k)* the k-th from outside,
+        lie outside the bar."""
+        core = line(band)
+        need = core.histogram()[255]
+        if not need:
+            return 0
+        for k in range(band):
+            if ImageChops.multiply(line(k), core).histogram()[255] * 2 >= need:
+                return k
+        return band
+
+    top = drawn_in(lambda k: dark.crop((0, k, w, k + 1)))
+    bottom = drawn_in(lambda k: dark.crop((0, h - 1 - k, w, h - k)))
+    left = drawn_in(lambda k: dark.crop((k, 0, k + 1, h)))
+    right = drawn_in(lambda k: dark.crop((w - 1 - k, 0, w - k, h)))
+    return (l + max(0, left - 1), t + max(0, top - 1),
+            r - max(0, right - 1), b - max(0, bottom - 1))
 
 
 def _page_fully_redacted(text: str, boxes: list, size: tuple) -> bool:
@@ -26666,15 +26718,14 @@ class _PdfPane(ttk.Frame):
             if block is None and not full:
                 block = frac
             elif block is not None and not full:
-                # The print's own ink a little past what the OCR read.
-                block = (frac[0] if block[0] - reach <= frac[0] < block[0]
-                         else block[0],
-                         frac[1] if block[1] - reach <= frac[1] < block[1]
-                         else block[1],
-                         frac[2] if block[2] < frac[2] <= block[2] + reach
-                         else block[2],
-                         frac[3] if block[3] < frac[3] <= block[3] + reach
-                         else block[3])
+                # The print's own ink a little past what the OCR read; and
+                # nothing past the ink, where the recognizer misplaced a
+                # word or two ("87)," beyond the column of K.H. ex rel.
+                # Murphy v. Morgan, 914 F.2d 846, 848).
+                block = (frac[0] if frac[0] >= block[0] - reach else block[0],
+                         frac[1] if frac[1] >= block[1] - reach else block[1],
+                         frac[2] if frac[2] <= block[2] + reach else block[2],
+                         frac[3] if frac[3] <= block[3] + reach else block[3])
             plan.append({
                 "boxes": _mask_boxes(mask) if mask is not None else (),
                 "frac": frac, "block": block})
@@ -26712,6 +26763,20 @@ class _PdfPane(ttk.Frame):
         scans = self._scan_plan() if clean_borders else []
         for i, scan in enumerate(scans):
             if scan and i < len(plan):
+                # The redactions stand in for print, so the block reaches
+                # over them, as if cut down before they were painted out.
+                # Left to the print alone, a page whose headnotes beside
+                # the opinion were blacked out came out one column, set
+                # in the middle of its page and its page number cut off
+                # (K.H. ex rel. Murphy v. Morgan, 914 F.2d 846, 847).
+                fl, ft, fr, fb = (v + d for v, d in zip(
+                    scan["frac"], (-0.01, -0.01, 0.01, 0.01)))
+                for l, t, r, b in plan[i]["boxes"] if scan["block"] else ():
+                    if (fl <= l and ft <= t and r <= fr and b <= fb
+                            and not _box_at_edge((l, t, r, b), (1, 1))):
+                        bl, bt, br, bb = scan["block"]
+                        scan["block"] = (min(bl, l), min(bt, t),
+                                         max(br, r), max(bb, b))
                 plan[i]["boxes"] = tuple(plan[i]["boxes"]) + scan["boxes"]
                 frac_boxes[i] = scan["frac"] or frac_boxes[i]
         lay_out = any(scan and scan["block"] for scan in scans)
@@ -29297,13 +29362,26 @@ def _print_header_font(px: int):
         return ImageFont.load_default()
 
 
+def _box_at_edge(box: tuple, size: tuple, share: float = 0.01) -> bool:
+    """Whether *box* (``(l, t, r, b)`` on a page of *size*) runs to within
+    *share* of the page's edge — a blot of the scan's border, not a bar
+    over print, which stops short of the margin."""
+    W, H = size
+    l, t, r, b = box
+    return (l <= share * W or t <= share * H
+            or r >= (1 - share) * W or b >= (1 - share) * H)
+
+
 def _header_redaction_box(boxes: list, size: tuple) -> "Optional[tuple]":
     """The page's whitened running-head line: the topmost erased box that is
     header-shaped (in the top 12% of the page and at least 15% of its
-    width); None when the page has no such box."""
+    width) and clear of the page's edge — on Palsgraf v. Long Island R.R.
+    Co., 248 N.Y. 339, a blot of the border along the top was taken for
+    one; None when the page has no such box."""
     W, H = size
     heads = [b for b in boxes
-             if b[1] < 0.12 * H and (b[2] - b[0]) >= 0.15 * W]
+             if b[1] < 0.12 * H and (b[2] - b[0]) >= 0.15 * W
+             and not _box_at_edge(b, size)]
     return min(heads, key=lambda bx: bx[1]) if heads else None
 
 
