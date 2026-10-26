@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import re
 
+from case_law_reprints import MARK_RE as _MARK_RE, clean_marks
+
 #: CAP's ``data-type`` → the viewer's part kinds.  Anything unrecognized is
 #: read as the main opinion, matching how CourtListener's own type codes are
 #: defaulted in :data:`courtlistener_gui._CL_TYPE_KIND`.
@@ -121,13 +123,19 @@ _BLOCK_TAGS = _H_TAGS | {
 }
 
 
-def parse_case_law_html(html: str) -> "tuple[list, list]":
+def parse_case_law_html(html: str,
+                        pages: "tuple | None" = None) -> "tuple[list, list]":
     """Parse a CAP case HTML file into ``(parts, blocks)``.
 
     *parts* are ``OpinionPart``s — the head matter as a ``header`` part,
     then one part per ``<article class="opinion">`` carrying its own
     footnotes.  *blocks* is every body block in printed order, which is what
     the caption reader and the plain-text rendering read.
+
+    *pages*, ``(first, last)``: the original pages of a case CAP scanned from
+    a reprint that sets two or more of them on each page of its own (see
+    case_law_reprints).  Its page labels are then the reprint's, and the
+    star pages are the original's numbers it sets in brackets ("[80]").
 
     Returns ``([], [])`` when beautifulsoup4 is missing or the file holds no
     casebody, so the caller can fall back to the JSON text.
@@ -149,6 +157,8 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
     # once, and CAP repeats the label where a page break falls inside material
     # it prints twice (a footnote continued under the page it interrupts).
     seen_pages: set[str] = set()
+    # A reprint's original pages, mended as one run, by the text holding each.
+    marked = _marked_pages(root, pages, Comment) if pages else None
 
     def classes(tag) -> list:
         return [c.lower() for c in (tag.get("class") or [])]
@@ -205,10 +215,28 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
         def emit_pagenum(tag) -> None:
             page = str(tag.get("data-label") or "").strip() or _WS_RE.sub(
                 " ", tag.get_text()).strip().lstrip("*").strip()
+            star(page)
+
+        def star(page: str) -> None:
             if not page or page in seen_pages:
                 return
             seen_pages.add(page)
             cur.append(Span(text="*" + page, pagenum=True))
+
+        def emit_marked(text: str, fmt: dict, found: list) -> None:
+            """A reprint's text: its bracketed numbers made star pages —
+            each the page *found* mended it to (None, or the case's first
+            page, which needs no star, drop it)."""
+            at = 0
+            for match, page in zip(_MARK_RE.finditer(text), found):
+                before = text[at:match.start()]
+                emit(before, fmt)
+                if page is not None and page > pages[0]:
+                    star(str(page))
+                at = match.end()
+                if not before or before[-1].isspace():
+                    at += len(text[at:]) - len(text[at:].lstrip())
+            emit(text[at:], fmt)
 
         def note_block(aside) -> None:
             """Turn an <aside class="footnote"> into a footnote block: a
@@ -299,7 +327,11 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
                 if isinstance(child, Comment):
                     continue
                 if isinstance(child, NavigableString):
-                    emit(str(child), fmt)
+                    found = marked.get(id(child)) if marked else None
+                    if found:
+                        emit_marked(str(child), fmt, found)
+                    else:
+                        emit(str(child), fmt)
                     continue
                 if not isinstance(child, Tag):
                     continue
@@ -319,7 +351,8 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
                     continue
                 if name == "a":
                     if "page-label" in cls:
-                        emit_pagenum(child)
+                        if marked is None:      # a reprint's are its own
+                            emit_pagenum(child)
                         continue
                     href = str(child.get("href") or "")
                     if "footnotemark" in cls and href.startswith("#"):
@@ -413,6 +446,30 @@ def parse_case_law_html(html: str) -> "tuple[list, list]":
     parts, body = _with_embedded_writings(parts, body)
     _finish(parts)
     return parts, body
+
+
+def _marked_pages(root, pages: tuple, comment_type) -> dict:
+    """The original pages a reprint's bracketed numbers mark, mended as one
+    run beginning at the case's first page (see case_law_reprints.
+    clean_marks), by the text each is in: ``{id(text): [page or None, …]}``.
+    A footnote's are left as they are printed."""
+    texts: list = []
+    values: list = []
+    for text in root.find_all(string=True):
+        if (isinstance(text, comment_type)
+                or text.find_parent("aside") is not None):
+            continue
+        found = [int(m.group(1)) for m in _MARK_RE.finditer(str(text))]
+        if found:
+            texts.append((text, len(found)))
+            values += found
+    # The run goes on from the page before the case's first where its text
+    # opens with that page's number, from its first where it begins inside
+    # the page.
+    start = pages[0] - 1 if values[:1] == [pages[0]] else pages[0]
+    mended = iter(clean_marks([start] + values)[1:])
+    return {id(text): [next(mended) for _ in range(count)]
+            for text, count in texts}
 
 
 def parse_case_law_json(casebody) -> "tuple[list, list]":

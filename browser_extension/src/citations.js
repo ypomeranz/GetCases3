@@ -271,8 +271,16 @@
     const out = [];
     const add = (v, r) => {
       const slug = caseLawSlug(r);
-      const url = `https://static.case.law/${slug}/${v}/case-pdfs/${pad(page, 4)}-01.pdf`;
-      if (slug && !out.includes(url)) out.push(url);
+      let url = `https://static.case.law/${slug}/${v}/case-pdfs/${pad(page, 4)}-01.pdf`;
+      // A volume CAP scanned from a reprint names its files by the
+      // reprint's pages (case_law_reprints.py): the first case to begin at
+      // the original's page, or none.
+      const reprint = T.caseLawReprints[`${slug}/${v}`];
+      if (reprint) {
+        const stem = Object.keys(reprint).find((s) => reprint[s] === page);
+        url = stem ? `https://static.case.law/${slug}/${v}/case-pdfs/${stem}.pdf` : "";
+      }
+      if (slug && url && !out.includes(url)) out.push(url);
     };
     // A state's reporter renumbered into its official series ("19 Pick.
     // 234" is 36 Mass. 234), where CAP files it.
@@ -1034,8 +1042,13 @@
     if (host === "cite.case.law" && (m = /^\/([a-z0-9-]+)\/(\d+)\/(\d+)\/?$/.exec(path))) {
       return caseAction(m[2], reporterFromSlug(m[1]), m[3]);
     }
-    if (host === "static.case.law" && (m = /^\/([a-z0-9-]+)\/(\d+)\/(?:cases|case-pdfs)\/(\d+)-\d+\.(?:json|pdf)$/.exec(path))) {
-      return caseAction(m[2], reporterFromSlug(m[1]), m[3]);
+    if (host === "static.case.law" && (m = /^\/([a-z0-9-]+)\/(\d+)\/(?:cases|case-pdfs)\/((\d+)-\d+)\.(?:json|pdf)$/.exec(path))) {
+      // A reprinted volume's file is named by the reprint's page, its case
+      // cited by the original's — of a volume bound in with it, [volume,
+      // page] (case_law_reprints.py).
+      const at = (T.caseLawReprints[`${m[1]}/${+m[2]}`] || {})[m[3]];
+      if (Array.isArray(at)) return caseAction(at[0], reporterFromSlug(m[1]), at[1]);
+      return caseAction(m[2], reporterFromSlug(m[1]), at || m[4]);
     }
     if (/^(?:tile|cdn)\.loc\.gov$|^loc\.gov$/.test(host) && (m = /usrep(\d{3})(\d{3,4})/.exec(path))) {
       return caseAction(m[1], "U.S.", m[2]);

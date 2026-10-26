@@ -189,7 +189,9 @@ SCAN_PAGE_FOR_PIN = _load_function(
     "_scan_page_for_pin",
     {"opinion_location": opinion_location,
      "_pin_page_number": PIN_PAGE_NUMBER,
-     "_printed_page_numbers": PRINTED_PAGE_NUMBERS})
+     "_printed_page_numbers": PRINTED_PAGE_NUMBERS,
+     # No scan here is of a reprinted volume (test_case_law_reprints).
+     "_case_law_reprint_case": lambda url: None})
 
 
 #: The real narrowing: which of a case's parallel citations names the pages

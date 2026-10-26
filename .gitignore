@@ -11,6 +11,11 @@ _engr_build/
 # and debates_index.tsv.gz, live in the repo root.
 _leghist_build/
 
+# static.case.law reprint index build scratch (each reprinted volume's list
+# of cases and their HTML, the builder).  The shipped product,
+# case_law_reprints.tsv.gz, lives in the repo root.
+_case_law_build/
+
 # SEC Decisions and Reports index build scratch (the HathiTrust Research
 # Center's Extracted Features for each volume, the builders).  The shipped
 # product, sec_index.tsv.gz, lives in the repo root.
