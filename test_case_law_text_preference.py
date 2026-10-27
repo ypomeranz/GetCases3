@@ -91,7 +91,10 @@ CASE_LAW_REPORTER_CITE = _load_function(
         r"static\.case\.law/([^/]+)/(\d+)/case-pdfs/0*(\d+)-\d+\.pdf", re.I),
      "_CASE_LAW_SLUG_REPORTERS": {"us": "U.S.", "sct": "S. Ct.",
                                   "f2d": "F.2d", "p2d": "P.2d",
-                                  "wash-2d": "Wash. 2d"}})
+                                  "wash-2d": "Wash. 2d"},
+     # No file here is of a reprinted volume (test_case_law_reprints).
+     "_case_law_reprint_case": lambda url: None,
+     "_reporter_family_in_folder": lambda slug: None})
 
 
 class _Source:

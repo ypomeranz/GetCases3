@@ -280,6 +280,7 @@ def tables() -> dict:
     """The reporter and rule tables the patterns are read against."""
     import bluebook_names
     import browser_links
+    import case_law_reprints
     import citations as c
     import constitution
     import eng_rep
@@ -307,6 +308,14 @@ def tables() -> dict:
         "stateNominative": {
             k: [list(s) for s in v]
             for k, v in sorted(c._STATE_NOMINATIVE.items())},
+        # The volumes CAP scanned from a reprint (case_law_reprints), whose
+        # files go by the reprint's pages: each file → the original page its
+        # case begins on, or [volume, page] for a volume bound in with it.
+        "caseLawReprints": {
+            f"{slug}/{vol}": {c.stem: c.first if c.book == vol
+                              else [int(c.book), c.first] for c in cases}
+            for (slug, vol), cases in sorted(
+                case_law_reprints._INDEX.volumes().items())},
         "usReports": {
             "locMax": browser_links.LOC_US_REPORTS_MAX,
             "locPreferredMax": browser_links.LOC_US_REPORTS_PREFERRED_MAX,

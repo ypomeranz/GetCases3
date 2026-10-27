@@ -27,6 +27,7 @@ import json
 import re
 import urllib.parse
 
+import case_law_reprints
 import citations
 import eng_rep
 import fed_cas
@@ -69,6 +70,7 @@ GOVINFO_US_REPORTS_MAX = 583
 #: case's first page (the "-01": the first case to begin there).
 CASE_LAW_PDF = ("https://static.case.law/{slug}/{vol}/case-pdfs/"
                 "{page:04d}-01.pdf")
+CASE_LAW_FILE = "https://static.case.law/{slug}/{vol}/case-pdfs/{stem}.pdf"
 
 #: The Supreme Court's early reports, cited by their reporters' names: each
 #: one's volumes are U.S. Reports volumes *offset* on, page for page —
@@ -155,7 +157,16 @@ def case_pdf_urls(cite: str) -> "list[str]":
         if slug:
             url = CASE_LAW_PDF.format(slug=slug, vol=int(om.group(1)),
                                       page=int(om.group(3)))
-            if url not in out:
+            # A volume CAP scanned from a reprint names its files by the
+            # reprint's pages (see case_law_reprints).
+            vol = str(int(om.group(1)))
+            if case_law_reprints.volume(slug, vol):
+                begun = case_law_reprints.cases_at(slug, vol,
+                                                   int(om.group(3)))
+                url = (CASE_LAW_FILE.format(slug=slug, vol=vol,
+                                            stem=begun[0].stem)
+                       if begun else "")
+            if url and url not in out:
                 out.append(url)
     return out
 

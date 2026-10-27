@@ -1265,6 +1265,7 @@ from case_law_parse import (
     split_embedded_writings as _split_embedded_writings,
 )
 from cl_parse import parse_cl_html as _parse_cl_html
+import case_law_reprints
 import case_name_usage
 import citing_cases
 import decision_year
@@ -2840,6 +2841,58 @@ _CASE_LAW_FILE_URL_RE = re.compile(
     r"^(https://static\.case\.law/([^/]+)/([^/]+)/(?:case-pdfs|cases))/"
     r"(\d+)-(\d+)\.(pdf|json)$", re.IGNORECASE)
 
+#: Any of a static.case.law case's three files: its scan, its JSON, its HTML.
+_CASE_LAW_ANY_FILE_RE = re.compile(
+    r"^https://static\.case\.law/([^/]+)/([^/]+)/(?:case-pdfs|cases|html)/"
+    r"(\d+-\d+)\.(?:pdf|json|html)$", re.IGNORECASE)
+
+
+def _case_law_reprint_case(url: str) -> "Optional[case_law_reprints.ReprintCase]":
+    """The case a static.case.law file holds where its volume was scanned
+    from a reprint that sets two or more of the original's pages on each of
+    its own (17 and 18 Wend.; see case_law_reprints): the original pages it
+    runs and where each begins in its scan.  None for any other file."""
+    m = _CASE_LAW_ANY_FILE_RE.match((url or "").strip())
+    if not m:
+        return None
+    return case_law_reprints.case_of_file(m.group(1).lower(), m.group(2),
+                                          m.group(3))
+
+
+def _case_law_true_cite(cite: str, url: str) -> str:
+    """*cite* — a citation static.case.law gives the case in file *url* — by
+    the volume and page the case begins at in the original, where the
+    volume's list cites it otherwise: 18 Wend.'s file 0045-01, listed "18
+    Wend. 45", is Judges of the Oneida Common Pleas, 18 Wend. 79; 17 La.'s
+    0362-01, listed "17 La. 1", is Leefe v. Walker, 18 La. 1 — 18 La. is
+    bound in with 17 La. in the reprint scanned."""
+    m = _CASE_LAW_ANY_FILE_RE.match((url or "").strip())
+    cm = _CITE_PARSE_RE.fullmatch(re.sub(r"\s+", " ", str(cite or "")).strip())
+    case = _case_law_reprint_case(url)
+    if not (m and cm and case is not None) or (
+            (case.book, case.first) == (m.group(2), case.listed)):
+        return cite
+    vol, reporter, page = cm.group(1), cm.group(2).strip(), int(cm.group(3))
+    if (vol != m.group(2) or page != case.listed
+            or _slugify_reporter(reporter) != m.group(1).lower()):
+        return cite
+    return f"{case.book} {reporter} {case.first}"
+
+
+def _with_true_citations(data, url: str):
+    """A static.case.law case JSON with its citations put as
+    :func:`_case_law_true_cite` puts them (a copy; *data* where nothing
+    changes)."""
+    if not isinstance(data, dict) or _case_law_reprint_case(url) is None:
+        return data
+    rows = []
+    for row in data.get("citations") or []:
+        if isinstance(row, dict) and row.get("cite"):
+            row = dict(row, cite=_case_law_true_cite(str(row["cite"]), url))
+        rows.append(row)
+    return dict(data, citations=rows)
+
+
 #: (reporter slug, volume) → ({citation key: file stems}, {file stem: case
 #: name}, {file stem: pages it runs}), filled as volumes are read — see
 #: :func:`_case_law_volume`.
@@ -2898,14 +2951,20 @@ def _case_law_volume(slug: str, vol: str) -> "tuple[dict, dict, dict]":
                 continue
             name = str(case.get("name_abbreviation") or case.get("name") or "")
             names[stem] = re.sub(r"\s+", " ", name).strip()
+            # A reprinted volume's pages are the reprint's: the original's,
+            # which the citations carry, are case_law_reprints'.
+            here = f"https://static.case.law/{slug}/{vol}/cases/{stem}.json"
+            reprint = _case_law_reprint_case(here)
             try:
-                lengths[stem] = (int(case.get("last_page"))
+                lengths[stem] = (reprint.last - reprint.first + 1
+                                 if reprint is not None else
+                                 int(case.get("last_page"))
                                  - int(case.get("first_page")) + 1)
             except (TypeError, ValueError):
                 lengths[stem] = 0
             for c in case.get("citations") or ():
-                ck = _case_law_cite_key(
-                    c.get("cite") if isinstance(c, dict) else "")
+                ck = _case_law_cite_key(_case_law_true_cite(
+                    c.get("cite") if isinstance(c, dict) else "", here))
                 if ck and stem not in files.get(ck, ()):
                     files[ck] = files.get(ck, ()) + (stem,)
     elif status != 404:
@@ -2963,10 +3022,29 @@ def _case_law_listed_url(cite: str, url: str) -> str:
     case.  The volume's own list of its cases says which file each citation
     is in.  A citation it does not list, or lists on the very page it names,
     is left to the page as before (where the -02 of a shared page is chosen
-    by the case's name)."""
+    by the case's name).
+
+    In a volume scanned from a reprint that sets two or more of the
+    original's pages on each of its own (see case_law_reprints) no file is
+    named by a page a citation carries: the case beginning at it is the one
+    the index of the reprint gives — the first, where several do (they are
+    told apart as any page's are, see _case_law_page_opinions) — and a page
+    no case begins at has no file ("")."""
     m = _CASE_LAW_FILE_URL_RE.match(url or "")
     if not m:
         return url
+    if case_law_reprints.volume(m.group(2).lower(), m.group(3)):
+        cm = _CITE_PARSE_RE.match(str(cite or "").split("@", 1)[0].strip())
+        begun = case_law_reprints.cases_at(
+            m.group(2).lower(), m.group(3), int(cm.group(3))) if cm else []
+        if not begun:
+            print(f"[case.law] no case begins at {cite!r} in the reprint "
+                  f"static.case.law scanned")
+            return ""
+        stem = begun[0].stem
+        if stem != f"{m.group(4)}-{m.group(5)}":
+            print(f"[case.law] {cite!r} is the reprint's {stem}")
+        return f"{m.group(1)}/{stem}.{m.group(6)}"
     stems = _case_law_volume_files(m.group(2), m.group(3)).get(
         _case_law_cite_key(cite), ())
     pages = {int(s.split("-")[0]) for s in stems}
@@ -3163,7 +3241,22 @@ def _case_law_page_opinions(url: str) -> list[_CaseLawPageOpinion]:
     PDF is probed first; only when it exists are all sibling JSON files fetched
     for their authoritative case names.  An empty list means the URL is not an
     ``-01`` CAP PDF or no second opinion exists.
+
+    In a reprinted volume (see _case_law_reprint_case) the files of one page
+    are the reprint's page's, which holds cases of more than one of the
+    original's: there the cases beginning at the original page are the ones,
+    whatever their files, as the index of the reprint names them.
     """
+    reprint = _case_law_reprint_case(url)
+    if reprint is not None:
+        m = _CASE_LAW_ANY_FILE_RE.match(url.strip())
+        base = f"https://static.case.law/{m.group(1)}/{m.group(2)}"
+        mates = case_law_reprints.cases_at(m.group(1).lower(), m.group(2),
+                                           reprint.first, book=reprint.book)
+        return [_CaseLawPageOpinion(
+            f"{base}/case-pdfs/{c.stem}.pdf", f"{base}/cases/{c.stem}.json",
+            c.name, pages=c.last - c.first + 1)
+            for c in mates] if len(mates) > 1 else []
     m = _CASE_LAW_NUMBERED_PDF_RE.match((url or "").strip())
     if not m or int(m.group(2)) != 1:
         return []
@@ -3808,6 +3901,8 @@ def _case_law_metadata(cite: str) -> "Optional[dict]":
     if not url:
         return None
     url = _case_law_listed_url(cite, url)
+    if not url:
+        return None
     try:
         resp = _anon_session.get(url, timeout=10)
     except Exception as exc:
@@ -3818,7 +3913,8 @@ def _case_law_metadata(cite: str) -> "Optional[dict]":
         return None
     try:
         data = resp.json()
-        return data if isinstance(data, dict) else None
+        return _with_true_citations(data, url) if isinstance(data, dict) \
+            else None
     except Exception as exc:
         print(f"[case.law-json] bad JSON for {cite!r}: {exc}")
         return None
@@ -3925,12 +4021,15 @@ def _case_law_case_html(json_url: str) -> str:
     return resp.text or ""
 
 
-def _case_law_case_parts(body, html: str = "") -> "tuple[list, list]":
+def _case_law_case_parts(body, html: str = "",
+                         pages: "Optional[tuple]" = None) -> "tuple[list, list]":
     """``(parts, blocks)`` for a CAP case — its formatted HTML where there is
-    any, its flattened JSON body where there is not."""
+    any, its flattened JSON body where there is not.  *pages*: the original
+    pages a case of a reprinted volume runs (see _case_law_reprint_case),
+    whose bracketed numbers are its star pages."""
     if html:
         try:
-            parts, blocks = _parse_case_law_html(html)
+            parts, blocks = _parse_case_law_html(html, pages=pages)
         except Exception as exc:
             print(f"[case.law-text] HTML parse failed: {exc}")
             parts, blocks = [], []
@@ -3954,6 +4053,8 @@ def _case_law_text_record(
     """
     if not isinstance(data, dict):
         return None
+    data = _with_true_citations(data, json_url)
+    reprint = _case_law_reprint_case(json_url)
 
     name = re.sub(r"\s+", " ", str(
         data.get("name_abbreviation") or data.get("name") or ""
@@ -4022,7 +4123,9 @@ def _case_law_text_record(
         "court_id": court_id,
         "dateFiled": date,
     }
-    parts, blocks = _case_law_case_parts(body, html)
+    parts, blocks = _case_law_case_parts(
+        body, html,
+        (reprint.first, reprint.last) if reprint is not None else None)
     return _CaseLawTextRecord(text, stem, item, json_url, parts, blocks)
 
 
@@ -14465,7 +14568,7 @@ class CourtListenerGUI:
         else:
             target = _scan_page_for_pin(
                 self._scan_cite_for(named), pin, named.get("cite") or "",
-                pdf_pages)
+                pdf_pages, url=named.get("url") or "")
         if target is None or target == named.get("pin_page"):
             return
         was = named.get("pin_page")
@@ -29051,10 +29154,18 @@ _CASE_LAW_SLUG_REPORTERS = {_slugify_reporter(_r): _r for _r in (
 
 
 def _case_law_reporter_cite(url: str) -> str:
-    """Reporter, volume, and first page encoded by a static.case.law URL."""
+    """Reporter, volume, and first page encoded by a static.case.law URL —
+    the original's first page, for a reprinted volume's (see
+    _case_law_reprint_case)."""
     match = _CASE_LAW_URL_RE.search(url or "")
     if not match:
         return ""
+    reprint = _case_law_reprint_case(url)
+    family = _reporter_family_in_folder(match.group(1).lower())
+    reporter = (family.canonical if family is not None else
+                _CASE_LAW_SLUG_REPORTERS.get(match.group(1).lower()))
+    if reprint is not None and reporter:
+        return f"{reprint.book} {reporter} {reprint.first}"
     reporter = _CASE_LAW_SLUG_REPORTERS.get(match.group(1).lower())
     if not reporter:
         return ""
@@ -29111,7 +29222,7 @@ def _pin_page_number(pin: str) -> "Optional[int]":
 
 
 def _scan_page_for_pin(scan_cite: str, pin: str, cite: str = "",
-                       pdf_pages=None) -> "Optional[int]":
+                       pdf_pages=None, url: str = "") -> "Optional[int]":
     """Which page of a scan prints the page a pin cite names — 0-based.
 
     Answered only when the pin belongs to the reporter the scan itself prints.
@@ -29124,6 +29235,11 @@ def _scan_page_for_pin(scan_cite: str, pin: str, cite: str = "",
     file, so the offset from the case's own first page is the answer.  When the
     pages print their numbers, that arithmetic is checked against them — and a
     printed number wins, since a volume slice can carry a cover leaf.
+
+    The scan *url* of a reprint that sets two or more of the original's pages
+    on each of its own (see _case_law_reprint_case) is the exception: the
+    page is the one the original's page begins on — the last whose head (the
+    number printed at its top, else the index's) is not past it.
     """
     scan = opinion_location.parse_reporter_cite(scan_cite)
     target = _pin_page_number(pin)
@@ -29133,8 +29249,16 @@ def _scan_page_for_pin(scan_cite: str, pin: str, cite: str = "",
         linked = opinion_location.parse_reporter_cite(cite)
         if linked is not None and linked.reporter_key != scan.reporter_key:
             return None
-    guess = target - scan.page
     printed = _printed_page_numbers(pdf_pages) if pdf_pages else {}
+    reprint = _case_law_reprint_case(url)
+    if reprint is not None and reprint.first == scan.page:
+        heads = list(reprint.heads)
+        for index, number in printed.items():
+            # The foot's number is the reprint's own page, never the case's.
+            if index < len(heads) and reprint.first <= number <= reprint.last:
+                heads[index] = number
+        return reprint._replace(heads=tuple(heads)).pdf_page(target)
+    guess = target - scan.page
     if printed:
         if printed.get(guess) == target:
             return guess
@@ -29274,7 +29398,7 @@ def _case_law_case_json(url: str, timeout: int = 8) -> "Optional[dict]":
         if resp.status_code != 200:
             return None
         data = resp.json()
-        return data if isinstance(data, dict) else None
+        return _with_true_citations(data, json_url)             if isinstance(data, dict) else None
     except Exception:
         return None
 

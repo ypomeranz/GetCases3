@@ -34,6 +34,8 @@ import time
 from typing import Any, Generator, Iterator
 from urllib.parse import urlencode, urljoin
 
+import case_law_reprints
+
 try:
     import requests
     from requests import Response, Session
@@ -44,6 +46,9 @@ except ImportError as exc:
 
 
 BASE_URL = "https://www.courtlistener.com/api/rest/v4/"
+
+#: A search's citation field: ``citation:(18 Wend. 79)``.
+_CITATION_FIELD_RE = re.compile(r"(\bcitation:\()([^)]*)\)", re.IGNORECASE)
 
 # Mapping of human-readable search type names to CourtListener type codes
 SEARCH_TYPES = {
@@ -104,19 +109,21 @@ class CourtListenerClient:
     # ------------------------------------------------------------------
 
     def _get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict:
-        """Perform a GET request and return parsed JSON."""
+        """Perform a GET request and return parsed JSON — its citations of a
+        volume CourtListener files by a reprint's pages put by the
+        original's (see :func:`case_law_reprints.read`)."""
         url = urljoin(BASE_URL, endpoint.lstrip("/"))
         response: Response = self._session.get(url, params=params, timeout=self._timeout)
         # print(f"[GET] {response.request.url}")
         self._raise_for_status(response)
-        return response.json()
+        return case_law_reprints.read(response.json())
 
     def _get_url(self, url: str, params: dict[str, Any] | None = None) -> dict:
         """Perform a GET request against an absolute URL (for pagination)."""
         # print(f"[GET] {url}")
         response: Response = self._session.get(url, params=params, timeout=self._timeout)
         self._raise_for_status(response)
-        return response.json()
+        return case_law_reprints.read(response.json())
 
     def _options(self, endpoint: str) -> dict:
         """Perform an OPTIONS request to discover filterable fields."""
@@ -192,6 +199,12 @@ class CourtListenerClient:
             ``previous`` keys.
         """
         resolved_type = SEARCH_TYPES.get(type, type)
+        # A citation field asked for a reprinted volume's original page is
+        # asked as CourtListener files it (see case_law_reprints.asked); the
+        # opinions' own words, which cite the original's pages, are not.
+        query = _CITATION_FIELD_RE.sub(
+            lambda m: m.group(1) + case_law_reprints.asked(m.group(2)) + ")",
+            query)
         params: dict[str, Any] = {
             "q": query,
             "type": resolved_type,
@@ -215,13 +228,21 @@ class CourtListenerClient:
         mismatches).  Returns the raw list of citation objects, each with a
         ``status`` (200 when resolved) and a ``clusters`` array of matching
         OpinionCluster records.
+
+        CourtListener took its citations of 18 Wend. from static.case.law's
+        list, which cites the cases by the pages of the reprint it scanned,
+        and of 17 La., whose list cites the 18 La. bound in with it as 17
+        La.'s: they are asked for, and read, by the volume and page they
+        were printed at — and a case of another volume is no answer (see
+        case_law_reprints).
         """
         url = urljoin(BASE_URL, "citation-lookup/")
         response: Response = self._session.post(
-            url, data={"text": text}, timeout=self._timeout
+            url, data={"text": case_law_reprints.asked(text)},
+            timeout=self._timeout
         )
         self._raise_for_status(response)
-        return response.json()
+        return case_law_reprints.answers(response.json(), text)
 
     def search_iter(
         self,
