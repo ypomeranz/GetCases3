@@ -21,6 +21,7 @@ import bisect
 import datetime as _dt
 import difflib
 import gc
+import heapq
 import html as _html
 import importlib.util
 import json
@@ -19842,6 +19843,8 @@ def _rtf_escape(s: str) -> str:
             out.append("\\" + ch)
         elif ch == "\n":
             out.append("\\line ")
+        elif ch == "\t":
+            out.append("\\tab ")
         elif ch == "\u00a0":
             out.append("\\~")   # a non-breaking space, as in "§ 1983"
         elif ord(ch) < 128:
@@ -20399,13 +20402,21 @@ def _dump_statute_rtf(txt: tk.Text, start: str, end: str) -> str:
             parts.append("\\sb120\\sa60")
         else:
             parts.append("\\sa120")
+        for tag in active:
+            # A table's columns, at the stops they have on screen: a pixel
+            # is 15 twips at Tk's 96 per inch.
+            if tag.startswith("table-"):
+                parts.extend(
+                    f"\\tx{int(str(stop)) * 15}" for stop
+                    in txt.tk.splitlist(txt.tag_cget(tag, "tabs")))
         return "".join(parts) + " "
 
     def run_to_rtf(seg: str) -> str:
         codes: list[str] = []
         if "sechead" in active:
             codes.append("\\b\\fs28")
-        elif "headline" in active or "notehead" in active or "enum" in active:
+        elif active & {"headline", "notehead", "enum", "tablehead",
+                       "notetablehead"}:
             codes.append("\\b")
         if "credit" in active or "notebody" in active:
             codes.append("\\fs18")
@@ -45102,6 +45113,68 @@ class _LinkedPdfWindow:
         self._status_var.set(f"Saved PDF to {path}")
 
 
+#: How much of the window a table's columns may take before its last begins:
+#: past that there is no room left to wrap it in (see _fit_tables).
+_TABLE_COLUMNS_SHARE = 0.75
+#: A heading longer than this cannot sit over its column, as print wraps it
+#: to: it sets no column's width, and its row is set as text.
+_TABLE_HEADING_MAX = 40
+
+
+def _long_heading(cells: list[str]) -> bool:
+    return any(len(cell) > _TABLE_HEADING_MAX for cell in cells[:-1])
+
+
+def _table_limits(rows: list[tuple[bool, list[str]]]) -> list[int]:
+    """How long a cell may run in each of a table's columns: half as long
+    again as nine in ten of them.  Six long names among the 575 of 29 C.F.R.
+    § 1910.1000's Table Z-1 would otherwise push every figure off the screen."""
+    data = [cells for head, cells in rows if not head]
+    limits: list[int] = []
+    for column in range(max((len(cells) for cells in data), default=1) - 1):
+        lengths = sorted(len(cells[column]) for cells in data
+                         if column < len(cells) - 1)
+        typical = lengths[int(len(lengths) * 0.9)] if lengths else 0
+        limits.append(max(typical * 3 // 2, 12))
+    return limits
+
+
+def _table_lines(cells: list[str], limits: list[int]) -> list[list[str]]:
+    """The lines a row is set on: one, unless a cell runs past its column's
+    limit.  That one ends a line, and the rest of the row follows on the next,
+    each cell still in its column."""
+    for column, limit in enumerate(limits):
+        if column < len(cells) - 1 and len(cells[column]) > limit:
+            rest = [""] * (column + 1) + cells[column + 1:]
+            return [cells[:column + 1], *_table_lines(rest, limits)]
+    return [cells]
+
+
+def _table_stops(rows: list[tuple[bool, list[str]]], measure, start: int,
+                 gap: int = 18) -> list[int]:
+    """Where a table's columns after the first begin, in pixels from the
+    left: each past the widest cell of the one before.  *rows* holds (heading?,
+    cells) per row, and *measure* gives a cell's width.
+
+    A row's last cell has no column to clear, a heading may run on across the
+    empty cells after it, spanning them, and a long one is left out (see
+    _TABLE_HEADING_MAX).  Only a column's longest few cells are measured, a
+    table running to thousands of rows."""
+    rows = [(head, cells) for head, cells in rows
+            if not (head and _long_heading(cells))]
+    stops: list[int] = []
+    edge = start
+    for column in range(max((len(cells) for _head, cells in rows), default=1)
+                        - 1):
+        widest = heapq.nlargest(3, (
+            cells[column] for head, cells in rows
+            if column < len(cells) - 1 and (cells[column + 1] or not head)
+        ), key=len)
+        edge += max(map(measure, widest), default=0) + gap
+        stops.append(edge)
+    return stops
+
+
 class _StatuteWindow:
     """
     Reader for a statute or regulation section — U.S. Code from the
@@ -45131,6 +45204,11 @@ class _StatuteWindow:
         self._neighbors: tuple = (None, None)
         self._link_actions: dict[str, tuple[str, str]] = {}
         self._link_n = 0
+        # Each table on show: its tag → its lines, margin, font and cell
+        # limits, and how it is set out now: its column stops, and whether
+        # they fit the window.
+        self._tables: dict[str, tuple] = {}
+        self._table_fit: dict[str, tuple[list[int], bool]] = {}
         # A U.S. Code unit's table of contents shown in place of the section
         # (us_code.UscUnit), and the section it was reached from.
         self._unit = None
@@ -45306,14 +45384,20 @@ class _StatuteWindow:
             ),
             "sechead": tkfont.Font(family=fam, size=s + 2, weight="bold"),
             "small": tkfont.Font(family=fam, size=max(s - 2, 8)),
+            "smallbold": tkfont.Font(family=fam, size=max(s - 2, 8),
+                                     weight="bold"),
         }
         txt = tk.Text(frame, wrap="word", font=self._fonts["base"],
                       padx=14, pady=10)
         self._text = txt
+        txt.bind("<Configure>", lambda _e: self._fit_tables(), add="+")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
         txt.pack(side="left", fill="both", expand=True)
+        self._hsb = ttk.Scrollbar(frame, orient="horizontal",
+                                  command=txt.xview)
+        txt.configure(xscrollcommand=self._on_xscroll)
 
         txt.tag_configure("sechead", font=self._fonts["sechead"],
                           spacing1=4, spacing3=12)
@@ -45330,6 +45414,8 @@ class _StatuteWindow:
                           foreground="#444444", spacing1=14)
         txt.tag_configure("notebody", font=self._fonts["small"],
                           foreground="#444444")
+        txt.tag_configure("tablehead", font=self._fonts["bold"])
+        txt.tag_configure("notetablehead", font=self._fonts["smallbold"])
         for i in range(7):
             is_cfr = self._doc.kind == "cfr"
             if is_cfr:
@@ -45400,12 +45486,17 @@ class _StatuteWindow:
         r"((?:\((?:\d{1,3}[A-Za-z]{0,2}|[a-zA-Z]{1,4})\)\s*)+)")
 
     def _render(self) -> None:
+        for tag in self._tables:
+            self._text.tag_delete(tag)
+        self._tables = {}
+        self._table_fit = {}
         if self._unit is not None:
             self._render_unit()
             return
         txt = self._text
         txt.config(state="normal")
         txt.delete("1.0", "end")
+        table_tag = ""      # the table the paragraphs are running through
         show_notes = self._notes_var.get()
         path: list[str] = []
         target = list(self._highlight)
@@ -45430,6 +45521,8 @@ class _StatuteWindow:
             and getattr(self._doc, "site_formatting", False)
         )
         for para_index, (kind, ind, text) in enumerate(self._doc.paras):
+            if kind not in us_code.TABLE_KINDS:
+                table_tag = ""
             if kind.startswith("note") and not show_notes:
                 continue
             styles = (
@@ -45445,7 +45538,7 @@ class _StatuteWindow:
                 else None
             lead = m.group(1) if m else ""
             if usc_paths is not None:
-                if kind in ("body", "head"):
+                if kind in ("body", "head", "table", "table-head"):
                     para_path = usc_paths[para_index]
                     self._anchors.append((txt.index("end-1c"), para_path))
                     if (target and target_pos is None and para_path
@@ -45511,6 +45604,27 @@ class _StatuteWindow:
             elif kind == "note-body":
                 self._insert_refs(text, ("notebody", indtag))
                 txt.insert("end", "\n", ("notebody", indtag))
+            elif kind in us_code.TABLE_KINDS:
+                table_tag = table_tag or self._add_table(para_index, indtag)
+                note = kind.startswith("note")
+                head = kind.endswith("head")
+                cells = text.split("\t")
+                for line in ([cells] if head else _table_lines(
+                        cells, self._tables[table_tag][3])):
+                    # A line of one cell (a caption, a note under the table)
+                    # is text at the table's margin, not the start of its
+                    # columns; so is a heading too long for them.
+                    tags = [indtag if len(line) == 1
+                            or (head and _long_heading(line)) else table_tag]
+                    if note:
+                        tags.append("notebody")
+                    if head:
+                        tags.append("notetablehead" if note else "tablehead")
+                    # The space keeps cells apart wherever a tab falls: such
+                    # a heading's can end just short of the next stop.
+                    self._insert_refs(" \t".join(line), tuple(tags))
+                    txt.insert("end", "\n", tuple(tags))
+        self._fit_tables()
         txt.config(state="disabled")
         self._finder.refresh()
         self._update_crumbs()
@@ -45522,6 +45636,58 @@ class _StatuteWindow:
                 1800,
                 lambda: txt.tag_remove("jumpflash", "1.0", "end"),
             )
+
+    # ------------------------------------------------------------------
+    # Tables
+    # ------------------------------------------------------------------
+
+    def _add_table(self, first: int, indtag: str) -> str:
+        """Register the table whose first row is paragraph *first*, set at
+        *indtag*'s margin, and name the tag that sets out its columns."""
+        rows = []
+        for kind, _ind, text in self._doc.paras[first:]:
+            if kind not in us_code.TABLE_KINDS:
+                break
+            rows.append((kind.endswith("head"), text.split("\t")))
+        limits = _table_limits(rows)
+        lines = [(head, line) for head, cells in rows for line
+                 in ([cells] if head else _table_lines(cells, limits))]
+        note = self._doc.paras[first][0].startswith("note")
+        tag = f"table-{first}"
+        self._tables[tag] = (
+            lines, int(self._text.tag_cget(indtag, "lmargin1")),
+            self._fonts["small" if note else "base"], limits)
+        return tag
+
+    def _fit_tables(self) -> None:
+        """Set each table's columns for the window as it now is: the last
+        wraps where there is room for it.  A table too wide for that keeps its
+        columns and runs on past the window's edge, for the scrollbar under
+        the text: wrapped, a figure would lose the column that says what it
+        is, and a lost column is worse than a scroll."""
+        txt = self._text
+        room = txt.winfo_width() * _TABLE_COLUMNS_SHARE
+        for tag, (rows, margin, font, _limits) in self._tables.items():
+            stops = _table_stops(rows, font.measure, margin)
+            fits = not stops or stops[-1] <= room
+            if self._table_fit.get(tag) == (stops, fits):
+                continue    # a window being dragged asks many times over
+            self._table_fit[tag] = (stops, fits)
+            txt.tag_configure(
+                tag, tabs=tuple(stops) or "", lmargin1=margin,
+                lmargin2=stops[-1] if stops else margin + 22,
+                wrap="word" if fits else "none", spacing3=3)
+
+    def _on_xscroll(self, first: str, last: str) -> None:
+        """The horizontal scrollbar, under the text only while there is
+        something to scroll to: a table wider than the window."""
+        self._hsb.set(first, last)
+        needed = float(first) > 0 or float(last) < 1
+        if needed != bool(self._hsb.winfo_manager()):
+            if needed:
+                self._hsb.pack(side="bottom", fill="x", before=self._text)
+            else:
+                self._hsb.pack_forget()
 
     # ------------------------------------------------------------------
     # The Code above a U.S. Code section
@@ -46033,6 +46199,8 @@ class _StatuteWindow:
         self._fonts["bold"].configure(size=new)
         self._fonts["sechead"].configure(size=new + 2)
         self._fonts["small"].configure(size=max(new - 2, 8))
+        self._fonts["smallbold"].configure(size=max(new - 2, 8))
+        self._fit_tables()
 
 
 class _CitingOpinionsWindow:

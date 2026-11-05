@@ -199,7 +199,7 @@ class UscSection:
     section: str
     url: str
     # (kind, indent, text); kind in {"sechead", "head", "body", "credit",
-    # "note-head", "note-body"}
+    # "note-head", "note-body"} or TABLE_KINDS
     paras: list[tuple[str, int, str]] = field(default_factory=list)
     # the units above the section, outermost first: ("title42", "Title 42"),
     # ("title42-chapter21", "Chapter 21") … — see load_unit
@@ -434,6 +434,32 @@ def _section_crumbs(title: str, url: str,
     return crumbs or [(f"title{title}", f"Title {title}")]
 
 
+def _mend_tables(paras: list[tuple[str, int, str]], title: str,
+                 section: str) -> list[tuple[str, int, str]]:
+    """*paras*, with a table row the OLRC's page ran together (see
+    _flat_table) split where Cornell's copy of the table splits it.  Cornell
+    gives only the place: a row is split only if its copy reads the same,
+    letter for letter, and any other stays as the OLRC prints it."""
+    if not any(kind == "table" and "\t" not in text
+               for kind, _depth, text in paras):
+        return paras
+    try:
+        copy = _lii_section(title, section)
+    except Exception as exc:
+        print(f"[usc] no Cornell copy to split {title} U.S.C. § {section}'s "
+              f"tables by: {exc}")
+        return paras
+
+    def compact(text: str) -> str:
+        return re.sub(r"\s+", "", text)
+
+    cells = {compact(text.replace(" | ", "")): text.replace(" | ", "\t")
+             for _kind, _depth, text in copy.paras if " | " in text}
+    return [(kind, depth, cells.get(compact(text), text)
+             if kind in ("table", "table-head") and "\t" not in text
+             else text) for kind, depth, text in paras]
+
+
 def _olrc_section(title: str, section: str) -> UscSection:
     """A section from the OLRC.  Raises SectionNotFound when the OLRC says
     there is no such section, _OlrcUnavailable when it does not answer.
@@ -456,7 +482,8 @@ def _olrc_section(title: str, section: str) -> UscSection:
         page, url = fetched
         paras = parse_section(page)
         if paras:
-            return UscSection(title=title, section=cand, url=url, paras=paras,
+            return UscSection(title=title, section=cand, url=url,
+                              paras=_mend_tables(paras, title, cand),
                               crumbs=_section_crumbs(title, url, contents),
                               adjacent=olrc_adjacent(page))
         if not _olrc_page(page):
@@ -768,13 +795,14 @@ def _class_depth(cls: str) -> int:
         return 4
     return 0
 
-# The paragraphs, and the <div>s that say what they are.  A note quotes the
-# provisions it amends in the very classes of the statute's own text, so it
-# is where a paragraph stands, not its class, that keeps quoted statutory
-# text in an amendment note from masquerading as current law.
+# The paragraphs and tables, and the <div>s that say what they are.  A note
+# quotes the provisions it amends in the very classes of the statute's own
+# text, so it is where a paragraph stands, not its class, that keeps quoted
+# statutory text in an amendment note from masquerading as current law.
 _TOKEN_RE = re.compile(
     r'<div\b[^>]*?class="(statutory-body-container|note-block)\b[^"]*"'
-    r"|<(h\d|p)\b[^>]*?class=\"([^\"]+)\"[^>]*>(.*?)</\2>",
+    r"|<(h\d|p)\b[^>]*?class=\"([^\"]+)\"[^>]*>(.*?)</\2>"
+    r"|(<table\b.*?</table>)",
     re.IGNORECASE | re.DOTALL,
 )
 # A subdivision's heading, a line of its own: "(a) <em>Employer practices</em>".
@@ -800,22 +828,134 @@ def _tidy(text: str) -> str:
     return re.sub(r"\s+(?=[,;]|\.\)?$)", "", text)
 
 
+# A table reaches the reader a row at a time, each row a paragraph of a kind
+# of its own: "table", "table-head" for a caption or a row of headings, and
+# "note-table" and "note-table-head" in a note, so that they go with the notes.
+# A row's cells are separated by tabs, which the viewer lines up, and it holds
+# a cell for every column, a spanned one empty, so that each cell stands under
+# its heading.  ecfr.py reads its tables here too.
+TABLE_KINDS = frozenset(("table", "table-head",
+                         "note-table", "note-table-head"))
+
+_TABLE_CAPTION_RE = re.compile(
+    r"<caption\b[^>]*>(.*?)</caption>", re.IGNORECASE | re.DOTALL)
+_TABLE_ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_TABLE_CELL_RE = re.compile(
+    r"<(t[dh])\b([^>]*)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+_CELL_BREAK_RE = re.compile(r"<(?:br|/p|/div)\b[^>]*>", re.IGNORECASE)
+# "mg/m<sup>3</sup>", "CO<sub>2</sub>": raised and lowered in the text too,
+# since plain digits would read as part of the figure before them.
+_RAISED_RE = re.compile(r"<(sup|sub)\b[^>]*>\s*(\d+)\s*</\1>", re.IGNORECASE)
+_RAISED_DIGITS = {"sup": str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹"),
+                  "sub": str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")}
+
+
+def _cell_text(fragment: str) -> str:
+    fragment = _FOOTNOTE_MARK_RE.sub(r"[\1]", fragment)
+    fragment = _RAISED_RE.sub(
+        lambda m: m.group(2).translate(_RAISED_DIGITS[m.group(1).lower()]),
+        fragment)
+    return _clean(_CELL_BREAK_RE.sub(" ", fragment))
+
+
+# A table the page has run into the paragraph before it, as the rate tables of
+# 26 U.S.C. § 1(a) and (e) are: no <table>, and nothing left between a row's
+# cells — "Not over $36,90015% of taxable income."  What shows it is its line
+# breaks: a long run of them, a line of headings (in <b>s, or not: 7 U.S.C.
+# § 1441), a shorter run, then a row a line.  A dollar figure with an amount
+# straight after it can only be where two cells met.  A row with no such place
+# ("Not more than 10290") stays as the page prints it, for _mend_tables.
+_FLAT_TABLE_RE = re.compile(r"^(.*?)\n{5,}(.+?)\n{2,}(.+)$", re.DOTALL)
+_FLAT_HEAD_RE = re.compile(r"<b>(.*?)</b>", re.DOTALL)
+_FLAT_CELLS_RE = re.compile(
+    r"^(.*\$\d{1,3}(?:,\d{3})*)(?=\$|\d+(?:\.\d+)?%)(.*)$")
+
+
+def _flat_table(inner: str) -> tuple[str, list[tuple[bool, str]]]:
+    """A paragraph's own text, and the rows of any table run into it (see
+    table_rows)."""
+    m = _FLAT_TABLE_RE.match(inner)
+    if m is None:
+        return inner, []
+    heads = _FLAT_HEAD_RE.findall(m.group(2)) or [m.group(2)]
+    rows = [(True, "\t".join(_clean(head) for head in heads))]
+    for line in m.group(3).splitlines():
+        line = _clean(line)
+        if line:
+            cells = _FLAT_CELLS_RE.match(line)
+            rows.append((False, "\t".join(cells.groups()) if cells else line))
+    return m.group(1), rows
+
+
+def _span(attrs: str, name: str) -> int:
+    m = re.search(rf'\b{name}="(\d+)"', attrs, re.IGNORECASE)
+    return max(int(m.group(1)), 1) if m else 1
+
+
+def table_rows(table: str) -> list[tuple[bool, str]]:
+    """A table's rows as (heading?, its cells joined by tabs): its caption if
+    it has one, then each row with text in it.  A heading row is all <th>."""
+    rows: list[tuple[bool, str]] = []
+    caption = _TABLE_CAPTION_RE.search(table)
+    if caption and _cell_text(caption.group(1)):
+        rows.append((True, _cell_text(caption.group(1))))
+    covered: dict[int, int] = {}    # column → rows a rowspan still fills
+    for row in _TABLE_ROW_RE.finditer(table):
+        cells: list[str] = []
+
+        def fill_covered() -> None:
+            while covered.get(len(cells), 0) > 0:
+                covered[len(cells)] -= 1
+                cells.append("")
+
+        found = list(_TABLE_CELL_RE.finditer(row.group(1)))
+        for cell in found:
+            fill_covered()
+            colspan = _span(cell.group(2), "colspan")
+            rowspan = _span(cell.group(2), "rowspan")
+            if rowspan > 1:
+                for column in range(len(cells), len(cells) + colspan):
+                    covered[column] = rowspan - 1
+            cells.append(_cell_text(cell.group(3)))
+            cells.extend("" for _spanned in range(colspan - 1))
+        fill_covered()
+        line = "\t".join(cells).rstrip("\t")
+        if line:
+            rows.append((all(c.group(1).lower() == "th" for c in found), line))
+    return rows
+
+
 def parse_section(page_html: str) -> list[tuple[str, int, str]]:
     """Parse an OLRC section page into a (kind, indent, text) stream, each
     paragraph at the indentation the page gives it (see _class_depth)."""
     paras: list[tuple[str, int, str]] = []
     is_note = False         # past the statute's own text
     footnotes = False
+
+    def add_table(rows: list[tuple[bool, str]]) -> None:
+        # Set where the text before it is: at its subdivision's margin.
+        depth = paras[-1][1] if paras else 0
+        prefix = "note-" if is_note else ""
+        paras.extend((f"{prefix}table-head" if heading else f"{prefix}table",
+                      depth, row) for heading, row in rows)
+
     for m in _TOKEN_RE.finditer(page_html):
         if m.group(1):
             is_note = m.group(1).lower() == "note-block"
+            continue
+        if m.group(5):
+            add_table(table_rows(m.group(5)))
             continue
         cls = m.group(3).split()[0]
         inner = _FOOTNOTE_MARK_RE.sub(r"[\1]", m.group(4))
         if cls == "footnote":
             inner = _FOOTNOTE_NUMBER_RE.sub(r"[\1] ", inner)
+        rows: list[tuple[bool, str]] = []
+        if _is_body_class(cls):
+            inner, rows = _flat_table(inner)
         text = _clean(inner)
         if not text:
+            add_table(rows)
             continue
         if cls == "section-head":
             paras.append(("sechead", 0, _tidy(text)))
@@ -836,6 +976,7 @@ def parse_section(page_html: str) -> list[tuple[str, int, str]]:
         elif is_note and _is_body_class(cls):
             # note text, or statute-classed text quoted inside a note
             paras.append(("note-body", _class_depth(cls), text))
+        add_table(rows)
     return paras
 
 
@@ -941,6 +1082,11 @@ def statute_paths(
     set_aside: list[tuple[int, str]] = []  # levels flush text interrupted
     out: list[tuple[str, ...]] = []
     for kind, depth, text in paras:
+        if kind in ("table", "table-head"):
+            # A table belongs to the subdivision it stands in, and a cell
+            # opening "(1)" is no enumerator of the statute's.
+            out.append(tuple(enum for _d, enum in stack))
+            continue
         if kind not in ("body", "head"):
             out.append(())
             continue
