@@ -1687,13 +1687,14 @@ class _SavedStatuteDoc:
             for styles in (data.get("para_styles") or [])
         ]
         self.site_formatting = bool(data.get("site_formatting", False))
-        self.url = str(data.get("url", ""))
+        # A U.S. Code section saved in the OLRC viewer's day holds its address
+        # there; its bookmark stays filed under that, its link goes to today's.
+        self.url = us_code.live_url(str(data.get("url", "")))
         # the address its bookmark is filed under, when not its url (see
         # _StatuteWindow._bookmark_descriptor)
-        self.key_url = str(data.get("key_url", "") or "")
+        self.key_url = str(data.get("key_url", "") or data.get("url", "") or "")
         self.title = str(data.get("title", ""))
         self.set_key = data.get("set_key")
-        self.container = None
         self.crumbs = [tuple(c) for c in (data.get("crumbs") or [])
                        if len(c) == 2]
         self._kind = str(data.get("kind", "usc"))
@@ -40695,14 +40696,17 @@ def _fetch_statute_window(parent: tk.Misc, kind: str, spec: str,
     ``on_missing`` receives a message for the reader when the section can't
     be opened — "No such provision found: 42 U.S.C. § 99999." when the
     source has no such section, or what went wrong when the source itself
-    failed — so a citation typed in by hand never ends in silence.
-    ``on_unreachable``, when given, takes the second kind of message
-    instead: the section may well exist, and its official page may open
-    where the app's own request could not."""
+    failed — so a citation never ends in silence.  Left out, as by a link
+    clicked in a case or a brief, the message is told as one typed into
+    Spotlight is.  ``on_unreachable``, when given, takes the second kind of
+    message instead: the section may well exist, and its official page may
+    open where the app's own request could not."""
     mod = _STATUTE_SOURCES[kind]
     host = _SOURCE_HOST.get(kind, "the source")
     title, section, subs = spec.split(":", 2)
     label = mod.spec_label(spec)
+    if on_missing is None:
+        on_missing = getattr(app, "_notify_lookup_miss", None)
 
     def safe_status(s: str) -> None:
         try:

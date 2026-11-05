@@ -44,16 +44,35 @@ class UsCodeTests(unittest.TestCase):
         with _with_requests(get):
             return us_code.load_section("42", section)
 
+    # The title's list of its sections, which names none asked for here.
+    TREE = ('<details class="tree-node"><summary>CHAPTER 1</summary>'
+            '<ul class="tree-sections"><li><a href="us/usc/t42/chapter1-front.'
+            'html">CHAPTER 1</a></li></ul><ul class="tree-sections"><li>'
+            '<a class="section-link" href="us/usc/t42/s1/">§ 1 — Title</a>'
+            "</li></ul></details>")
+
+    def _olrc(self, section):
+        def get(url, **kw):
+            if "browse-tree" in url:
+                return _Response(200, self.TREE)
+            if "law.cornell.edu" in url:
+                raise AssertionError("Cornell asked")
+            return section
+        return get
+
+    def setUp(self):
+        us_code._contents_cache.clear()
+        self.addCleanup(us_code._contents_cache.clear)
+
     def test_a_section_the_code_does_not_have(self):
         with self.assertRaises(us_code.SectionNotFound):
-            self._load(lambda url, **kw: _Response(404))
+            self._load(self._olrc(_Response(404)))
 
     def test_a_page_with_no_section_on_it(self):
-        # the OLRC's viewer (its template), with no section in it
-        page = ('<html><head><link rel="stylesheet" href="/javax.faces.'
-                'resource/usc.css.xhtml?ln=css" /></head><body></body></html>')
+        # the OLRC's own frame, with no section in it
+        page = '<html><body><div class="page_content_internal"></div></html>'
         with self.assertRaises(us_code.SectionNotFound):
-            self._load(lambda url, **kw: _Response(200, page))
+            self._load(self._olrc(_Response(200, page)))
 
     def test_a_site_that_fails_is_not_a_missing_section(self):
         def down(url, **kw):
@@ -124,7 +143,7 @@ class _Inline:
 
 
 class StatuteFetchTests(unittest.TestCase):
-    def _fetch(self, error):
+    def _fetcher(self, error):
         source = SimpleNamespace(
             spec_label=lambda spec: "42 U.S.C. § 99999",
             load_section=Mock(side_effect=error))
@@ -132,10 +151,12 @@ class StatuteFetchTests(unittest.TestCase):
               "_STATUTE_SOURCES": {"usc": source},
               "_SOURCE_HOST": {"usc": "uscode.house.gov"},
               "_StatuteWindow": Mock()}
-        fetch = _module_function("_fetch_statute_window", ns)
+        return _module_function("_fetch_statute_window", ns)
+
+    def _fetch(self, error):
         status, missing = [], []
-        fetch(_Parent(), "usc", "42:99999:", status.append,
-              on_missing=missing.append)
+        self._fetcher(error)(_Parent(), "usc", "42:99999:", status.append,
+                             on_missing=missing.append)
         return status, missing
 
     def test_a_missing_section_is_reported_as_missing(self):
@@ -149,6 +170,34 @@ class StatuteFetchTests(unittest.TestCase):
         self.assertEqual(
             missing,
             ["Couldn't open 42 U.S.C. § 99999: uscode.house.gov: 503"])
+
+    def test_a_link_clicked_is_told_as_spotlight_tells_it(self):
+        # A click names no on_missing; Spotlight's own handler hears of it,
+        # with no window to sit on, just as for a citation typed there.
+        for error, message in (
+                (us_code.SectionNotFound("no such"),
+                 "No such provision found: 42 U.S.C. § 99999."),
+                (RuntimeError("uscode.house.gov: 503"),
+                 "Couldn't open 42 U.S.C. § 99999: uscode.house.gov: 503")):
+            with self.subTest(message=message):
+                app = SimpleNamespace(_notify_lookup_miss=Mock())
+                self._fetcher(error)(_Parent(), "usc", "42:99999:", app=app)
+                app._notify_lookup_miss.assert_called_once_with(message)
+
+    def test_a_caller_with_its_own_notice_keeps_it(self):
+        app = SimpleNamespace(_notify_lookup_miss=Mock())
+        missing = []
+        self._fetcher(us_code.SectionNotFound("no such"))(
+            _Parent(), "usc", "42:99999:", app=app, on_missing=missing.append)
+        self.assertEqual(len(missing), 1)
+        app._notify_lookup_miss.assert_not_called()
+
+    def test_with_no_app_to_tell_it_goes_to_the_status_line(self):
+        status = []
+        self._fetcher(us_code.SectionNotFound("no such"))(
+            _Parent(), "usc", "42:99999:", status.append)
+        self.assertEqual(status[-1],
+                         "No such provision found: 42 U.S.C. § 99999.")
 
 
 class NoticeTests(unittest.TestCase):
@@ -208,6 +257,38 @@ class WhereItIsAskedTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn("self._notify_lookup_miss(m, dlg)",
                               self._source(name))
+
+
+class WhereALinkIsClickedTests(unittest.TestCase):
+    """Every way of following a statute link reaches _fetch_statute_window
+    with the app, so that its misses are told (see StatuteFetchTests)."""
+
+    def _source(self, owner, name):
+        body = (TREE.body if owner is None else next(
+            n.body for n in TREE.body
+            if isinstance(n, ast.ClassDef) and n.name == owner))
+        node = next(n for n in body
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+        return ast.get_source_segment(SRC, node)
+
+    def test_a_link_in_a_case_read_as_text(self):
+        src = self._source("_ScholarTextWindow", "_open_statute")
+        self.assertIn("_fetch_statute_window(", src)
+        self.assertIn("app=self._app", src)
+
+    def test_a_link_in_a_scan_or_a_brief(self):
+        src = self._source(None, "_follow_brief_action")
+        self.assertIn("_open_statute_action(parent, action, status, app=app)",
+                      src)
+
+    def test_a_cross_reference_in_a_statute(self):
+        src = self._source("_StatuteWindow", "_follow_link")
+        self.assertIn("_fetch_statute_window(", src)
+        self.assertIn("app=self._app", src)
+
+    def test_none_of_them_silences_the_notice(self):
+        src = self._source(None, "_open_statute_action")
+        self.assertIn("on_missing=on_missing", src)
 
 
 if __name__ == "__main__":

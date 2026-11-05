@@ -1,18 +1,18 @@
 """Going up from a U.S. Code section to the units above it.
 
-Every unit of the Code — title, subtitle, part, chapter, subchapter, subpart —
-has an OLRC page: its heading, a table of its contents, then its full text.
-``us_code.load_unit`` reads a unit's table (and only that much of the page);
-a unit with no table of its own takes the part of its parent's that lists it.
-Every page's navigation bar names the units above it by page id, so the
-viewer's breadcrumb goes up exactly; a unit below is found from the OLRC's
-naming, then the designation as printed, then its first section's navigation
-bar.
+The OLRC's browse tree sets out a whole title: every unit — subtitle, part,
+chapter, subchapter, subpart — nested in the one that holds it, with the
+sections directly in it.  ``us_code.load_unit`` reads a unit's contents from
+that, and a section's place in the Code too, so the viewer's breadcrumb goes
+up exactly and one fetch serves a whole title.  A section's own page names
+the sections before and after it.
 
-The fixtures are the OLRC's own markup, cut down (September 2026).  Nothing
+The fixtures are the OLRC's own markup, cut down (November 2026).  Nothing
 here touches the network.
 """
 
+import sys
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,433 +22,410 @@ import us_code
 from us_code import (
     UnitEntry,
     UnitNotFound,
-    UscSection,
     UscUnit,
-    _child_granule,
-    _group_in,
-    _is_roman_list,
-    _same_designation,
-    _unit_entries,
+    _parse_tree,
     crumb_label,
+    load_section,
     load_unit,
+    olrc_adjacent,
     open_unit_entry,
-    page_crumbs,
 )
 
 
-def nav(*crumbs, own):
-    links = " / ".join(
-        f'<a href="/view.xhtml;jsessionid=X?req=granuleid%3AUSC-prelim-{g}'
-        f'&amp;saved=%7CZ%7C&amp;edition=prelim" class="link_class">{label}'
-        "</a>" for g, label in crumbs)
-    return ('<div class="navigator"><form id="frmNav">'
-            '<a id="frmNav:prevSection" href="#">&lt;&lt; Previous</a> '
-            f'{links} / <span style="font-size: 11px; font-weight: bold;">'
-            f"{own}</span></form></div>")
+def sections(title, *rows):
+    links = "".join(
+        f'<li><a class="section-link" href="us/usc/t{title}/s{number}/">'
+        f'§ {number.replace("-", "–")} — {text}</a></li>'
+        for number, text in rows)
+    return f'<ul class="tree-sections">{links}</ul>'
 
 
-def row2(left, right):
-    return ('<div><div class="two-column-analysis-style-content-left">'
-            f'{left}</div><div class="two-column-analysis-style-content-right">'
-            f"{right}</div></div>")
+def node(title, slug, head, span, *inside):
+    """A unit: its summary, its front matter link, then what is in it."""
+    name = head.split("⁠—")[0]
+    return (f'<details class="tree-node"><summary>{head} '
+            f'<span class="section-range">({span})</span></summary>'
+            f'<ul class="tree-sections"><li><a href="us/usc/t{title}/{slug}-'
+            f'front.html">{name}⁠—Front Matter</a></li></ul>'
+            + "".join(inside) + "</details>")
 
 
-def row3(left, center, right=""):
-    return ('<div><div class="three-column-analysis-style-content-left">'
-            f'{left}</div><div class="three-column-analysis-style-content-'
-            f'center">{center}</div><div class="three-column-analysis-style-'
-            f'content-right">{right}</div></div>')
-
-
-def label(text):
-    return f'<div><div class="analysis-head-left">{text}</div></div>'
-
-
-def subhead(text, tag="h4", cls="analysis-subhead"):
-    return f'<{tag} class="{cls}">{text}</{tag}>'
-
-
-def unit_page(head, *table, crumbs=(), own="", title_page=False):
-    """A unit page: navigation bar, heading, table, then the body."""
-    field = "titlehead" if title_page else "structuralhead"
-    tag = "h1" if title_page else "h3"
-    return (nav(*crumbs, own=own)
-            + f'<div id="docViewer"><!-- field-start:{field} -->'
-            f'<{tag} class="x-head">{head}</{tag}>'
-            f"<!-- field-end:{field} -->"
-            "<!-- field-start:analysis -->" + "".join(table)
-            + "<!-- field-end:analysis -->"
-            '<!-- field-start:head --><h3 class="section-head">§1. First'
-            "</h3><!-- field-end:head -->")
-
-
-CHAPTER_21 = unit_page(
-    "CHAPTER 21&mdash;CIVIL RIGHTS",
-    subhead("SUBCHAPTER I&mdash;GENERALLY"),
-    '<div class="analysis">', label("Sec."),
-    row2("1981.", "Equal rights under the law."),
-    row2("1983.", "Civil action for deprivation of rights."),
-    row2("1993.", '<span id="wide">Repealed.</span>'),
-    "</div>",
-    subhead("SUBCHAPTER I&ndash;A&mdash;INSTITUTIONALIZED PERSONS"),
-    '<div class="analysis">', row2("1997.", "Definitions."), "</div>",
-    crumbs=[("title42", "TITLE 42")], own="CHAPTER 21",
+TITLE_42 = node(
+    "42", "chapter21", "CHAPTER 21⁠—CIVIL RIGHTS",
+    "sections 1981 to 2000h–6",
+    node("42", "chapter21-subchapterI", "SUBCHAPTER I⁠—GENERALLY",
+         "sections 1981 to 1996b",
+         sections("42", ("1981", "Equal rights under the law"),
+                  ("1983", "Civil action for deprivation of rights"))),
+    node("42", "chapter21-subchapterVI",
+         "SUBCHAPTER VI⁠—EQUAL EMPLOYMENT OPPORTUNITIES",
+         "sections 2000e to 2000e–17",
+         sections("42", ("2000e-2", "Unlawful employment practices"))),
+) + node(
+    "42", "chapter5", "[CHAPTER 5⁠—REPEALED]", "section 201",
+    sections("42", ("201", "Repealed.  July 1, 1944, ch. 373 , title XIII, "
+                           "§ 1313,  58 Stat. 714")),
 )
 
-SUBCHAPTER_I = unit_page(
-    "SUBCHAPTER I&mdash;GENERALLY",   # no table of its own
-    crumbs=[("title42", "TITLE 42"), ("title42-chapter21", "CHAPTER 21")],
-    own="SUBCHAPTER I",
+# Topics with no designation share one name under their unit.
+TITLE_12 = node(
+    "12", "chapter7", "CHAPTER 7⁠—FARM CREDIT", "sections 636 to 1020",
+    node("12", "chapter7-level", "Examinations", "sections 636 to 640",
+         sections("12", ("636", "Omitted"))),
+    node("12", "chapter7-level", "Penalties", "section 641",
+         sections("12", ("641", "Repealed"))),
+)
+
+# A repealed chapter, and the new one that took its number.
+TITLE_26 = node(
+    "26", "subtitleD", "Subtitle D⁠—Miscellaneous Excise Taxes",
+    "sections 4001 to 5000D",
+    node("26", "subtitleD-chapter38", "[CHAPTER 38⁠—REPEALED]",
+         "sections 4521 to 4601", sections("26", ("4521", "Repealed"))),
+    node("26", "subtitleD-chapter38",
+         "CHAPTER 38⁠—ENVIRONMENTAL TAXES", "sections 4611 to 4682",
+         sections("26", ("4611", "Imposition of tax"))),
+)
+
+TITLE_18 = node(
+    "18", "partI", "PART I⁠—CRIMES", "sections 1 to 2725",
+    node("18", "partI-chapter44", "CHAPTER 44⁠—FIREARMS",
+         "sections 921 to 934", sections("18", ("922", "Unlawful acts"))),
+)
+
+BROWSE = ('<details class="tree-title" data-lazy-title="41"><summary>* Title 41 '
+          "— PUBLIC CONTRACTS</summary></details>"
+          '<details class="tree-title" data-lazy-title="42"><summary>Title 42 '
+          "— THE PUBLIC HEALTH AND WELFARE</summary></details>")
+
+SECTION_1983 = (
+    '<nav class="section-nav"><a href="../../t42/s1982/" class="prev-section">'
+    "&laquo; Previous</a><span class=\"breadcrumb\"></span>"
+    '<a href="../../t42/s1984/" class="next-section">Next &raquo;</a></nav>'
+    '<div id="content" class="page_content_internal section-page">'
+    '<h3 class="section-head">§1983. Civil action</h3>'
+    '<div class="statutory-body-container">'
+    '<p class="statutory-body">Every person</p></div>'
 )
 
 
-class NavigationBarTests(unittest.TestCase):
-    def test_the_units_above_and_the_page_itself(self):
-        crumbs, own = page_crumbs(SUBCHAPTER_I)
-        self.assertEqual(crumbs, [("title42", "TITLE 42"),
-                                  ("title42-chapter21", "CHAPTER 21")])
-        self.assertEqual(own, "SUBCHAPTER I")
+class _Response:
+    def __init__(self, status=200, text=""):
+        self.status_code = status
+        self.content = text.encode()
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"{self.status_code} Server Error")
+
+
+def _site(pages):
+    """A requests stand-in: the page, _Response or exception *pages* gives
+    each URL's end, 404 for the rest.  Records the URLs asked for."""
+    asked = []
+
+    def get(url, **_kw):
+        asked.append(url)
+        for end, page in pages.items():
+            if url.endswith(end):
+                if isinstance(page, BaseException):
+                    raise page
+                return page if isinstance(page, _Response) \
+                    else _Response(200, page)
+        return _Response(404)
+
+    return patch.dict(sys.modules, {"requests": SimpleNamespace(get=get)}), \
+        asked
+
+
+class _Fresh(unittest.TestCase):
+    def setUp(self):
+        self._reset()
+        self.addCleanup(self._reset)
+
+    @staticmethod
+    def _reset():
+        us_code._cache.clear()
+        us_code._contents_cache.clear()
+        us_code._olrc_rest_until = 0.0
+
+
+class LabelTests(unittest.TestCase):
     def test_labels_as_the_reader_shows_them(self):
         self.assertEqual(crumb_label("SUBCHAPTER I"), "Subchapter I")
         self.assertEqual(crumb_label("part 5"), "Part 5")
         self.assertEqual(crumb_label("TITLE 42"), "Title 42")
         self.assertEqual(crumb_label("Subpart C"), "Subpart C")
 
-    def test_a_page_without_a_bar(self):
-        self.assertEqual(page_crumbs("<p>nothing</p>"), ([], ""))
+    def test_a_unit_with_no_designation_is_named_as_printed(self):
+        self.assertEqual(crumb_label("GENERAL PROVISIONS"),
+                         "GENERAL PROVISIONS")
+        self.assertEqual(crumb_label("Penalties"), "Penalties")
 
 
-class TableOfContentsTests(unittest.TestCase):
-    def test_sections_under_the_subheads_of_a_chapter(self):
-        entries = _unit_entries(CHAPTER_21, "title42-chapter21")
-        self.assertEqual(
-            [(e.kind, e.depth, e.label, e.heading) for e in entries], [
-                ("group", 0, "SUBCHAPTER I—GENERALLY", ""),
-                ("section", 1, "§ 1981", "Equal rights under the law."),
-                ("section", 1, "§ 1983",
-                 "Civil action for deprivation of rights."),
-                ("section", 1, "§ 1993", "Repealed."),
-                ("group", 0, "SUBCHAPTER I–A—INSTITUTIONALIZED PERSONS", ""),
-                ("section", 1, "§ 1997", "Definitions."),
-            ])
-        self.assertEqual(entries[2].section, "1983")
-
-    def test_a_titles_chapters_with_their_first_sections(self):
-        page = unit_page(
-            "TITLE 42&mdash;THE PUBLIC HEALTH AND WELFARE",
-            '<div class="analysis"><div><div class="analysis-head-left">'
-            'Chap.</div><div class="analysis-head-right">Sec.</div></div>',
-            row3("1A.", "The Public Health Service; Supplemental Provisions",
-                 "71"),
-            row3("5.<sup>1</sup>", "Administrative Procedure",
-                 "<sup>1</sup>501"),
-            "</div>", title_page=True, own="TITLE 42")
-        entries = _unit_entries(page, "title42")
-        self.assertEqual(
-            [(e.label, e.granule, e.first_section) for e in entries],
-            [("Chapter 1A", "title42-chapter1A", "71"),
-             ("Chapter 5", "title42-chapter5", "501")])
-
-    def test_a_title_listing_subtitles_then_every_chapter(self):
-        # 26 U.S.C.: two tables, told apart by headings.
-        page = unit_page(
-            "TITLE 26&mdash;INTERNAL REVENUE CODE",
-            label("Subtitle"), row3("A.", "Income taxes."),
-            row3("B.", "Estate and gift taxes."),
-            label("Chapter"), row3("1.", "Normal taxes and surtaxes", "1"),
-            title_page=True, own="TITLE 26")
-        entries = _unit_entries(page, "title26")
-        self.assertEqual(
-            [(e.kind, e.depth, e.label) for e in entries],
-            [("group", 0, "Subtitles"), ("unit", 1, "Subtitle A"),
-             ("unit", 1, "Subtitle B"), ("group", 0, "Chapters"),
-             ("unit", 1, "Chapter 1")])
-        self.assertEqual(entries[1].granule, "title26-subtitleA")
-
-    def test_notes_are_not_contents(self):
-        # 42 U.S.C. ch. 6A lists part after part in notes; "Editorial
-        # Notes" and "Amendments" head real notes and list nothing.
-        page = unit_page(
-            "CHAPTER 6A&mdash;PUBLIC HEALTH SERVICE",
-            subhead("SUBCHAPTER I&mdash;ADMINISTRATION"),
-            label("Sec."), row2("201.", "Definitions."),
-            "<!-- field-end:analysis --><!-- field-start:notes -->",
-            subhead("Part A&mdash;Administration", cls="note-head"),
-            row2("202.", "Administration and supervision of Service."),
-            subhead("<strong>Editorial Notes</strong>", cls="note-head"),
-            subhead("Amendments", cls="note-head"),
-            own="CHAPTER 6A")
-        entries = _unit_entries(page, "title42-chapter6A")
-        self.assertEqual(
-            [(e.kind, e.depth, e.label) for e in entries],
-            [("group", 0, "SUBCHAPTER I—ADMINISTRATION"),
-             ("section", 1, "§ 201"),
-             ("group", 1, "Part A—Administration"),
-             ("section", 2, "§ 202")])
-
-    def test_part_subheads_set_as_h3(self):
-        # 10 U.S.C. subtitle A.
-        page = unit_page(
-            "Subtitle A&mdash;General Military Law",
-            subhead("<strong>PART I&mdash;ORGANIZATION</strong>", tag="h3"),
-            label("Chap."), row3("1.", "Definitions", "101"),
-            own="Subtitle A")
-        entries = _unit_entries(page, "title10-subtitleA")
-        self.assertEqual([(e.kind, e.label, e.granule) for e in entries], [
-            ("group", "PART I—ORGANIZATION", ""),
-            ("unit", "Chapter 1", "title10-chapter1")])
-
-    def test_a_table_set_as_a_table(self):
-        # 10 U.S.C. ch. 47 (the UCMJ): subchapters, and sections numbered as
-        # articles too.
-        chapter = unit_page(
-            "CHAPTER 47&mdash;UNIFORM CODE OF MILITARY JUSTICE",
-            '<table class="usc"><tr><th id="row0col0">Subchapter</th>'
-            '<th id="row0col1">&#160;</th><th id="row0col2">Sec.</th>'
-            '<th id="row0col3">Art.</th></tr>'
-            '<tr>\n<td class="left">I. </td>\n<td class="middle">General '
-            'Provisions </td>\n<td class="middle">801 </td>\n'
-            '<td class="right">1</td>\n</tr>'
-            '<tr>\n<td class="left">XII. </td>\n<td class="middle">Court of '
-            'Appeals </td>\n<td class="middle">941 </td>\n'
-            '<td class="right">141</td>\n</tr></table>',
-            own="CHAPTER 47")
-        units = _unit_entries(chapter, "title10-chapter47")
-        self.assertEqual(
-            [(e.label, e.granule, e.first_section) for e in units],
-            [("Subchapter I", "title10-chapter47-subchapter1", "801"),
-             ("Subchapter XII", "title10-chapter47-subchapter12", "941")])
-        subchapter = unit_page(
-            "SUBCHAPTER I&mdash;GENERAL PROVISIONS",
-            '<table class="usc"><tr><th id="row0col0">Sec.</th>'
-            '<th id="row0col1">Art.</th><th id="row0col2">&#160;</th></tr>'
-            '<tr>\n<td class="left">801. </td>\n<td class="middle">1. </td>'
-            '\n<td class="right">Definitions.</td>\n</tr></table>',
-            own="SUBCHAPTER I")
-        (entry,) = _unit_entries(subchapter, "title10-chapter47-subchapter1")
-        self.assertEqual((entry.label, entry.heading, entry.section),
-                         ("§ 801 (Art. 1)", "Definitions.", "801"))
-
-
-class PageIdTests(unittest.TestCase):
-    """The ids the OLRC gives the units a table lists, as its navigation
-    bars show them."""
-
-    def test_the_naming(self):
-        cases = [
-            # chapters, subtitles, and parts directly under a title hang
-            # off the title
-            (("title18-part1", "chapter", "44", False), "title18-chapter44"),
-            (("title26-subtitleA", "chapter", "1", False), "title26-chapter1"),
-            (("title49", "subtitle", "VII", True), "title49-subtitle7"),
-            (("title18", "part", "I", True), "title18-part1"),
-            # everything else nests, roman numerals as digits
-            (("title10-subtitleA", "part", "II", True),
-             "title10-subtitleA-part2"),
-            (("title26-chapter1", "subchapter", "A", False),
-             "title26-chapter1-subchapterA"),
-            (("title42-chapter7", "subchapter", "XVIII", True),
-             "title42-chapter7-subchapter18"),
-            (("title49-subtitle7-partA", "subpart", "i", True),
-             "title49-subtitle7-partA-subpart1"),
-        ]
-        for args, want in cases:
-            with self.subTest(args=args):
-                self.assertEqual(_child_granule(*args), want)
-
-    def test_roman_numerals_or_letters(self):
-        self.assertTrue(_is_roman_list(["I", "II", "III", "IV"]))
-        self.assertTrue(_is_roman_list(["i", "ii"]))
-        self.assertTrue(_is_roman_list(["I"]))
-        # 26 U.S.C. ch. 1's subchapters: C, D, I, L and M are numerals too
-        self.assertFalse(_is_roman_list(["A", "B", "C", "D", "I", "L"]))
-        self.assertFalse(_is_roman_list(["1", "1A", "2"]))
-
-
-class GroupTests(unittest.TestCase):
-    ENTRIES = [
-        UnitEntry("group", 0, "SUBCHAPTER I—GENERALLY"),
-        UnitEntry("section", 1, "§ 1981", section="1981"),
-        UnitEntry("group", 0, "SUBCHAPTER I–A—INSTITUTIONALIZED PERSONS"),
-        UnitEntry("section", 1, "§ 1997", section="1997"),
-        UnitEntry("group", 0, "SUBCHAPTER II—IMMIGRATION"),
-        UnitEntry("group", 1, "Part I—Selection System"),
-        UnitEntry("section", 2, "§ 1151", section="1151"),
-        UnitEntry("group", 1, "Part II—Admission Qualifications"),
-        UnitEntry("section", 2, "§ 1182", section="1182"),
-    ]
-
-    def test_a_designation_is_matched_whole(self):
-        self.assertTrue(_same_designation("SUBCHAPTER I—GENERALLY",
-                                          "SUBCHAPTER I"))
-        self.assertFalse(_same_designation(
-            "SUBCHAPTER I–A—INSTITUTIONALIZED PERSONS", "SUBCHAPTER I"))
-        self.assertTrue(_same_designation("part 5—administration", "part 5"))
-        self.assertTrue(_same_designation("Part II", "PART II"))
-
-    def test_a_group_one_level_out(self):
-        self.assertEqual([e.section for e in _group_in(self.ENTRIES,
-                                                       "SUBCHAPTER I")],
-                         ["1981"])
-        part = _group_in(self.ENTRIES, "Part II")
-        self.assertEqual([(e.kind, e.depth, e.section) for e in part],
-                         [("section", 0, "1182")])
-        subchapter = _group_in(self.ENTRIES, "SUBCHAPTER II")
-        self.assertEqual([(e.kind, e.depth) for e in subchapter],
-                         [("group", 0), ("section", 1), ("group", 0),
-                          ("section", 1)])
-        self.assertEqual(_group_in(self.ENTRIES, "SUBCHAPTER IX"), [])
-
-
-class LoadUnitTests(unittest.TestCase):
+class TreeTests(unittest.TestCase):
     def setUp(self):
-        us_code._unit_cache.clear()
-        self.addCleanup(us_code._unit_cache.clear)
+        self.contents = _parse_tree(TITLE_42, "42")
 
-    def fetch_from(self, pages):
-        # The OLRC's page for an id it does not have: its viewer's template,
-        # and nothing in it.
-        missing = ('<html><head><link type="text/css" rel="stylesheet" '
-                   'href="/javax.faces.resource/viewLayout.css.xhtml?ln=css"'
-                   " /></head><body>no such page</body></html>")
+    def test_a_titles_chapters(self):
+        title = self.contents.units["title42"]
+        self.assertEqual((title.label, title.heading, title.crumbs),
+                         ("Title 42", "TITLE 42", []))
+        self.assertEqual(title.url,
+                         "https://uscode.house.gov/us/usc/t42/frontmatter/")
+        self.assertEqual([entry.granule for entry in title.entries],
+                         ["title42-chapter21", "title42-chapter5"])
 
-        def fetch(url, cap=0):
-            granule = url.split("USC-prelim-")[1].split("&")[0]
-            return pages.get(granule, missing)
-        return patch("us_code._fetch_unit_top", side_effect=fetch)
-
-    def test_a_unit_without_a_table_is_listed_in_its_parent(self):
-        with self.fetch_from({"title42-chapter21-subchapter1": SUBCHAPTER_I,
-                              "title42-chapter21": CHAPTER_21}) as fetch:
-            unit = load_unit("title42-chapter21-subchapter1")
-            again = load_unit("title42-chapter21")
-        self.assertEqual(unit.label, "Subchapter I")
-        self.assertEqual(unit.heading, "SUBCHAPTER I—GENERALLY")
-        self.assertEqual([e.section for e in unit.entries],
-                         ["1981", "1983", "1993"])
-        self.assertEqual(unit.crumbs[-1], ("title42-chapter21", "CHAPTER 21"))
-        self.assertEqual(unit.title, "42")
-        # the parent, read for its table, is kept
-        self.assertEqual(fetch.call_count, 2)
-        self.assertEqual(len(again.entries), 6)
-
-    def test_no_such_page(self):
-        with self.fetch_from({}):
-            with self.assertRaises(UnitNotFound):
-                load_unit("title42-chapter999")
-
-    def test_listed_nowhere_its_own_text_is_read(self):
-        # 52 U.S.C. subtitle III: no table, and the title lists chapters
-        # without subtitles.
-        subtitle = unit_page(
-            "Subtitle III&mdash;Federal Campaign Finance",
-            crumbs=[("title52", "TITLE 52")], own="Subtitle III")
-        title = unit_page("TITLE 52&mdash;VOTING", label("Chapter"),
-                          row3("301.", "Federal Election Campaigns", "30101"),
-                          title_page=True, own="TITLE 52")
-        body = [UnitEntry("section", 0, "§ 30101", section="30101")]
-        with self.fetch_from({"title52-subtitle3": subtitle,
-                              "title52": title}), \
-                patch("us_code._entries_from_body",
-                      return_value=(body, False)) as read:
-            unit = load_unit("title52-subtitle3")
-        read.assert_called_once()
-        self.assertEqual([e.section for e in unit.entries], ["30101"])
-
-    def test_the_body_reading(self):
-        page = (nav(("title52", "TITLE 52"), own="Subtitle III")
-                + "<!-- field-start:structuralhead -->"
-                '<h3 class="subtitle-head">Subtitle III&mdash;Federal '
-                "Campaign Finance</h3><!-- field-end:structuralhead -->"
-                '<!-- field-start:structuralhead --><h3 class="chapter-head">'
-                "CHAPTER 301&mdash;FEDERAL ELECTION CAMPAIGNS</h3>"
-                "<!-- field-end:structuralhead -->"
-                '<h3 class="section-head">&sect;30101. Definitions</h3>'
-                '<h3 class="section-head">[&sect;30102. Repealed]</h3>')
-
-        class Response:
-            def raise_for_status(self):
-                pass
-
-            def iter_content(self, _size):
-                yield page.encode("utf-8")
-
-            def close(self):
-                pass
-
-        with patch("requests.get", return_value=Response()):
-            entries, partial = us_code._entries_from_body("u")
-        self.assertFalse(partial)
+    def test_a_chapters_subchapters(self):
+        chapter = self.contents.units["title42-chapter21"]
+        self.assertEqual((chapter.label, chapter.heading),
+                         ("Chapter 21", "CHAPTER 21—CIVIL RIGHTS"))
+        self.assertEqual(chapter.url, "https://uscode.house.gov/us/usc/t42/"
+                                      "chapter21-front.html")
         self.assertEqual(
-            [(e.kind, e.depth, e.label) for e in entries],
-            [("group", 0, "CHAPTER 301—FEDERAL ELECTION CAMPAIGNS"),
-             ("section", 1, "§ 30101"), ("section", 1, "§ 30102")])
+            [(e.kind, e.label, e.heading, e.unit_kind, e.designation,
+              e.granule, e.first_section) for e in chapter.entries], [
+                ("unit", "Subchapter I", "GENERALLY", "subchapter", "I",
+                 "title42-chapter21-subchapterI", "1981"),
+                ("unit", "Subchapter VI", "EQUAL EMPLOYMENT OPPORTUNITIES",
+                 "subchapter", "VI", "title42-chapter21-subchapterVI",
+                 "2000e"),
+            ])
+
+    def test_a_subchapters_sections(self):
+        unit = self.contents.units["title42-chapter21-subchapterVI"]
+        self.assertEqual(
+            [(e.kind, e.label, e.heading, e.section) for e in unit.entries],
+            [("section", "§ 2000e–2", "Unlawful employment practices",
+              "2000e-2")])
+
+    def test_the_units_above_a_unit(self):
+        self.assertEqual(
+            self.contents.units["title42-chapter21-subchapterI"].crumbs,
+            [("title42", "Title 42"), ("title42-chapter21", "Chapter 21")])
+
+    def test_where_a_section_sits(self):
+        want = [("title42", "Title 42"), ("title42-chapter21", "Chapter 21"),
+                ("title42-chapter21-subchapterI", "Subchapter I")]
+        self.assertEqual(self.contents.crumbs("1983"), want)
+
+    def test_whatever_the_case_of_the_number_asked_for(self):
+        contents = _parse_tree(node(
+            "26", "subtitleA", "Subtitle A⁠—Income Taxes", "section 36B",
+            sections("26", ("36B", "Refundable credit"))), "26")
+        self.assertTrue(contents.crumbs("36b"))
+
+    def test_a_section_the_title_does_not_list(self):
+        self.assertIsNone(self.contents.crumbs("99999"))
+
+    def test_a_repealed_chapter(self):
+        title = self.contents.units["title42"]
+        chapter = self.contents.units["title42-chapter5"]
+        self.assertEqual(chapter.label, "Chapter 5")
+        self.assertEqual(title.entries[1].heading, "REPEALED")
+        self.assertEqual(title.entries[1].first_section, "201")
+        self.assertEqual(
+            chapter.entries[0].heading,
+            "Repealed. July 1, 1944, ch. 373, title XIII, § 1313, 58 Stat. 714")
+
+    def test_topics_of_one_name_stay_apart(self):
+        contents = _parse_tree(TITLE_12, "12")
+        chapter = contents.units["title12-chapter7"]
+        self.assertEqual(
+            [(e.label, e.heading, e.unit_kind, e.designation)
+             for e in chapter.entries],
+            [("Examinations", "", "", ""), ("Penalties", "", "", "")])
+        first, second = (contents.units[e.granule] for e in chapter.entries)
+        self.assertEqual([e.section for e in first.entries], ["636"])
+        self.assertEqual([e.section for e in second.entries], ["641"])
+        self.assertEqual(contents.crumbs("641")[-1],
+                         (second.granule, "Penalties"))
+
+    def test_a_chapter_and_the_one_that_took_its_number(self):
+        contents = _parse_tree(TITLE_26, "26")
+        repealed, new = contents.units["title26-subtitleD"].entries
+        self.assertEqual(repealed.heading, "REPEALED")
+        self.assertEqual(new.heading, "ENVIRONMENTAL TAXES")
+        self.assertEqual(
+            [e.section for e in contents.units[new.granule].entries], ["4611"])
+        self.assertEqual(
+            [e.section for e in contents.units[repealed.granule].entries],
+            ["4521"])
 
 
-class OpenUnitEntryTests(unittest.TestCase):
-    PARENT = UscUnit(title="42", granule="title42-chapter6A-subchapter25-partA",
-                     url="u", label="Part A", heading="Part A")
+class LoadUnitTests(_Fresh):
+    def test_a_unit_by_its_id(self):
+        stub, _asked = _site({"browse-tree/t42.html": TITLE_42})
+        with stub:
+            unit = load_unit("title42-chapter21-subchapterVI")
+        self.assertEqual(unit.heading,
+                         "SUBCHAPTER VI—EQUAL EMPLOYMENT OPPORTUNITIES")
 
-    def test_the_designation_as_printed(self):
-        # 42 U.S.C. ch. 6A's "Subpart II" is subpartII, not subpart2.
-        entry = UnitEntry(
-            "unit", 0, "Subpart II", unit_kind="subpart", designation="II",
-            granule="title42-chapter6A-subchapter25-partA-subpart2")
-        tried = []
+    def test_one_fetch_serves_a_title(self):
+        stub, asked = _site({"browse-tree/t42.html": TITLE_42})
+        with stub:
+            load_unit("title42-chapter21")
+            load_unit("title42-chapter21-subchapterI")
+        self.assertEqual(len(asked), 1)
 
-        def load(granule):
-            tried.append(granule)
-            if granule.endswith("subpartII"):
-                return "found"
-            raise UnitNotFound(granule)
+    def test_a_titles_own_heading(self):
+        stub, _asked = _site({"browse-tree/t42.html": TITLE_42,
+                              "browse.html": BROWSE})
+        with stub:
+            unit = load_unit("title42")
+        self.assertEqual(unit.heading,
+                         "TITLE 42—THE PUBLIC HEALTH AND WELFARE")
 
-        with patch("us_code.load_unit", side_effect=load):
-            self.assertEqual(open_unit_entry(entry, self.PARENT), "found")
-        self.assertEqual(tried, [
-            "title42-chapter6A-subchapter25-partA-subpart2",
-            "title42-chapter6A-subchapter25-partA-subpartII"])
+    def test_its_contents_without_the_list_of_titles(self):
+        stub, _asked = _site({"browse-tree/t42.html": TITLE_42,
+                              "browse.html": ConnectionError("unreachable")})
+        with stub:
+            unit = load_unit("title42")
+        self.assertEqual(unit.heading, "TITLE 42")
+        self.assertEqual(len(unit.entries), 2)
 
-    def test_the_first_sections_navigation_bar(self):
-        # 29 U.S.C. ch. 18's "part 5" is title29-chapter18-subchapter1-
-        # node555-part5, which no naming produces.
-        entry = UnitEntry(
-            "unit", 0, "Part 5", unit_kind="part", designation="5",
-            granule="title29-chapter18-subchapter1-part5",
-            first_section="1131")
-        section = UscSection(title="29", section="1131", url="u", crumbs=[
-            ("title29", "TITLE 29"), ("title29-chapter18", "CHAPTER 18"),
-            ("title29-chapter18-subchapter1", "SUBCHAPTER I"),
-            ("title29-chapter18-subchapter1-node555-part5", "part 5")])
+    def test_no_such_unit(self):
+        stub, _asked = _site({"browse-tree/t42.html": TITLE_42})
+        with stub, self.assertRaises(UnitNotFound):
+            load_unit("title42-chapter9999")
 
-        def load(granule):
-            if "node555" in granule:
-                return "found"
-            raise UnitNotFound(granule)
+    def test_no_such_title(self):
+        stub, _asked = _site({})
+        with stub, self.assertRaises(UnitNotFound):
+            load_unit("title99")
 
-        parent = UscUnit(title="29", granule="title29-chapter18-subchapter1",
-                         url="u", label="Subchapter I", heading="")
-        with patch("us_code.load_unit", side_effect=load), \
-                patch("us_code.load_section", return_value=section):
-            self.assertEqual(open_unit_entry(entry, parent), "found")
+    def test_a_site_that_fails_is_not_a_missing_unit(self):
+        for down in (ConnectionError("unreachable"), _Response(503),
+                     "<html>Under Maintenance</html>"):
+            with self.subTest(down=down):
+                self._reset()
+                stub, _asked = _site({"browse-tree/t42.html": down})
+                with stub, self.assertRaises(RuntimeError) as ctx:
+                    load_unit("title42-chapter21")
+                self.assertNotIsInstance(ctx.exception, LookupError)
+                self.assertFalse(us_code._contents_cache)
+
+    def test_an_entry_opens_by_its_id(self):
+        stub, _asked = _site({"browse-tree/t42.html": TITLE_42})
+        with stub:
+            chapter = load_unit("title42-chapter21")
+            unit = open_unit_entry(chapter.entries[0], chapter)
+        self.assertEqual(unit.label, "Subchapter I")
+
+
+class ViewerIdTests(_Fresh):
+    """Breadcrumbs saved in a bookmark in the days of the OLRC's viewer."""
+
+    def _opens(self, granule, tree, title):
+        stub, _asked = _site({f"browse-tree/t{title}.html": tree})
+        with stub:
+            return load_unit(granule).granule
+
+    def test_roman_numerals_as_digits(self):
+        self.assertEqual(
+            self._opens("title42-chapter21-subchapter1", TITLE_42, "42"),
+            "title42-chapter21-subchapterI")
+        self.assertEqual(
+            self._opens("title42-chapter21-subchapter6", TITLE_42, "42"),
+            "title42-chapter21-subchapterVI")
+
+    def test_a_chapter_hung_off_its_title(self):
+        self.assertEqual(self._opens("title18-chapter44", TITLE_18, "18"),
+                         "title18-partI-chapter44")
+
+    def test_the_end_of_an_id_is_matched_whole(self):
+        # "chapter4" is not the end of "chapter44"
+        with self.assertRaises(UnitNotFound):
+            self._opens("title18-chapter4", TITLE_18, "18")
+
+
+class SectionPlaceTests(_Fresh):
+    def test_a_section_opens_with_its_place_in_the_code(self):
+        stub, _asked = _site({"browse-tree/t42.html": TITLE_42,
+                              "t42/s1983/": SECTION_1983})
+        with stub:
+            doc = load_section("42", "1983")
+        self.assertEqual(doc.source, "olrc")
+        self.assertEqual(doc.url,
+                         "https://uscode.house.gov/us/usc/t42/s1983/")
+        self.assertEqual(doc.crumbs[-1],
+                         ("title42-chapter21-subchapterI", "Subchapter I"))
+
+    def test_a_section_does_not_wait_on_its_title_for_long(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def get(url, **_kw):
+            if "browse-tree" in url:
+                release.wait(5)
+                return _Response(200, TITLE_42)
+            return _Response(200, SECTION_1983)
+
+        with patch.dict(sys.modules,
+                        {"requests": SimpleNamespace(get=get)}), \
+                patch.object(us_code, "_CRUMBS_WAIT_S", 0.01):
+            doc = load_section("42", "1983")
+        self.assertEqual(doc.source, "olrc")
+        self.assertEqual(doc.crumbs, [("title42", "Title 42")])
+
+    def test_without_its_title_it_opens_all_the_same(self):
+        stub, _asked = _site({"t42/s1983/": SECTION_1983})
+        with stub:
+            doc = load_section("42", "1983")
+        self.assertEqual(doc.source, "olrc")
+        self.assertEqual(doc.crumbs, [("title42", "Title 42")])
+
+    def test_a_section_printed_in_a_range_with_the_one_before(self):
+        # 42 U.S.C. § 4 is printed in "§§ 3, 4": its page sends the reader on.
+        stub, asked = _site({
+            "browse-tree/t42.html": TITLE_42,
+            "t42/s1983/": SECTION_1983,
+            "t42/s1982/": '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+                          '<meta http-equiv="refresh" content="0; url='
+                          '../s1983/"><link rel="canonical" href="../s1983/">'
+                          "</head><body>Redirecting to the current edition"
+                          "&hellip;</body></html>",
+        })
+        with stub:
+            doc = load_section("42", "1982")
+        self.assertEqual(doc.section, "1982")
+        self.assertEqual(doc.url,
+                         "https://uscode.house.gov/us/usc/t42/s1983/")
+        self.assertEqual(doc.heading, "§1983. Civil action")
+        self.assertEqual(doc.crumbs[-1][1], "Subchapter I")
+        self.assertIn("https://uscode.house.gov/us/usc/t42/s1983/", asked)
+
+    def test_a_stub_that_leads_to_itself_is_given_up_on(self):
+        loop = '<meta http-equiv="refresh" content="0; url=../s5/">'
+        stub, asked = _site({"browse-tree/t42.html": TITLE_42,
+                             "t42/s5/": loop})
+        with stub, self.assertRaises(RuntimeError):
+            us_code._olrc_section("42", "5")
+        self.assertLessEqual(
+            len([url for url in asked if "/s5/" in url]), 3)
 
 
 class NeighborTests(unittest.TestCase):
-    def test_prev_and_next_come_from_the_same_contents(self):
-        us_code._order_cache.pop("title42-chapter21-subchapter1", None)
-        unit = UscUnit(title="42", granule="title42-chapter21-subchapter1",
-                       url="u", label="Subchapter I", heading="", entries=[
-                           UnitEntry("section", 0, "§ 1982", section="1982"),
-                           UnitEntry("section", 0, "§ 1983", section="1983"),
-                           UnitEntry("section", 0, "§ 1984", section="1984"),
-                       ])
-        doc = UscSection(title="42", section="1983", url="u",
-                         container="title42-chapter21-subchapter1")
-        with patch("us_code.load_unit", return_value=unit), \
-                patch("us_code._container_sections") as streamed:
+    def test_prev_and_next_come_from_the_page(self):
+        self.assertEqual(olrc_adjacent(SECTION_1983),
+                         (("42", "1982"), ("42", "1984")))
+
+    def test_across_the_end_of_a_title(self):
+        page = ('<a href="../../t41/s8707/" class="prev-section">Previous</a>'
+                '<a href="../../t42/s2/" class="next-section">Next</a>')
+        self.assertEqual(olrc_adjacent(page), (("41", "8707"), ("42", "2")))
+
+    def test_the_first_section_of_all(self):
+        page = '<a href="../../t1/s2/" class="next-section">Next</a>'
+        self.assertEqual(olrc_adjacent(page), (None, ("1", "2")))
+
+    def test_the_section_needs_no_one_asked(self):
+        doc = us_code.UscSection(title="42", section="1983", url="u",
+                                 adjacent=(("42", "1982"), ("42", "1984")))
+        with patch("us_code.load_unit") as contents:
             self.assertEqual(doc.neighbors(),
                              (("42", "1982"), ("42", "1984")))
-        streamed.assert_not_called()
+        contents.assert_not_called()
 
 
 class ViewerTests(unittest.TestCase):
@@ -486,6 +463,13 @@ class ViewerTests(unittest.TestCase):
         render = inspect.getsource(courtlistener_gui._StatuteWindow._render)
         self.assertLess(render.index("self._render_unit()"),
                         render.index("txt.delete"))
+
+    def test_a_unit_answers_what_the_viewer_asks_of_any_contents(self):
+        unit = UscUnit(title="42", granule="title42", url="u", label="Title 42",
+                       heading="TITLE 42", entries=[
+                           UnitEntry("section", 0, "§ 1", section="1")])
+        self.assertFalse(unit.partial)
+        self.assertEqual(unit.host, "uscode.house.gov")
 
 
 if __name__ == "__main__":

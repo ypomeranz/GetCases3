@@ -331,10 +331,7 @@
       case "browse": case "statpdf": case "frpdf":
         return value;
       case "usc":
-        if (first && section) {
-          return "https://uscode.house.gov/view.xhtml?req=granuleid:" +
-            `USC-prelim-title${first}-section${section}&num=0&edition=prelim`;
-        }
+        if (first && section) return `https://uscode.house.gov/us/usc/t${first}/s${section}/`;
         break;
       case "cfr":
         if (first && section) return `https://www.ecfr.gov/current/title-${first}/section-${section}`;
@@ -1019,6 +1016,10 @@
       }
     }
     if (host === "uscode.house.gov") {
+      if ((m = /^\/us\/usc\/t(\d+)\/s([\w.-]+)\/?$/.exec(path))) {
+        return statuteAction("usc", `${m[1]}:${m[2]}:`);
+      }
+      // The site's old viewer, which links around the web still name.
       const req = decodeURIComponent(u.search);
       if ((m = /granuleid:USC-(?:prelim-)?title(\d+)[a-z]?-section([\w.-]+)/i.exec(req))) {
         return statuteAction("usc", `${m[1]}:${m[2]}:`);

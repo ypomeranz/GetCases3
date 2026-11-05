@@ -1,16 +1,15 @@
 """The U.S. Code keeps the OLRC page's own indentation.
 
-The OLRC stylesheet gives every paragraph class its margin — a heading the
-margin of its level (paragraph-head 1em, subparagraph-head 2em, …), body text
-the number in its class (statutory-body-2em, statutory-body-block-2em) — and
-the reader shows each paragraph there.  That is the printed Code's layout: in
-an older section a subsection's paragraphs sit flush with it, and a "(2)"
-after "(d)(1)" is flush too.  The subdivision each paragraph belongs to —
+The OLRC's page gives every paragraph its margin in its class (statutory-
+body-2em, statutory-body-block-2em), a subdivision's heading the margin of its
+level, and the reader shows each paragraph there.  That is the printed Code's
+layout: in an older section a subsection's paragraphs sit flush with it, and a
+"(2)" after "(d)(1)" is flush too.  The subdivision each paragraph belongs to —
 what a pin cite jumps to and Copy + Cite cites — is read from the same layout
 (``us_code.statute_paths``).
 
 The fixtures are the OLRC's own markup and text, cut down, from the sections
-named in each test (September 2026).
+named in each test (November 2026).
 """
 
 import pathlib
@@ -21,16 +20,20 @@ from us_code import _class_depth, parse_section, statute_paths
 
 
 def statute(*paras: str) -> str:
-    return ("<!-- field-start:statute -->\n" + "\n".join(paras)
-            + "\n<!-- field-end:statute -->")
+    return ('<div class="statutory-body-container">\n' + "\n".join(paras)
+            + "\n</div>")
 
 
 def p(cls: str, text: str) -> str:
     return f'<p class="{cls}">{text}</p>'
 
 
-def h(cls: str, text: str) -> str:
-    return f'<h4 class="{cls}">{text}</h4>'
+def h(level: int, text: str) -> str:
+    """A subdivision's heading, set at the margin of its level."""
+    enum, heading = text.split(" ", 1)
+    cls = f"statutory-body-{level}em" if level else "statutory-body"
+    return (f'<p class="{cls}" id="x">{enum}&nbsp;'
+            f'<em class="level-heading"> {heading}</em></p>')
 
 
 def read(page: str) -> list[tuple[int, tuple[str, ...], str]]:
@@ -51,11 +54,16 @@ def depths(page: str) -> list[int]:
 
 class ClassDepthTests(unittest.TestCase):
     def test_headings_sit_at_their_levels_margin(self):
-        for cls, depth in (("subsection-head", 0), ("paragraph-head", 1),
-                           ("subparagraph-head", 2), ("clause-head", 3),
-                           ("subclause-head", 4), ("subsubclause-head", 5)):
-            with self.subTest(cls=cls):
-                self.assertEqual(_class_depth(cls), depth)
+        for level in range(6):
+            with self.subTest(level=level):
+                self.assertEqual(parse_section(statute(h(level, "(a) Heading"))),
+                                 [("head", level, "(a) Heading")])
+
+    def test_a_heading_run_in_to_its_text_is_body_text(self):
+        page = statute(p("statutory-body", '(a)&nbsp;<em class="level-heading">'
+                                           " In General.</em> The Secretary"))
+        self.assertEqual(parse_section(page),
+                         [("body", 0, "(a) In General. The Secretary")])
 
     def test_body_text_at_the_margin_its_class_names(self):
         for cls, depth in (("statutory-body", 0), ("statutory-body-3em", 3),
@@ -86,10 +94,10 @@ class HeadedSectionTests(unittest.TestCase):
     flush text closing a list."""
 
     PAGE = statute(
-        h("subsection-head", "(b) Premium assistance credit amount"),
+        h(0, "(b) Premium assistance credit amount"),
         p("statutory-body", "For purposes of this section-"),
-        h("paragraph-head", "(3) Other terms and rules"),
-        h("subparagraph-head", "(B) Applicable second lowest cost silver plan"),
+        h(1, "(3) Other terms and rules"),
+        h(2, "(B) Applicable second lowest cost silver plan"),
         p("statutory-body-2em", "The applicable second lowest cost silver "
           "plan is the plan which-"),
         p("statutory-body-3em", "(ii) provides-"),
@@ -102,8 +110,8 @@ class HeadedSectionTests(unittest.TestCase):
           "other applicable taxpayer."),
         p("statutory-body-block-2em", "If a taxpayer files a joint return "
           "and no credit is allowed under this section"),
-        h("subparagraph-head", "(C) Adjusted monthly premium"),
-        h("clause-head", "(i) In general"),
+        h(2, "(C) Adjusted monthly premium"),
+        h(3, "(i) In general"),
         p("statutory-body-3em", "Except as provided in clause (ii), the "
           "applicable percentage"),
     )
@@ -230,12 +238,12 @@ class LabelsThePageMarginSettlesTests(unittest.TestCase):
         # 20 U.S.C. § 1415(h)-(i): "(i)" is the next subsection, not a
         # clause of (h)(4)(B) — the page's own anchors get this wrong.
         page = statute(
-            h("subsection-head", "(h) Safeguards"),
-            h("paragraph-head", "(4) the right to have"),
-            h("subparagraph-head", "(B) Written findings"),
-            h("subsection-head", "(i) Administrative procedures"),
-            h("paragraph-head", "(1) In general"),
-            h("subparagraph-head", "(A) Decision made in hearing"),
+            h(0, "(h) Safeguards"),
+            h(1, "(4) the right to have"),
+            h(2, "(B) Written findings"),
+            h(0, "(i) Administrative procedures"),
+            h(1, "(1) In general"),
+            h(2, "(A) Decision made in hearing"),
         )
         self.assertEqual(paths(page), [
             ("h",), ("h", "4"), ("h", "4", "B"), ("i",), ("i", "1"),
@@ -265,12 +273,12 @@ class LabelsThePageMarginSettlesTests(unittest.TestCase):
         # 26 U.S.C. § 7701(a)(51)(D)(ii)(III)(bb): the page has no deeper
         # heading class, so "(AA)" shares the item heading's 5em.
         page = statute(
-            h("subclause-head", "(III) Special rule"),
-            h("subsubclause-head", "(bb) Exception"),
-            h("subsubclause-head", "(AA) In general"),
+            h(4, "(III) Special rule"),
+            h(5, "(bb) Exception"),
+            h(5, "(AA) In general"),
             p("statutory-body-6em", "Item (aa) shall not apply in the case of "
               "a bona fide purchase"),
-            h("subsubclause-head", "(BB) Bona fide purchase or sale"),
+            h(5, "(BB) Bona fide purchase or sale"),
         )
         self.assertEqual(paths(page), [
             ("III",), ("III", "bb"), ("III", "bb", "AA"),
@@ -285,7 +293,7 @@ class LabelsThePageMarginSettlesTests(unittest.TestCase):
             p("statutory-body-2em", "The Secretary may impose a penalty"),
             p("statutory-body-1em", "(B) False information.-"),
             p("statutory-body-2em", "The Secretary may impose a penalty"),
-            h("subparagraph-head", "(C) Waivers.-"),
+            h(2, "(C) Waivers.-"),
             p("statutory-body-2em", "The Secretary may waive penalties"),
         )
         self.assertEqual(paths(page), [
@@ -314,22 +322,157 @@ class LabelsThePageMarginSettlesTests(unittest.TestCase):
         ])
 
 
+class RunInHeadingTests(unittest.TestCase):
+    def test_the_first_item_on_its_headings_line(self):
+        # 10 U.S.C. § 1565(a), (e): the heading runs in and "(1)" follows on
+        # the same line, as in "(a)(1)"; a flush "(2)" is its sibling.
+        page = statute(
+            p("statutory-body", '(a)&nbsp;<em class="level-heading"> Collection '
+              "of DNA Samples.\u2060—</em>(1)&nbsp; The Secretary shall"),
+            p("statutory-body", "(2) For each member"),
+            p("statutory-body", '(e)&nbsp;<em class="level-heading"> Expungement'
+              ".\u2060—</em>(1)&nbsp; The Secretary of Defense"),
+            p("statutory-body", "(2) For purposes of paragraph (1)"),
+            p("statutory-body-1em", "(A) A qualifying Federal offense"),
+        )
+        self.assertEqual(paths(page), [
+            ("a", "1"), ("a", "2"), ("e", "1"), ("e", "2"), ("e", "2", "A"),
+        ])
+
+    def test_a_sentence_that_runs_on_to_an_item(self):
+        page = statute(p("statutory-body", "(b) The Secretary shall—(1) act"),
+                       p("statutory-body", "(2) report"),
+                       p("statutory-body", "(c) Next"))
+        self.assertEqual(paths(page), [("b", "1"), ("b", "2"), ("c",)])
+
+    def test_a_dash_with_no_item_after_it_is_only_a_dash(self):
+        page = statute(p("statutory-body", "(a) The term means—"),
+                       p("statutory-body-1em", "(1) one"))
+        self.assertEqual(paths(page), [("a",), ("a", "1")])
+
+
+class RepealedItemTests(unittest.TestCase):
+    def test_a_bracketed_item_keeps_its_place(self):
+        # 26 U.S.C. § 1(j)(4)
+        page = statute(p("statutory-body", "(j) Maximum capital gains rate"),
+                       p("statutory-body-1em", "(3) Maximum zero rate amount"),
+                       p("statutory-body-1em", "[(4) Repealed. Pub. L. 116-94]"),
+                       p("statutory-body-1em", "(5) Coordination"))
+        self.assertEqual(paths(page), [("j",), ("j", "3"), ("j", "4"),
+                                       ("j", "5")])
+
+
+NOTE = ('<div class="note-block" id="amendments-note">'
+        '<h4 class="note-head legacy-note-style">Amendments</h4>'
+        '<p class="note-body">Subsec. (b) read as follows:</p>'
+        '<p class="statutory-body">(b) quoted text</p>'
+        '<p class="statutory-body-1em" id="b-1">(1) more quoted text</p></div>')
+
+
 class NotStatuteTextTests(unittest.TestCase):
+    PAGE = ('<h3 class="section-head">§552. Public information</h3>'
+            + statute(p("statutory-body", "(a) Each agency shall"))
+            + '<p class="source-credit" id="sourcecredit">(Pub. L. 89-554.)</p>'
+            + NOTE)
+
     def test_heading_credit_and_notes_belong_to_no_subdivision(self):
-        page = ('<!-- field-start:head --><h3 class="section-head">'
-                "§552. Public information</h3><!-- field-end:head -->"
-                + statute(p("statutory-body", "(a) Each agency shall"))
-                + '<!-- field-start:sourcecredit --><p class="source-credit">'
-                "(Pub. L. 89-554.)</p><!-- field-end:sourcecredit -->"
-                '<!-- field-start:notes --><h4 class="note-head">Amendments'
-                '</h4><p class="statutory-body">(b) quoted text</p>'
-                "<!-- field-end:notes -->")
-        paras = parse_section(page)
+        paras = parse_section(self.PAGE)
         self.assertEqual(
             [(kind, path) for (kind, _d, _t), path
              in zip(paras, statute_paths(paras))],
             [("sechead", ()), ("body", ("a",)), ("credit", ()),
-             ("note-head", ()), ("note-body", ())])
+             ("note-head", ()), ("note-body", ()), ("note-body", ()),
+             ("note-body", ())])
+
+    def test_text_quoted_in_a_note_is_never_current_law(self):
+        # A note quotes what it amends in the statute's own classes: 1,172
+        # such paragraphs in the notes to 42 U.S.C. § 1396a alone.
+        kinds = {text: kind for kind, _d, text in parse_section(self.PAGE)}
+        self.assertEqual(kinds["(b) quoted text"], "note-body")
+        self.assertEqual(kinds["(1) more quoted text"], "note-body")
+
+    def test_a_prospective_amendment_is_not_current_law(self):
+        # The law as it will read, in 26 U.S.C. § 1's notes.
+        page = (statute(p("statutory-body", "(a) Now"))
+                + '<p class="source-credit">(Pub. L. 1.)</p>'
+                '<div class="note-block" id="prospectiveAmendment-note">'
+                '<h4 class="note-head legacy-note-style">Amendment</h4>'
+                '<p class="statutory-body-1em prospective-amendment-body">'
+                "(1) Later</p></div>")
+        self.assertEqual([para[0] for para in parse_section(page)],
+                         ["body", "credit", "note-head", "note-body"])
+
+    def test_what_follows_the_credit_is_a_note_with_or_without_its_block(self):
+        page = (statute(p("statutory-body", "(a) Now"))
+                + '<p class="source-credit">(Pub. L. 1.)</p>'
+                '<p class="statutory-body">(b) not the statute</p>')
+        self.assertEqual(parse_section(page)[-1],
+                         ("note-body", 0, "(b) not the statute"))
+
+    def test_a_repealed_section_has_no_text_of_its_own(self):
+        # 42 U.S.C. § 1984, "Omitted": an empty text and notes.
+        page = ('<h3 class="section-head">§1984. Omitted</h3>'
+                + statute() + NOTE)
+        paras = parse_section(page)
+        self.assertEqual(paras[0], ("sechead", 0, "§1984. Omitted"))
+        self.assertFalse([para for para in paras
+                          if para[0] in ("body", "head")])
+
+
+class PageTextTests(unittest.TestCase):
+    def test_the_word_joiner_before_every_dash_is_dropped(self):
+        page = statute(p("statutory-body", "for an employer\u2060—"))
+        self.assertEqual(parse_section(page)[0][2], "for an employer—")
+
+    def test_a_source_credit_loses_the_space_after_each_link(self):
+        page = ('<p class="source-credit">(R.S. § 1979;  Pub. L. 96-170, § 1 ,'
+                '  Dec. 29, 1979 ,  <a class="citation">93 Stat. 1284</a> ;  '
+                'Pub. L. 104-317, title III, § 309(c) ,  Oct. 19, 1996 ,  '
+                '<a class="citation">110 Stat. 3853</a> .)</p>')
+        self.assertEqual(parse_section(page), [(
+            "credit", 0,
+            "(R.S. § 1979; Pub. L. 96-170, § 1, Dec. 29, 1979, 93 Stat. 1284; "
+            "Pub. L. 104-317, title III, § 309(c), Oct. 19, 1996, "
+            "110 Stat. 3853.)")])
+
+    def test_an_ellipsis_in_the_text_is_left_alone(self):
+        page = statute(p("statutory-body", "the court . . . shall"))
+        self.assertEqual(parse_section(page)[0][2], "the court . . . shall")
+
+    def test_a_footnote_mark_stays_off_the_figure_before_it(self):
+        # 11 U.S.C. § 101(3): not "$150,000.1"
+        page = (statute(p("statutory-body-1em", "(3) less than $150,000."
+                          '<sup><a id="fnref-fn1" href="#fn1">1</a></sup>'))
+                + '<p class="footnote" id="fn1"><sup>1</sup>&nbsp;'
+                '<a href="#fnref-fn1">See Adjustment notes below.</a></p>'
+                '<p class="footnote" id="fn2"><sup>2</sup>&nbsp;'
+                '<a href="#fnref-fn2">So in original.</a></p>')
+        self.assertEqual(parse_section(page), [
+            ("body", 1, "(3) less than $150,000.[1]"),
+            ("note-head", 0, "Footnotes"),
+            ("note-body", 0, "[1] See Adjustment notes below."),
+            ("note-body", 0, "[2] So in original."),
+        ])
+
+
+class SavedPageTests(unittest.TestCase):
+    """The OLRC's own page, whole (test_data, November 2026)."""
+
+    def test_42_usc_1983(self):
+        page = (pathlib.Path(__file__).parent / "test_data" /
+                "42 USC 1983_ Civil action for deprivation of rights.html"
+                ).read_text(encoding="utf-8")
+        paras = parse_section(page)
+        self.assertEqual(paras[0], (
+            "sechead", 0, "§1983. Civil action for deprivation of rights"))
+        self.assertEqual([kind for kind, _d, _t in paras[:3]],
+                         ["sechead", "body", "credit"])
+        self.assertTrue(paras[1][2].startswith("Every person who, under color"))
+        self.assertEqual(paras[2][2][:40],
+                         "(R.S. § 1979; Pub. L. 96-170, § 1, Dec. ")
+        self.assertIn(("note-head", 0, "Editorial Notes"), paras)
+        self.assertEqual(us_code.olrc_adjacent(page),
+                         (("42", "1982"), ("42", "1984")))
 
 
 class ViewerTests(unittest.TestCase):

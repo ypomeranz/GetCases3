@@ -6,7 +6,9 @@ then read from Cornell's Legal Information Institute, which republishes the
 OLRC's releases: the same text, source credit and notes, set as the OLRC
 sets them, so the viewer's pin-cite jumps and Copy + Cite read it the same
 way.  A section the OLRC says it does not have is not looked for at Cornell,
-whose copy can trail the OLRC's.
+whose copy can trail the OLRC's — but a 404 is the OLRC saying so only when
+its list of the title's sections agrees.  When the site was rebuilt, every
+address the app knew answered 404.
 
 The fixtures are Cornell's and house.gov's own markup, cut down (October
 2026).  Nothing here touches the network.
@@ -35,6 +37,9 @@ from us_code import (
     parse_section,
     statute_paths,
 )
+
+VIEWER_2254 = ("https://uscode.house.gov/view.xhtml?req=granuleid:"
+               "USC-prelim-title28-section2254&num=0&edition=prelim")
 
 HOUSE_DOWN = """<html lang="en" dir="ltr" class=" js"><head>
 <meta charset="utf-8">
@@ -263,10 +268,24 @@ class _Response:
             raise RuntimeError(f"{self.status_code} Server Error")
 
 
+def _olrc(section, *listed):
+    """The OLRC: *section* for any section's page, and for its title's list
+    of sections, one naming *listed*."""
+    links = "".join(f'<li><a class="section-link" href="us/usc/t28/s{number}/"'
+                    f">§ {number} — Heading</a></li>" for number in listed)
+    tree = ('<details class="tree-node"><summary>CHAPTER 153\u2060—HABEAS '
+            'CORPUS <span class="section-range">(sections 2241 to 2255)</span>'
+            '</summary><ul class="tree-sections"><li><a href="us/usc/t28/'
+            'partVI-chapter153-front.html">CHAPTER 153</a></li></ul>'
+            f'<ul class="tree-sections">{links}</ul></details>')
+    return lambda url: tree if "browse-tree" in url else section
+
+
 def _sites(house, cornell):
     """A requests stand-in: *house* and *cornell* each a page, a
     _Response, or an exception, or a function of the URL giving one.
-    Records the URLs asked for."""
+    Records the URLs asked for, less the title list the OLRC is always
+    asked for alongside a section."""
     asked = []
 
     def answer(spec, url):
@@ -277,7 +296,8 @@ def _sites(house, cornell):
         return spec if isinstance(spec, _Response) else _Response(200, spec)
 
     def get(url, **_kw):
-        asked.append(url)
+        if "browse-tree" not in url:
+            asked.append(url)
         if "uscode.house.gov" in url:
             return answer(house, url)
         if "law.cornell.edu" in url:
@@ -308,6 +328,7 @@ class _Fresh(unittest.TestCase):
     def _reset():
         us_code._cache.clear()
         us_code._unit_cache.clear()
+        us_code._contents_cache.clear()
         us_code._olrc_rest_until = 0.0
 
 
@@ -346,24 +367,48 @@ class FallbackTests(_Fresh):
             doc = load_section("42", "1983")
         self.assertEqual(doc.source, "olrc")
         self.assertEqual(doc.source_name, "U.S. Code (OLRC)")
-        self.assertEqual(doc.key_url, doc.url)
+        self.assertEqual(doc.url, us_code.section_url("42", "1983"))
         self.assertEqual(len(asked), 1)
 
     def test_no_such_section_at_the_olrc_is_not_looked_for_at_cornell(self):
         # Cornell's copy can trail the OLRC's: a section renumbered or
         # repealed since would still be there.
-        stub, asked = _sites(_Response(404), PAGE_2254)
+        stub, asked = _sites(_olrc(_Response(404), "2253"), PAGE_2254)
         with stub, self.assertRaises(SectionNotFound):
             load_section("28", "2254")
         self.assertFalse([url for url in asked if "cornell" in url])
 
+    def test_the_site_rebuilt_under_the_app(self):
+        # November 2026: every address the app knew answered 404, and
+        # 42 U.S.C. § 1983 was reported not to exist.
+        stub, _asked = _sites(_Response(404), PAGE_2254)
+        with stub:
+            doc = load_section("28", "2254")
+        self.assertEqual(doc.source, "lii")
+        self.assertIn("uscode.house.gov was not answering", doc.source_note)
+
+    def test_a_404_for_a_section_the_title_lists(self):
+        stub, _asked = _sites(_olrc(_Response(404), "2254"), PAGE_2254)
+        with stub:
+            self.assertEqual(load_section("28", "2254").source, "lii")
+
+    def test_nor_does_a_rebuilt_site_make_a_section_up(self):
+        stub, _asked = _sites(_Response(404), _Response(404))
+        with stub, self.assertRaises(SectionNotFound):
+            load_section("42", "99999")
+
+    def test_a_404_with_no_list_and_no_cornell_says_neither_answered(self):
+        stub, _asked = _sites(_Response(404), ConnectionError("unreachable"))
+        with stub, self.assertRaises(RuntimeError) as ctx:
+            load_section("28", "2254")
+        self.assertNotIsInstance(ctx.exception, LookupError)
+
     def test_the_olrcs_own_page_with_no_section_on_it(self):
-        # The OLRC's viewer loads its stylesheets from /javax.faces.resource/
-        # whatever the page holds; house.gov's maintenance notice does not.
-        page = ('<html><head><link type="text/css" rel="stylesheet" '
-                'href="/javax.faces.resource/usc.css.xhtml?ln=css" /></head>'
-                "<body>Document not found</body></html>")
-        stub, asked = _sites(page, PAGE_2254)
+        # Every page of the OLRC's sets its content in this frame, whatever
+        # it holds; house.gov's maintenance notice does not.
+        page = ('<html><body><div id="content" class="page_content_internal">'
+                "Document not found</div></body></html>")
+        stub, asked = _sites(_olrc(page, "2253"), PAGE_2254)
         with stub, self.assertRaises(SectionNotFound):
             load_section("28", "2254")
         self.assertEqual(len(asked), 1)
@@ -535,7 +580,7 @@ class ReadingTests(unittest.TestCase):
             self.assertEqual(doc.neighbors(),
                              (("28", "2253"), ("28", "2255")))
         contents.assert_not_called()
-        self.assertEqual(doc.key_url, us_code.section_url("28", "2254"))
+        self.assertEqual(doc.key_url, VIEWER_2254)
 
 
 class UnitTests(_Fresh):
@@ -632,7 +677,7 @@ class ViewerTests(unittest.TestCase):
                          url="https://www.law.cornell.edu/uscode/text/28/"
                              "2254",
                          paras=parse_lii_section(PAGE_2254), source="lii")
-        olrc_key = "statute:" + us_code.section_url("28", "2254")
+        olrc_key = "statute:" + VIEWER_2254
         desc = courtlistener_gui._StatuteWindow._bookmark_descriptor(
             self._window(doc))
         self.assertEqual(desc["key"], olrc_key)
@@ -650,6 +695,20 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(
             courtlistener_gui._StatuteWindow._bookmark_descriptor(
                 self._window(saved))["key"], olrc_key)
+
+    def test_a_bookmark_from_the_viewers_day_stays_the_same_bookmark(self):
+        for data in ({"url": VIEWER_2254, "key_url": VIEWER_2254},
+                     {"url": VIEWER_2254}):
+            with self.subTest(data=data):
+                saved = courtlistener_gui._SavedStatuteDoc(
+                    {**data, "kind": "usc", "label": "28 U.S.C. § 2254"})
+                self.assertEqual(
+                    courtlistener_gui._StatuteWindow._bookmark_descriptor(
+                        self._window(saved))["key"],
+                    f"statute:{VIEWER_2254}")
+                # and its link opens the page the section has now
+                self.assertEqual(saved.url,
+                                 "https://uscode.house.gov/us/usc/t28/s2254/")
 
     def test_other_statutes_keep_their_own_address(self):
         saved = courtlistener_gui._SavedStatuteDoc({

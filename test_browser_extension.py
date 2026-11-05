@@ -357,8 +357,7 @@ class BrowserUrlTests(unittest.TestCase):
     def test_statutes_go_to_their_official_pages(self):
         self.assertEqual(
             self.url("usc", "42:1983:a"),
-            "https://uscode.house.gov/view.xhtml?req=granuleid:"
-            "USC-prelim-title42-section1983&num=0&edition=prelim")
+            "https://uscode.house.gov/us/usc/t42/s1983/")
         self.assertEqual(self.url("cfr", "29:1614.105:a,1"),
                          "https://www.ecfr.gov/current/title-29/"
                          "section-1614.105")
@@ -623,6 +622,7 @@ class FallbackReaderTests(unittest.TestCase):
             "https://www.law.cornell.edu/constitution/amendmentxiv",
             "https://uscode.house.gov/view.xhtml?req=granuleid:"
             "USC-prelim-title18-section922&num=0&edition=prelim",
+            "https://uscode.house.gov/us/usc/t42/s2000e-2/",
             "https://www.ecfr.gov/current/title-40/chapter-I/"
             "subchapter-I/part-261/section-261.4",
             "https://www.govinfo.gov/link/statute/88/1932",
@@ -645,6 +645,7 @@ class FallbackReaderTests(unittest.TestCase):
             ["rule", "frcp:56:"],
             ["const", "amend:14:"],
             ["usc", "18:922:"],
+            ["usc", "42:2000e-2:"],
             ["cfr", "40:261.4:"],
             ["statpdf", "https://www.govinfo.gov/link/statute/88/1932"],
             ["cite", "574 F.3d 1098"],
