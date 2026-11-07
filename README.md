@@ -442,10 +442,12 @@ things:
    Scholar answer with an "unusual traffic" challenge. With Firefox and the
    `selenium` package installed, GetCases then goes straight to a private,
    invisible copy of Firefox, which Google usually accepts. If even that is
-   challenged, a Firefox window opens on Google's CAPTCHA: answer it there, and
-   the case opens and the window closes by itself. GetCases keeps the cleared
-   cookies for later searches and app restarts. (Close the window to skip it;
-   GetCases won't ask again for ten minutes.) With the
+   challenged, an ordinary Firefox window opens on Google's CAPTCHA, in a
+   separate profile that Selenium never controls. Answer the check there;
+   **once Scholar's results appear, close that window** to return to GetCases.
+   GetCases imports the cleared cookies and retries the page, keeping them
+   for later searches and app restarts. If the check remains unanswered,
+   GetCases won't open another window for ten minutes. With the
    [Chrome extension](browser_extension/README.md) in Chrome or Edge, the
    CAPTCHA opens there instead, with or without Firefox: answer it in your own
    browser and the case opens in GetCases. Without either, GetCases falls back

@@ -7,8 +7,8 @@ unusual traffic" challenge (verified 2026-07-03 — same IP, same google.com
 cookies, real Firefox passed a fresh search and all curl_cffi fingerprints
 429'd).  So when the impersonation layer in :mod:`google_scholar` is blocked,
 it falls back here and drives the actual Firefox, whose genuine Gecko network
-stack Scholar trusts. When Google challenges that fetch, Selenium opens a
-visible Firefox window and waits for the user to answer the CAPTCHA.
+stack Scholar trusts. When Google challenges that fetch, Selenium quits and
+the user answers in ordinary Firefox, with no WebDriver attached.
 
 Design:
   * A **dedicated** headless Firefox profile (under the app cache) — never the
@@ -19,11 +19,13 @@ Design:
     there is no manual setup beyond ``pip install selenium`` and Firefox.
   * The driver is started lazily and kept alive for reuse (start-up is slow);
     :func:`ScholarBrowser.close` / atexit tear it down.
-  * When Google challenges even this Firefox, the reader solves it in a
-    visible Selenium window on the same profile (see
-    :meth:`ScholarBrowser._solve`). The loaded page and cookies are captured
-    before that window closes automatically. Session cookies are also saved
-    separately, so the next headless session and app restart retain them.
+  * The CAPTCHA window uses a separate persistent profile that Selenium never
+    opens. After the reader solves the check and closes that window, its
+    fresh Google cookies and the cleared results URL are imported before
+    retrying. Google sometimes puts the exemption only in that URL; Firefox's
+    saved session preserves it even when cookies.sqlite does not.
+    On Windows, ``-wait-for-browser`` keeps the launcher alive until the
+    actual window closes, avoiding a premature automated retry.
 
 Everything here is optional: :func:`available` is False when Selenium or
 Firefox is missing, and the caller degrades to the local opinion DB /
@@ -38,15 +40,18 @@ import os
 import subprocess
 import threading
 import time
+from email.utils import parsedate_to_datetime
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 _PROFILE_DIR = Path.home() / ".cache" / "courtlistener_scholar_ff"
 _PAGE_LOAD_TIMEOUT = 40
 _CONTENT_TIMEOUT = 20  # seconds to wait for results / opinion to appear
 _SOLVE_TIMEOUT = 300   # seconds the reader has to answer a CAPTCHA
 _SOLVE_SNOOZE = 600    # seconds no CAPTCHA window opens after one went unanswered
+_MAX_SESSION_BYTES = 32 * 1024 * 1024
 
 # Substrings that mark Google's bot challenge, checked against the URL + source.
 _BLOCK_MARKERS = (
@@ -54,24 +59,6 @@ _BLOCK_MARKERS = (
     "id=\"recaptcha\"", "g-recaptcha", "google.com/recaptcha",
     "automated queries",
 )
-
-
-_SOLVE_NOTE = (
-    "GetCases: Google Scholar wants to check that a person is asking. Answer "
-    "the CAPTCHA below and the page you asked for opens in GetCases; this "
-    "window then closes by itself."
-)
-
-_NOTE_JS = """
-if (document.body && !document.getElementById('getcases-solve-note')) {
-  var d = document.createElement('div');
-  d.id = 'getcases-solve-note';
-  d.textContent = arguments[0];
-  d.style.cssText = 'padding:10px 16px;background:#fff3cd;color:#222;'
-    + 'font:15px/1.4 sans-serif;border-bottom:1px solid #d9c27a;';
-  document.body.insertBefore(d, document.body.firstChild);
-}
-"""
 
 
 #: Told what a fetch is waiting on, when set: ``on_step(text)`` as a CAPTCHA
@@ -147,37 +134,54 @@ def _store_firefox_binary() -> Optional[str]:
     return None
 
 
-def _google_cookie_rows() -> list:
+def _google_cookie_rows(dbs=None) -> list:
     """Full google.com cookie rows from the user's Firefox profile(s), as
     Selenium ``add_cookie`` dicts.  These carry the account/reputation state
     (chiefly ``NID``) that — together with a real Gecko fingerprint — is what
     lets a search pass; a fresh profile has the fingerprint but not the
     standing, so it is challenged.  Host-only ``__Host-*`` cookies are skipped
     (they can't be re-scoped)."""
-    import os
     import shutil
     import sqlite3
     import tempfile
     import time
     try:
         import eng_rep_pdf
-        dbs = eng_rep_pdf._firefox_cookie_dbs()
+        if dbs is None:
+            dbs = eng_rep_pdf._firefox_cookie_dbs()
     except Exception:
         return []
     seen: set = set()
     rows: list = []
     for db in dbs:
-        tmp = None
         try:
-            fd, tmp = tempfile.mkstemp(suffix=".sqlite")
-            os.close(fd)
-            shutil.copy2(db, tmp)
-            con = sqlite3.connect(tmp)
+            # Firefox's newest cookies may still be in the WAL, even after
+            # its window closes. Copy the DB and journal together, never
+            # writing to the user's live store.
+            with tempfile.TemporaryDirectory(prefix="scholar_cookies_") as tmp:
+                snapshot = Path(tmp) / "cookies.sqlite"
+                shutil.copy2(db, snapshot)
+                for suffix in ("-wal", "-shm"):
+                    side = Path(str(db) + suffix)
+                    if side.is_file():
+                        shutil.copy2(side, str(snapshot) + suffix)
+                con = sqlite3.connect(snapshot)
+                try:
+                    have = {row[1] for row in con.execute("PRAGMA table_info(moz_cookies)")}
+                    # The most recently updated partition wins for a cookie
+                    # with the same domain, path and name.
+                    stamps = [col for col in ("updateTime", "lastAccessed", "creationTime")
+                              if col in have]
+                    order = (" ORDER BY " + ", ".join(col + " DESC" for col in stamps)
+                             if stamps else "")
+                    found = con.execute(
+                        "SELECT name, value, host, path, isSecure, expiry "
+                        "FROM moz_cookies WHERE host LIKE '%google.com'" + order
+                    ).fetchall()
+                finally:
+                    con.close()
             now = time.time()
-            for name, value, host, path, is_secure, expiry in con.execute(
-                "SELECT name, value, host, path, isSecure, expiry "
-                "FROM moz_cookies WHERE host LIKE '%google.com'"
-            ):
+            for name, value, host, path, is_secure, expiry in found:
                 domain = host.lstrip(".").lower()
                 key = (domain, path or "/", name)
                 if (domain != "google.com" and not domain.endswith(".google.com")
@@ -200,15 +204,8 @@ def _google_cookie_rows() -> list:
                 if exp:
                     row["expiry"] = int(exp)
                 rows.append(row)
-            con.close()
         except Exception:
             continue
-        finally:
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
     return rows
 
 
@@ -221,12 +218,123 @@ def available() -> bool:
     return _firefox_binary() is not None
 
 
+def _read_firefox_session(profile: Path) -> dict:
+    """Read the latest native Firefox session, without starting a browser.
+
+    A solved Scholar check may exist only in the results URL, rather than in
+    cookies.sqlite. Firefox saves that URL in its Mozilla-LZ4 session file.
+    Do not fall back to stale backups when the latest valid session is empty.
+    """
+    paths = [profile / "sessionstore.jsonlz4",
+             profile / "sessionstore-backups" / "recovery.jsonlz4",
+             profile / "sessionstore-backups" / "recovery.baklz4",
+             profile / "sessionstore-backups" / "previous.jsonlz4"]
+    existing = []
+    for path in paths:
+        try:
+            if path.is_file():
+                existing.append((path.stat().st_mtime_ns, path))
+        except OSError:
+            pass
+    for _mtime, path in sorted(existing, reverse=True):
+        try:
+            if path.stat().st_size > _MAX_SESSION_BYTES:
+                continue
+            data = path.read_bytes()
+            if (not data.startswith(b"mozLz40\0") or len(data) < 12
+                    or int.from_bytes(data[8:12], "little") > _MAX_SESSION_BYTES):
+                continue
+            import lz4.block
+            state = json.loads(lz4.block.decompress(data[8:]))
+            if isinstance(state, dict):
+                return state
+        except ImportError:
+            print("[scholar-browser] reading Firefox's cleared URL needs lz4 "
+                  "(install with `pip install lz4`)")
+            return {}
+        except Exception:
+            # Includes corrupt/truncated LZ4 data during a Firefox shutdown.
+            continue
+    return {}
+
+
+def _scholar_page_key(url: str) -> tuple:
+    """The requested Scholar page, ignoring Google's handoff parameters."""
+    try:
+        parts = urlparse(url)
+        if (parts.scheme != "https" or parts.hostname != "scholar.google.com"
+                or parts.port not in (None, 443) or parts.username or parts.password):
+            return ()
+    except (TypeError, ValueError):
+        return ()
+    return (parts.path, tuple(sorted(
+        (key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key not in {"google_abuse", "sgst"})))
+
+
+def _session_clearance(state: dict, requested_url: str) -> tuple[list, str]:
+    """Recover Google's cookie assignment and the matching cleared URL.
+
+    Accept only Google's exemption, from HTTPS Scholar URLs. The encoded
+    assignment contains domain/path/expiry attributes, not just a token.
+    Never log the URL or the cookie's value.
+    """
+    tabs = []
+    for group in ("windows", "_closedWindows"):
+        windows = state.get(group, [])
+        for window in windows if isinstance(windows, list) else []:
+            if isinstance(window, dict) and isinstance(window.get("tabs"), list):
+                tabs.extend(tab for tab in window["tabs"] if isinstance(tab, dict))
+    tabs.sort(key=lambda tab: (tab.get("lastAccessed", 0)
+                              if isinstance(tab.get("lastAccessed", 0), (int, float))
+                              else 0), reverse=True)
+    matching, other, cleared_url = [], [], ""
+    wanted = _scholar_page_key(requested_url)
+    for tab in tabs:
+        entries = tab.get("entries", [])
+        for entry in reversed(entries if isinstance(entries, list) else []):
+            if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
+                continue
+            url = entry["url"]
+            key = _scholar_page_key(url)
+            if not key:
+                continue
+            try:
+                assignment = parse_qs(urlparse(url).query).get("google_abuse", [""])[0]
+                cookie = SimpleCookie()
+                cookie.load(assignment)
+                exemption = cookie.get("GOOGLE_ABUSE_EXEMPTION")
+                if not exemption or not exemption.value:
+                    continue
+                domain = exemption["domain"].lstrip(".").lower() or "google.com"
+                if domain not in {"google.com", "scholar.google.com"}:
+                    continue
+                row = {"name": "GOOGLE_ABUSE_EXEMPTION", "value": exemption.value,
+                       "domain": "." + domain, "path": exemption["path"] or "/",
+                       "secure": True, "httpOnly": bool(exemption["httponly"])}
+                if exemption["expires"]:
+                    row["expiry"] = int(parsedate_to_datetime(exemption["expires"]).timestamp())
+                    if row["expiry"] <= time.time():
+                        continue
+                if wanted and key == wanted:
+                    matching.append(row)
+                    if not cleared_url:
+                        cleared_url = url
+                else:
+                    other.append(row)
+            except (CookieError, TypeError, ValueError, OverflowError):
+                continue
+    return matching + other, cleared_url
+
+
 class ScholarBrowser:
     """A lazily-started headless Firefox that fetches Scholar pages.  Not
     safe for concurrent use — the caller serializes fetches with a lock."""
 
     def __init__(self) -> None:
         self._driver = None
+        self._manual_process = None
+        self._manual_imported = False
         self._lock = threading.Lock()
         # google.com cookies a CAPTCHA answered in the visible window earned
         # (Google's exemption chiefly), seeded into the next headless session.
@@ -264,15 +372,6 @@ class ScholarBrowser:
             opts.binary_location = binary
         except Exception:
             pass
-        # Trim obvious automation tells (harmless for the TLS-level block, but
-        # cheap insurance against JS-level checks).
-        for pref, val in (
-            ("dom.webdriver.enabled", False),
-            ("useAutomationExtension", False),
-            ("general.useragent.override", None),  # keep Firefox's real UA
-        ):
-            if val is not None:
-                opts.set_preference(pref, val)
         opts.set_preference("intl.accept_languages", "en-US, en")
 
         try:
@@ -364,6 +463,9 @@ class ScholarBrowser:
                 list(driver.get_cookies() or []) + self._earned)
         except Exception:
             return  # A closed window must not discard the previous clearance.
+        self._save_cookies()
+
+    def _save_cookies(self) -> None:
         try:
             _PROFILE_DIR.mkdir(parents=True, exist_ok=True)
             path = _PROFILE_DIR / "scholar_cookies.json"
@@ -372,6 +474,39 @@ class ScholarBrowser:
             pending.replace(path)
         except OSError:
             pass  # In-memory reuse still works when the cache isn't writable.
+
+    def _manual_profile(self) -> Path:
+        # This child directory is never passed to Selenium. Keep its browser
+        # preferences and standing separate from the automated profile.
+        return _PROFILE_DIR / "manual"
+
+    def _prepare_manual_profile(self) -> Path:
+        profile = self._manual_profile()
+        profile.mkdir(parents=True, exist_ok=True)
+        prefs = {
+            "browser.shell.checkDefaultBrowser": False,
+            "browser.aboutwelcome.enabled": False,
+            "browser.startup.homepage_override.mstone": "ignore",
+            "browser.startup.page": 0,
+            "intl.accept_languages": "en-US, en",
+        }
+        (profile / "user.js").write_text("".join(
+            f"user_pref({json.dumps(key)}, {json.dumps(value)});\n"
+            for key, value in prefs.items()), encoding="utf-8")
+        return profile
+
+    def _import_manual_cookies(self, requested_url: str = "") -> str:
+        state = _read_firefox_session(self._manual_profile())
+        clearance, cleared_url = _session_clearance(state, requested_url)
+        rows = _google_cookie_rows([self._manual_profile() / "cookies.sqlite"])
+        # Import BEFORE restarting Selenium: otherwise its previously saved
+        # exemption would overwrite the one the user has just earned.
+        self._earned = self._valid_cookies(clearance + rows + self._earned)
+        self._manual_imported = True
+        self._save_cookies()
+        if clearance:
+            print("[scholar-browser] recovered CAPTCHA exemption from Firefox's cleared URL")
+        return cleared_url or requested_url
 
     def close(self) -> None:
         drv, self._driver = self._driver, None
@@ -401,12 +536,23 @@ class ScholarBrowser:
         )
 
         with self._lock:
+            resume_url = url
+            if self._manual_process is not None:
+                if self._manual_process.poll() is None:
+                    # A timed-out manual window is still owned by the reader.
+                    # Do not relaunch it or race it with an automated request.
+                    raise BrowserBlocked()
+                self._manual_process = None
+                resume_url = self._import_manual_cookies(url)
+            elif not self._manual_imported and self._manual_profile().is_dir():
+                # Recover an already-solved check after an app restart, too.
+                resume_url = self._import_manual_cookies(url)
             driver = self._ensure_driver()
             if not wait_for:
                 wait_for = ("#gs_opinion" if "scholar_case" in url
                             else "#gs_res_ccl, .gs_r")
             try:
-                driver.get(url)
+                driver.get(resume_url)
             except TimeoutException:
                 pass  # partial load is fine — we inspect what arrived
             except WebDriverException as exc:
@@ -414,7 +560,7 @@ class ScholarBrowser:
                 self.restart()
                 driver = self._driver
                 try:
-                    driver.get(url)
+                    driver.get(resume_url)
                 except Exception as exc2:
                     raise BrowserUnavailable(f"navigation failed: {exc2}")
 
@@ -429,64 +575,70 @@ class ScholarBrowser:
             return source, final_url
 
     def _solve(self, url: str, wait_for: str) -> "tuple[str, str]":
-        """Let the reader answer in visible Firefox, capturing the resulting
-        page and cookies before closing it. Never require them to close the
-        window to continue: that loses session cookies and the loaded page.
-        An unanswered window is snoozed for :data:`_SOLVE_SNOOZE`."""
+        """Hand the check to an ordinary browser, then import its cookies.
+
+        Nothing attaches to or navigates that window while the reader works.
+        Closing it is the explicit handoff back to GetCases. A timeout leaves
+        it open; it is never terminated just to force an automated retry.
+        """
         from selenium.common.exceptions import TimeoutException, WebDriverException
 
         if time.monotonic() < self._solve_after:
             raise BrowserBlocked()
         self._remember_cookies(self._driver)
-        self.close()  # a profile is open in one Firefox at a time
+        self.close()
         try:
-            driver = self._ensure_driver(headless=False)
-        except BrowserUnavailable as exc:
-            self.close()
+            binary = _firefox_binary()
+            if not binary:
+                raise BrowserUnavailable("Firefox not found")
+            profile = self._prepare_manual_profile()
+            args = [binary, "-no-remote", "-profile", str(profile)]
+            if os.name == "nt":
+                args.append("-wait-for-browser")
+            args.append(url)
+            env = {key: value for key, value in os.environ.items()
+                   if key not in ("MOZ_AUTOMATION", "MOZ_MARIONETTE")
+                   and not key.startswith("MOZ_HEADLESS")}
+            process = self._manual_process = subprocess.Popen(args, env=env)
+        except (OSError, BrowserUnavailable) as exc:
             print(f"[scholar-browser] no window for the CAPTCHA: {exc}")
             self._solve_after = time.monotonic() + _SOLVE_SNOOZE
             raise BrowserBlocked()
 
-        print("[scholar-browser] waiting for the user in the Firefox window")
+        print("[scholar-browser] waiting for the user in ordinary Firefox")
         _tell(on_step, "Google Scholar needs a CAPTCHA check. Answer it in the "
-                       "Firefox window that has opened; GetCases will "
-                       "continue automatically…")
+                       "ordinary Firefox window. Once Scholar's results "
+                       "appear, close that window to continue in GetCases…")
+        deadline = time.monotonic() + _SOLVE_TIMEOUT
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.5)
+        if process.poll() is None:
+            print("[scholar-browser] manual Firefox is still open; leaving it "
+                  "with the user and pausing Scholar requests")
+            self._solve_after = time.monotonic() + _SOLVE_SNOOZE
+            raise BrowserBlocked()
 
-        def go(target):
-            try:
-                driver.get(target)
-            except TimeoutException:
-                pass  # Inspect the partial load rather than abandoning it.
-
+        self._manual_process = None
+        resume_url = self._import_manual_cookies(url)
         try:
-            go(url)
-            deadline = time.monotonic() + _SOLVE_TIMEOUT
-            while time.monotonic() < deadline:
-                final_url = driver.current_url or ""
-                source = driver.page_source or ""
-                # A blank page or an intermediate redirect isn't a completed
-                # check. Only resume once Scholar itself has loaded content.
-                if (urlparse(final_url).hostname == "scholar.google.com"
-                        and source.strip() and not _challenged(final_url, source)):
-                    if urlparse(final_url).path != urlparse(url).path:
-                        go(url)
-                    self._await_content(driver, wait_for)
-                    final_url = driver.current_url or url
-                    source = driver.page_source or ""
-                    if (urlparse(final_url).hostname == "scholar.google.com"
-                            and not _challenged(final_url, source)
-                            and self._content_ready(driver, wait_for)):
-                        self._remember_cookies(driver)
-                        self._solve_after = 0.0
-                        print("[scholar-browser] CAPTCHA answered")
-                        return source, final_url
-                driver.execute_script(_NOTE_JS, _SOLVE_NOTE)
-                time.sleep(1.0)
-        except WebDriverException:
-            pass  # The reader closed the window or Firefox exited.
-        finally:
-            self.close()  # The next fetch starts headless with the new cookies.
+            driver = self._ensure_driver()
+            try:
+                driver.get(resume_url)
+            except TimeoutException:
+                pass
+            self._await_content(driver, wait_for)
+            source, final_url = driver.page_source or "", driver.current_url or url
+            if (urlparse(final_url).hostname == "scholar.google.com"
+                    and not _challenged(final_url, source)
+                    and self._content_ready(driver, wait_for)):
+                self._remember_cookies(driver)
+                self._solve_after = 0.0
+                print("[scholar-browser] manual Firefox cleared the CAPTCHA")
+                return source, final_url
+        except (BrowserUnavailable, WebDriverException) as exc:
+            print(f"[scholar-browser] could not resume Scholar: {exc}")
 
+        self.close()
         print("[scholar-browser] the CAPTCHA was not cleared")
         self._solve_after = time.monotonic() + _SOLVE_SNOOZE
         raise BrowserBlocked()
