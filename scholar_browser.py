@@ -7,7 +7,9 @@ unusual traffic" challenge (verified 2026-07-03 — same IP, same google.com
 cookies, real Firefox passed a fresh search and all curl_cffi fingerprints
 429'd).  So when the impersonation layer in :mod:`google_scholar` is blocked,
 it falls back here and drives the actual Firefox, whose genuine Gecko network
-stack Scholar trusts.
+stack Scholar trusts. When Google challenges that fetch, the CAPTCHA is
+opened in a separate, ordinary Firefox process on the same dedicated profile;
+Selenium is shut down first and never controls the CAPTCHA window.
 
 Design:
   * A **dedicated** headless Firefox profile (under the app cache) — never the
@@ -18,11 +20,10 @@ Design:
     there is no manual setup beyond ``pip install selenium`` and Firefox.
   * The driver is started lazily and kept alive for reuse (start-up is slow);
     :func:`ScholarBrowser.close` / atexit tear it down.
-  * When Google challenges even this Firefox, the page is opened again in a
-    Firefox window the reader can see, on the same profile, and the fetch
-    waits for them to answer the CAPTCHA there (see
-    :meth:`ScholarBrowser._solve`).  What answering earns is carried back into
-    the headless session.
+  * When Google challenges even this Firefox, the reader solves it in an
+    ordinary Firefox process on the same profile (see
+    :meth:`ScholarBrowser._solve`). The app retries the page after that
+    window closes.
 
 Everything here is optional: :func:`available` is False when Selenium or
 Firefox is missing, and the caller degrades to the local opinion DB /
@@ -32,11 +33,11 @@ CourtListener exactly as before.
 from __future__ import annotations
 
 import atexit
+import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 _PROFILE_DIR = Path.home() / ".cache" / "courtlistener_scholar_ff"
 _PAGE_LOAD_TIMEOUT = 40
@@ -50,25 +51,6 @@ _BLOCK_MARKERS = (
     "id=\"recaptcha\"", "g-recaptcha",
 )
 
-
-# Said above Google's challenge in the window the reader answers it in.  It must
-# not contain any of _BLOCK_MARKERS, or the page would never read as answered.
-_SOLVE_NOTE = (
-    "GetCases: Google Scholar wants to check that a person is asking. Answer "
-    "the CAPTCHA below and the page you asked for opens in GetCases; this "
-    "window then closes by itself."
-)
-
-_NOTE_JS = """
-if (document.body && !document.getElementById('getcases-solve-note')) {
-  var d = document.createElement('div');
-  d.id = 'getcases-solve-note';
-  d.textContent = arguments[0];
-  d.style.cssText = 'padding:10px 16px;background:#fff3cd;color:#222;'
-    + 'font:15px/1.4 sans-serif;border-bottom:1px solid #d9c27a;';
-  document.body.insertBefore(d, document.body.firstChild);
-}
-"""
 
 #: Told what a fetch is waiting on, when set: ``on_step(text)`` as a CAPTCHA
 #: window opens for the reader (the app shows it in its loading window).
@@ -326,66 +308,77 @@ class ScholarBrowser:
             return source, final_url
 
     def _solve(self, url: str, wait_for: str) -> "tuple[str, str]":
-        """Google has challenged the headless Firefox too: put the CAPTCHA to
-        the reader.  *url* is opened again in a Firefox window they can see,
-        on the same profile, and this waits — up to _SOLVE_TIMEOUT — for the
-        challenge to be answered and the page behind it to load, and returns
-        that page.  The window then closes; the cookies answering earned go
-        on into the headless session the next fetch starts.
+        """Google challenged the automated fetch: let the reader solve it in
+        an ordinary Firefox process, then resume the fetch with Selenium.
 
-        Raises :class:`BrowserBlocked` when the reader closes the window or
-        lets it time out — and, for _SOLVE_SNOOZE after that, at once and
-        without a window, so an unanswered challenge does not come back on
-        every fetch."""
-        from selenium.common.exceptions import (
-            TimeoutException, WebDriverException,
-        )
+        Selenium quits before Firefox opens. The standalone process uses the
+        same dedicated profile, but is started with ``-no-remote`` and is
+        never attached to by WebDriver. Once the reader solves the challenge
+        and closes that window, Selenium reopens the profile and fetches the
+        requested page. This keeps the CAPTCHA interaction out of the
+        WebDriver-controlled window.
+
+        Raises :class:`BrowserBlocked` when Firefox cannot be opened, the
+        reader closes it without clearing the challenge, or the solve times
+        out. An unanswered challenge is snoozed for
+        :data:`_SOLVE_SNOOZE`."""
 
         if time.monotonic() < self._solve_after:
             raise BrowserBlocked()
         self.close()  # a profile is open in one Firefox at a time
-        try:
-            driver = self._ensure_driver(headless=False)
-        except BrowserUnavailable as exc:
-            print(f"[scholar-browser] no window for the CAPTCHA: {exc}")
+        binary = _firefox_binary()
+        if not binary:
+            print("[scholar-browser] Firefox unavailable for the CAPTCHA")
             self._solve_after = time.monotonic() + _SOLVE_SNOOZE
             raise BrowserBlocked()
-        print("[scholar-browser] Google challenged Firefox too — waiting for "
-              "the CAPTCHA to be answered in the window")
-        _tell(on_step, "Google Scholar wants a CAPTCHA answered — answer it in "
-                       "the Firefox window that has opened…")
-
-        def go(target: str) -> None:
-            try:
-                driver.get(target)
-            except TimeoutException:
-                pass  # partial load is fine — we inspect what arrived
-
+        _PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        print("[scholar-browser] opening an ordinary Firefox window for "
+              "the Scholar CAPTCHA")
+        _tell(on_step, "Google Scholar needs a CAPTCHA check. An ordinary "
+                       "Firefox window has opened; solve it there, then close "
+                       "that window to continue…")
         try:
-            go(url)
+            process = subprocess.Popen([
+                binary, "-no-remote", "-profile", str(_PROFILE_DIR), url,
+            ])
+        except Exception as exc:
+            print(f"[scholar-browser] could not open ordinary Firefox: {exc}")
+            self._solve_after = time.monotonic() + _SOLVE_SNOOZE
+            raise BrowserBlocked()
+        try:
             deadline = time.monotonic() + _SOLVE_TIMEOUT
             while time.monotonic() < deadline:
-                final_url = driver.current_url or url
-                source = driver.page_source or ""
-                if not _challenged(final_url, source):
-                    if urlparse(final_url).path != urlparse(url).path:
-                        # Answered, but left somewhere else: go on to the page
-                        # asked for, now that Google lets us.
-                        go(url)
-                    self._await_content(driver, wait_for)
-                    final_url = driver.current_url or url
-                    source = driver.page_source or ""
-                    if not _challenged(final_url, source):
-                        self._earned = driver.get_cookies() or []
-                        print("[scholar-browser] CAPTCHA answered")
-                        return source, final_url
-                driver.execute_script(_NOTE_JS, _SOLVE_NOTE)
-                time.sleep(1.0)
-        except WebDriverException:
-            pass  # the reader closed the window
+                if process.poll() is not None:
+                    break  # the reader closed the ordinary Firefox window
+                time.sleep(0.5)
         finally:
-            self.close()  # the next fetch starts headless again
-        print("[scholar-browser] the CAPTCHA went unanswered")
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except Exception:
+                    pass
+
+        # Firefox has released the shared profile; retry the original page in
+        # the normal headless fetch session and return its actual HTML.
+        try:
+            from selenium.common.exceptions import TimeoutException
+            driver = self._ensure_driver()
+            try:
+                driver.get(url)
+            except TimeoutException:
+                pass
+            self._await_content(driver, wait_for)
+            source = driver.page_source or ""
+            final_url = driver.current_url or url
+            if not _challenged(final_url, source):
+                self._earned = driver.get_cookies() or []
+                print("[scholar-browser] ordinary Firefox cleared the CAPTCHA")
+                return source, final_url
+        except Exception as exc:
+            print(f"[scholar-browser] could not resume Scholar fetch: {exc}")
+
+        print("[scholar-browser] the CAPTCHA was not cleared")
         self._solve_after = time.monotonic() + _SOLVE_SNOOZE
         raise BrowserBlocked()
 
