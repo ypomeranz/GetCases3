@@ -17,6 +17,7 @@ and the drivers are fakes.
 """
 
 import sys
+import json
 import tempfile
 import time
 import types
@@ -48,6 +49,10 @@ HOME = "<html><body><div id=\"gs_hdr\">Google Scholar</div></body></html>"
 class _FetcherFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
+        for patcher in (mock.patch.object(GoogleScholarFetcher, "_load_state", return_value={}),
+                        mock.patch.object(gs, "_browser_google_cookies", return_value={})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.fetcher = GoogleScholarFetcher(
             cache_path=Path(self._tmp.name) / "cache.db", delay=0.0)
         f = self.fetcher
@@ -97,6 +102,17 @@ class StraightToFirefoxTests(_FetcherFixture):
     def test_which_is_then_asked_first(self):
         self.fetcher._get(URL)
         self.assertTrue(self.fetcher._browser_first)
+
+    def test_a_captcha_served_with_http_200_also_opens_firefox(self):
+        self._answer(200, URL)
+        self.session.get.return_value.text = CHALLENGE
+        self.fetcher._get(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL)
+
+    def test_an_http_403_also_opens_firefox(self):
+        self._answer(403, URL)
+        self.fetcher._get(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL)
 
     def test_without_firefox_the_other_fingerprints_are_tried(self):
         self.fetcher._browser_usable.return_value = False
@@ -170,9 +186,9 @@ class ExtensionBrowserTests(_FetcherFixture):
         f._extension_get.return_value = gs._BrowserResponse(RESULTS, URL)
         f._browser_get.return_value = None     # the hidden Firefox challenged
 
-    def test_the_hidden_firefox_is_asked_but_puts_up_no_window(self):
+    def test_the_extension_is_preferred_without_starting_firefox(self):
         resp = self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.fetcher._browser_get.assert_not_called()
         self.fetcher._extension_get.assert_called_once_with(URL)
         self.assertEqual(resp.text, RESULTS)
 
@@ -182,12 +198,13 @@ class ExtensionBrowserTests(_FetcherFixture):
         self.assertEqual(self.session.get.call_count, 1)
         self.fetcher._extension_get.assert_called_once_with(URL)
 
-    def test_firefox_passing_needs_no_browser(self):
+    def test_an_installed_extension_is_preferred_even_when_firefox_could_pass(self):
         self.fetcher._browser_get.return_value = gs._BrowserResponse(
             RESULTS, URL)
         self.fetcher._get(URL)
-        self.fetcher._extension_get.assert_not_called()
-        self.assertTrue(self.fetcher._browser_first)
+        self.fetcher._extension_get.assert_called_once_with(URL)
+        self.fetcher._browser_get.assert_not_called()
+        self.assertFalse(self.fetcher._browser_first)
 
     def test_the_browser_answering_is_not_firefox_working(self):
         # Next time the app's own requests go first again, wearing what the
@@ -204,7 +221,7 @@ class ExtensionBrowserTests(_FetcherFixture):
     def test_with_firefox_first_too(self):
         self.fetcher._browser_first = True
         self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.fetcher._browser_get.assert_not_called()
         self.fetcher._extension_get.assert_called_once_with(URL)
         self.session.get.assert_not_called()
 
@@ -272,6 +289,9 @@ class _FakeDriver:
     def get_cookies(self):
         return list(self.cookies)
 
+    def find_elements(self, by, selector):
+        return gs.BeautifulSoup(self.page_source, "html.parser").select(selector)
+
     def add_cookie(self, row):
         self.added.append(row)
 
@@ -281,12 +301,20 @@ class _FakeDriver:
 
 class _BrowserFixture(unittest.TestCase):
     def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        profile_patch = mock.patch.object(sb, "_PROFILE_DIR", Path(self._tmp.name))
+        profile_patch.start()
+        self.addCleanup(profile_patch.stop)
         exc = types.ModuleType("selenium.common.exceptions")
         exc.WebDriverException = _WebDriverException
         exc.TimeoutException = _TimeoutException
+        by = types.ModuleType("selenium.webdriver.common.by")
+        by.By = SimpleNamespace(CSS_SELECTOR="css selector")
         modules = {"selenium": types.ModuleType("selenium"),
                    "selenium.common": types.ModuleType("selenium.common"),
-                   "selenium.common.exceptions": exc}
+                   "selenium.common.exceptions": exc,
+                   "selenium.webdriver.common.by": by}
         for patcher in (mock.patch.dict(sys.modules, modules),
                         mock.patch.object(sb.time, "sleep"),
                         mock.patch.object(sb, "on_step", None)):
@@ -328,6 +356,42 @@ class CaptchaWindowTests(_BrowserFixture):
     def test_the_page_behind_the_captcha_is_returned_once_answered(self):
         html, final = self.browser.fetch(URL, solve=True)
         self.assertEqual((html, final), (RESULTS, URL))
+
+    def test_a_temporary_blank_page_is_not_a_completed_check(self):
+        self.window.states = [("about:blank", ""), (URL, "<html></html>"),
+                              (SORRY, CHALLENGE), (URL, RESULTS)]
+        html, final = self.browser.fetch(URL, solve=True)
+        self.assertEqual((html, final), (RESULTS, URL))
+
+    def test_an_empty_results_notice_also_completes_the_check(self):
+        empty = "<html><body>Your search did not match any articles.</body></html>"
+        self.window.states = [(SORRY, CHALLENGE), (URL, empty)]
+        self.assertEqual(self.browser.fetch(URL, solve=True), (empty, URL))
+
+    def test_a_partial_navigation_timeout_still_allows_a_solve(self):
+        def get(url):
+            self.window.got.append(url)
+            raise _TimeoutException()
+
+        self.window.get = get
+        self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))
+
+    def test_the_cookie_is_reused_on_the_next_fetch_without_a_window(self):
+        self.browser.fetch(URL, solve=True)
+        hidden = _FakeDriver((URL, RESULTS), cookies=self.browser._earned)
+        self.drivers = [hidden]
+        with mock.patch.object(sb, "_google_cookie_rows", return_value=[]):
+            self.browser._seed_cookies(hidden)
+        html, final = self.browser.fetch(URL, solve=True)
+        self.assertEqual((html, final), (RESULTS, URL))
+        self.assertEqual(self.started, [True, False, True])
+        self.assertEqual(hidden.added[0]["value"], "ok")
+
+    def test_session_cookies_survive_a_new_browser_instance(self):
+        self.browser.fetch(URL, solve=True)
+        restarted = sb.ScholarBrowser()
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted._earned, self.window.cookies)
 
     def test_the_hidden_firefox_makes_way_for_the_window(self):
         # A profile can be open in one Firefox at a time.
@@ -443,6 +507,13 @@ class UnansweredTests(_BrowserFixture):
 class EarnedCookiesTests(unittest.TestCase):
     """What answering earned leads the cookies the hidden Firefox starts with."""
 
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(sb, "_PROFILE_DIR", Path(tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_they_go_in_ahead_of_the_user_s_own(self):
         browser = sb.ScholarBrowser()
         self.addCleanup(browser.close)
@@ -457,6 +528,100 @@ class EarnedCookiesTests(unittest.TestCase):
             browser._seed_cookies(driver)
         self.assertEqual([(c["name"], c["value"]) for c in driver.added],
                          [("GOOGLE_ABUSE_EXEMPTION", "new"), ("NID", "n")])
+
+    def test_the_persistent_profile_also_beats_an_older_borrowed_cookie(self):
+        browser = sb.ScholarBrowser()
+        self.addCleanup(browser.close)
+        fresh = {"name": "GOOGLE_ABUSE_EXEMPTION", "value": "new",
+                 "domain": ".google.com", "path": "/"}
+        stale = dict(fresh, value="old")
+        driver = _FakeDriver((URL, RESULTS), cookies=[fresh])
+        with mock.patch.object(sb, "_google_cookie_rows", return_value=[stale]):
+            browser._seed_cookies(driver)
+        self.assertEqual(driver.added, [fresh])
+
+    def test_cookie_scope_expiry_and_flags_are_preserved(self):
+        browser = sb.ScholarBrowser()
+        self.addCleanup(browser.close)
+        live = {"name": "GOOGLE_ABUSE_EXEMPTION", "value": "new",
+                "domain": "scholar.google.com", "path": "/scholar",
+                "expiry": int(time.time()) + 3600, "secure": True,
+                "httpOnly": True, "sameSite": "Lax"}
+        other_path = dict(live, path="/", value="other-path")
+        driver = _FakeDriver((URL, RESULTS), cookies=[
+            live, dict(live, value="old"), other_path,
+            dict(live, name="expired", expiry=1),
+            dict(live, domain="notgoogle.com"),
+        ])
+        browser._remember_cookies(driver)
+        self.assertEqual(browser._earned, [live, other_path])
+        self.assertEqual(sb.ScholarBrowser._load_cookies(), [live, other_path])
+
+    def test_a_corrupt_cookie_file_does_not_disable_firefox(self):
+        (sb._PROFILE_DIR / "scholar_cookies.json").write_text("{bad json")
+        browser = sb.ScholarBrowser()
+        self.addCleanup(browser.close)
+        self.assertEqual(browser._earned, [])
+
+    def test_a_redirected_homepage_still_allows_scholar_scoped_cookies(self):
+        browser = sb.ScholarBrowser()
+        self.addCleanup(browser.close)
+        cookie = {"name": "GOOGLE_ABUSE_EXEMPTION", "value": "new",
+                  "domain": "scholar.google.com", "path": "/"}
+        browser._earned = [cookie]
+        robots = "https://scholar.google.com/robots.txt"
+        driver = _FakeDriver((SORRY, CHALLENGE), routes={robots: (robots, "User-agent: *")})
+        with mock.patch.object(sb, "_google_cookie_rows", return_value=[]):
+            browser._seed_cookies(driver)
+        self.assertEqual(driver.got, ["https://scholar.google.com/", robots])
+        self.assertEqual(driver.added, [cookie])
+
+    def test_expired_persisted_cookies_are_not_replayed(self):
+        (sb._PROFILE_DIR / "scholar_cookies.json").write_text(json.dumps([
+            {"name": "GOOGLE_ABUSE_EXEMPTION", "value": "old",
+             "domain": ".google.com", "path": "/", "expiry": 1}]))
+        self.assertEqual(sb.ScholarBrowser._load_cookies(), [])
+
+
+class FirefoxBinaryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        patcher = mock.patch.object(sb, "_store_binary", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_store_launcher_is_resolved_to_the_actual_browser(self):
+        import eng_rep_pdf
+
+        alias = self.root / "firefox.exe"
+        alias.touch()
+        package = self.root / "Mozilla.Firefox_159_x64"
+        real = package / "VFS" / "ProgramFiles" / "Firefox Package Root" / "firefox.exe"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"firefox")
+        reply = SimpleNamespace(returncode=0, stdout=str(package) + "\n")
+        with mock.patch.object(eng_rep_pdf, "_firefox_exe", return_value=str(alias)), \
+                mock.patch.object(sb.subprocess, "run", return_value=reply) as run, \
+                mock.patch.object(sb.os, "name", "nt"):
+            self.assertEqual(sb._firefox_binary(), str(real))
+            self.assertEqual(sb._firefox_binary(), str(real))
+        self.assertEqual(run.call_count, 1)
+
+    def test_a_normal_firefox_binary_needs_no_package_query(self):
+        import eng_rep_pdf
+
+        real = self.root / "firefox.exe"
+        real.write_bytes(b"firefox")
+        with mock.patch.object(eng_rep_pdf, "_firefox_exe", return_value=str(real)), \
+                mock.patch.object(sb.subprocess, "run") as run:
+            self.assertEqual(sb._firefox_binary(), str(real))
+        run.assert_not_called()
+
+    def test_an_unresolvable_store_launcher_is_unavailable(self):
+        with mock.patch.object(sb.subprocess, "run", side_effect=OSError()):
+            self.assertIsNone(sb._store_firefox_binary())
 
 
 class NoteTests(unittest.TestCase):

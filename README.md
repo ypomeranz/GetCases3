@@ -443,7 +443,8 @@ things:
    `selenium` package installed, GetCases then goes straight to a private,
    invisible copy of Firefox, which Google usually accepts. If even that is
    challenged, a Firefox window opens on Google's CAPTCHA: answer it there, and
-   the case opens and the window closes by itself. (Close the window to skip it;
+   the case opens and the window closes by itself. GetCases keeps the cleared
+   cookies for later searches and app restarts. (Close the window to skip it;
    GetCases won't ask again for ten minutes.) With the
    [Chrome extension](browser_extension/README.md) in Chrome or Edge, the
    CAPTCHA opens there instead, with or without Firefox: answer it in your own
