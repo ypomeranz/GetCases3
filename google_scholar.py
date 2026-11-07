@@ -2524,6 +2524,7 @@ class GoogleScholarFetcher:
         self._browser_dead = False  # selenium/Firefox unavailable — stop trying
         self._browser_first_wall = 0.0  # wall-clock end of the browser-first window
         state = self._load_state()
+        self._browser_identity_applied_at = 0.0
         saved_target = state.get("persona")
         for i, p in enumerate(self._personas):
             if p.target == saved_target:
@@ -3740,12 +3741,27 @@ class GoogleScholarFetcher:
 
     @staticmethod
     def _looks_blocked(resp) -> bool:
-        """Google's bot challenge: a redirect to /sorry/ or a 403/429."""
+        """Google's bot challenge, including CAPTCHA pages served as HTTP 200.
+
+        Scholar sometimes leaves the requested URL in place and serves its
+        "unusual traffic" interstitial with a successful status.  Treating
+        that as a results page skips the browser fallback and makes the
+        caller report a misleading no-result answer.
+        """
         try:
             final_url = str(getattr(resp, "url", "") or "")
         except Exception:
             final_url = ""
-        return "/sorry/" in final_url or resp.status_code in (403, 429)
+        if "/sorry/" in final_url or resp.status_code in (403, 429):
+            return True
+        try:
+            body = str(getattr(resp, "text", "") or "").lower()
+        except Exception:
+            body = ""
+        return any(marker in body for marker in (
+            "unusual traffic", "not a robot", "g-recaptcha",
+            'id="recaptcha"', "google.com/recaptcha",
+        ))
 
     def _throttle(self) -> bool:
         """Human-ish pacing: the base delay plus jitter, so requests don't
@@ -3906,7 +3922,8 @@ class GoogleScholarFetcher:
         cookies too."""
         import scholar_extension
         ident = scholar_extension.identity()
-        if ident is None or _curl_requests is None:
+        if (ident is None or _curl_requests is None
+                or ident.obtained <= self._browser_identity_applied_at):
             return
         chrome = sorted((t for t in _available_targets()
                          if re.fullmatch(r"chrome\d+", str(t))),
@@ -3923,6 +3940,7 @@ class GoogleScholarFetcher:
                                       if not p.cookies]
         self._persona_ix = 0
         self._session = self._build_session()
+        self._browser_identity_applied_at = ident.obtained
         if self._browser is not None:
             self._browser._earned = [
                 {"name": name, "value": value, "domain": ".google.com",
@@ -3959,26 +3977,30 @@ class GoogleScholarFetcher:
         nothing is sent during a cooldown, and a challenge or a hiccup is
         neither retried nor escalated (a challenged fingerprint is still
         rotated out for the next fetch).  Nor is a CAPTCHA put to the user."""
+        # If the extension has already observed a normal Scholar page in the
+        # reader's browser, use that browser's current identity before making
+        # another scripted request.  The bridge receives this asynchronously
+        # from the extension, including when the user passed a check earlier.
+        if self._extension_usable():
+            self._adopt_browser_identity()
         now = time.monotonic()
         if once and now < self._blocked_until:
             raise ScholarError(
                 f"blocked (cooling down {int(self._blocked_until - now)}s)")
         browser_preferred = self._browser_first or now < self._blocked_until
         if browser_preferred:
-            # A CAPTCHA goes to the reader's Chrome or Edge when the
-            # extension is there, not to a Firefox window.
+            # The installed extension browser has the reader's ordinary
+            # Google session and can hand its page and clearance straight
+            # back. Prefer it over a separate, automation-driven Firefox.
             extension = not once and self._extension_usable()
-            resp = (self._browser_get(url, solve=False) if extension
+            resp = (self._extension_get(url) if extension
                     else self._browser_get(url, solve=not once))
             if resp is not None:
-                self._mark_browser_working()
+                if not extension:
+                    self._mark_browser_working()
                 return resp
-            if extension:
-                resp = self._extension_get(url)
-                if resp is not None:
-                    return resp
             if once:
-                raise ScholarError("the real Firefox didn't return the page")
+                raise ScholarError("the browser didn't return the page")
             if now < self._blocked_until:
                 # Still cooling down and the browser can't help — fail fast.
                 raise ScholarError(
@@ -4027,19 +4049,17 @@ class GoogleScholarFetcher:
         extension = False
         if not browser_preferred:
             extension = self._extension_usable()
-            resp = (self._browser_get(url, solve=False) if extension
+            resp = (self._extension_get(url) if extension
                     else self._browser_get(url))
             if resp is not None:
-                print("[scholar] fetched via real Firefox (curl_cffi was "
-                      "blocked)")
-                self._mark_browser_working()
-                return resp
-            if extension:
-                resp = self._extension_get(url)
-                if resp is not None:
+                if extension:
                     print("[scholar] fetched through the reader's browser "
                           "(curl_cffi was blocked)")
-                    return resp
+                else:
+                    print("[scholar] fetched via real Firefox (curl_cffi was "
+                          "blocked)")
+                    self._mark_browser_working()
+                return resp
 
         self._blocked_until = time.monotonic() + _BLOCK_COOLDOWN
         self._save_state()  # the cooldown survives an app restart
