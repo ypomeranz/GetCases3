@@ -18464,16 +18464,24 @@ class _BookmarkOrganizer:
 
     def __init__(self, app, parent: tk.Misc) -> None:
         self._app = app
+        # Placed before it is made: measuring *parent* brings Tk's pending
+        # work up to date, which put a window already made on screen, empty,
+        # at the system's default spot until it was moved here.
+        spec = f"{self._W}x{self._H}"
+        try:
+            parent.update_idletasks()
+            x = parent.winfo_rootx() + 40
+            y = parent.winfo_rooty() + 40
+            spec = f"{self._W}x{self._H}+{x}+{y}"
+        except (AttributeError, tk.TclError):
+            pass
         self._win = _ui_toplevel(app.window_master(parent))
         _ensure_modern_ttk_styles(self._win)
         self._win.title("Organize Bookmarks")
         self._win.minsize(460, 300)
         try:
-            parent.update_idletasks()
-            x = parent.winfo_rootx() + 40
-            y = parent.winfo_rooty() + 40
-            self._win.geometry(f"{self._W}x{self._H}+{x}+{y}")
-        except (AttributeError, tk.TclError):
+            self._win.geometry(spec)
+        except tk.TclError:
             self._win.geometry(f"{self._W}x{self._H}")
         # tree row -> ("folder", folder id, None), ("bookmark", folder id,
         # key) or ("empty", folder id, None); rebuilt with the tree.
@@ -27135,7 +27143,14 @@ def _beside_geometry(win: tk.Misc, anchor: "Optional[tk.Misc]", width: int,
     """Where a document window opens: beside the window it was opened from
     rather than over it.  The left of the desktop is where it goes — to that
     window's left when there is room there, to its right when there is not,
-    and against the left edge when neither side can hold it."""
+    and against the left edge when neither side can hold it.
+
+    Ask it before the window it places is made.  Measuring *anchor* brings
+    Tk's pending work up to date, and a window made but not yet given its
+    place is put on screen as it stands by that: an empty square at the
+    system's default spot, left there while the window is built, before it
+    jumps to where this says.  *win* is any window on the desktop meant —
+    the application's root will do."""
     left, top, work_w, work_h = _work_area(win)
     w = max(min_width, min(width, max(min_width, work_w - 32)))
     h = max(min_height, min(height, max(min_height, work_h - 72)))
@@ -27401,8 +27416,9 @@ class _LoadWatch:
     # --- the window -----------------------------------------------------------
 
     def _geometry(self) -> str:
-        """Where the document will open (see _FloatingPdfWindow._place_beside),
-        stepped down and across from any other load's window already there."""
+        """Where the document will open (see _FloatingPdfWindow._beside),
+        stepped down and across from any other load's window already there.
+        Asked before the window is made (see _beside_geometry)."""
         # Beside the window it was asked for from — the main window included,
         # as a viewer with no other anchor stands beside the application's
         # root — or, that window gone, beside the root.
@@ -27438,10 +27454,13 @@ class _LoadWatch:
         except (KeyError, tk.TclError):
             had_focus = None
         try:
+            # Placed before it is made: made first, it flashed up empty at
+            # the system's default spot while its place was being found.
+            spec = self._geometry()
             win = _ui_toplevel(self._root)
             _ensure_modern_ttk_styles(win)
             win.title(f"Opening {self.label}")
-            win.geometry(self._geometry())
+            win.geometry(spec)
             win.minsize(_FloatingPdfWindow._MIN_W, _FloatingPdfWindow._MIN_H)
             self._win = win
             self._build(win)
@@ -27681,7 +27700,7 @@ class _FloatingPdfWindow:
     window — floating clear of the reader is the whole point of the mode.
     """
 
-    _W = 720     # preferred size, clamped to the usable desktop in _place_beside
+    _W = 720     # preferred size, clamped to the usable desktop in _beside
     _H = 880
     # Wide enough for the whole strip: its controls on the left, the History,
     # Bookmarks and Window icons and the side panel's switch on the right.
@@ -27748,18 +27767,22 @@ class _FloatingPdfWindow:
         # its master, so a viewer meant to outlive the reader that opened it is
         # given the application's own root instead.  ``anchor`` is only where to
         # put it on screen.
+        #
+        # Where a slow document's status window stood, the document opens in
+        # its place (see _LoadWatch); anywhere else, beside the reader.  That
+        # is settled before the window is made: made first, it went up empty
+        # at the system's default spot while the reader was measured, and
+        # stayed there, small, while it was built (see _beside_geometry).
+        if not _WM_GEOMETRY_RE.match(geometry or ""):
+            geometry = self._beside(
+                parent, anchor if anchor is not None else parent)
         self._win = _ui_toplevel(parent)
         _ensure_modern_ttk_styles(self._win)
         self._win.title(title or "PDF")
-        if geometry:
-            # Where a slow document's status window stood (see _LoadWatch):
-            # the document opens in its place.
-            try:
-                self._win.geometry(geometry)
-            except tk.TclError:
-                self._place_beside(anchor if anchor is not None else parent)
-        else:
-            self._place_beside(anchor if anchor is not None else parent)
+        try:
+            self._win.geometry(geometry)
+        except tk.TclError:
+            pass
         self._win.minsize(self._MIN_W, self._MIN_H)
 
         self._zoom_var = tk.StringVar(master=self._win, value="100%")
@@ -27831,18 +27854,17 @@ class _FloatingPdfWindow:
     # Geometry and the top strip
     # ------------------------------------------------------------------
 
-    def _place_beside(self, anchor: "Optional[tk.Misc]") -> None:
-        """Open next to the reader rather than over it — keeping the page from
-        covering the text is the point of the mode.  The left of the desktop is
-        where it goes: to the reader's left when there is room there, to its
-        right when there is not, and against the left edge when neither side of
-        the reader can hold it (see _beside_geometry, which a slow document's
-        status window uses too, so that the document opens where it stood)."""
-        try:
-            self._win.geometry(_beside_geometry(
-                self._win, anchor, self._W, self._H, self._MIN_W, self._MIN_H))
-        except tk.TclError:
-            pass
+    def _beside(self, master: tk.Misc, anchor: "Optional[tk.Misc]") -> str:
+        """Where to open: next to the reader rather than over it — keeping the
+        page from covering the text is the point of the mode.  The left of the
+        desktop is where it goes: to the reader's left when there is room
+        there, to its right when there is not, and against the left edge when
+        neither side of the reader can hold it (see _beside_geometry, which a
+        slow document's status window uses too, so that the document opens
+        where it stood).  Asked before the window is made, so *master* — the
+        window it will belong to — says which desktop is meant."""
+        return _beside_geometry(
+            master, anchor, self._W, self._H, self._MIN_W, self._MIN_H)
 
     def _build_bar(self) -> None:
         """The one piece of chrome: save and print, then the zoom controls,
