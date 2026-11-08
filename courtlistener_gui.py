@@ -46941,6 +46941,26 @@ def _start_gc_timer(root: tk.Misc,
     root.after(_GC_TICK_MS, tick)
 
 
+#: How long a thread waits for the GIL before asking whoever holds it to let
+#: go (sys.setswitchinterval).  Every Tk call gives the GIL up and must win it
+#: back; while a worker computes in Python — reading a scan, ranking search
+#: results, parsing a page — each call waits out this interval first, and a
+#: long opinion's window makes some ten thousand of them.  Under a
+#: millisecond, because Windows waits in whole milliseconds, until the system
+#: timer next ticks — every 15.6 ms unless some program running has asked for
+#: a finer timer — so at 1 ms (or the default 5) the same opening took a
+#: second one time and ten the next.  At 15.6 ms, 3,000 Tk calls beside one
+#: busy worker took 45 s, and a Spotlight click on Dobbs v. Jackson Women's
+#: Health, its text in hand in 0.3 s, took 14 s to 96 s to show it.  A wait
+#: under 1 ms is not waited at all: the same calls take 1 s and the click
+#: 3.4 s, and the text scrolls in 5 ms while its scan is read behind it,
+#: where a scroll took 44 ms and one in ten half a second.  A download waits
+#: the same way at each read of its socket while the Tk thread computes: that
+#: scan reached the window in 7–8 s, not 15.  Two workers computing at once
+#: get through about a third less between them.
+_GIL_SWITCH_INTERVAL_S = 0.0005
+
+
 def main() -> None:
     root = tk.Tk()
 
@@ -46953,12 +46973,8 @@ def main() -> None:
     # only cycle collection is deferred to the timer (_start_gc_timer).
     gc.disable()
 
-    # Hand the GIL back to the Tk thread sooner.  Workers read scans and
-    # opinions in pure Python, and every Tk call the window makes gives the
-    # GIL up and then waits — up to this interval — to have it back; a scroll
-    # makes several such calls, so at the default 5 ms an opinion scrolled
-    # while its citations were being read stalled for a third of a second.
-    sys.setswitchinterval(0.001)
+    # Hand the GIL back to the Tk thread at once (see _GIL_SWITCH_INTERVAL_S).
+    sys.setswitchinterval(_GIL_SWITCH_INTERVAL_S)
 
     app = CourtListenerGUI(root)
     # A GetCases already running — in the background, from another checkout —
