@@ -504,7 +504,9 @@ async function sendClearance(details, headers) {
     if (!reply || tabId < 0) return;
     if (!reply.page) {
       // The clearance was all GetCases wanted (CommonLII's).
-      if (errand && reply.ok) await finishErrand(errand);
+      if (errand && reply.ok && clearanceSite(url) === "commonlii.org") {
+        await finishErrand(errand);
+      }
       return;
     }
     const html = await arrivedPage(tabId);

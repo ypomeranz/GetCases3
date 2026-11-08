@@ -40,6 +40,7 @@ from typing import NamedTuple, Optional
 
 import eng_rep_pdf
 import scholar_browser
+import scholar_pages
 
 #: The host whose pages the extension hands over.
 SCHOLAR_HOST = "scholar.google.com"
@@ -56,7 +57,8 @@ HEADERS = eng_rep_pdf._BROWSER_HEADERS
 
 #: The query parameters a page's address may gain or lose on its way past
 #: Google's check without being another page.
-_VOLATILE = frozenset(("hl", "gws_rd", "sei", "ei", "oi", "authuser"))
+_VOLATILE = frozenset(("hl", "gws_rd", "sei", "ei", "oi", "authuser",
+                       "google_abuse", "sgst"))
 
 #: The app's browser bridge (browser_bridge.BrowserBridge), set while it is
 #: listening for the extension; None otherwise.
@@ -182,7 +184,7 @@ def deliver_page(data: dict) -> dict:
         wait = _waiting.get(page_key(url))
     if wait is None:
         return {"ok": False}
-    if scholar_browser._challenged(url, html):
+    if scholar_pages.response_needs_browser(wait.url, url, html):
         return {"ok": False, "check": True}
     wait.html, wait.final_url = html, url
     wait.done.set()

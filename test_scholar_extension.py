@@ -30,7 +30,8 @@ import scholar_extension as se
 
 URL = "https://scholar.google.com/scholar?hl=en&as_sdt=4&q=%22347+U.S.+483%22"
 RESULTS = ("<html><body><div id=\"gs_res_ccl\"><div class=\"gs_r\">"
-           "Brown v. Board of Education</div></div></body></html>")
+           '<h3 class="gs_rt"><a href="/scholar_case?case=123">'
+           "Brown v. Board of Education</a></h3></div></div></body></html>")
 SCHOLARS_CAPTCHA = ("<html><body>Please show you're not a robot"
                     "<div class=\"g-recaptcha\"></div></body></html>")
 CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -118,6 +119,12 @@ class AcceptTests(_Fresh):
         other = "https://scholar.google.com/scholar?q=other&as_sdt=4"
         self.assertFalse(se.accept_clearance(handed_over(other))["page"])
 
+    def test_google_s_captcha_parameters_do_not_lose_the_waiting_search(self):
+        se._waiting[se.page_key(URL)] = se._Wait(URL)
+        cleared = URL + "&google_abuse=encoded-exemption&sgst=handoff"
+        self.assertEqual(se.page_key(cleared), se.page_key(URL))
+        self.assertTrue(se.accept_clearance(handed_over(cleared))["page"])
+
 
 class DeliverTests(_Fresh):
 
@@ -146,6 +153,26 @@ class DeliverTests(_Fresh):
         other = "https://scholar.google.com/scholar?q=other"
         self.assertEqual(se.deliver_page({"url": other, "html": RESULTS}),
                          {"ok": False})
+
+    def test_unknown_blocks_and_incomplete_search_pages_are_not_empty_results(self):
+        for html in ("<html>We cannot process automated queries.</html>",
+                     "<html><h1>Access denied</h1></html>",
+                     '<div id="gs_res_ccl"></div>'):
+            with self.subTest(html=html):
+                self.assertEqual(se.deliver_page({"url": URL, "html": html}),
+                                 {"ok": False, "check": True})
+                self.assertFalse(self.wait.done.is_set())
+
+    def test_real_empty_results_can_be_handed_back(self):
+        empty = '<div id="gs_res_ccl">Your search did not match any articles.</div>'
+        self.assertEqual(se.deliver_page({"url": URL, "html": empty}),
+                         {"ok": True, "close": True})
+
+    def test_a_cleared_results_url_is_handed_to_the_original_request(self):
+        cleared = URL + "&google_abuse=encoded-exemption&sgst=handoff"
+        self.assertEqual(se.deliver_page({"url": cleared, "html": RESULTS}),
+                         {"ok": True, "close": True})
+        self.assertEqual(self.wait.final_url, cleared)
 
 
 class FetchTests(_Fresh):

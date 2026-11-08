@@ -39,7 +39,8 @@ CHALLENGE = ("<html><body>Our systems have detected unusual traffic from "
              "your computer network.<div class=\"g-recaptcha\"></div>"
              "</body></html>")
 RESULTS = ("<html><body><div id=\"gs_res_ccl\"><div class=\"gs_r\">"
-           "Brown v. Board of Education</div></div></body></html>")
+           '<h3 class="gs_rt"><a href="/scholar_case?case=123">'
+           "Brown v. Board of Education</a></h3></div></div></body></html>")
 HOME = "<html><body><div id=\"gs_hdr\">Google Scholar</div></body></html>"
 
 
@@ -137,6 +138,45 @@ class StraightToFirefoxTests(_FetcherFixture):
         self.fetcher._get(URL)
         self.fetcher._browser_get.assert_called_once_with(URL)
 
+    def test_unrecognized_http_200_search_pages_go_to_firefox(self):
+        pages = ["<html>We cannot process automated queries right now.</html>",
+                 "<html><h1>Access denied</h1></html>",
+                 '<html><div id="gs_res_ccl"></div></html>', ""]
+        for page in pages:
+            with self.subTest(page=page):
+                self.fetcher._browser_first = False
+                self.fetcher._browser_get.reset_mock()
+                self._answer(200, URL)
+                self.session.get.return_value.text = page
+                self.assertEqual(self.fetcher._get(URL).text, RESULTS)
+                self.fetcher._browser_get.assert_called_once_with(URL)
+
+    def test_a_genuine_empty_search_does_not_open_a_browser(self):
+        self._answer(200, URL)
+        empty = '<div id="gs_res_ccl">Your search did not match any articles.</div>'
+        self.session.get.return_value.text = empty
+        self.assertEqual(self.fetcher._get(URL).text, empty)
+        self.fetcher._browser_get.assert_not_called()
+
+    def test_an_incomplete_cached_copy_check_does_not_prompt_for_a_captcha(self):
+        self._answer(200, URL)
+        self.session.get.return_value.text = '<div id="gs_res_ccl"></div>'
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL, once=True)
+        self.fetcher._browser_get.assert_not_called()
+        self.fetcher._extension_get.assert_not_called()
+
+    def test_a_later_search_switches_to_firefox_after_successful_searches(self):
+        self._answer(200, URL)
+        for words in ("first search", "second search", "third search"):
+            self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
+        self.fetcher._browser_get.assert_not_called()
+        self.session.get.return_value.text = '<html><h1>Access denied</h1></html>'
+        found = self.fetcher.search_cases("later search", allow_db_fallback=False)
+        self.assertEqual(len(found), 1)
+        self.fetcher._browser_get.assert_called_once()
+        self.assertTrue(self.fetcher._browser_first)
+
     def test_without_firefox_the_other_fingerprints_are_tried(self):
         self.fetcher._browser_usable.return_value = False
         self.fetcher._browser_get.return_value = None
@@ -191,6 +231,19 @@ class FirefoxFirstTests(_FetcherFixture):
     def test_a_check_for_a_newer_version_puts_no_captcha_to_the_reader(self):
         self.fetcher._get(URL, once=True)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+
+    def test_a_block_page_from_firefox_is_not_returned_as_an_empty_search(self):
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(
+            '<html><div id="gs_res_ccl"></div></html>', URL)
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.assertEqual(self.fetcher._browser_get.call_count, 1)
+
+    def test_recovery_clears_the_cooldown_for_a_following_cached_copy_check(self):
+        self.fetcher._blocked_until = time.monotonic() + 60
+        self.fetcher._get(URL)
+        self.assertEqual(self.fetcher._blocked_until, 0.0)
+        self.fetcher._get(URL, once=True)
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +306,45 @@ class ExtensionBrowserTests(_FetcherFixture):
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL, once=True)
         self.fetcher._extension_get.assert_not_called()
+
+    def test_a_failed_extension_falls_through_to_firefox(self):
+        self.fetcher._extension_get.return_value = None
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
+        self.fetcher._extension_get.assert_called_once_with(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL)
+
+    def test_an_extension_error_falls_through_to_firefox(self):
+        self.fetcher._extension_get.side_effect = OSError("bridge disconnected")
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
+        self.fetcher._browser_get.assert_called_once_with(URL)
+
+    def test_an_extension_block_page_falls_through_to_firefox(self):
+        self.fetcher._extension_get.return_value = gs._BrowserResponse(
+            '<html><h1>Access denied</h1></html>', URL)
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
+        self.fetcher._browser_get.assert_called_once_with(URL)
+
+    def test_a_cooling_down_extension_does_not_skip_firefox_when_browser_first(self):
+        self.fetcher._browser_first = True
+        self.fetcher._blocked_until = time.monotonic() + 60
+        self.fetcher._extension_get.return_value = None
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.assertEqual(self.fetcher._blocked_until, 0.0)
+
+    def test_a_later_block_switches_to_the_extension_after_successful_searches(self):
+        self._answer(200, URL)
+        for words in ("first search", "second search", "third search"):
+            self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
+        self.fetcher._extension_get.assert_not_called()
+        self.session.get.return_value.text = '<div id="gs_res_ccl"></div>'
+        found = self.fetcher.search_cases("later search", allow_db_fallback=False)
+        self.assertEqual(len(found), 1)
+        self.fetcher._extension_get.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +472,15 @@ class _NativeBrowserFixture(_BrowserFixture):
 
 
 class CaptchaWindowTests(_NativeBrowserFixture):
+    def test_firefox_escalates_a_later_unrecognized_block_to_the_manual_window(self):
+        self.hidden.states = [(URL, RESULTS)]
+        self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))
+        self.launch.assert_not_called()
+        self.hidden.states = [(URL, '<html><div id="gs_res_ccl"></div></html>')]
+        self.assertFalse(self.browser._content_ready(self.hidden, "#gs_res_ccl, .gs_r"))
+        self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))
+        self.launch.assert_called_once()
+
     def test_a_cookie_only_in_the_results_url_is_used_after_the_window_closes(self):
         cleared = _cleared_url()
 

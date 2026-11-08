@@ -46,20 +46,14 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
+import scholar_pages
+
 _PROFILE_DIR = Path.home() / ".cache" / "courtlistener_scholar_ff"
 _PAGE_LOAD_TIMEOUT = 40
 _CONTENT_TIMEOUT = 20  # seconds to wait for results / opinion to appear
 _SOLVE_TIMEOUT = 300   # seconds the reader has to answer a CAPTCHA
 _SOLVE_SNOOZE = 600    # seconds no CAPTCHA window opens after one went unanswered
 _MAX_SESSION_BYTES = 32 * 1024 * 1024
-
-# Substrings that mark Google's bot challenge, checked against the URL + source.
-_BLOCK_MARKERS = (
-    "/sorry/", "unusual traffic", "not a robot",
-    "id=\"recaptcha\"", "g-recaptcha", "google.com/recaptcha",
-    "automated queries",
-)
-
 
 #: Told what a fetch is waiting on, when set: ``on_step(text)`` as a CAPTCHA
 #: window opens for the reader (the app shows it in its loading window).
@@ -77,9 +71,7 @@ def _tell(hook, *args) -> None:
 
 def _challenged(url: str, source: str) -> bool:
     """Whether the page at *url* is Google's bot challenge."""
-    low = (source or "").lower()
-    return ("/sorry/" in (url or "").lower()
-            or any(m in low for m in _BLOCK_MARKERS))
+    return scholar_pages.is_challenge(url, source)
 
 
 class BrowserUnavailable(Exception):
@@ -567,7 +559,7 @@ class ScholarBrowser:
             self._await_content(driver, wait_for)
             source = driver.page_source or ""
             final_url = driver.current_url or url
-            if _challenged(final_url, source):
+            if scholar_pages.response_needs_browser(url, final_url, source):
                 if solve:
                     return self._solve(url, wait_for)
                 raise BrowserBlocked()
@@ -647,6 +639,8 @@ class ScholarBrowser:
     def _content_ready(driver, wait_for: str) -> bool:
         from selenium.webdriver.common.by import By
 
+        if scholar_pages.is_search_url(driver.current_url):
+            return scholar_pages.has_search_content(driver.page_source or "")
         return (any(driver.find_elements(By.CSS_SELECTOR, sel.strip())
                     for sel in wait_for.split(",") if sel.strip())
                 or "did not match any" in (driver.page_source or "").lower())
