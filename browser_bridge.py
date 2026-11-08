@@ -21,7 +21,12 @@ arrangement: a small HTTP server on this machine's loopback address that
   :func:`eng_rep_pdf.accept_browser_clearance`), Google's CAPTCHA
   exemption for Scholar (see :mod:`scholar_extension`); and
 * ``POST /page`` hands over a page the app opened in the browser to have a
-  CAPTCHA answered, once it has been (see :mod:`scholar_extension`).
+  CAPTCHA answered, once it has been (see :mod:`scholar_extension`); and
+* ``GET /errand`` is where the extension waits, while the app runs, for a
+  page the app wants opened in the browser out of the reader's sight -- one
+  behind such a check -- and ``POST /errand`` where it says how that went:
+  the window opened (minimized), needed the reader (and came to the front),
+  was done with, or was closed by the reader (see :class:`Errand`).
 
 Only the extension may use it.  Web pages can reach a loopback server too, so
 every request must carry the ``X-GetCases`` header (a page cannot add one
@@ -37,10 +42,12 @@ from __future__ import annotations
 
 import bisect
 import json
+import secrets
 import socket
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
 
@@ -49,8 +56,8 @@ from typing import Callable, Optional
 DEFAULT_PORT = 21983
 #: The header only the extension sends.
 CLIENT_HEADER = "X-GetCases"
-#: Bumped when a request or response changes shape.
-API_VERSION = 1
+#: Bumped when a request or response changes shape.  2: errands.
+API_VERSION = 2
 #: The most text one /detect request may carry, in characters.
 MAX_TEXT = 3_000_000
 _MAX_BODY = 4 * MAX_TEXT + 65_536       # UTF-8 at its widest, plus JSON
@@ -70,6 +77,97 @@ MAX_PAGE = 2 * MAX_TEXT
 #: The origins a browser gives an extension's own requests.
 _EXTENSION_SCHEMES = ("chrome-extension://", "moz-extension://",
                       "safari-web-extension://", "extension://")
+
+#: How long ``GET /errand`` holds the extension's request, waiting for an
+#: errand, before answering that there is none and being asked again: well
+#: under the half minute after which Chrome stops waiting on a request from
+#: an extension's service worker.  The asking keeps the worker awake.
+ERRAND_POLL = 20.0
+#: How long after its last request ends a browser's extension still counts
+#: as listening for errands (it asks again at once).
+_LISTENING_GRACE = 3.0
+#: Finished errands kept, for a late report of one to find.
+_ERRANDS_KEPT = 32
+
+
+# ---------------------------------------------------------------------------
+# Errands: pages opened in the browser out of the reader's sight
+# ---------------------------------------------------------------------------
+
+class Errand:
+    """A page the app has asked the extension to open in a browser out of
+    the reader's sight (:meth:`BrowserBridge.errand`): a page behind a check
+    for people, which a browser of the reader's own often passes without
+    asking them anything.  The extension opens it in a minimized window, and
+    brings that to the front only when there is something for the reader to
+    do there -- a CAPTCHA to answer -- closing it once the app has what it
+    needed.
+
+    :attr:`state` follows what the extension reports: ``"queued"`` until an
+    extension takes it (``"cancelled"`` if none did), ``"taken"``, then
+    ``"opened"`` (its window is there, minimized), ``"shown"`` (it came to
+    the front for the reader), and at last ``"done"`` (the app had what it
+    needed and the window closed) or ``"closed"`` (the reader closed it
+    first).  *on_event*, if given, is called with each new state, on
+    whichever thread moved it there.
+    """
+
+    FINAL = frozenset(("done", "closed", "cancelled"))
+
+    def __init__(self, url: str, browser: str = "",
+                 on_event: Optional[Callable[[str], None]] = None) -> None:
+        self.id = secrets.token_hex(8)
+        self.url = url
+        #: The browser it is for ("Chrome", "Edge"), or "" for any.
+        self.browser = browser
+        #: The browser whose extension took it.
+        self.taken_by = ""
+        self.state = "queued"
+        self._on_event = on_event
+        self._changed = threading.Condition()
+
+    def _move(self, state: str, *, unless=()) -> bool:
+        """Into *state*, unless it is finished or in one of *unless*;
+        whether it moved."""
+        with self._changed:
+            if (self.state in self.FINAL or self.state in unless
+                    or self.state == state):
+                return False
+            self.state = state
+            self._changed.notify_all()
+        if self._on_event is not None:
+            try:
+                self._on_event(state)
+            except Exception:
+                pass
+        return True
+
+    def wait_until(self, states, timeout: float) -> bool:
+        """Wait up to *timeout* seconds for it to reach one of *states* (or
+        finish); whether it is in one of them now."""
+        states = frozenset(states)
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._changed:
+            while self.state not in states and self.state not in self.FINAL:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                self._changed.wait(left)
+            return self.state in states
+
+
+def allow_foreground() -> None:
+    """Let another program -- the browser, bringing a window to the front
+    for the reader -- take the foreground from this one.  Windows lets a
+    program do that only when the one in front allows it; elsewhere there is
+    nothing to allow."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)   # ASFW_ANY
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +329,9 @@ class BrowserBridge:
     True or False, or the reply itself, a dict with ``"ok"`` in it.
     *on_page* receives each ``/page`` — ``{"url", "html"}`` — likewise.
     Without them, those paths are not found.
+
+    :meth:`errand` asks the extension to open a page out of the reader's
+    sight; see :class:`Errand`.
     """
 
     def __init__(self, on_open: Callable[[dict], None], *,
@@ -250,11 +351,76 @@ class BrowserBridge:
         self._server: Optional[_Server] = None
         self._closed = threading.Event()
         self._bound = threading.Event()
+        # Errands, by id, in the order asked for (finished ones too, a few,
+        # for a late report to find); and, by browser, how many of its
+        # extensions' requests for one are open now and when one last ended.
+        self._errands: "dict[str, Errand]" = {}
+        self._errand_cond = threading.Condition()
+        self._polling: "dict[str, int]" = {}
+        self._polled: "dict[str, float]" = {}
 
     @property
     def bound(self) -> bool:
         """Whether the port is this app's now."""
         return self._bound.is_set() and not self._closed.is_set()
+
+    # -- errands -------------------------------------------------------
+
+    def errand(self, url: str, browser: str = "",
+               on_event: Optional[Callable[[str], None]] = None) -> Errand:
+        """Ask the extension in *browser* ("Chrome", "Edge"; "" for any) to
+        open *url* out of the reader's sight; the extension takes it the
+        next time it asks (at once, if it is listening).  See
+        :class:`Errand`."""
+        errand = Errand(url, browser, on_event)
+        with self._errand_cond:
+            self._errands[errand.id] = errand
+            finished = [k for k, e in self._errands.items()
+                        if e.state in Errand.FINAL]
+            for key in finished[:max(0, len(finished) - _ERRANDS_KEPT)]:
+                del self._errands[key]
+            self._errand_cond.notify_all()
+        return errand
+
+    def cancel(self, errand: Errand) -> bool:
+        """Withdraw *errand* if no extension has taken it yet; whether it
+        was withdrawn."""
+        with self._errand_cond:
+            return errand._move("cancelled", unless=(
+                "taken", "opened", "shown"))
+
+    def listening(self) -> "list[str]":
+        """The browsers ("Chrome", "Edge") whose extension is waiting for an
+        errand now, so would take one at once."""
+        now = time.monotonic()
+        with self._errand_cond:
+            return sorted(name for name in set(self._polling) | set(self._polled)
+                          if self._polling.get(name)
+                          or now - self._polled.get(name, -1e9)
+                          < _LISTENING_GRACE)
+
+    def _take_errand(self, browser: str, timeout: float) -> Optional[Errand]:
+        """The next errand for *browser*'s extension, waiting up to *timeout*
+        seconds for one; None if none came (or the bridge is closing)."""
+        deadline = time.monotonic() + timeout
+        with self._errand_cond:
+            self._polling[browser] = self._polling.get(browser, 0) + 1
+            try:
+                while not self._closed.is_set():
+                    for errand in self._errands.values():
+                        if (errand.state == "queued"
+                                and errand.browser in ("", browser)):
+                            errand.taken_by = browser
+                            errand._move("taken")
+                            return errand
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    self._errand_cond.wait(left)
+                return None
+            finally:
+                self._polling[browser] -= 1
+                self._polled[browser] = time.monotonic()
 
     def start(self) -> None:
         threading.Thread(target=self._run, daemon=True,
@@ -265,6 +431,8 @@ class BrowserBridge:
 
     def close(self) -> None:
         self._closed.set()
+        with self._errand_cond:
+            self._errand_cond.notify_all()      # the extension's open asks
         server, self._server = self._server, None
         if server is not None:
             try:
@@ -390,11 +558,45 @@ class BrowserBridge:
                 if not self._allowed():
                     self._reply(403, {"error": "forbidden"})
                     return
-                if self.path.split("?")[0] == "/status":
+                path, _, query = self.path.partition("?")
+                if path == "/status":
                     self._reply(200, {"app": "GetCases", "api": API_VERSION,
                                       "version": bridge.version})
                     return
+                if path == "/errand":
+                    self._next_errand(query)
+                    return
                 self._reply(404, {"error": "not found"})
+
+            def _next_errand(self, query: str) -> None:
+                """The extension waiting for an errand: answered with the
+                next one for its browser, or after ERRAND_POLL seconds with
+                none."""
+                asked = urllib.parse.parse_qs(query)
+                browser = (asked.get("browser") or [""])[0].strip()[:40]
+                errand = bridge._take_errand(browser, ERRAND_POLL)
+                self._reply(200, {"errand": None if errand is None else {
+                    "id": errand.id, "url": errand.url}})
+
+            def _errand_report(self, data: dict) -> None:
+                """The extension saying how an errand went: ``opened``,
+                ``show`` (it is about to bring the window to the front, which
+                the app lets it), ``done`` or ``closed``."""
+                event = data.get("event")
+                states = {"opened": "opened", "show": "shown",
+                          "done": "done", "closed": "closed"}
+                if event not in states:
+                    self._reply(400, {"error": "not an errand's event"})
+                    return
+                with bridge._errand_cond:
+                    errand = bridge._errands.get(str(data.get("id") or ""))
+                if errand is None:
+                    self._reply(200, {"ok": False})
+                    return
+                if event == "show":
+                    allow_foreground()
+                errand._move(states[event])
+                self._reply(200, {"ok": True})
 
             def do_POST(self) -> None:
                 if not self._allowed():
@@ -402,7 +604,7 @@ class BrowserBridge:
                     self._reply(403, {"error": "forbidden"})
                     return
                 path = self.path.split("?")[0]
-                known = ["/detect", "/open"]
+                known = ["/detect", "/open", "/errand"]
                 if bridge._on_clearance is not None:
                     known.append("/clearance")
                 if bridge._on_page is not None:
@@ -421,6 +623,8 @@ class BrowserBridge:
                     self._open(data)
                 elif path == "/clearance":
                     self._clearance(data)
+                elif path == "/errand":
+                    self._errand_report(data)
                 else:
                     self._page(data)
 

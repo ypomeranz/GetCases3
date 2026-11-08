@@ -71,17 +71,31 @@ arrow on the extension's card in `chrome://extensions` to pick up any changes.
   "Just a moment…" check that GetCases can't pass by itself, and it can't read
   Chrome's or Edge's cookies either. When GetCases asks for the check, click
   **Open in Chrome** (or **Open in Edge**): the case's page opens in the
-  browser the extension is in, you pass the check there, and the extension
-  hands CommonLII's cookies to GetCases, which then loads the scan, and the
-  ones after it, in the app. Settings → Open Citations Clicked in Chrome Here
-  has to be on in GetCases for this.
+  browser the extension is in — out of sight (below) — the check is passed
+  there, by itself or by you, and the extension hands CommonLII's cookies to
+  GetCases, which then loads the scan, and the ones after it, in the app.
+  Settings → Open Citations Clicked in Chrome Here has to be on in GetCases
+  for this.
 - **Google Scholar's CAPTCHA.** When Google stops answering GetCases ("unusual
   traffic"), GetCases opens the page it wanted in the browser the extension is
-  in. Answer the CAPTCHA there if Google shows one (often it doesn't: your own
-  browser is trusted where GetCases isn't); the extension hands the page to
-  GetCases, the tab closes by itself, and the case opens in the app. GetCases's
-  own requests then go out with the CAPTCHA exemption Google gave your browser.
-  This needs Settings → Open Citations Clicked in Chrome Here too.
+  in, out of sight. If Google shows a CAPTCHA, answer it there (often it
+  doesn't: your own browser is trusted where GetCases isn't); the extension
+  hands the page to GetCases, the window closes by itself, and the case opens
+  in the app. GetCases's own requests then go out with the CAPTCHA exemption
+  Google gave your browser. This needs Settings → Open Citations Clicked in
+  Chrome Here too.
+
+**Out of sight.** A page GetCases opens in your browser for one of these checks
+opens in a minimized window, whether or not the browser was already open (one
+that wasn't is started without any window of its own, and quits again after),
+so a check the browser passes by itself is never seen. The window comes to the
+front only when there is something for you to do there: Google's CAPTCHA, or a
+check that hasn't let the page through after about ten seconds. Close it to
+give up on that page. While GetCases runs, the extension keeps a request open
+to it, waiting for such a page; when the browser had put the extension to
+sleep, it looks in again within half a minute. A copy of the extension from
+before this (1.4 and older) can't do this, and the page opens in sight as
+before — reload the extension after updating GetCases.
 
 The toolbar button shows whether GetCases is running ("on" on the icon), how
 many citations are linked on the page, and these settings:

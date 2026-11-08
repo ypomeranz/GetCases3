@@ -42812,10 +42812,11 @@ class _CloudflarePdfWindow(_PdfWindow):
         row = ttk.Frame(frame)
         row.pack(anchor="w")
 
-        def opener(name: str, launch):
+        def opener(name: str, launch, waiting: str = ""):
             def go() -> None:
                 if launch(web_url):
-                    self._status_var.set(self._handoff_waiting_text(name))
+                    self._status_var.set(
+                        waiting or self._handoff_waiting_text(name))
                 else:
                     eng_rep_pdf.open_in_browser(web_url)
             return go
@@ -42827,11 +42828,32 @@ class _CloudflarePdfWindow(_PdfWindow):
 
         self._watch_for_clearance(retry)
 
+        # In Chrome or Edge the page opens out of sight, and comes to the
+        # front only if the check wants the reader (eng_rep_pdf's errands).
+        bridge = getattr(getattr(self, "_app", None), "_browser_bridge", None)
+
+        def errand_said(name: str):
+            def said(state: str) -> None:           # off the Tk thread
+                text = {
+                    "shown": self._handoff_waiting_text(name),
+                    "fallback": self._handoff_waiting_text(name),
+                    "closed": f"The page in {name} was closed before the "
+                              "check was passed.",
+                }.get(state)
+                if text:
+                    self._post(self._status_var.set, text)
+            return said
+
         for browser in extension:
             ttk.Button(
                 row, text=f"Open in {browser.name}",
-                command=opener(browser.name, lambda url, b=browser:
-                               eng_rep_pdf.open_in_extension_browser(url, b)),
+                command=opener(
+                    browser.name,
+                    lambda url, b=browser: eng_rep_pdf.open_in_extension_browser(
+                        url, b, bridge, errand_said(b.name)),
+                    f"Passing the check in {browser.name}, out of sight — the "
+                    f"scan loads here then (if the check wants you, "
+                    f"{browser.name} comes to the front)."),
             ).pack(side="left", padx=(0, 8))
         if has_ff:
             ttk.Button(row, text="Open in Firefox",

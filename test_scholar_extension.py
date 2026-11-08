@@ -10,9 +10,11 @@ half of that:
 * only Scholar's cookies are taken, and of those only Google's anti-abuse
   and preference cookies, never the ones that sign the reader in;
 * the page goes to the fetch waiting for it, and only once it is past the
-  CAPTCHA; the tab the app opened then closes;
-* the fetch opens the page on the extension's profile, waits, and, left
-  unanswered, does not open another for a while;
+  CAPTCHA (the extension is told it is still the CAPTCHA, to bring it to
+  the front); the tab the app opened then closes;
+* the fetch opens the page on the extension's profile, out of sight, waits,
+  and, left unanswered or closed by the reader, does not open another for a
+  while;
 * the app's own requests then go out as that browser.
 """
 
@@ -133,9 +135,11 @@ class DeliverTests(_Fresh):
         answered.assert_called_once_with()   # the app comes forward
 
     def test_not_while_it_is_still_scholar_s_captcha(self):
+        # The extension is told so: the page comes to the front, for the
+        # reader to answer.
         self.assertEqual(se.deliver_page({"url": URL,
                                           "html": SCHOLARS_CAPTCHA}),
-                         {"ok": False})
+                         {"ok": False, "check": True})
         self.assertFalse(self.wait.done.is_set())
 
     def test_nor_a_page_nobody_is_waiting_for(self):
@@ -149,7 +153,7 @@ class FetchTests(_Fresh):
     def _deliver_when_opened(self, html=RESULTS, url=URL):
         """The reader answers in the browser: the page is handed over as
         soon as it has opened."""
-        def opened(page, browser):
+        def opened(page, browser, bridge=None, on_event=None):
             threading.Timer(0.05, se.deliver_page,
                             [{"url": url, "html": html}]).start()
             return True
@@ -159,16 +163,45 @@ class FetchTests(_Fresh):
     def test_the_page_opens_in_the_browser_and_comes_back(self):
         with self._deliver_when_opened() as opened:
             self.assertEqual(se.fetch(URL), (RESULTS, URL))
-        opened.assert_called_once_with(URL, CHROME)
+        # Through the app's bridge, as an errand: out of sight.
+        opened.assert_called_once_with(URL, CHROME, se.bridge, mock.ANY)
         self.assertEqual(se._waiting, {})
 
     def test_the_app_says_where_to_answer(self):
         told = []
-        with self._deliver_when_opened(), \
+        with self._deliver_when_opened() as opened, \
                 mock.patch.object(scholar_browser, "on_step", told.append):
             se.fetch(URL)
-        self.assertEqual(len(told), 1)
-        self.assertIn("opened in Chrome", told[0])
+            self.assertEqual(len(told), 1)
+            self.assertIn("in Chrome, out of sight", told[0])
+            # Then, as the errand goes: the CAPTCHA come to the front, or
+            # the page opened the old way, in sight.
+            said = opened.call_args.args[3]
+            said("opened")
+            said("shown")
+            said("fallback")
+        self.assertEqual(len(told), 3)
+        self.assertIn("CAPTCHA answered — it is open in Chrome", told[1])
+        self.assertIn("the page has opened in Chrome", told[2])
+
+    def test_closed_by_the_reader_it_is_not_waited_for(self):
+        def opened(page, browser, bridge, on_event):
+            threading.Timer(0.05, on_event, ["closed"]).start()
+            return True
+        started = time.monotonic()
+        with mock.patch.object(eng_rep_pdf, "open_in_extension_browser",
+                               side_effect=opened):
+            self.assertIsNone(se.fetch(URL))
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertGreater(se._open_after, time.monotonic())
+
+    def test_a_browser_listening_for_errands_is_preferred(self):
+        edge = CHROME._replace(name="Edge")
+        eng_rep_pdf.extension_browsers.return_value = [CHROME, edge]
+        se.bridge.listening.return_value = ["Edge"]
+        self.assertEqual(se._browser(), edge)
+        se.bridge.listening.return_value = []
+        self.assertEqual(se._browser(), CHROME)     # the one used last
 
     def test_unanswered_it_is_not_opened_again_for_a_while(self):
         with mock.patch.object(eng_rep_pdf, "open_in_extension_browser",

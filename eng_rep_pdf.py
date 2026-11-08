@@ -436,18 +436,87 @@ def extension_browsers() -> "list[ExtensionBrowser]":
     return list(found)
 
 
-def open_in_extension_browser(url: str, browser: ExtensionBrowser) -> bool:
+#: How long a page asked of the extension waits for it to be taken before
+#: it is opened the old way, in sight: an extension listening takes it at
+#: once, one in a browser just started within seconds, and one whose
+#: browser had put it to sleep when it next looks in (every half minute).
+_ERRAND_TAKEN = 1.0
+_ERRAND_WAKE = 35.0
+#: How long, once taken, the extension has to say the page's window opened.
+_ERRAND_OPENED = 15.0
+
+
+def open_in_extension_browser(url: str, browser: ExtensionBrowser,
+                              bridge=None, on_event=None) -> bool:
     """Open *url* in *browser*, on the profile the extension is in, for the
-    reader to pass CloudFlare's check there; the extension hands the
-    clearance to the app once they have.  The browser is only asked to open
-    a page, as a link opens one: CloudFlare's check refuses a browser under
-    automation.  Returns False if it couldn't be launched."""
+    reader to pass a check for people there -- CommonLII's CloudFlare check,
+    Google's CAPTCHA; the extension hands the app what passing it earns.
+    The browser is only asked to open a page, as a link opens one: those
+    checks refuse a browser under automation.
+
+    Given the app's browser *bridge*, the page goes to the extension as an
+    errand (:class:`browser_bridge.Errand`): it opens the page in a
+    minimized window and brings that to the front only if there is
+    something for the reader to do there, so a check the browser passes by
+    itself is never seen.  A browser that isn't running is started without
+    a window for it; one whose extension takes no errand (one from before
+    errands) is sent the page as before, and shows it.  *on_event* is told
+    the errand's states (see Errand); "fallback" when it went the old way.
+    That is settled on a thread of its own: this returns at once.
+
+    Returns False if the browser couldn't be launched."""
+    if bridge is not None and getattr(bridge, "bound", False) \
+            and hasattr(bridge, "errand"):
+        errand = bridge.errand(url, browser.name, on_event=on_event)
+        threading.Thread(target=_see_errand_through,
+                         args=(errand, bridge, browser, on_event),
+                         daemon=True, name="getcases-errand").start()
+        return True
+    return _launch_extension_browser(browser, url)
+
+
+def _launch_extension_browser(browser: ExtensionBrowser,
+                              url: str = "") -> bool:
+    """Start *browser* on the extension's profile, opening *url*; with no
+    *url*, without opening a window at all (a browser already running
+    ignores that), for its extension to take an errand."""
+    args = [browser.exe, f"--profile-directory={browser.profile}"]
+    args.append(url if url else "--no-startup-window")
     try:
-        subprocess.Popen([browser.exe, f"--profile-directory={browser.profile}",
-                          url])
+        subprocess.Popen(args)
         return True
     except Exception:
         return False
+
+
+def _see_errand_through(errand, bridge, browser: ExtensionBrowser,
+                        on_event=None) -> None:
+    """Until the extension has *errand*'s page open: if no extension is
+    there to take it, start the browser without a window (its extension
+    takes it as it starts) and wait for the extension to look in; and if
+    none takes it after all, or one took it and never opened it, open the
+    page the old way."""
+    taken = ("taken", "opened", "shown")
+    if not errand.wait_until(taken, _ERRAND_TAKEN):
+        _launch_extension_browser(browser)
+        errand.wait_until(taken, _ERRAND_WAKE)
+    if bridge.cancel(errand):               # (not if taken just now)
+        print(f"[browser] no GetCases extension in {browser.name} took the "
+              "page; opening it there in sight")
+        _launch_extension_browser(browser, errand.url)
+        if on_event is not None:
+            try:
+                on_event("fallback")
+            except Exception:
+                pass
+        return
+    if errand.wait_until(("opened", "shown"), _ERRAND_OPENED) \
+            or errand.state in errand.FINAL:
+        return
+    # Taken, but its window never came: the extension's worker stopped.
+    print(f"[browser] the extension in {browser.name} took the page but "
+          "never opened it; opening it there in sight")
+    _launch_extension_browser(browser, errand.url)
 
 
 # ---------------------------------------------------------------------------

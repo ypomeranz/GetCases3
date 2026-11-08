@@ -614,9 +614,30 @@ class PanelTests(unittest.TestCase):
         with mock.patch.object(eng_rep_pdf, "open_in_extension_browser",
                                return_value=True) as launch:
             buttons["Open in Chrome"].invoke()
-        launch.assert_called_once_with(self.WEB, self.CHROME)
+        # As an errand, through the app's bridge: out of sight until the
+        # check wants the reader.
+        launch.assert_called_once_with(
+            self.WEB, self.CHROME, self.win._app._browser_bridge, mock.ANY)
         self.win._status_var.set.assert_called_with(
-            "Pass the check in Chrome — the scan loads here then.")
+            "Passing the check in Chrome, out of sight — the scan loads here "
+            "then (if the check wants you, Chrome comes to the front).")
+
+    def test_the_status_follows_the_page_out_of_sight(self):
+        self._with_extension(self.CHROME)
+        self.win._need_clearance(self.WEB)
+        with mock.patch.object(eng_rep_pdf, "open_in_extension_browser",
+                               return_value=True) as launch:
+            _buttons(self.win._body)["Open in Chrome"].invoke()
+        said = launch.call_args.args[3]
+        posted = []
+        with mock.patch.object(self.win, "_post",
+                               side_effect=lambda fn, *a: posted.append(a)):
+            said("opened")
+            said("shown")
+            said("closed")
+        self.assertEqual(posted, [
+            ("Pass the check in Chrome — the scan loads here then.",),
+            ("The page in Chrome was closed before the check was passed.",)])
 
     def test_without_firefox_the_extension_is_the_way(self):
         self._with_extension(self.CHROME)
