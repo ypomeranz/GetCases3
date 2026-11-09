@@ -7,7 +7,9 @@ reader can answer the CAPTCHA in the browser they use every day, if the
 GetCases extension is there.  The app opens the page it wants in that
 browser, on the extension's profile, and waits.  Nothing drives the browser:
 Google, like CloudFlare, is harder on one under automation, and the reader's
-own browser often passes without a CAPTCHA at all.
+own browser often passes without a CAPTCHA at all -- so the page opens out
+of sight, in a minimized window, and comes to the front only if Google does
+ask the reader something (an errand: see :class:`browser_bridge.Errand`).
 
 Once the page loads past Google's check, the extension (``background.js``)
 hands the app, through :mod:`browser_bridge`:
@@ -19,10 +21,11 @@ hands the app, through :mod:`browser_bridge`:
   then on, as that browser (see ``google_scholar``); and
 * the page itself, as the browser has it, for the fetch waiting on it
   (``/page``, :func:`deliver_page`).  A page loaded only so far as Scholar's
-  own CAPTCHA is not taken: the fetch waits on.
+  own CAPTCHA is not taken: the fetch waits on, and the window comes to the
+  front for the reader to answer it.
 
 The tab the app opened is closed once its page is handed over, as the
-Firefox window is.
+Firefox window is; closed by the reader first, the fetch stops waiting.
 
 Tkinter-free: the app sets :data:`bridge` (its browser bridge, to know the
 extension can reach it) and the :data:`on_answered` hook.
@@ -37,6 +40,7 @@ from typing import NamedTuple, Optional
 
 import eng_rep_pdf
 import scholar_browser
+import scholar_pages
 
 #: The host whose pages the extension hands over.
 SCHOLAR_HOST = "scholar.google.com"
@@ -53,7 +57,8 @@ HEADERS = eng_rep_pdf._BROWSER_HEADERS
 
 #: The query parameters a page's address may gain or lose on its way past
 #: Google's check without being another page.
-_VOLATILE = frozenset(("hl", "gws_rd", "sei", "ei", "oi", "authuser"))
+_VOLATILE = frozenset(("hl", "gws_rd", "sei", "ei", "oi", "authuser",
+                       "google_abuse", "sgst"))
 
 #: The app's browser bridge (browser_bridge.BrowserBridge), set while it is
 #: listening for the extension; None otherwise.
@@ -80,7 +85,7 @@ class _Wait:
 
     def __init__(self, url: str) -> None:
         self.url = url
-        self.done = threading.Event()
+        self.done = threading.Event()   # handed over, or its window closed
         self.html = ""
         self.final_url = ""
 
@@ -168,50 +173,81 @@ def accept_clearance(data: dict) -> dict:
 def deliver_page(data: dict) -> dict:
     """The page a fetch is waiting for, as the extension hands it over
     (``/page``).  Not a page that is still Google's CAPTCHA: the reader has
-    not answered it yet, and the fetch waits on.  Replies whether it was
-    taken, and that the tab the app opened for it may close."""
+    not answered it yet, and the fetch waits on -- the reply says so
+    (``"check"``), and the extension brings the page to the front for them.
+    Replies whether it was taken, and that the tab the app opened for it may
+    close."""
     url, html = str(data.get("url") or ""), data.get("html")
     if not handles(url) or not isinstance(html, str) or not html:
         return {"ok": False}
     with _lock:
         wait = _waiting.get(page_key(url))
-    if wait is None or scholar_browser._challenged(url, html):
+    if wait is None:
         return {"ok": False}
+    if scholar_pages.response_needs_browser(wait.url, url, html):
+        return {"ok": False, "check": True}
     wait.html, wait.final_url = html, url
     wait.done.set()
     _tell(on_answered)
     return {"ok": True, "close": True}
 
 
+def _browser() -> "eng_rep_pdf.ExtensionBrowser":
+    """The browser to open a page in: the one used last of those whose
+    extension is listening for the app's errands now (it opens the page out
+    of sight at once), or else the one used last."""
+    browsers = eng_rep_pdf.extension_browsers()
+    try:
+        listening = set(bridge.listening())
+    except Exception:
+        listening = set()
+    return next((b for b in browsers if b.name in listening), browsers[0])
+
+
 def fetch(url: str) -> "Optional[tuple[str, str]]":
     """Open *url* in Chrome or Edge, where the extension is, and wait (up
     to scholar_browser's five minutes) for the extension to hand the page
     over once it loads past Google's check -- the reader answering a
-    CAPTCHA there, if Google asks for one.  Returns ``(html, final_url)``,
-    or None when the page wasn't handed over; for ten minutes after that,
-    None at once, so an unanswered challenge does not come back on every
-    fetch."""
+    CAPTCHA there, if Google asks for one.  The page opens out of sight,
+    and comes to the front only then.  Returns ``(html, final_url)``, or
+    None when the page wasn't handed over (or the reader closed it); for
+    ten minutes after that, None at once, so an unanswered challenge does
+    not come back on every fetch."""
     global _open_after
     if time.monotonic() < _open_after or not available():
         return None
-    browser = eng_rep_pdf.extension_browsers()[0]
+    browser = _browser()
     key = page_key(url)
     with _lock:
         wait = _waiting.get(key)
         mine = wait is None
         if mine:
             wait = _waiting[key] = _Wait(url)
+
+    def on_event(state: str) -> None:
+        if state == "shown":
+            _tell(scholar_browser.on_step,
+                  f"Google Scholar wants a CAPTCHA answered — it is open in "
+                  f"{browser.name}: answer it there…")
+        elif state == "fallback":
+            _tell(scholar_browser.on_step,
+                  f"Google Scholar wants to check that a person is asking — "
+                  f"the page has opened in {browser.name}: answer the CAPTCHA "
+                  f"there if it shows one…")
+        elif state == "closed":
+            wait.done.set()                 # the reader closed it unanswered
+
     try:
         if mine:
-            if not eng_rep_pdf.open_in_extension_browser(url, browser):
+            if not eng_rep_pdf.open_in_extension_browser(
+                    url, browser, bridge, on_event):
                 return None
             print(f"[scholar] waiting for the page in {browser.name} "
                   "(a CAPTCHA there, if Google asks for one)")
             _tell(scholar_browser.on_step,
                   f"Google Scholar wants to check that a person is asking — "
-                  f"the page has opened in {browser.name}: answer the CAPTCHA "
-                  f"there if it shows one…")
-        if wait.done.wait(scholar_browser._SOLVE_TIMEOUT):
+                  f"trying the page in {browser.name}, out of sight…")
+        if wait.done.wait(scholar_browser._SOLVE_TIMEOUT) and wait.html:
             return wait.html, wait.final_url
     finally:
         if mine:

@@ -1,18 +1,17 @@
 """Fetch and parse U.S. Code sections from the Office of the Law Revision
 Counsel (uscode.house.gov), the House's official online edition.
 
-The OLRC "prelim" edition serves one section per page at
+The OLRC serves one section per page at
 
-    https://uscode.house.gov/view.xhtml?req=granuleid:
-        USC-prelim-title{T}-section{S}&num=0&edition=prelim
+    https://uscode.house.gov/us/usc/t{T}/s{S}/
 
-Pages are machine-generated with a stable structure: HTML comments
-``<!-- field-start:statute -->`` … ``<!-- field-end:statute -->`` delimit
-the head, statute text, source credit, and notes, and every paragraph
-carries a CSS class encoding its role and indentation depth
-(``statutory-body``, ``statutory-body-1em``, …, ``subsection-head``).
-``parse_section()`` walks those markers; the GUI renders the resulting
-(kind, indent, text) stream with bolding and indentation.
+Pages are machine-generated with a stable structure: the section's text in
+a ``<div class="statutory-body-container">``, then its source credit, then
+each note in a ``<div class="note-block">``, and every paragraph carries a
+CSS class encoding its role and indentation depth (``statutory-body``,
+``statutory-body-1em``, …, ``note-body``).  ``parse_section()`` walks those
+markers; the GUI renders the resulting (kind, indent, text) stream with
+bolding and indentation.
 
 When the OLRC's site is down, a section is read from Cornell's Legal
 Information Institute instead (see "Cornell's copy" below).
@@ -24,9 +23,11 @@ import html as _html
 import re
 import threading
 import time
+from concurrent.futures import (FIRST_COMPLETED, Future,
+                                TimeoutError as FutureTimeout, wait)
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 
 # ---------------------------------------------------------------------------
 # Citation recognition
@@ -170,11 +171,26 @@ _BROWSER_HEADERS = {
 }
 
 
+OLRC_BASE = "https://uscode.house.gov/"
+
+
 def section_url(title: str, section: str) -> str:
-    return (
-        "https://uscode.house.gov/view.xhtml?req=granuleid:"
-        f"USC-prelim-title{title}-section{section}&num=0&edition=prelim"
-    )
+    return f"{OLRC_BASE}us/usc/t{title}/s{section}/"
+
+
+# Until 2026 the OLRC served sections through a viewer, and that address is
+# still what bookmarks made then are filed under, and hold as the section's
+# source.  The viewer's pages are gone.
+_VIEWER_URL = ("https://uscode.house.gov/view.xhtml?req=granuleid:"
+               "USC-prelim-title{}-section{}&num=0&edition=prelim")
+_VIEWER_URL_RE = re.compile(
+    r"/view\.xhtml\?req=granuleid:USC-prelim-title(\w+)-section([^&]+)")
+
+
+def live_url(url: str) -> str:
+    """*url*, or the section's address today if it is the viewer's."""
+    m = _VIEWER_URL_RE.search(url)
+    return section_url(m.group(1), m.group(2)) if m else url
 
 
 @dataclass
@@ -183,21 +199,17 @@ class UscSection:
     section: str
     url: str
     # (kind, indent, text); kind in {"sechead", "head", "body", "credit",
-    # "note-head", "note-body"}
+    # "note-head", "note-body"} or TABLE_KINDS
     paras: list[tuple[str, int, str]] = field(default_factory=list)
-    # deepest container granule from the page breadcrumbs, e.g.
-    # "title26-chapter48" — its table of sections gives document order
-    container: str | None = None
-    # the units above the section, outermost first, as the page's navigation
-    # bar names them: ("title42", "TITLE 42"), ("title42-chapter21",
-    # "CHAPTER 21") … — see load_unit
+    # the units above the section, outermost first: ("title42", "Title 42"),
+    # ("title42-chapter21", "Chapter 21") … — see load_unit
     crumbs: list[tuple[str, str]] = field(default_factory=list)
     # where the text was read: "olrc", or "lii" for Cornell's copy, read
     # while the OLRC's site was down
     source: str = "olrc"
     # Cornell's copy taken because the OLRC was slow to answer, not down
     olrc_slow: bool = False
-    # Cornell's page names the sections before and after it outright
+    # the sections before and after it, as its page names them
     adjacent: tuple = (None, None)
 
     @property
@@ -206,50 +218,15 @@ class UscSection:
 
     @property
     def key_url(self) -> str:
-        """The section's address at the OLRC, wherever its text was read:
-        what a bookmark of it is filed under."""
-        return section_url(self.title, self.section)
+        """What a bookmark of the section is filed under, wherever its text
+        was read: the viewer's address, so that a section bookmarked in the
+        viewer's day is still the same bookmark."""
+        return _VIEWER_URL.format(self.title, self.section)
 
     def neighbors(self) -> tuple[tuple[str, str] | None,
                                  tuple[str, str] | None]:
-        """Adjacent sections, from the container's table of sections
-        (fetched lazily and cached).  Failures yield (None, None)."""
-        if self.source == "lii":
-            return self.adjacent
-        if not self.container:
-            print(f"[usc-nav] no container breadcrumb found for "
-                  f"§ {self.section}")
-            return None, None
-        with _cache_lock:
-            order = _order_cache.get(self.container)
-        if order is None:
-            # The container's table of contents — the same one its
-            # breadcrumb opens, fetched once for both.
-            try:
-                order = [entry.section
-                         for entry in load_unit(self.container).entries
-                         if entry.kind == "section"]
-            except Exception as exc:
-                print(f"[usc-nav] contents of {self.container} failed: "
-                      f"{exc}")
-                order = []
-        if not order:
-            try:
-                order = _container_sections(self.container)
-            except Exception as exc:
-                print(f"[usc-nav] section list fetch failed for "
-                      f"{self.container}: {exc}")
-                return None, None
-        try:
-            i = next(idx for idx, s in enumerate(order)
-                     if s.lower() == self.section.lower())
-        except StopIteration:
-            print(f"[usc-nav] § {self.section} not in {self.container} "
-                  f"list ({len(order)} sections: {order[:8]}…)")
-            return None, None
-        prev = (self.title, order[i - 1]) if i > 0 else None
-        nxt = (self.title, order[i + 1]) if i + 1 < len(order) else None
-        return prev, nxt
+        """Adjacent sections, as the section's own page names them."""
+        return self.adjacent
 
     @property
     def heading(self) -> str:
@@ -274,7 +251,7 @@ class UscSection:
             why = ("was slow to answer" if self.olrc_slow
                    else "was not answering")
             return f"Cornell LII's copy of the OLRC text (uscode.house.gov {why})"
-        return "OLRC preliminary edition (current law)"
+        return "OLRC online edition (current law)"
 
     def bluebook_cite(self, subs: tuple = ()) -> str:
         """Bluebook citation (rule 12.3); current official code, so no
@@ -306,10 +283,9 @@ class _OlrcUnavailable(RuntimeError):
 def _olrc_page(page: str) -> bool:
     """Whether a page is the OLRC's own, as against the house.gov "Under
     Maintenance" notice or an error page put up in front of the site.  Every
-    page the OLRC's viewer serves, one saying it has no such section
-    included, loads its stylesheets from /javax.faces.resource/."""
-    return any(mark in page
-               for mark in ("javax.faces", "field-start:", 'class="navigator"'))
+    page of the OLRC's, one saying it has no such section included, sets its
+    content in this frame."""
+    return "page_content_internal" in page
 
 
 # After the OLRC fails and Cornell answers, Cornell is asked first for this
@@ -364,6 +340,20 @@ def load_section(title: str, section: str) -> UscSection:
 _OLRC_HEDGE_S = 1.5
 
 
+def _in_thread(fetch) -> Future:
+    """*fetch* set going on a thread of its own, its outcome a Future."""
+    future: Future = Future()
+
+    def run() -> None:
+        try:
+            future.set_result(fetch())
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    threading.Thread(target=run, daemon=True).start()
+    return future
+
+
 def _olrc_or_quicker(title: str, section: str) -> UscSection:
     """The OLRC's copy of a section, as :func:`_olrc_section` — unless the
     OLRC is slow: past ``_OLRC_HEDGE_S`` Cornell's copy is asked for too, and
@@ -371,29 +361,14 @@ def _olrc_or_quicker(title: str, section: str) -> UscSection:
     OLRC's word that there is no such section stands, Cornell's copy being
     able to trail it; its failing to answer is raised as before, and
     load_section falls back to Cornell."""
-    from concurrent.futures import (FIRST_COMPLETED, Future,
-                                    TimeoutError as FutureTimeout, wait)
-
-    def start(fetch) -> Future:
-        future: Future = Future()
-
-        def run() -> None:
-            try:
-                future.set_result(fetch())
-            except BaseException as exc:
-                future.set_exception(exc)
-
-        threading.Thread(target=run, daemon=True).start()
-        return future
-
-    olrc = start(lambda: _olrc_section(title, section))
+    olrc = _in_thread(lambda: _olrc_section(title, section))
     try:
         return olrc.result(timeout=_OLRC_HEDGE_S)
     except FutureTimeout:
         pass
     print(f"[usc] uscode.house.gov is slow; asking Cornell for "
           f"{title} U.S.C. § {section} as well")
-    lii = start(lambda: _lii_section(title, section))
+    lii = _in_thread(lambda: _lii_section(title, section))
     wait([olrc, lii], return_when=FIRST_COMPLETED, timeout=65)
     if not olrc.done() and lii.done() and lii.exception() is None:
         doc = lii.result()
@@ -403,168 +378,142 @@ def _olrc_or_quicker(title: str, section: str) -> UscSection:
     return olrc.result(timeout=65)
 
 
-def _olrc_section(title: str, section: str) -> UscSection:
-    """A section from the OLRC.  Raises SectionNotFound when the OLRC says
-    there is no such section, _OlrcUnavailable when it does not answer."""
+# A section with no page of its own — one printed in a range with the section
+# before it, as 42 U.S.C. § 4 is in "§§ 3, 4" — has a stub that sends the
+# reader on, which requests does not follow by itself.
+_REFRESH_RE = re.compile(
+    r'<meta http-equiv="refresh" content="[^"]*?url=([^"]+)"', re.IGNORECASE)
+_SECTION_PATH_RE = re.compile(r"/t(\w+)/s([^/\"]+)/?$")
+_ADJACENT_RE = re.compile(
+    r'<a href="[^"]*/t(\w+)/s([^/"]+)/" class="(prev|next)-section"')
+#: How long a section waits for the list of its title's contents, which only
+#: places it in the Code: the section itself is worth more than its crumbs.
+_CRUMBS_WAIT_S = 0.75
+
+
+def _olrc_fetch(url: str) -> tuple[str, str] | None:
+    """The page at *url* and the address it ended up at, stubs followed, or
+    None when the OLRC has no such page."""
     import requests
 
-    last_err = "section not found"
-    for cand in _candidates(section):
-        url = section_url(title, cand)
-        try:
-            resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
-            if resp.status_code == 404:
-                last_err = f"no such section {title} U.S.C. § {cand}"
-                continue
-            resp.raise_for_status()
-        except Exception as exc:
-            raise _OlrcUnavailable(f"failed: {exc}") from exc
+    page = ""
+    for _hop in range(3):
+        resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
         # Decode explicitly: a missing charset in the Content-Type would
         # otherwise turn "§" into "Â§" via requests' Latin-1 fallback
         page = resp.content.decode("utf-8", "replace")
+        moved = _REFRESH_RE.search(page)
+        if moved is None:
+            break
+        url = urljoin(url, moved.group(1))
+    return page, url
+
+
+def olrc_adjacent(page: str) -> tuple[tuple[str, str] | None,
+                                      tuple[str, str] | None]:
+    """The sections before and after a page's, as (title, section): its
+    navigation bar names them, across the end of a title too."""
+    found = {m.group(3): (m.group(1), m.group(2))
+             for m in _ADJACENT_RE.finditer(page)}
+    return found.get("prev"), found.get("next")
+
+
+def _section_crumbs(title: str, url: str,
+                    contents: Future) -> list[tuple[str, str]]:
+    """The units above the section at *url*, or just its title when the
+    title's contents aren't to hand in time."""
+    m = _SECTION_PATH_RE.search(url)
+    try:
+        crumbs = contents.result(timeout=_CRUMBS_WAIT_S).crumbs(m.group(2))
+    except Exception as exc:
+        print(f"[usc-unit] title {title}: contents not to hand: {exc!r}")
+        crumbs = None
+    return crumbs or [(f"title{title}", f"Title {title}")]
+
+
+def _mend_tables(paras: list[tuple[str, int, str]], title: str,
+                 section: str) -> list[tuple[str, int, str]]:
+    """*paras*, with a table row the OLRC's page ran together (see
+    _flat_table) split where Cornell's copy of the table splits it.  Cornell
+    gives only the place: a row is split only if its copy reads the same,
+    letter for letter, and any other stays as the OLRC prints it."""
+    if not any(kind == "table" and "\t" not in text
+               for kind, _depth, text in paras):
+        return paras
+    try:
+        copy = _lii_section(title, section)
+    except Exception as exc:
+        print(f"[usc] no Cornell copy to split {title} U.S.C. § {section}'s "
+              f"tables by: {exc}")
+        return paras
+
+    def compact(text: str) -> str:
+        return re.sub(r"\s+", "", text)
+
+    cells = {compact(text.replace(" | ", "")): text.replace(" | ", "\t")
+             for _kind, _depth, text in copy.paras if " | " in text}
+    return [(kind, depth, cells.get(compact(text), text)
+             if kind in ("table", "table-head") and "\t" not in text
+             else text) for kind, depth, text in paras]
+
+
+def _olrc_section(title: str, section: str) -> UscSection:
+    """A section from the OLRC.  Raises SectionNotFound when the OLRC says
+    there is no such section, _OlrcUnavailable when it does not answer.
+
+    A 404 alone is not its word on that.  When the OLRC rebuilt its site every
+    address the app knew answered 404, and 42 U.S.C. § 1983 was reported not
+    to exist; so the title's list of its sections has to agree, and if the
+    list names the section, or there is no list, the site has changed under
+    the app rather than the Code."""
+    contents = _in_thread(lambda: _title_contents(title))
+    last_err = "section not found"
+    for cand in _candidates(section):
+        try:
+            fetched = _olrc_fetch(section_url(title, cand))
+        except Exception as exc:
+            raise _OlrcUnavailable(f"failed: {exc}") from exc
+        if fetched is None:
+            last_err = f"no such section {title} U.S.C. § {cand}"
+            continue
+        page, url = fetched
         paras = parse_section(page)
         if paras:
-            doc = UscSection(title=title, section=cand, url=url, paras=paras)
-            doc.container = _find_container(page)
-            doc.crumbs = page_crumbs(page)[0]
-            return doc
+            return UscSection(title=title, section=cand, url=url,
+                              paras=_mend_tables(paras, title, cand),
+                              crumbs=_section_crumbs(title, url, contents),
+                              adjacent=olrc_adjacent(page))
         if not _olrc_page(page):
             raise _OlrcUnavailable("answered with a page that is not the "
                                    "Code's (down for maintenance?)")
         last_err = f"no text found for {title} U.S.C. § {cand}"
-    raise SectionNotFound(f"uscode.house.gov: {last_err}")
-
-
-# Previous/next navigation.  The OLRC viewer's own prev/next controls are
-# JSF form postbacks (no usable hrefs), so neighbors are derived instead
-# from the page's breadcrumb trail: the deepest container granule (part,
-# subchapter, or chapter) is fetched — streamed, stopping at the end of
-# its "analysis" field — and its table of sections gives document order.
-
-_GRANULE_PATH_RE = re.compile(
-    r"granuleid(?:%3[Aa]|:)USC-prelim-([A-Za-z0-9\-]+)"
-)
-
-
-def _find_container(page_html: str) -> str | None:
-    """Deepest non-section granule path in the page's breadcrumb links,
-    e.g. "title26-chapter48"."""
-    best = None
-    for m in _GRANULE_PATH_RE.finditer(page_html):
-        path = m.group(1)
-        if "-section" in path.lower():
-            continue
-        # breadcrumbs run shallow -> deep, so on equal depth keep the
-        # later one (Subtitle D and Chapter 48 both have one dash)
-        if best is None or path.count("-") >= best.count("-"):
-            best = path
-    return best
-
-
-# The closing comment is optional so a streamed buffer cut mid-comment
-# still parses; the cell classes only occur inside analyses, so falling
-# back to the whole buffer when the field markers are absent is safe.
-_ANALYSIS_REGION_RE = re.compile(
-    r"<!--\s*field-start:analysis\s*-->(.*?)"
-    r"(?:<!--\s*field-end:analysis|\Z)",
-    re.DOTALL,
-)
-_ANALYSIS_LEFT_RE = re.compile(
-    r'class="(?:two|three)-column-analysis-style-content-left"[^>]*>'
-    r"(.*?)</(?:div|td)>",
-    re.DOTALL,
-)
-_ANALYSIS_SEC_RE = re.compile(
-    r"\[?(\d+[A-Za-z0-9]*(?:[-–]\d+[A-Za-z0-9]*)?)"
-)
-# Fallback ordering: the section heads themselves, in document order
-_SECHEAD_NUM_RE = re.compile(
-    r'<h3\s+class="section-head"[^>]*>\s*(?:<[^>]+>\s*)*\[?\s*'
-    # OLRC's current container pages emit ``&sect;1983``; older/saved
-    # pages and tests may contain the decoded character or a numeric entity.
-    r"(?:(?:§|&sect;|&#0*167;|&#x0*a7;)\s*)+"
-    r"(\d+[A-Za-z0-9]*(?:[-–]\d+[A-Za-z0-9]*)?)",
-    re.IGNORECASE,
-)
-
-
-def _sections_from_analysis(page_html: str) -> list[str]:
-    """Ordered section numbers from a container page's table of sections.
-    A range entry ("5001 to 5011. Repealed.") contributes its first
-    number; bracketed (repealed/omitted) entries are kept — the OLRC
-    serves a page for them too.  When no analysis cells are found, the
-    section heads in the buffer provide the order instead."""
-    m = _ANALYSIS_REGION_RE.search(page_html)
-    region = m.group(1) if m else page_html
-    out: list[str] = []
-    for cell in _ANALYSIS_LEFT_RE.finditer(region):
-        text = _clean(cell.group(1))
-        sec = _ANALYSIS_SEC_RE.match(text)
-        if sec:
-            ident = sec.group(1).replace("–", "-")
-            if not out or out[-1] != ident:
-                out.append(ident)
-    if not out:
-        for head in _SECHEAD_NUM_RE.finditer(page_html):
-            ident = head.group(1).replace("–", "-")
-            if not out or out[-1] != ident:
-                out.append(ident)
-    return out
-
-
-_order_cache: dict[str, list[str]] = {}
-
-
-def _container_sections(container: str) -> list[str]:
-    """Ordered sections of a container granule, cached.  The container
-    page holds the whole unit's text, so the response is streamed and cut
-    off once the table of sections has arrived."""
-    with _cache_lock:
-        if container in _order_cache:
-            return _order_cache[container]
-
-    import requests
-
-    url = ("https://uscode.house.gov/view.xhtml?req=granuleid:"
-           f"USC-prelim-{container}&num=0&edition=prelim")
-    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30,
-                        stream=True)
     try:
-        resp.raise_for_status()
-        buf = b""
-        for chunk in resp.iter_content(65536):
-            buf += chunk
-            if b"field-end:analysis" in buf or len(buf) > 2_000_000:
-                break
-    finally:
-        resp.close()
-    order = _sections_from_analysis(buf.decode("utf-8", "replace"))
-    print(f"[usc-nav] {container}: {len(order)} sections "
-          f"from {len(buf):,} bytes")
-    if order:
-        with _cache_lock:
-            _order_cache[container] = order
-    return order
+        listed = contents.result(timeout=35)
+    except Exception as exc:
+        raise _OlrcUnavailable(f"has no list of title {title}: {exc}") from exc
+    if any(listed.crumbs(cand) for cand in _candidates(section)):
+        raise _OlrcUnavailable(f"lists {title} U.S.C. § {section} but has no "
+                               "page for it")
+    raise SectionNotFound(f"uscode.house.gov: {last_err}")
 
 
 # ---------------------------------------------------------------------------
 # The Code above the section
 #
-# Every unit the Code is divided into — title, subtitle, part, chapter,
-# subchapter, subpart — has an OLRC page of its own: its heading, a table of
-# its contents, then the full text of everything in it.  The table lists the
-# unit's sections ("1983. | Civil action for deprivation of rights.") or the
-# units below it ("21. | Civil Rights | 1981"), under subheads for the groups
-# in between ("SUBCHAPTER I—GENERALLY"), and in a big chapter runs on through
-# notes, part after part.  Only that much of the page is read; the text after
-# it can run to hundreds of megabytes.  A unit with no table of its own, as
-# the lowest ones often are, is listed in its parent's under its own subhead.
+# The OLRC's browse page opens each title from a file of its own,
 #
-# Every page's navigation bar names the units above it by page id
-# ("title42-chapter21"), so going up is exact.  A table names a unit below
-# only by its designation ("Subchapter A"); its page id follows the OLRC's
-# naming ("title26-chapter1-subchapterA", roman numerals mostly as digits),
-# and where that misses, the navigation bar of its first section names it.
+#     https://uscode.house.gov/browse-tree/t{T}.html
+#
+# which sets out the whole title: every unit — subtitle, part, chapter,
+# subchapter, subpart — as a <details> nested in the one that holds it, each
+# with a link to the unit's front matter ("us/usc/t42/chapter21-subchapterI-
+# front.html") and a link to each section directly in it.  So one fetch gives
+# every table of contents in a title and where each section sits in it.  A
+# unit's id is that link's name under its title: "title42-chapter21-
+# subchapterI".
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -578,7 +527,7 @@ class UnitEntry:
     section: str = ""       # a section entry's number: "1983"
     unit_kind: str = ""     # a unit entry's "chapter", "subchapter" …
     designation: str = ""   # a unit entry's "21", "A", "IV"
-    granule: str = ""       # a unit entry's page id, as the OLRC names them
+    granule: str = ""       # a unit entry's id: see load_unit
     first_section: str = "" # a unit entry's first section, where the table
                             # gives it
 
@@ -592,480 +541,239 @@ class UscUnit:
     url: str
     label: str              # "Chapter 21"
     heading: str            # "CHAPTER 21—CIVIL RIGHTS"
-    # the units above this one, outermost first: ("title42", "TITLE 42")
+    # the units above this one, outermost first: ("title42", "Title 42")
     crumbs: list[tuple[str, str]] = field(default_factory=list)
     entries: list[UnitEntry] = field(default_factory=list)
-    # the contents were read from the unit's own text and stopped short
+    # the contents stop short — never so here, but the viewer asks it of
+    # every source's units
     partial: bool = False
     # the site the contents were read from
     host: str = "uscode.house.gov"
 
 
 class UnitNotFound(RuntimeError, LookupError):
-    """The OLRC has no page by that id."""
+    """The OLRC has no unit by that id."""
 
 
-def unit_url(granule: str) -> str:
-    return (
-        "https://uscode.house.gov/view.xhtml?req=granuleid:"
-        f"USC-prelim-{granule}&num=0&edition=prelim"
-    )
+_UNIT_KINDS = frozenset((
+    "title", "subtitle", "division", "subdivision", "part", "subpart",
+    "chapter", "subchapter", "article",
+))
 
 
 def crumb_label(label: str) -> str:
-    """A navigation-bar label as the reader shows it: "SUBCHAPTER I" →
-    "Subchapter I", "part 5" → "Part 5", "TITLE 42" → "Title 42"."""
+    """A unit's designation as the reader shows it: "SUBCHAPTER I" →
+    "Subchapter I", "part 5" → "Part 5", "TITLE 42" → "Title 42".  A unit
+    with no designation is named as printed: "GENERAL PROVISIONS"."""
     words = (label or "").split(None, 1)
     if not words:
         return ""
+    if words[0].lower() not in _UNIT_KINDS:
+        return label
     head = words[0][:1].upper() + words[0][1:].lower()
     return f"{head} {words[1]}" if len(words) > 1 else head
 
 
-_NAV_CRUMB_RE = re.compile(
-    r'granuleid(?:%3A|:)USC-prelim-([A-Za-z0-9\-]+)[^"]*"\s+'
-    r'class="link_class">([^<]+)</a>'
-)
-_NAV_OWN_RE = re.compile(
-    r'<span style="font-size: 11px; font-weight: bold;">([^<]*)</span>'
-)
+@dataclass
+class _TitleContents:
+    """A title's units by id, and the unit holding each of its sections by
+    the section's number in lower case."""
+
+    units: dict[str, UscUnit]
+    sections: dict[str, UscUnit]
+
+    def crumbs(self, section: str) -> list[tuple[str, str]] | None:
+        """The units above a section, outermost first; None when the title
+        does not list it."""
+        unit = self.sections.get(section.casefold())
+        if unit is None:
+            return None
+        return unit.crumbs + [(unit.granule, unit.label)]
 
 
-def page_crumbs(page_html: str) -> tuple[list[tuple[str, str]], str]:
-    """The units above a page, outermost first, as (page id, label) — and
-    the page's own label ("CHAPTER 21", "§ 1983") — from its navigation
-    bar."""
-    start = page_html.find('class="navigator"')
-    if start < 0:
-        return [], ""
-    end = page_html.find("</form>", start)
-    nav = page_html[start:end if end > 0 else len(page_html)]
-    crumbs = [(granule, _clean(label))
-              for granule, label in _NAV_CRUMB_RE.findall(nav)]
-    own = _NAV_OWN_RE.search(nav)
-    return crumbs, _clean(own.group(1)) if own else ""
-
-
-# A unit's own heading: a title's <h1>, any other unit's first structural
-# heading (<h3> mostly; title 49's subtitles are <h2>).  Its body begins at
-# the next heading field — a section's, or the first unit's inside it.
-_UNIT_HEAD_RE = re.compile(
-    r"<!--\s*field-start:(titlehead|structuralhead)\s*-->\s*"
-    r"<h[1-3]\b[^>]*>(.*?)</h[1-3]>",
+_TREE_TOKEN_RE = re.compile(
+    r'<details class="tree-node">\s*<summary>(?P<summary>.*?)</summary>\s*'
+    r'<ul class="tree-sections">\s*<li>\s*'
+    r'<a href="us/usc/t\w+/(?P<slug>[^"]+)-front\.html"'
+    r"|(?P<end></details>)"
+    r'|<a class="section-link" href="us/usc/t\w+/s(?P<section>[^/"]+)/">'
+    r"(?P<line>.*?)</a>",
     re.DOTALL,
 )
-_UNIT_BODY_RE = re.compile(
-    r"<!--\s*field-start:(?:head|structuralhead)\s*-->")
-# The table's pieces: subheads; column labels ("Sec.", "Chap.") naming what
-# a table lists; and its rows — designation, heading and, where given, first
-# section — as <div> cells, or in some chapters (10 U.S.C. ch. 47) a <table>.
-_UNIT_TOKEN_RE = re.compile(
-    r'<h[3-5] class="(?:analysis-subhead|note-head)"[^>]*>'
-    r"(?P<group>.*?)</h[3-5]>"
-    r'|class="analysis-head-left">(?P<label>.*?)</div>'
-    r"|<tr>\s*<th\b[^>]*>(?P<thlabel>.*?)</th>(?P<threst>.*?)</tr>"
-    r'|<div class="(?:two|three)-column-analysis-style-content-left">'
-    r"(?P<left>.*?)</div>"
-    r'<div class="(?:two|three)-column-analysis-style-content-'
-    r'(?:right|center)"[^>]*>(?P<middle>.*?)</div>'
-    r'(?:<div class="three-column-analysis-style-content-right"[^>]*>'
-    r"(?P<right>.*?)</div>)?"
-    r'|<tr>\s*<td class="left">(?P<tleft>.*?)</td>\s*'
-    r'<td class="middle">(?P<tmiddle>.*?)</td>'
-    r'(?:\s*<td class="(?:middle|right)">(?P<tright>.*?)</td>)?',
+_TREE_RANGE_RE = re.compile(
+    r'<span class="section-range">\(sections?\s+([^\s)]+).*?</span>',
     re.DOTALL,
 )
-# A subhead that names a unit: "SUBCHAPTER I–A—INSTITUTIONALIZED PERSONS",
-# "Part A—Administration", "subpart i—general".  Others ("Editorial Notes",
-# "Amendments") head notes, not lists.
-_UNIT_DESIGNATION_RE = re.compile(
-    r"^(title|subtitle|division|subdivision|part|subpart|chapter|"
-    r"subchapter|article)\s+([A-Za-z0-9]+(?:[–-][A-Za-z0-9]+)?)\s*(?:—|$)",
-    re.IGNORECASE,
-)
-_TABLE_KINDS = (
-    ("chap", "chapter"), ("subchap", "subchapter"), ("subtitle", "subtitle"),
-    ("subpart", "subpart"), ("part", "part"), ("subdivision", "subdivision"),
-    ("division", "division"), ("article", "article"), ("sec", "section"),
-)
-_PLURALS = {"chapter": "Chapters", "subchapter": "Subchapters",
-            "subtitle": "Subtitles", "subpart": "Subparts", "part": "Parts",
-            "subdivision": "Subdivisions", "division": "Divisions",
-            "article": "Articles", "section": "Sections"}
 
 
-def _cell(fragment: str) -> str:
-    """A table cell's text, less its footnote markers."""
-    fragment = re.sub(r"<sup\b.*?</sup>", "", fragment or "",
-                      flags=re.DOTALL)
-    return _clean(fragment)
+def _parse_tree(page: str, title: str) -> _TitleContents:
+    """Read a title's browse tree: see "The Code above the section"."""
+    root = UscUnit(title=title, granule=f"title{title}",
+                   url=f"{OLRC_BASE}us/usc/t{title}/frontmatter/",
+                   label=f"Title {title}", heading=f"TITLE {title}")
+    units = {root.granule: root}
+    sections: dict[str, UscUnit] = {}
+    stack = [root]
+    for m in _TREE_TOKEN_RE.finditer(page):
+        holder = stack[-1]
+        if m.group("end"):
+            if len(stack) > 1:
+                stack.pop()
+        elif m.group("section"):
+            # "§ 2000e–2 — Unlawful employment practices"
+            label, _dash, heading = _tidy(_clean(m.group("line"))).partition(
+                " — ")
+            holder.entries.append(UnitEntry(
+                kind="section", depth=0, label=label, heading=heading,
+                section=m.group("section")))
+            sections[m.group("section").casefold()] = holder
+        else:
+            summary = m.group("summary")
+            found = _TREE_RANGE_RE.search(summary)
+            first = found.group(1).replace("–", "-") if found else ""
+            heading = _clean(_TREE_RANGE_RE.sub("", summary))
+            # repealed units are bracketed: "[CHAPTER 5—REPEALED]"
+            own, _dash, name = heading.strip("[] ").partition("—")
+            kind, _space, designation = own.strip().partition(" ")
+            if kind.lower() not in _UNIT_KINDS:
+                # a topic with no designation of its own ("Penalties")
+                own, name, kind, designation = heading, "", "", ""
+            granule = f"title{title}-{m.group('slug')}"
+            if granule in units:
+                # Topics under one unit share a name ("chapter7-level"), and
+                # a repealed chapter its successor's ("subtitleD-chapter38").
+                granule += f"@{first}"
+            unit = UscUnit(
+                title=title, granule=granule,
+                url=f"{OLRC_BASE}us/usc/t{title}/{m.group('slug')}-front.html",
+                label=crumb_label(own.strip()), heading=heading,
+                crumbs=holder.crumbs + [(holder.granule, holder.label)],
+            )
+            holder.entries.append(UnitEntry(
+                kind="unit", depth=0, label=unit.label, heading=name.strip(),
+                unit_kind=kind.lower(), designation=designation,
+                granule=granule, first_section=first,
+            ))
+            units[granule] = unit
+            stack.append(unit)
+    return _TitleContents(units, sections)
 
 
-def _fetch_unit_top(url: str, cap: int = 8_000_000) -> str:
-    """A unit page as far as its table of contents: streamed, and cut off
-    where the unit's body begins."""
-    import codecs
+_contents_cache: dict[str, _TitleContents] = {}
+
+
+def _title_contents(title: str) -> _TitleContents:
+    """A title's units and sections, cached.  Raises UnitNotFound when the
+    OLRC has no such title, RuntimeError when it does not answer."""
+    with _cache_lock:
+        if title in _contents_cache:
+            return _contents_cache[title]
 
     import requests
 
-    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30,
-                        stream=True)
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    text, read, head_end = "", 0, -1
-    try:
-        resp.raise_for_status()
-        for chunk in resp.iter_content(65536):
-            read += len(chunk)
-            # Search only what is new, less a margin for a marker split
-            # between chunks.
-            start = max(0, len(text) - 200)
-            text += decoder.decode(chunk)
-            if head_end < 0:
-                head = _UNIT_HEAD_RE.search(text)
-                if head:
-                    head_end = start = head.end()
-            if head_end >= 0 and _UNIT_BODY_RE.search(
-                    text, max(start, head_end)):
-                break
-            if read > cap:
-                break
-    finally:
-        resp.close()
-    return text
+    resp = requests.get(f"{OLRC_BASE}browse-tree/t{title}.html",
+                        headers=_BROWSER_HEADERS, timeout=30)
+    if resp.status_code == 404:
+        raise UnitNotFound(f"uscode.house.gov has no title {title}")
+    resp.raise_for_status()
+    contents = _parse_tree(resp.content.decode("utf-8", "replace"), title)
+    if not contents.sections:
+        raise RuntimeError("uscode.house.gov is not answering (down for "
+                           "maintenance?)")
+    print(f"[usc-unit] title {title}: {len(contents.units)} units, "
+          f"{len(contents.sections)} sections")
+    with _cache_lock:
+        _contents_cache[title] = contents
+    return contents
 
 
-def _is_roman_list(designations: list[str]) -> bool:
-    """Whether a table's designations are roman numerals ("I", "II", "IV")
-    rather than letters ("A", "B", "C" — C and D are numerals too)."""
-    marks = [d for d in designations if d]
-    return bool(marks) and all(
-        re.fullmatch(r"[IVXLCDM]+|[ivxlcdm]+", d) for d in marks
-    ) and (any(len(d) > 1 for d in marks) or marks == ["I"]
-           or marks == ["i"])
-
-
-def _child_granule(parent: str, kind: str, designation: str,
-                   roman: bool) -> str:
-    """The page id the OLRC gives a unit listed in *parent*'s table.
-
-    A chapter's id hangs off the title whatever holds it ("title18-
-    chapter44", in part I), and so does a subtitle's, and a part's directly
-    under a title; everything else is nested under its parent.  Roman
-    numerals become digits ("SUBCHAPTER XVIII" → subchapter18)."""
-    title = parent.split("-", 1)[0]
-    mark = designation
-    if roman:
-        mark = str(_roman_to_int(designation))
-    if kind in ("chapter", "subtitle") or (kind == "part" and parent == title):
-        return f"{title}-{kind}{mark}"
-    return f"{parent}-{kind}{mark}"
-
-
-def _unit_entries(page: str, granule: str) -> list[UnitEntry]:
-    """The entries of the table of contents between a unit page's heading
-    and its body."""
-    head = _UNIT_HEAD_RE.search(page)
-    if head is None:
-        return []
-    body = _UNIT_BODY_RE.search(page, head.end())
-    region = page[head.end():body.start() if body else len(page)]
-    tokens: list[tuple] = []
-    for m in _UNIT_TOKEN_RE.finditer(region):
-        if m.group("group") is not None:
-            tokens.append(("group", _cell(m.group("group"))))
-        elif (m.group("label") or m.group("thlabel")) is not None:
-            label = _cell(m.group("label") or m.group("thlabel")).lower()
-            # a table of something else (a note's conversion table)
-            if any(label.startswith(prefix) for prefix, _k in _TABLE_KINDS):
-                # The UCMJ numbers its sections as articles too, in a
-                # column of their own: Sec. | Art. | heading.
-                articles = bool(re.search(
-                    r">\s*Art\.", m.group("threst") or ""))
-                tokens.append(("label", label, articles))
-        elif m.group("left") is not None:
-            tokens.append(("row", _cell(m.group("left")),
-                           _cell(m.group("middle")),
-                           _cell(m.group("right") or "")))
-        else:
-            tokens.append(("row", _cell(m.group("tleft")),
-                           _cell(m.group("tmiddle")),
-                           _cell(m.group("tright") or "")))
-
-    # Which rows are numerals, a table (label to label) at a time.
-    roman_blocks: dict[int, bool] = {}
-    block, marks = 0, []
-    for i, token in enumerate(tokens):
-        if token[0] == "label":
-            if marks:
-                roman_blocks[block] = _is_roman_list(marks)
-            block, marks = i, []
-        elif token[0] == "row":
-            marks.append(token[1].strip("[]. ").split(" ")[0])
-    if marks:
-        roman_blocks[block] = _is_roman_list(marks)
-
-    entries: list[UnitEntry] = []
-    group_kinds: list[str] = []   # subhead kinds, outermost first
-    group_depth = -1
-    row_kind, block, articles = "section", 0, False
-    tables: list[tuple[int, str]] = []   # (entry index, kind) per table
-    for i, token in enumerate(tokens):
-        if token[0] == "label":
-            row_kind = next((kind for prefix, kind in _TABLE_KINDS
-                             if token[1].startswith(prefix)), "section")
-            articles = token[2]
-            block = i
-            tables.append((len(entries), row_kind))
-            continue
-        if token[0] == "group":
-            m = _UNIT_DESIGNATION_RE.match(token[1])
-            if m is None:
-                continue
-            kind = m.group(1).lower()
-            if kind not in group_kinds:
-                group_kinds.append(kind)
-            group_depth = group_kinds.index(kind)
-            entries.append(UnitEntry("group", group_depth, token[1]))
-            continue
-        _row, left, middle, right = token
-        mark = left.strip("[]").rstrip(".").strip()
-        heading = middle.rstrip("]").strip()
-        depth = group_depth + 1
-        if row_kind == "section":
-            first = re.split(r"\s+to\s+|,", mark)[0].strip()
-            label = f"§ {mark}"
-            if articles and right:
-                label += f" (Art. {middle.rstrip('.').strip()})"
-                heading = right.rstrip("]").strip()
-            entries.append(UnitEntry(
-                "section", depth, label, heading,
-                section=first.replace("–", "-"),
-            ))
-        else:
-            designation = mark.split(" ")[0]
-            entries.append(UnitEntry(
-                "unit", depth,
-                f"{crumb_label(row_kind)} {designation}", heading,
-                unit_kind=row_kind, designation=designation,
-                granule=_child_granule(
-                    granule, row_kind, designation,
-                    roman_blocks.get(block, False)),
-                first_section=(right.split() or [""])[-1],
-            ))
-    # A title can list its units twice over, subtitles and then every
-    # chapter (title 26): with no subheads to tell the lists apart, each is
-    # headed with what it lists.
-    kinds = {kind for start, kind in tables
-             if any(e.kind != "group" for e in entries[start:])}
-    if len(kinds) > 1 and not any(e.kind == "group" for e in entries):
-        ends = [start for start, _kind in tables[1:]] + [len(entries)]
-        for (start, kind), end in reversed(list(zip(tables, ends))):
-            for entry in entries[start:end]:
-                entry.depth += 1
-            entries.insert(start, UnitEntry(
-                "group", 0, _PLURALS.get(kind, kind.title() + "s")))
-    # A subhead is kept only where something is listed under it.
-    kept: list[UnitEntry] = []
-    for i, entry in enumerate(entries):
-        if entry.kind == "group" and not any(
-                e.kind != "group" and e.depth > entry.depth
-                for e in entries[i + 1:
-                                 next((j for j in range(i + 1, len(entries))
-                                       if entries[j].kind == "group"
-                                       and entries[j].depth <= entry.depth),
-                                      len(entries))]):
-            continue
-        kept.append(entry)
-    return kept
-
-
-def _same_designation(text: str, label: str) -> bool:
-    """Whether a subhead ("SUBCHAPTER I—GENERALLY") heads the unit a
-    navigation bar calls *label* ("SUBCHAPTER I") — and not "SUBCHAPTER
-    I–A"."""
-    norm = lambda s: re.sub(r"\s+", " ", s or "").strip().casefold()
-    text, label = norm(text), norm(label)
-    return bool(label) and (text == label or text.startswith(label + "—")
-                            or text.startswith(label + " —"))
-
-
-def _group_in(entries: list[UnitEntry], label: str) -> list[UnitEntry]:
-    """The entries under the subhead naming *label*, one level out."""
-    for i, entry in enumerate(entries):
-        if entry.kind == "group" and _same_designation(entry.label, label):
-            out: list[UnitEntry] = []
-            for later in entries[i + 1:]:
-                if later.kind == "group" and later.depth <= entry.depth:
-                    break
-                out.append(UnitEntry(**{
-                    **later.__dict__, "depth": later.depth - entry.depth - 1,
-                }))
-            return out
-    return []
-
-
-_BODY_HEAD_RE = re.compile(
-    r"<!--\s*field-start:structuralhead\s*-->\s*"
-    r'<h[1-3] class="([a-z-]+)"[^>]*>(.*?)</h[1-3]>'
-    r'|<h3 class="section-head"[^>]*>(.*?)</h3>',
-    re.DOTALL,
-)
-_SECTION_HEAD_TEXT_RE = re.compile(
-    r"^\[?\s*§+\s*([0-9][\w\-–]*?)\.?\s+(.*?)\]?$")
-
-
-def _entries_from_body(url: str,
-                       cap: int = 6_000_000) -> tuple[list[UnitEntry], bool]:
-    """A unit's contents read off its own text — the headings of the units
-    and sections in it — for a unit no table lists.  Reads at most *cap*
-    bytes; the flag says whether it stopped short."""
-    import codecs
-
+def _title_heading(title: str) -> str | None:
+    """"TITLE 42—THE PUBLIC HEALTH AND WELFARE": only the site's list of the
+    titles names them.  None when it can't be read."""
     import requests
 
-    resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30,
-                        stream=True)
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    text, read, partial = "", 0, False
     try:
+        resp = requests.get(f"{OLRC_BASE}browse.html",
+                            headers=_BROWSER_HEADERS, timeout=30)
         resp.raise_for_status()
-        for chunk in resp.iter_content(65536):
-            read += len(chunk)
-            text += decoder.decode(chunk)
-            if read > cap:
-                partial = True
-                break
-    finally:
-        resp.close()
-    head = _UNIT_HEAD_RE.search(text)
-    entries: list[UnitEntry] = []
-    kinds: list[str] = []
-    depth = -1
-    for m in _BODY_HEAD_RE.finditer(text, head.end() if head else 0):
-        if m.group(1):
-            kind = m.group(1)
-            if kind not in kinds:
-                kinds.append(kind)
-            depth = kinds.index(kind)
-            entries.append(UnitEntry("group", depth, _clean(m.group(2))))
-            continue
-        sec = _SECTION_HEAD_TEXT_RE.match(_clean(m.group(3)))
-        if sec:
-            number = sec.group(1).replace("–", "-")
-            entries.append(UnitEntry(
-                "section", depth + 1, f"§ {number}", sec.group(2),
-                section=number))
-    return entries, partial
+    except Exception as exc:
+        print(f"[usc-unit] title {title}: list of titles failed: {exc}")
+        return None
+    m = re.search(rf'data-lazy-title="{title}"><summary>.*? — (.*?)</summary>',
+                  resp.content.decode("utf-8", "replace"))
+    return f"TITLE {title}—{_clean(m.group(1))}" if m else None
+
+
+def _digits_id(granule: str) -> str:
+    """A unit's id with its roman numerals as digits."""
+    return re.sub(r"(?<=[a-z])[IVXLC]+\b",
+                  lambda m: str(_roman_to_int(m.group(0))), granule)
+
+
+def _unit_by_viewer_id(contents: _TitleContents,
+                       granule: str) -> UscUnit | None:
+    """The unit a bookmark from the OLRC's viewer names in its breadcrumbs.
+    The viewer's ids wrote roman numerals as digits and left out what holds
+    a chapter ("title18-chapter44", in part I), so one reads as the end of
+    an id today."""
+    tail = _digits_id(granule).partition("-")[2]
+    if not tail:
+        return None
+    return next((unit for unit in contents.units.values()
+                 if _digits_id(unit.granule).endswith(f"-{tail}")), None)
 
 
 _unit_cache: dict[str, UscUnit] = {}
 
 
 def load_unit(granule: str) -> UscUnit:
-    """A unit of the Code with its table of contents, cached.  A unit with
-    no table of its own is given the part of its parent's that lists it.
-    Raises UnitNotFound when the OLRC has no page by that id.  A unit above
-    a section read from Cornell has a Cornell id ("lii:28/part-VI") and is
-    read from Cornell."""
+    """A unit of the Code with its table of contents.  Raises UnitNotFound
+    when the OLRC has no unit by that id.  A unit above a section read from
+    Cornell has a Cornell id ("lii:28/part-VI") and is read from Cornell."""
     granule = str(granule).strip()
-    with _cache_lock:
-        if granule in _unit_cache:
-            return _unit_cache[granule]
     if granule.startswith(_LII_PREFIX):
+        with _cache_lock:
+            if granule in _unit_cache:
+                return _unit_cache[granule]
         unit = _lii_unit(granule)
         with _cache_lock:
             _unit_cache[granule] = unit
         return unit
-    url = unit_url(granule)
+    title = granule.split("-", 1)[0].replace("title", "", 1)
     try:
-        page = _fetch_unit_top(url)
+        contents = _title_contents(title)
+    except UnitNotFound:
+        raise
     except Exception as exc:
         raise RuntimeError(f"uscode.house.gov: {exc}") from exc
-    head = _UNIT_HEAD_RE.search(page)
-    if head is None:
-        if not _olrc_page(page):
-            raise RuntimeError("uscode.house.gov is not answering (down for "
-                               "maintenance?)")
+    unit = contents.units.get(granule) or _unit_by_viewer_id(contents, granule)
+    if unit is None:
         raise UnitNotFound(f"uscode.house.gov has no page {granule}")
-    crumbs, own = page_crumbs(page)
-    heading = _clean(head.group(2))
-    if not own:
-        own = heading.split("—", 1)[0].strip()
-    entries = _unit_entries(page, granule)
-    partial = False
-    if not any(e.kind != "group" for e in entries) and crumbs:
-        try:
-            parent = load_unit(crumbs[-1][0])
-            entries = _group_in(parent.entries, own) or entries
-        except Exception as exc:
-            print(f"[usc-unit] {granule}: parent's contents failed: {exc}")
-    if not any(e.kind != "group" for e in entries):
-        # Listed nowhere (52 U.S.C. subtitle III): read its own headings.
-        try:
-            entries, partial = _entries_from_body(url)
-        except Exception as exc:
-            print(f"[usc-unit] {granule}: reading its text failed: {exc}")
-    unit = UscUnit(
-        title=granule.split("-", 1)[0].replace("title", "", 1),
-        granule=granule, url=url, label=crumb_label(own),
-        heading=heading, crumbs=crumbs, entries=entries, partial=partial,
-    )
-    print(f"[usc-unit] {granule}: {len(entries)} entries")
-    with _cache_lock:
-        _unit_cache[granule] = unit
+    if unit.granule == f"title{title}" and "—" not in unit.heading:
+        unit.heading = _title_heading(title) or unit.heading
     return unit
 
 
 def open_unit_entry(entry: UnitEntry, parent: UscUnit) -> UscUnit:
-    """The unit a table entry names.  Its page id is the OLRC's usual one
-    for its designation; failing that, the designation as printed
-    ("subpartII"); failing that, the one the navigation bar of its first
-    section gives it.  Cornell's tables link each unit by its own path."""
-    if entry.granule.startswith(_LII_PREFIX):
-        return load_unit(entry.granule)
-    tried: list[str] = []
-    for granule in (entry.granule,
-                    f"{entry.granule.rsplit(entry.unit_kind, 1)[0]}"
-                    f"{entry.unit_kind}{entry.designation}"):
-        if not granule or granule in tried:
-            continue
-        tried.append(granule)
-        try:
-            return load_unit(granule)
-        except UnitNotFound:
-            continue
-    if entry.first_section:
-        section = load_section(parent.title, entry.first_section)
-        for granule, label in section.crumbs:
-            if (granule not in tried and crumb_label(label).casefold()
-                    == entry.label.casefold()):
-                return load_unit(granule)
-    raise UnitNotFound(f"uscode.house.gov has no page for {entry.label}")
+    """The unit a table entry names."""
+    return load_unit(entry.granule)
 
 
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
-# The page's own indentation.  The OLRC stylesheet (usc.css) gives every
-# paragraph class its left margin in ems — statutory-body-2em sits 2em in,
-# statutory-body-block-2em is a block at 2em — and each subdivision heading
-# the margin of its level: subsection-head 0, paragraph-head 1em, on to
-# subsubclause-head at 5em.  That margin is the depth shown here.  A hanging
+# The page's own indentation.  Every paragraph class gives its left margin in
+# ems — statutory-body-2em sits 2em in — and a subdivision's heading is set at
+# the margin of its level.  That margin is the depth shown here.  A hanging
 # paragraph, flushX_hangY, starts its first line at X em, which is where the
-# reader's own hanging indent puts it at depth X.  The stylesheet omits a few
-# rules the pages rely on (block-2em, 6em; the page puts the first in an
-# inline style), so the number in the class name is read rather than the CSS.
+# reader's own hanging indent puts it at depth X.
 #
 # The page follows the printed Code's layout, and so does the reader: in an
 # older section a subsection's paragraphs sit flush with it — "(a)", "(1)",
 # "(2)", "(b)" at one margin, only "(A)" stepping in — and a paragraph that
 # opens "(d)(1)" is followed by a flush "(2)".  statute_paths() reads the
 # subdivision each paragraph belongs to from the same indentation.
-_HEAD_DEPTH = {
-    "subsection-head": 0, "paragraph-head": 1, "subparagraph-head": 2,
-    "clause-head": 3, "subclause-head": 4, "subsubclause-head": 5,
-}
 _BODY_CLASS_PREFIXES = ("statutory-body", "note-body", "tableftnt", "usc28a")
 _MAX_DEPTH = 6
 
@@ -1078,8 +786,6 @@ def _is_body_class(cls: str) -> bool:
 
 def _class_depth(cls: str) -> int:
     """How far in the page sets a paragraph of this class — see above."""
-    if cls in _HEAD_DEPTH:
-        return _HEAD_DEPTH[cls]
     m = re.search(r"flush(\d+)_hang\d+", cls)
     if m is None:
         m = re.search(r"-(\d+)em\b", cls)
@@ -1089,64 +795,188 @@ def _class_depth(cls: str) -> int:
         return 4
     return 0
 
-# Fields whose content is shown as statute vs. notes; anything else inside
-# an unrecognized field is treated as a note so quoted statutory text in
-# amendment notes never masquerades as current law.
+# The paragraphs and tables, and the <div>s that say what they are.  A note
+# quotes the provisions it amends in the very classes of the statute's own
+# text, so it is where a paragraph stands, not its class, that keeps quoted
+# statutory text in an amendment note from masquerading as current law.
 _TOKEN_RE = re.compile(
-    r"<!--\s*field-(start|end):([\w-]+)\s*-->"
-    r"|<(h\d|p)\b[^>]*?class=\"([^\"]+)\"[^>]*>(.*?)</\3>",
+    r'<div\b[^>]*?class="(statutory-body-container|note-block)\b[^"]*"'
+    r"|<(h\d|p)\b[^>]*?class=\"([^\"]+)\"[^>]*>(.*?)</\2>"
+    r"|(<table\b.*?</table>)",
     re.IGNORECASE | re.DOTALL,
 )
+# A subdivision's heading, a line of its own: "(a) <em>Employer practices</em>".
+_LEVEL_HEAD_RE = re.compile(
+    r'^[^<]*<em class="level-heading">.*</em>\s*$', re.DOTALL)
+# A footnote's marker, kept off the text it follows: "$150,000." and footnote
+# 1 are not "$150,000.1".
+_FOOTNOTE_MARK_RE = re.compile(
+    r"<sup\b[^>]*>\s*<a\b[^>]*>(.*?)</a>\s*</sup>", re.DOTALL)
+_FOOTNOTE_NUMBER_RE = re.compile(r"^\s*<sup\b[^>]*>(.*?)</sup>", re.DOTALL)
 
 
 def _clean(fragment: str) -> str:
     text = re.sub(r"<[^>]+>", "", fragment)
-    text = _html.unescape(text)
+    # the OLRC sets a word joiner before every dash
+    text = _html.unescape(text).replace("⁠", "")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _tidy(text: str) -> str:
+    """A source credit's text, less the space the OLRC leaves after each of
+    its links: "§ 1 , Dec. 29, 1979 , 93 Stat. 1284 ."."""
+    return re.sub(r"\s+(?=[,;]|\.\)?$)", "", text)
+
+
+# A table reaches the reader a row at a time, each row a paragraph of a kind
+# of its own: "table", "table-head" for a caption or a row of headings, and
+# "note-table" and "note-table-head" in a note, so that they go with the notes.
+# A row's cells are separated by tabs, which the viewer lines up, and it holds
+# a cell for every column, a spanned one empty, so that each cell stands under
+# its heading.  ecfr.py reads its tables here too.
+TABLE_KINDS = frozenset(("table", "table-head",
+                         "note-table", "note-table-head"))
+
+_TABLE_CAPTION_RE = re.compile(
+    r"<caption\b[^>]*>(.*?)</caption>", re.IGNORECASE | re.DOTALL)
+_TABLE_ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_TABLE_CELL_RE = re.compile(
+    r"<(t[dh])\b([^>]*)>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+_CELL_BREAK_RE = re.compile(r"<(?:br|/p|/div)\b[^>]*>", re.IGNORECASE)
+# "mg/m<sup>3</sup>", "CO<sub>2</sub>": raised and lowered in the text too,
+# since plain digits would read as part of the figure before them.
+_RAISED_RE = re.compile(r"<(sup|sub)\b[^>]*>\s*(\d+)\s*</\1>", re.IGNORECASE)
+_RAISED_DIGITS = {"sup": str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹"),
+                  "sub": str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")}
+
+
+def _cell_text(fragment: str) -> str:
+    fragment = _FOOTNOTE_MARK_RE.sub(r"[\1]", fragment)
+    fragment = _RAISED_RE.sub(
+        lambda m: m.group(2).translate(_RAISED_DIGITS[m.group(1).lower()]),
+        fragment)
+    return _clean(_CELL_BREAK_RE.sub(" ", fragment))
+
+
+# A table the page has run into the paragraph before it, as the rate tables of
+# 26 U.S.C. § 1(a) and (e) are: no <table>, and nothing left between a row's
+# cells — "Not over $36,90015% of taxable income."  What shows it is its line
+# breaks: a long run of them, a line of headings (in <b>s, or not: 7 U.S.C.
+# § 1441), a shorter run, then a row a line.  A dollar figure with an amount
+# straight after it can only be where two cells met.  A row with no such place
+# ("Not more than 10290") stays as the page prints it, for _mend_tables.
+_FLAT_TABLE_RE = re.compile(r"^(.*?)\n{5,}(.+?)\n{2,}(.+)$", re.DOTALL)
+_FLAT_HEAD_RE = re.compile(r"<b>(.*?)</b>", re.DOTALL)
+_FLAT_CELLS_RE = re.compile(
+    r"^(.*\$\d{1,3}(?:,\d{3})*)(?=\$|\d+(?:\.\d+)?%)(.*)$")
+
+
+def _flat_table(inner: str) -> tuple[str, list[tuple[bool, str]]]:
+    """A paragraph's own text, and the rows of any table run into it (see
+    table_rows)."""
+    m = _FLAT_TABLE_RE.match(inner)
+    if m is None:
+        return inner, []
+    heads = _FLAT_HEAD_RE.findall(m.group(2)) or [m.group(2)]
+    rows = [(True, "\t".join(_clean(head) for head in heads))]
+    for line in m.group(3).splitlines():
+        line = _clean(line)
+        if line:
+            cells = _FLAT_CELLS_RE.match(line)
+            rows.append((False, "\t".join(cells.groups()) if cells else line))
+    return m.group(1), rows
+
+
+def _span(attrs: str, name: str) -> int:
+    m = re.search(rf'\b{name}="(\d+)"', attrs, re.IGNORECASE)
+    return max(int(m.group(1)), 1) if m else 1
+
+
+def table_rows(table: str) -> list[tuple[bool, str]]:
+    """A table's rows as (heading?, its cells joined by tabs): its caption if
+    it has one, then each row with text in it.  A heading row is all <th>."""
+    rows: list[tuple[bool, str]] = []
+    caption = _TABLE_CAPTION_RE.search(table)
+    if caption and _cell_text(caption.group(1)):
+        rows.append((True, _cell_text(caption.group(1))))
+    covered: dict[int, int] = {}    # column → rows a rowspan still fills
+    for row in _TABLE_ROW_RE.finditer(table):
+        cells: list[str] = []
+
+        def fill_covered() -> None:
+            while covered.get(len(cells), 0) > 0:
+                covered[len(cells)] -= 1
+                cells.append("")
+
+        found = list(_TABLE_CELL_RE.finditer(row.group(1)))
+        for cell in found:
+            fill_covered()
+            colspan = _span(cell.group(2), "colspan")
+            rowspan = _span(cell.group(2), "rowspan")
+            if rowspan > 1:
+                for column in range(len(cells), len(cells) + colspan):
+                    covered[column] = rowspan - 1
+            cells.append(_cell_text(cell.group(3)))
+            cells.extend("" for _spanned in range(colspan - 1))
+        fill_covered()
+        line = "\t".join(cells).rstrip("\t")
+        if line:
+            rows.append((all(c.group(1).lower() == "th" for c in found), line))
+    return rows
 
 
 def parse_section(page_html: str) -> list[tuple[str, int, str]]:
     """Parse an OLRC section page into a (kind, indent, text) stream, each
     paragraph at the indentation the page gives it (see _class_depth)."""
     paras: list[tuple[str, int, str]] = []
-    fields: list[str] = []  # stack of open field names
+    is_note = False         # past the statute's own text
+    footnotes = False
+
+    def add_table(rows: list[tuple[bool, str]]) -> None:
+        # Set where the text before it is: at its subdivision's margin.
+        depth = paras[-1][1] if paras else 0
+        prefix = "note-" if is_note else ""
+        paras.extend((f"{prefix}table-head" if heading else f"{prefix}table",
+                      depth, row) for heading, row in rows)
+
     for m in _TOKEN_RE.finditer(page_html):
-        if m.group(1):  # field comment
-            name = m.group(2).lower()
-            if m.group(1) == "start":
-                fields.append(name)
-            else:
-                while fields and fields.pop() != name:
-                    pass
+        if m.group(1):
+            is_note = m.group(1).lower() == "note-block"
             continue
-        cls = m.group(4).split()[0]
-        text = _clean(m.group(5))
+        if m.group(5):
+            add_table(table_rows(m.group(5)))
+            continue
+        cls = m.group(3).split()[0]
+        inner = _FOOTNOTE_MARK_RE.sub(r"[\1]", m.group(4))
+        if cls == "footnote":
+            inner = _FOOTNOTE_NUMBER_RE.sub(r"[\1] ", inner)
+        rows: list[tuple[bool, str]] = []
+        if _is_body_class(cls):
+            inner, rows = _flat_table(inner)
+        text = _clean(inner)
         if not text:
+            add_table(rows)
             continue
-        ctx = fields[-1] if fields else None
-        if ctx is None:
-            # No field markers (format drift): classify by class name
-            is_note = cls.startswith("note") or cls == "analysis-subhead"
-        else:
-            is_note = ctx not in ("statute", "head", "sourcecredit",
-                                  "repealedhead", "omittedhead")
-        if cls == "section-head" or (
-            cls.endswith("-head")
-            and ctx in ("head", "repealedhead", "omittedhead")
-        ):
-            paras.append(("sechead", 0, text))
+        if cls == "section-head":
+            paras.append(("sechead", 0, _tidy(text)))
         elif cls == "source-credit":
-            paras.append(("credit", 0, text))
-        elif not is_note and cls in _HEAD_DEPTH:
-            paras.append(("head", _class_depth(cls), text))
+            is_note = True
+            paras.append(("credit", 0, _tidy(text)))
+        elif cls == "footnote":
+            if not footnotes:
+                footnotes = True
+                paras.append(("note-head", 0, "Footnotes"))
+            paras.append(("note-body", 0, text))
         elif not is_note and _is_body_class(cls):
-            paras.append(("body", _class_depth(cls), text))
+            kind = "head" if _LEVEL_HEAD_RE.match(inner) else "body"
+            paras.append((kind, _class_depth(cls), text))
         elif is_note and (cls in _NOTE_HEAD_CLASSES
                           or cls.endswith("-head")):
             paras.append(("note-head", 0, text))
         elif is_note and _is_body_class(cls):
             # note text, or statute-classed text quoted inside a note
             paras.append(("note-body", _class_depth(cls), text))
+        add_table(rows)
     return paras
 
 
@@ -1155,8 +985,15 @@ def parse_section(page_html: str) -> list[tuple[str, int, str]]:
 # ---------------------------------------------------------------------------
 
 # A paragraph's leading enumerators: "(a)", "(4A)", "(ii)(I)", "(aa)".
+# A repealed item is bracketed: "[(4) Repealed.".
 _PATH_LEAD_RE = re.compile(
-    r"^((?:\((?:\d{1,3}[A-Za-z]{0,2}|[a-zA-Z]{1,5})\)\s*)+)"
+    r"^\[?((?:\((?:\d{1,3}[A-Za-z]{0,2}|[a-zA-Z]{1,5})\)\s*)+)"
+)
+# And an older section's heading runs in, with the first item below it on the
+# same line: "(a) Authority To Convey.—(1) The Secretary may" opens as "(a)(1)"
+# does, and a flush "(2)" follows it.
+_PATH_RUN_IN_RE = re.compile(
+    r"^\([^)]+\)\s[^()]*—((?:\((?:\d{1,3}[A-Za-z]{0,2}|[a-zA-Z]{1,5})\)\s*)+)"
 )
 # The U.S. Code's levels, subsection to subitem.
 _LEVEL_KINDS = ("a", "1", "A", "i", "I", "aa", "AA")
@@ -1245,11 +1082,19 @@ def statute_paths(
     set_aside: list[tuple[int, str]] = []  # levels flush text interrupted
     out: list[tuple[str, ...]] = []
     for kind, depth, text in paras:
+        if kind in ("table", "table-head"):
+            # A table belongs to the subdivision it stands in, and a cell
+            # opening "(1)" is no enumerator of the statute's.
+            out.append(tuple(enum for _d, enum in stack))
+            continue
         if kind not in ("body", "head"):
             out.append(())
             continue
         m = _PATH_LEAD_RE.match(text)
         enums = re.findall(r"\(([^)]+)\)", m.group(1)) if m else []
+        run_in = _PATH_RUN_IN_RE.match(text)
+        if run_in:
+            enums += re.findall(r"\(([^)]+)\)", run_in.group(1))
         if not enums:
             while stack and stack[-1][0] > depth:
                 set_aside.insert(0, stack.pop())
@@ -1791,10 +1636,8 @@ if __name__ == "__main__":
     # --- parser, against authentic OLRC markup ---
     sample = """
 <html><body><div class="uscnav">junk <p class="navhead">nav</p></div>
-<!-- field-start:head -->
 <h3 class="section-head">&sect;110. Same; income tax</h3>
-<!-- field-end:head -->
-<!-- field-start:statute -->
+<div class="statutory-body-container">
 <p class="statutory-body">(a) No State, or political subdivision thereof,
  may, for purposes of any income tax levied by such State&mdash;</p>
 <p class="statutory-body-1em">(1) treat such Member as a <em>resident</em>
@@ -1804,18 +1647,17 @@ if __name__ == "__main__":
  such State,</p>
 <p class="statutory-body-2em">(A) a deeper clause;</p>
 <p class="statutory-body">(b) For purposes of subsection (a)&mdash;</p>
-<!-- field-end:statute -->
-<!-- field-start:sourcecredit -->
-<p class="source-credit">(Added Pub. L. 99&ndash;190, Dec. 19, 1985,
- 99 Stat. 1185.)</p>
-<!-- field-end:sourcecredit -->
-<!-- field-start:notes -->
-<h4 class="note-head">Editorial Notes</h4>
+</div>
+<p class="source-credit">(Added Pub. L. 99&ndash;190, Dec. 19, 1985 ,
+ <a href="/statviewer.html?volume=99&page=1185">99 Stat. 1185</a> .)</p>
+<div class="note-block" id="editorialNotes-note">
+<h4 class="note-head legacy-note-style">Editorial Notes</h4></div>
+<div class="note-block" id="amendments-note">
 <h4 class="note-sub-head">Amendments</h4>
 <p class="note-body">1985&mdash;Subsec. (a). Pub. L. 99&ndash;190 added
  text reading as follows:</p>
 <p class="statutory-body">(x) quoted statute text inside a note</p>
-<!-- field-end:notes -->
+</div>
 </body></html>"""
     paras = parse_section(sample)
     kinds = [(k, i) for k, i, _t in paras]
@@ -1823,7 +1665,8 @@ if __name__ == "__main__":
           f"section head: {paras[0]!r}")
     check(("body", 0) in kinds and ("body", 1) in kinds
           and ("body", 2) in kinds, f"body indents: {kinds!r}")
-    check(any(k == "credit" for k, _i in kinds), "source credit captured")
+    check(("credit", 0, "(Added Pub. L. 99–190, Dec. 19, 1985, "
+           "99 Stat. 1185.)") in paras, "source credit captured, tidied")
     check(kinds.count(("note-head", 0)) == 2, "note heads captured")
     check(paras[-1][0] == "note-body",
           f"quoted statute in note stays a note: {paras[-1]!r}")
@@ -1836,7 +1679,7 @@ if __name__ == "__main__":
     # both flush left, as the printed Code does, and the reader keeps it;
     # the subdivision each paragraph belongs to is still read correctly.
     quirk = """
-<!-- field-start:statute -->
+<div class="statutory-body-container">
 <p class="statutory-body">(a)(1) Combined opening paragraph.</p>
 <p class="statutory-body">(2) Print-flush sibling of (1).</p>
 <p class="statutory-body-1em">(A) A subparagraph.</p>
@@ -1848,7 +1691,7 @@ if __name__ == "__main__":
 <p class="statutory-body">(c) Then (h)-style:</p>
 <p class="statutory-body">(h) Skip ahead.</p>
 <p class="statutory-body">(i) Letter i, not roman.</p>
-<!-- field-end:statute -->"""
+</div>"""
     quirk_paras = parse_section(quirk)
     got_lvls = [(t.split()[0], i) for k, i, t in quirk_paras]
     want_lvls = [("(a)(1)", 0), ("(2)", 0), ("(A)", 1), ("(i)", 2),
@@ -1865,19 +1708,21 @@ if __name__ == "__main__":
     # Headings sit at their level's margin; flush text after a list and
     # items (aa) keep the page's indent (26 U.S.C. § 36B(b)(3)).
     headed = """
-<!-- field-start:statute -->
-<h4 class="subsection-head">(b) Premium assistance credit amount</h4>
-<h4 class="paragraph-head">(3) Other terms</h4>
-<h4 class="subparagraph-head">(B) Applicable second lowest cost silver plan</h4>
+<div class="statutory-body-container">
+<p class="statutory-body" id="b">(b)&nbsp;<em class="level-heading"> Premium assistance credit amount</em></p>
+<p class="statutory-body-1em" id="b-3">(3)&nbsp;<em class="level-heading"> Other terms</em></p>
+<p class="statutory-body-2em" id="b-3-B">(B)&nbsp;<em class="level-heading"> Applicable second lowest cost silver plan</em></p>
 <p class="statutory-body-2em">The applicable plan is the plan which-</p>
 <p class="statutory-body-3em">(ii) provides-</p>
 <p class="statutory-body-4em">(I) self-only coverage-</p>
 <p class="statutory-body-5em">(aa) whose tax is determined under section 1(c), or</p>
 <p class="statutory-body-4em">(II) family coverage.</p>
 <p class="statutory-body-block-2em">If a taxpayer files a joint return, the plan is determined as follows.</p>
-<h4 class="subparagraph-head">(C) Adjusted monthly premium</h4>
-<!-- field-end:statute -->"""
+<p class="statutory-body-2em" id="b-3-C">(C)&nbsp;<em class="level-heading"> Adjusted monthly premium</em></p>
+</div>"""
     headed_paras = parse_section(headed)
+    check([k for k, _i, _t in headed_paras].count("head") == 4,
+          f"headings are heads: {headed_paras!r}")
     check([i for _k, i, _t in headed_paras] == [0, 1, 2, 2, 3, 4, 5, 4, 2, 2],
           f"heading and block depths: {headed_paras!r}")
     check(statute_paths(headed_paras) == [
@@ -1886,71 +1731,5 @@ if __name__ == "__main__":
         ("b", "3", "B", "ii", "I", "aa"), ("b", "3", "B", "ii", "II"),
         ("b", "3", "B"), ("b", "3", "C")],
         f"headed paths: {statute_paths(headed_paras)!r}")
-
-    # Breadcrumb container extraction (real OLRC breadcrumb form: the
-    # links are URL-encoded and carry jsessionid/saved parameters)
-    crumbs = """
-<a href="/view.xhtml;jsessionid=9600DA?req=granuleid%3AUSC-prelim-title26&amp;saved=%7CZ3%3D%7C&amp;edition=prelim" class="link_class">TITLE 26</a>
-<a href="/view.xhtml;jsessionid=9600DA?req=granuleid%3AUSC-prelim-title26-subtitleD&amp;edition=prelim" class="link_class">Subtitle D</a>
-<a href="/view.xhtml;jsessionid=9600DA?req=granuleid%3AUSC-prelim-title26-chapter48&amp;edition=prelim" class="link_class">CHAPTER 48</a>
-"""
-    check(_find_container(crumbs) == "title26-chapter48",
-          f"container: {_find_container(crumbs)!r}")
-    check(_find_container("<p>nothing</p>") is None, "no container -> None")
-
-    # Table-of-sections parsing (verbatim OLRC analysis markup)
-    analysis = """
-<!-- field-start:analysis -->
-<div class="analysis">
-<div><div class="analysis-head-left">Sec.</div></div>
-<div><div class="two-column-analysis-style-content-left">5000A.</div><div class="two-column-analysis-style-content-right">Requirement to maintain minimum essential coverage.</div></div>
-<div><div class="two-column-analysis-style-content-left">5000B.</div><div class="two-column-analysis-style-content-right">Imposition of tax.</div></div>
-<div><div class="two-column-analysis-style-content-left">5001 to 5011. Repealed.</div><div class="two-column-analysis-style-content-right"></div></div>
-<div><div class="two-column-analysis-style-content-left">[5012.</div><div class="two-column-analysis-style-content-right">Omitted.]</div></div>
-<div><div class="two-column-analysis-style-content-left">2000e&#8211;2.</div><div class="two-column-analysis-style-content-right">Hyphenated.</div></div>
-</div>
-<!-- field-end:analysis -->
-<h3 class="section-head">§5000A. Not part of the analysis</h3>"""
-    order = _sections_from_analysis(analysis)
-    check(order == ["5000A", "5000B", "5001", "5012", "2000e-2"],
-          f"analysis order: {order!r}")
-    # Streamed buffer cut off mid closing comment still parses
-    truncated = analysis.split("<!-- field-end:analysis")[0] \
-        + "<!-- field-end:analysis"
-    check(_sections_from_analysis(truncated)
-          == ["5000A", "5000B", "5001", "5012", "2000e-2"],
-          "truncated buffer parses")
-    # Fallback: no analysis cells -> order from section heads
-    heads = """
-<h3 class="section-head">§1981. Equal rights under the law</h3>
-<p class="statutory-body">text</p>
-<h3 class="section-head">§1981a. Damages in cases of intentional
- discrimination</h3>
-<h3 class="section-head">[§1982. Repealed]</h3>
-<h3 class="section-head">§1983. Civil action for deprivation of rights</h3>
-"""
-    fb = _sections_from_analysis(heads)
-    check(fb == ["1981", "1981a", "1982", "1983"],
-          f"section-head fallback: {fb!r}")
-    doc = UscSection(title="26", section="5000A", url="u",
-                     container="title26-chapter48")
-    _order_cache["title26-chapter48"] = order
-    check(doc.neighbors() == (None, ("26", "5000B")),
-          f"neighbors: {doc.neighbors()!r}")
-    doc2 = UscSection(title="26", section="5000B", url="u",
-                      container="title26-chapter48")
-    check(doc2.neighbors() == (("26", "5000A"), ("26", "5001")),
-          f"neighbors mid: {doc2.neighbors()!r}")
-    _order_cache.clear()
-
-    # Fallback: same page without field comments still classifies by class
-    stripped = re.sub(r"<!--.*?-->", "", sample, flags=re.DOTALL)
-    paras2 = parse_section(stripped)
-    kinds2 = [(k, i) for k, i, _t in paras2]
-    check(("body", 0) in kinds2 and ("body", 2) in kinds2,
-          f"fallback bodies: {kinds2!r}")
-    check(("note-head", 0) in kinds2 and ("note-body", 0) in kinds2,
-          "fallback notes")
-    check(paras2[0][0] == "sechead", "fallback section head")
 
     raise SystemExit(1 if failed else 0)

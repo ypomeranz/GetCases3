@@ -31,3 +31,7 @@ Pillow
 # E.R. citations simply open in the user's browser instead.
 curl_cffi
 browser_cookie3
+
+# Firefox's saved Scholar results URL may carry the CAPTCHA exemption even
+# when Google did not write a cookie. Firefox session files use Mozilla LZ4.
+lz4

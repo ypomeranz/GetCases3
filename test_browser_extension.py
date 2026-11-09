@@ -239,6 +239,124 @@ class BridgeOpenTests(unittest.TestCase):
             newer.close()
 
 
+class BridgeErrandTests(unittest.TestCase):
+    """Pages the app asks the extension to open out of the reader's sight:
+    the extension waits for one (GET /errand), and says how it went (POST
+    /errand)."""
+
+    def setUp(self):
+        p = patch.object(browser_bridge, "ERRAND_POLL", 0.3)
+        p.start()
+        self.addCleanup(p.stop)
+        self.b = _Bridge()
+        self.addCleanup(self.b.close)
+        self.bridge = self.b.bridge
+
+    def ask(self, browser="Edge"):
+        status, body, _ = self.b.request(f"/errand?browser={browser}")
+        self.assertEqual(status, 200)
+        return body["errand"]
+
+    def test_none_comes_back_empty_after_a_while(self):
+        started = time.monotonic()
+        self.assertIsNone(self.ask())
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+    def test_an_errand_waiting_is_taken_at_once(self):
+        errand = self.bridge.errand("https://scholar.google.com/x", "Edge")
+        self.assertEqual(self.ask(), {"id": errand.id,
+                                      "url": "https://scholar.google.com/x"})
+        self.assertEqual((errand.state, errand.taken_by), ("taken", "Edge"))
+        self.assertIsNone(self.ask())               # taken once only
+
+    def test_one_asked_for_while_the_extension_waits(self):
+        got = []
+        asking = threading.Thread(target=lambda: got.append(self.ask()))
+        with patch.object(browser_bridge, "ERRAND_POLL", 5.0):
+            asking.start()
+            time.sleep(0.2)
+            self.assertEqual(self.bridge.listening(), ["Edge"])
+            errand = self.bridge.errand("https://example.com/", "Edge")
+            asking.join(5)
+        self.assertEqual(got, [{"id": errand.id, "url": "https://example.com/"}])
+
+    def test_only_the_browser_it_is_for_takes_it(self):
+        errand = self.bridge.errand("https://example.com/", "Chrome")
+        self.assertIsNone(self.ask("Edge"))
+        self.assertEqual(self.ask("Chrome")["id"], errand.id)
+        anyone = self.bridge.errand("https://example.com/")
+        self.assertEqual(self.ask("Edge")["id"], anyone.id)
+
+    def test_what_the_extension_reports(self):
+        events = []
+        errand = self.bridge.errand("https://example.com/", "Edge",
+                                    on_event=events.append)
+        self.ask()
+        with patch.object(browser_bridge, "allow_foreground") as allow:
+            for event in ("opened", "show", "done"):
+                status, body, _ = self.b.request(
+                    "/errand", {"id": errand.id, "event": event})
+                self.assertEqual((status, body), (200, {"ok": True}))
+        # Before the browser comes to the front, the app lets it.
+        allow.assert_called_once_with()
+        self.assertEqual(events, ["taken", "opened", "shown", "done"])
+        self.assertEqual(errand.state, "done")
+        # Finished, it stays so.
+        self.b.request("/errand", {"id": errand.id, "event": "closed"})
+        self.assertEqual(errand.state, "done")
+
+    def test_closed_by_the_reader(self):
+        errand = self.bridge.errand("https://example.com/", "Edge")
+        self.ask()
+        self.b.request("/errand", {"id": errand.id, "event": "closed"})
+        self.assertEqual(errand.state, "closed")
+        self.assertTrue(errand.wait_until(("done",), 0) is False)
+
+    def test_bad_reports(self):
+        self.assertEqual(self.b.request(
+            "/errand", {"id": "nope", "event": "done"})[1], {"ok": False})
+        self.assertEqual(self.b.request(
+            "/errand", {"id": "nope", "event": "explode"})[0], 400)
+
+    def test_withdrawn_only_while_no_extension_has_it(self):
+        waiting = self.bridge.errand("https://example.com/a", "Chrome")
+        self.assertTrue(self.bridge.cancel(waiting))
+        self.assertEqual(waiting.state, "cancelled")
+        self.assertIsNone(self.ask("Chrome"))
+        taken = self.bridge.errand("https://example.com/b", "Chrome")
+        self.ask("Chrome")
+        self.assertFalse(self.bridge.cancel(taken))
+        self.assertEqual(taken.state, "taken")
+
+    def test_listening_only_while_it_asks(self):
+        self.assertEqual(self.bridge.listening(), [])
+        self.ask("Chrome")
+        self.assertEqual(self.bridge.listening(), ["Chrome"])
+        with patch.object(browser_bridge, "_LISTENING_GRACE", 0.0):
+            self.assertEqual(self.bridge.listening(), [])
+
+    def test_closing_the_bridge_answers_the_waiting_extension(self):
+        got = []
+        with patch.object(browser_bridge, "ERRAND_POLL", 30.0):
+            asking = threading.Thread(target=lambda: got.append(
+                self.bridge._take_errand("Edge", 30.0)))
+            asking.start()
+            time.sleep(0.2)
+            started = time.monotonic()
+            self.bridge.close()
+            asking.join(5)
+        self.assertEqual(got, [None])
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_only_the_extension_may_wait_for_one(self):
+        status, _body, _ = self.b.request("/errand?browser=Edge",
+                                          headers={"X-GetCases": ""})
+        self.assertEqual(status, 403)
+        status, _body, _ = self.b.request(
+            "/errand?browser=Edge", headers={"Origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+
+
 class BridgeDetectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -357,8 +475,7 @@ class BrowserUrlTests(unittest.TestCase):
     def test_statutes_go_to_their_official_pages(self):
         self.assertEqual(
             self.url("usc", "42:1983:a"),
-            "https://uscode.house.gov/view.xhtml?req=granuleid:"
-            "USC-prelim-title42-section1983&num=0&edition=prelim")
+            "https://uscode.house.gov/us/usc/t42/s1983/")
         self.assertEqual(self.url("cfr", "29:1614.105:a,1"),
                          "https://www.ecfr.gov/current/title-29/"
                          "section-1614.105")
@@ -623,6 +740,7 @@ class FallbackReaderTests(unittest.TestCase):
             "https://www.law.cornell.edu/constitution/amendmentxiv",
             "https://uscode.house.gov/view.xhtml?req=granuleid:"
             "USC-prelim-title18-section922&num=0&edition=prelim",
+            "https://uscode.house.gov/us/usc/t42/s2000e-2/",
             "https://www.ecfr.gov/current/title-40/chapter-I/"
             "subchapter-I/part-261/section-261.4",
             "https://www.govinfo.gov/link/statute/88/1932",
@@ -645,6 +763,7 @@ class FallbackReaderTests(unittest.TestCase):
             ["rule", "frcp:56:"],
             ["const", "amend:14:"],
             ["usc", "18:922:"],
+            ["usc", "42:2000e-2:"],
             ["cfr", "40:261.4:"],
             ["statpdf", "https://www.govinfo.gov/link/statute/88/1932"],
             ["cite", "574 F.3d 1098"],

@@ -1253,7 +1253,7 @@ class OneColumnGutterTests(unittest.TestCase):
 
 
 PLACE_NS = _load(
-    "_FloatingPdfWindow", ["_place_beside"],
+    "_FloatingPdfWindow", ["_beside"],
     {"_work_area": lambda _w: (0, 0, 1600, 900),
      # The arithmetic itself, shared with a slow document's status window so
      # that the document opens where that window stood.
@@ -1290,11 +1290,11 @@ class _Placed:
 
     def __init__(self):
         self.spec = None
-        self._win = self
-        self._place_beside = PLACE_NS["_place_beside"].__get__(self)
+        self._beside = PLACE_NS["_beside"].__get__(self)
 
-    def geometry(self, spec):
-        self.spec = spec
+    def place(self, anchor):
+        # Asked before the window is made, so the desktop is the master's.
+        self.spec = self._beside(object(), anchor)
 
     def x(self):
         return int(re.search(r"\+(-?\d+)\+", self.spec).group(1))
@@ -1305,27 +1305,27 @@ class WindowPlacementTests(unittest.TestCase):
 
     def test_with_nothing_to_open_beside_it_takes_the_left_edge(self):
         win = _Placed()
-        win._place_beside(None)
+        win.place(None)
         self.assertEqual(win.x(), 16)
 
     def test_it_opens_to_the_left_of_a_reader_with_room_there(self):
         win = _Placed()
-        win._place_beside(_Anchor(x=800, width=760))
+        win.place(_Anchor(x=800, width=760))
         self.assertEqual(win.x(), 800 - win._W - 12)
 
     def test_and_to_its_right_when_the_left_is_too_tight(self):
         win = _Placed()
-        win._place_beside(_Anchor(x=20, width=700))
+        win.place(_Anchor(x=20, width=700))
         self.assertEqual(win.x(), 720 + 12)
 
     def test_a_reader_filling_the_desktop_sends_it_to_the_left_edge(self):
         win = _Placed()
-        win._place_beside(_Anchor(x=10, width=1580))
+        win.place(_Anchor(x=10, width=1580))
         self.assertEqual(win.x(), 16)
 
     def test_a_reader_that_has_gone_away_is_no_obstacle(self):
         win = _Placed()
-        win._place_beside(_Anchor(x=800, width=760, alive=False))
+        win.place(_Anchor(x=800, width=760, alive=False))
         self.assertEqual(win.x(), 16)
 
 

@@ -371,6 +371,15 @@ class DiscoveryTests(unittest.TestCase):
         popen.assert_called_once_with(
             [r"C:\msedge.exe", "--profile-directory=Profile 2", WEB])
 
+    def test_started_for_an_errand_it_opens_no_window(self):
+        browser = eng_rep_pdf.ExtensionBrowser("Edge", r"C:\msedge.exe",
+                                               "Profile 2", 0.0)
+        with mock.patch.object(eng_rep_pdf.subprocess, "Popen") as popen:
+            self.assertTrue(eng_rep_pdf._launch_extension_browser(browser))
+        popen.assert_called_once_with(
+            [r"C:\msedge.exe", "--profile-directory=Profile 2",
+             "--no-startup-window"])
+
     def test_the_extension_s_name_is_its_manifest_s(self):
         manifest = json.loads((EXTENSION / "manifest.json").read_text(
             encoding="utf-8"))
@@ -479,6 +488,112 @@ class BridgeClearanceTests(unittest.TestCase):
         self.assertEqual((held.value, held.user_agent), ("chrome-pass", CHROME_UA))
 
 
+class _ErrandBridge:
+    """The app's bridge, as far as an errand's launcher sees it."""
+
+    bound = True
+
+    def __init__(self):
+        self.errands = []
+
+    def errand(self, url, browser="", on_event=None):
+        errand = browser_bridge.Errand(url, browser, on_event)
+        self.errands.append(errand)
+        return errand
+
+    def cancel(self, errand):
+        return errand._move("cancelled", unless=("taken", "opened", "shown"))
+
+
+class ErrandLaunchTests(unittest.TestCase):
+    """A page for the extension goes as an errand: opened out of sight by
+    the extension, the browser started windowless for it if no extension
+    took it, and opened the old way, in sight, if none does after all."""
+
+    EDGE = eng_rep_pdf.ExtensionBrowser("Edge", r"C:\msedge.exe", "Default",
+                                        0.0)
+
+    def setUp(self):
+        for name, value in (("_ERRAND_TAKEN", 0.05), ("_ERRAND_WAKE", 0.2),
+                            ("_ERRAND_OPENED", 0.2)):
+            p = mock.patch.object(eng_rep_pdf, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(eng_rep_pdf, "_launch_extension_browser",
+                              return_value=True)
+        self.launch = p.start()
+        self.addCleanup(p.stop)
+        self.bridge = _ErrandBridge()
+        self.events = []
+
+    def see_through(self, extension=None, at_once=False):
+        """Run the errand's launcher with *extension* (called with the
+        errand, on a thread of its own -- or first, *at_once*) playing the
+        extension's part."""
+        errand = self.bridge.errand(WEB, "Edge", self.events.append)
+        if extension is not None and at_once:
+            extension(errand)
+        elif extension is not None:
+            import threading
+            threading.Thread(target=extension, args=(errand,)).start()
+        eng_rep_pdf._see_errand_through(errand, self.bridge, self.EDGE,
+                                        self.events.append)
+        return errand
+
+    def test_it_returns_at_once_and_goes_as_an_errand(self):
+        with mock.patch.object(eng_rep_pdf, "_see_errand_through") as through:
+            started = time.monotonic()
+            self.assertTrue(eng_rep_pdf.open_in_extension_browser(
+                WEB, self.EDGE, self.bridge, self.events.append))
+            self.assertLess(time.monotonic() - started, 0.5)
+            for _ in range(50):
+                if through.called:
+                    break
+                time.sleep(0.01)
+        (errand,) = self.bridge.errands
+        self.assertEqual((errand.url, errand.browser), (WEB, "Edge"))
+        through.assert_called_once_with(errand, self.bridge, self.EDGE,
+                                        self.events.append)
+        self.launch.assert_not_called()
+
+    def test_without_the_app_listening_the_old_way(self):
+        self.bridge.bound = False
+        self.assertTrue(eng_rep_pdf.open_in_extension_browser(
+            WEB, self.EDGE, self.bridge))
+        self.launch.assert_called_once_with(self.EDGE, WEB)
+        self.assertEqual(self.bridge.errands, [])
+
+    def test_an_extension_listening_takes_it_and_nothing_is_launched(self):
+        def extension(errand):
+            errand._move("taken")
+            errand._move("opened")
+        errand = self.see_through(extension, at_once=True)
+        self.assertEqual(errand.state, "opened")
+        self.launch.assert_not_called()
+
+    def test_not_taken_at_once_the_browser_starts_without_a_window(self):
+        def extension(errand):
+            time.sleep(0.1)                 # as the browser starts
+            errand._move("taken")
+            errand._move("opened")
+        errand = self.see_through(extension)
+        self.assertEqual(errand.state, "opened")
+        self.launch.assert_called_once_with(self.EDGE)
+
+    def test_taken_by_none_it_opens_the_old_way(self):
+        errand = self.see_through()
+        self.assertEqual(errand.state, "cancelled")
+        self.assertEqual(self.launch.call_args_list,
+                         [mock.call(self.EDGE), mock.call(self.EDGE, WEB)])
+        self.assertEqual(self.events, ["cancelled", "fallback"])
+
+    def test_taken_but_never_opened_it_opens_the_old_way(self):
+        errand = self.see_through(lambda errand: errand._move("taken"))
+        self.assertEqual(errand.state, "taken")
+        self.assertEqual(self.launch.call_args_list[-1],
+                         mock.call(self.EDGE, WEB))
+
+
 class ExtensionSourceTests(unittest.TestCase):
     """The extension's half, as far as Python can read it."""
 
@@ -486,6 +601,20 @@ class ExtensionSourceTests(unittest.TestCase):
         manifest = json.loads((EXTENSION / "manifest.json").read_text(
             encoding="utf-8"))
         self.assertIn("cookies", manifest["permissions"])
+        # And wake itself to look for the app's errands.
+        self.assertIn("alarms", manifest["permissions"])
+
+    def test_an_errand_s_window_opens_out_of_sight(self):
+        worker = (EXTENSION / "src" / "background.js").read_text(
+            encoding="utf-8")
+        # Minimized beside the reader's windows; with none, a popup (never
+        # restored in place of their session), minimized as soon as it is
+        # there -- the browser makes no popup minimized.
+        self.assertIn('url: "about:blank", state: "minimized"', worker)
+        self.assertIn('type: "popup", focused: false', worker)
+        self.assertIn('chrome.windows.update(win.id, { state: "minimized" })',
+                      worker)
+        self.assertIn("/errand?browser=", worker)
 
     def _listed(self, name):
         import re

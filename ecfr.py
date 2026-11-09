@@ -495,7 +495,7 @@ def open_unit_entry(entry, parent: CfrUnit) -> CfrUnit:
 # using the engine shared with the U.S. Code module.
 # ---------------------------------------------------------------------------
 
-from us_code import CFR_HIERARCHY, infer_enum_level  # noqa: E402
+from us_code import CFR_HIERARCHY, infer_enum_level, table_rows  # noqa: E402
 
 _DIV8_RE = re.compile(
     r"<DIV8\b[^>]*TYPE=\"SECTION\"[^>]*>(.*?)</DIV8>",
@@ -550,12 +550,18 @@ def _normalized_styled_text(
     return "".join(chars), ranges
 
 
-class _SectionHTMLParser(_HTMLParser):
-    """Read one rendered eCFR ``div.section`` without the surrounding chrome."""
+_TABLE_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
 
-    def __init__(self, section: str = "") -> None:
+
+class _SectionHTMLParser(_HTMLParser):
+    """Read one rendered eCFR ``div.section`` without the surrounding chrome.
+    ``tables`` holds the section's tables, each marked in the page by a
+    ``<p data-table="N">`` where it stood (see parse_section_html)."""
+
+    def __init__(self, section: str = "", tables: list[str] = ()) -> None:
         super().__init__(convert_charrefs=True)
         self.section = str(section or "")
+        self.tables = tables
         self.paras: list[tuple[str, int, str]] = []
         self.para_styles: list[list[tuple[int, int, str]]] = []
         self._section_depth = 0
@@ -583,6 +589,15 @@ class _SectionHTMLParser(_HTMLParser):
                     self._section_depth = 1
             return
         if not self._section_depth:
+            return
+        if not self._capture and "data-table" in attributes:
+            # Set where the text before it is: at its subdivision's margin.
+            indent = self.paras[-1][1] if self.paras else 0
+            table = self.tables[int(attributes["data-table"])]
+            for heading, row in table_rows(table):
+                self.paras.append(
+                    ("table-head" if heading else "table", indent, row))
+                self.para_styles.append([])
             return
         if not self._capture and tag in ("h4", "p"):
             self._capture = tag
@@ -639,9 +654,15 @@ def parse_section_html(
     list[list[tuple[int, int, str]]],
 ]:
     """Parse the eCFR website's authoritative indentation/emphasis markup."""
-    parser = _SectionHTMLParser(section)
+    tables: list[str] = []
+
+    def set_aside(m: re.Match) -> str:
+        tables.append(m.group(0))
+        return f'<p data-table="{len(tables) - 1}"></p>'
+
+    parser = _SectionHTMLParser(section, tables)
     try:
-        parser.feed(html or "")
+        parser.feed(_TABLE_RE.sub(set_aside, html or ""))
         parser.close()
     except Exception:
         return [], []

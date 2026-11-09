@@ -12,7 +12,8 @@
 // sites its scan would be at (the Library of Congress, GovInfo, the Caselaw
 // Access Project) are asked whether they have it; and, with GetCases,
 // CommonLII's CloudFlare check and Google Scholar's CAPTCHA passed here,
-// handed to the app.
+// handed to the app -- in a window out of sight unless there is something
+// for the reader to do there.
 
 importScripts("settings.js", "patterns.js", "citations.js");
 
@@ -87,6 +88,7 @@ async function appRunning(force = false) {
   }
   status = { at: Date.now(), running };
   showStatus(running);
+  if (running) listenForErrands();
   return running;
 }
 
@@ -250,7 +252,11 @@ chrome.runtime.onInstalled.addListener(() => {
   setUpMenus();
   addResearchSites();
 });
-chrome.runtime.onStartup.addListener(setUpMenus);
+chrome.runtime.onStartup.addListener(() => {
+  setUpMenus();
+  // GetCases may have started the browser, without a window, for an errand.
+  appRunning(true);
+});
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const sender = { tab };
@@ -473,25 +479,264 @@ async function arrivedPage(tabId) {
 
 /** Hand GetCases the cookies a page of a site behind a check loaded with —
  *  and the page itself, if GetCases opened it here to have a CAPTCHA
- *  answered, closing its tab once GetCases has it. */
+ *  answered, closing its tab once GetCases has it.  A page GetCases sent
+ *  as an errand (below) is done with once GetCases has what it wanted
+ *  from it; one it says is still the CAPTCHA comes to the front. */
 async function sendClearance(details, headers) {
   if (!(await appRunning())) return;
   const { url, tabId } = details;
   const cookies = await siteCookies(url);
   // CommonLII's cookies are no use to GetCases without CloudFlare's.
   if (clearanceSite(url) === "commonlii.org" && !cookies.some((c) => c.name === "cf_clearance")) return;
-  const reply = await appFetch("/clearance", {
-    body: {
-      url,
-      browser: browserName(),
-      cookies,
-      headers: headers && headers["user-agent"] ? headers : ownHeaders(),
-    },
-    timeout: 5000,
-  });
-  if (!reply || !reply.page || tabId < 0) return;
-  const html = await arrivedPage(tabId);
-  if (!html) return;
-  const taken = await appFetch("/page", { body: { url, html }, timeout: 15000 });
-  if (taken && taken.close) await chrome.tabs.remove(tabId);
+  await loadErrands();
+  const errand = errands.get(tabId);
+  handing.add(tabId);
+  try {
+    const reply = await appFetch("/clearance", {
+      body: {
+        url,
+        browser: browserName(),
+        cookies,
+        headers: headers && headers["user-agent"] ? headers : ownHeaders(),
+      },
+      timeout: 5000,
+    });
+    if (!reply || tabId < 0) return;
+    if (!reply.page) {
+      // The clearance was all GetCases wanted (CommonLII's).
+      if (errand && reply.ok && clearanceSite(url) === "commonlii.org") {
+        await finishErrand(errand);
+      }
+      return;
+    }
+    const html = await arrivedPage(tabId);
+    if (!html) return;
+    const taken = await appFetch("/page", { body: { url, html }, timeout: 15000 });
+    if (taken && taken.close) {
+      if (errand) await finishErrand(errand);
+      else await chrome.tabs.remove(tabId);
+    } else if (errand && taken && taken.check) {
+      await showErrand(errand);
+    }
+  } finally {
+    handing.delete(tabId);
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Errands: pages GetCases has opened here out of the reader's sight
+// ---------------------------------------------------------------------------
+//
+// While GetCases is running, this worker keeps a request open to it
+// (GET /errand), which GetCases answers with a page it wants opened here —
+// one behind a check for people, CommonLII's or Google's, that a browser of
+// the reader's own often passes without asking anything — or, after a while,
+// with nothing, and is asked again.  (The asking keeps the worker awake; an
+// alarm wakes it to ask again should the browser have stopped it.)
+//
+// The page opens in a minimized window, never seen: beside the reader's own
+// windows, a normal one; with none of theirs open, a popup, which the browser
+// never restores in place of their last session (a normal window opened
+// then would be).  A popup can't be made minimized, so it is minimized as
+// soon as it is there.  Once GetCases has what it wanted from the page
+// (above), its tab closes.  When there is something for the reader to do
+// there instead — Google's CAPTCHA, or a check that hasn't let the page
+// through after a few seconds — the window comes to the front.  GetCases is
+// told how it went (POST /errand): opened, shown, done, or closed by the
+// reader.
+
+/** How long a page opened for GetCases may sit loaded before the reader is
+ *  shown it: CloudFlare's check passes by itself in a few seconds, and the
+ *  page goes to GetCases in one or two. */
+const ERRAND_GRACE = 10000;
+/** How long one may take to load at all before the reader is shown it. */
+const ERRAND_LOAD = 45000;
+/** The popup's size: small while it is minimized as it opens, then big
+ *  enough for a CAPTCHA's pictures if the reader has to answer one. */
+const ERRAND_POPUP = { width: 360, height: 280 };
+const ERRAND_POPUP_SHOWN = { width: 1000, height: 820 };
+
+/** The errands under way, by their tab: { id, tabId, popup, shown }.  Kept
+ *  in the session's storage too, should the worker stop in between. */
+const errands = new Map();
+let errandsLoaded = null;
+/** The tabs whose page is being handed to GetCases now. */
+const handing = new Set();
+/** Each errand's timer, by tab. */
+const errandTimers = new Map();
+let listening = false;
+
+function loadErrands() {
+  if (!errandsLoaded) {
+    errandsLoaded = chrome.storage.session.get("errands").then(
+      ({ errands: saved }) => {
+        for (const errand of Object.values(saved || {})) {
+          if (!errands.has(errand.tabId)) {
+            errands.set(errand.tabId, errand);
+            // The worker stopped while it was under way: its timer went too.
+            if (!errand.shown) armErrand(errand, ERRAND_GRACE);
+          }
+        }
+      },
+      () => {},
+    );
+  }
+  return errandsLoaded;
+}
+
+function saveErrands() {
+  return chrome.storage.session.set({ errands: Object.fromEntries(errands) }).catch(() => {});
+}
+
+/** Tell GetCases how an errand went. */
+function reportErrand(id, event) {
+  return appFetch("/errand", { body: { id, event }, timeout: 3000 }).catch(() => null);
+}
+
+/** Wait for GetCases's errands while it runs, taking each as it comes. */
+async function listenForErrands() {
+  if (listening) return;
+  listening = true;
+  try {
+    const browser = encodeURIComponent(browserName());
+    for (;;) {
+      const asked = Date.now();
+      let reply;
+      try {
+        // GetCases holds the request for up to 20 seconds.
+        reply = await appFetch(`/errand?browser=${browser}`, { timeout: 25000 });
+      } catch (e) {
+        break;              // GetCases has gone (or knows no errands)
+      }
+      if (reply && reply.errand) {
+        runErrand(reply.errand).catch(() => reportErrand(reply.errand.id, "closed"));
+      } else if (Date.now() - asked < 1000) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+  } finally {
+    listening = false;
+  }
+}
+
+/** Open an errand's page out of sight. */
+async function runErrand({ id, url }) {
+  if (!/^https?:/i.test(url || "")) {
+    await reportErrand(id, "closed");
+    return;
+  }
+  await loadErrands();
+  const windows = await chrome.windows.getAll({ windowTypes: ["normal"], populate: true });
+  const readers = windows.some((w) => !(w.tabs || []).some((t) => errands.has(t.id)));
+  // Opened blank, and sent to the page once it is known to be an errand's:
+  // a page that loads fast is not done with before then.
+  let win;
+  if (readers) {
+    win = await chrome.windows.create({ url: "about:blank", state: "minimized" });
+  } else {
+    win = await chrome.windows.create({ url: "about:blank", type: "popup", focused: false, ...ERRAND_POPUP });
+    await chrome.windows.update(win.id, { state: "minimized" });
+  }
+  const tab = win.tabs && win.tabs[0];
+  if (!tab) {
+    await reportErrand(id, "closed");
+    return;
+  }
+  const errand = { id, tabId: tab.id, popup: !readers, shown: false };
+  errands.set(tab.id, errand);
+  await saveErrands();
+  armErrand(errand, ERRAND_LOAD);
+  await chrome.tabs.update(tab.id, { url });
+  await reportErrand(id, "opened");
+}
+
+/** Show the reader an errand's page after *ms*, unless it is done by then
+ *  (or being handed over then: it is given a few seconds more). */
+function armErrand(errand, ms) {
+  clearTimeout(errandTimers.get(errand.tabId));
+  errandTimers.set(errand.tabId, setTimeout(() => {
+    errandTimers.delete(errand.tabId);
+    if (!errands.has(errand.tabId) || errand.shown) return;
+    if (handing.has(errand.tabId)) armErrand(errand, 4000);
+    else showErrand(errand);
+  }, ms));
+}
+
+/** Bring an errand's window to the front: there is something for the
+ *  reader to do there.  GetCases, asked first, lets the browser come in
+ *  front of it. */
+async function showErrand(errand) {
+  if (errand.shown || !errands.has(errand.tabId)) return;
+  errand.shown = true;
+  clearTimeout(errandTimers.get(errand.tabId));
+  errandTimers.delete(errand.tabId);
+  await saveErrands();
+  await reportErrand(errand.id, "show");
+  try {
+    const tab = await chrome.tabs.get(errand.tabId);
+    await chrome.windows.update(tab.windowId, { state: "normal" });
+    await chrome.windows.update(tab.windowId, {
+      ...(errand.popup ? ERRAND_POPUP_SHOWN : {}),
+      focused: true,
+    });
+  } catch (e) {
+    // The window has gone.
+  }
+}
+
+/** GetCases has what it wanted from an errand's page: close its tab. */
+async function finishErrand(errand) {
+  if (!errands.delete(errand.tabId)) return;
+  clearTimeout(errandTimers.get(errand.tabId));
+  errandTimers.delete(errand.tabId);
+  await saveErrands();
+  await reportErrand(errand.id, "done");
+  try {
+    await chrome.tabs.remove(errand.tabId);
+  } catch (e) {
+    // Closed already.
+  }
+}
+
+/** Whether a page is one only the reader can get past: Google's CAPTCHA
+ *  ("unusual traffic"), which Scholar sends a browser to. */
+function needsReader(url) {
+  try {
+    const { hostname, pathname } = new URL(url);
+    return /(^|\.)google\.[a-z.]+$/.test(hostname) && pathname.startsWith("/sorry/");
+  } catch (e) {
+    return false;
+  }
+}
+
+chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
+  if (change.status !== "complete" || !/^https?:/i.test(tab.url || "")) return;
+  await loadErrands();
+  const errand = errands.get(tabId);
+  if (!errand || errand.shown) return;
+  if (needsReader(tab.url)) await showErrand(errand);
+  else armErrand(errand, ERRAND_GRACE);
+});
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await loadErrands();
+  const errand = errands.get(tabId);
+  if (!errand) return;
+  // Closed before GetCases had what it wanted: by the reader.
+  errands.delete(tabId);
+  clearTimeout(errandTimers.get(tabId));
+  errandTimers.delete(tabId);
+  await saveErrands();
+  await reportErrand(errand.id, "closed");
+});
+
+// Look in on GetCases every half minute, should the browser have stopped
+// this worker while GetCases was not running; and as the worker starts.
+chrome.alarms.get("getcases").then((alarm) => {
+  if (!alarm) chrome.alarms.create("getcases", { periodInMinutes: 0.5 });
+});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "getcases") appRunning(true);
+});
+loadErrands();
+appRunning(true);
