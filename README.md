@@ -444,11 +444,12 @@ things:
    GetCases opens Scholar in that browser from the first request. If the
    extension cannot return a page, GetCases can use an invisible Firefox
    session when Firefox and `selenium` are installed. When Firefox gets a
-   CAPTCHA, an ordinary Firefox window opens in a separate profile. Answer
-   the check there, and
-   **once Scholar's results appear, close that window** to return to GetCases.
-   GetCases imports the cleared cookies and retries the page, keeping them
-   for later searches and app restarts. If the check remains unanswered,
+   CAPTCHA, ordinary Firefox opens in a separate profile, initially minimized
+   on Windows. A temporary helper returns the page and cookies and closes
+   that window automatically when results arrive. The window comes forward
+   if a check needs your attention. If the helper cannot start, close the
+   window once results appear to use the saved-cookie fallback. GetCases
+   keeps the cookies for later searches and app restarts. If the check remains unanswered,
    GetCases waits ten minutes before offering another Firefox check. With
    neither browser route available, GetCases can make direct requests. The
    local database and CourtListener can help when Scholar is unavailable.
@@ -471,7 +472,7 @@ command, run in the GetCases folder, builds `dist\GetCases.exe`: one file, no
 console window, carrying the saved opinions and every index GetCases reads.
 
 ```bash
-python -m PyInstaller --noconfirm --onefile --noconsole --name GetCases --add-data "data/opinions.jsonl;data" --add-data "person_names.tsv.gz;." --add-data "eng_rep_index.tsv.gz;." --add-data "eng_rep_nominate.tsv.gz;." --add-data "sec_index.tsv.gz;." --add-data "case_law_reprints.tsv.gz;." --add-data "crecb_index.tsv.gz;." --add-data "debates_index.tsv.gz;." courtlistener_gui.py
+python -m PyInstaller --noconfirm --onefile --noconsole --name GetCases --add-data "firefox_handoff.js;." --add-data "data/opinions.jsonl;data" --add-data "person_names.tsv.gz;." --add-data "eng_rep_index.tsv.gz;." --add-data "eng_rep_nominate.tsv.gz;." --add-data "sec_index.tsv.gz;." --add-data "case_law_reprints.tsv.gz;." --add-data "crecb_index.tsv.gz;." --add-data "debates_index.tsv.gz;." courtlistener_gui.py
 ```
 
 The .exe runs in the background, with the scales in the taskbar. The first
@@ -543,9 +544,9 @@ automatic matching that can go wrong. In particular:
   sent to CourtListener, Google Scholar and the other sources above. A brief you
   open is read on your computer; nothing from it leaves your computer except
   the citations you follow or download.
-- **Google Scholar paces itself.** GetCases waits a few seconds between Scholar
-  requests so Google does not block it. If Google blocks it anyway, see
-  [Firefox](#firefox) above.
+- **Google Scholar pacing.** GetCases spaces direct requests apart and pauses
+  when Scholar refuses a request or sends a retry delay. The pause survives
+  an app restart. Browser access is described under [Firefox](#firefox).
 - **Where your data is kept:** your settings, token, history and bookmarks are in
   `~/.config/courtlistener/` (a folder in your home folder); downloaded caches are
   there and in `~/.cache/`. The local opinion database is `data/opinions.jsonl` in

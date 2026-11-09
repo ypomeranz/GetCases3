@@ -12152,11 +12152,10 @@ class CourtListenerGUI:
     _WARM_EVERY_S = 60.0     # connections left idle longer are closed
 
     def _warm_for_lookup(self) -> None:
-        """Spotlight has opened, so a lookup is coming: open the connections
-        it will use, and make Google Scholar's once-a-session homepage visit
-        now, while the reader types, rather than in front of the first search
-        — which would then wait three seconds or more behind it.  In the
-        background; at most once a minute."""
+        """Open connections to the case sources while the reader types.
+
+        Runs in the background at most once a minute.
+        """
         now = time.monotonic()
         if now - getattr(self, "_warmed_at", float("-inf")) < self._WARM_EVERY_S:
             return
@@ -12181,18 +12180,6 @@ class CourtListenerGUI:
             if api is not None:
                 hosts.append((api, "https://www.courtlistener.com/api/rest/v4/"))
             _in_parallel(*(lambda s=s, u=u: head(s, u) for s, u in hosts))
-            # Made here, not on the Tk thread: the first time, the fetcher
-            # reads Firefox's cookies, and the popup is going up.
-            try:
-                fetcher = self._get_scholar() if _SCHOLAR_AVAILABLE else None
-            except Exception:
-                fetcher = None
-            warm = getattr(fetcher, "warm", None)
-            if callable(warm):
-                try:
-                    warm()
-                except Exception as exc:
-                    print(f"[scholar] warming up failed: {exc}")
 
         threading.Thread(target=run, daemon=True).start()
 

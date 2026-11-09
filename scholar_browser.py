@@ -20,10 +20,11 @@ Design:
   * The driver is started lazily and kept alive for reuse (start-up is slow);
     :func:`ScholarBrowser.close` / atexit tear it down.
   * The CAPTCHA window uses a separate persistent profile that Selenium never
-    opens. After the reader solves the check and closes that window, its
-    fresh Google cookies and the cleared results URL are imported before
-    retrying. Google sometimes puts the exemption only in that URL; Firefox's
-    saved session preserves it even when cookies.sqlite does not.
+    opens. A temporary helper returns results and cookies and closes the
+    window automatically; only a page needing attention is brought forward.
+    If that helper cannot start, closing the window still imports its fresh
+    cookies and saved results URL. Google sometimes puts the exemption only
+    in that URL; Firefox's saved session preserves it too.
     On Windows, ``-wait-for-browser`` keeps the launcher alive until the
     actual window closes, avoiding a premature automated retry.
 
@@ -47,6 +48,7 @@ from typing import Optional
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import scholar_pages
+from firefox_handoff import FirefoxHandoff, PREFERENCES as HANDOFF_PREFERENCES
 
 _PROFILE_DIR = Path.home() / ".cache" / "courtlistener_scholar_ff"
 _PAGE_LOAD_TIMEOUT = 40
@@ -481,6 +483,7 @@ class ScholarBrowser:
             "browser.startup.homepage_override.mstone": "ignore",
             "browser.startup.page": 0,
             "intl.accept_languages": "en-US, en",
+            **HANDOFF_PREFERENCES,
         }
         (profile / "user.js").write_text("".join(
             f"user_pref({json.dumps(key)}, {json.dumps(value)});\n"
@@ -569,9 +572,10 @@ class ScholarBrowser:
     def _solve(self, url: str, wait_for: str) -> "tuple[str, str]":
         """Hand the check to an ordinary browser, then import its cookies.
 
-        Nothing attaches to or navigates that window while the reader works.
-        Closing it is the explicit handoff back to GetCases. A timeout leaves
-        it open; it is never terminated just to force an automated retry.
+        A temporary helper returns the page and cookies and closes its tab
+        after results arrive. No Selenium driver attaches to this profile.
+        If the helper is unavailable, closing the window still imports its
+        saved cookies and session. A timeout leaves the reader's window open.
         """
         from selenium.common.exceptions import TimeoutException, WebDriverException
 
@@ -579,31 +583,85 @@ class ScholarBrowser:
             raise BrowserBlocked()
         self._remember_cookies(self._driver)
         self.close()
+        handoff = None
+
+        def needs_reader():
+            _tell(on_step, "Google Scholar needs attention in Firefox. Complete "
+                           "the check there; the window will close automatically "
+                           "when the results are ready…")
+
         try:
             binary = _firefox_binary()
             if not binary:
                 raise BrowserUnavailable("Firefox not found")
             profile = self._prepare_manual_profile()
             args = [binary, "-no-remote", "-profile", str(profile)]
+            try:
+                handoff = FirefoxHandoff(profile, url, _scholar_page_key, needs_reader)
+                port = handoff.start()
+                args.extend(["-start-debugger-server", str(port)])
+            except (OSError, ValueError) as exc:
+                if handoff:
+                    handoff.close()
+                handoff = None
+                print(f"[scholar-browser] automatic handoff unavailable: {exc}")
             if os.name == "nt":
                 args.append("-wait-for-browser")
             args.append(url)
             env = {key: value for key, value in os.environ.items()
                    if key not in ("MOZ_AUTOMATION", "MOZ_MARIONETTE")
                    and not key.startswith("MOZ_HEADLESS")}
-            process = self._manual_process = subprocess.Popen(args, env=env)
+            startup = {}
+            if handoff and os.name == "nt":
+                info = subprocess.STARTUPINFO()
+                info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                info.wShowWindow = 7  # SW_SHOWMINNOACTIVE: no foreground flash
+                startup["startupinfo"] = info
+            process = self._manual_process = subprocess.Popen(args, env=env, **startup)
         except (OSError, BrowserUnavailable) as exc:
+            if handoff:
+                handoff.close()
             print(f"[scholar-browser] no window for the CAPTCHA: {exc}")
             self._solve_after = time.monotonic() + _SOLVE_SNOOZE
             raise BrowserBlocked()
 
-        print("[scholar-browser] waiting for the user in ordinary Firefox")
-        _tell(on_step, "Google Scholar needs a CAPTCHA check. Answer it in the "
-                       "ordinary Firefox window. Once Scholar's results "
-                       "appear, close that window to continue in GetCases…")
+        if handoff:
+            try:
+                handoff.install(port, process)
+                _tell(on_step, "Loading Google Scholar in Firefox, out of sight…")
+            except (OSError, ValueError, KeyError) as exc:
+                print(f"[scholar-browser] automatic handoff unavailable: {exc}")
+                handoff.close()
+                handoff = None
+        if not handoff:
+            print("[scholar-browser] waiting for the user in ordinary Firefox")
+            _tell(on_step, "Open the ordinary Firefox window from the taskbar if "
+                           "needed. Answer any CAPTCHA there. Once Scholar's "
+                           "results appear, close that window to continue in GetCases…")
         deadline = time.monotonic() + _SOLVE_TIMEOUT
-        while process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.5)
+        try:
+            while process.poll() is None and time.monotonic() < deadline:
+                if handoff and handoff.ready.wait(0.5):
+                    break
+                if not handoff:
+                    time.sleep(0.5)
+            if handoff and handoff.result:
+                source, final_url = handoff.result
+                # A clearance may be carried only in the results URL.
+                state = {"windows": [{"tabs": [{"entries": [{"url": final_url}], "index": 1}]}]}
+                clearance, _ = _session_clearance(state, url)
+                self._earned = self._valid_cookies(clearance + handoff.cookies + self._earned)
+                self._save_cookies()
+                self._manual_imported = True
+                self._solve_after = 0.0
+                # Save first, then close only this successfully completed
+                # helper browser. Unanswered manual windows remain untouched.
+                if handoff.finish(process):
+                    self._manual_process = None
+                return source, final_url
+        finally:
+            if handoff:
+                handoff.close()
         if process.poll() is None:
             print("[scholar-browser] manual Firefox is still open; leaving it "
                   "with the user and pausing Scholar requests")

@@ -36,15 +36,18 @@ from __future__ import annotations
 
 import html as _html
 import json
+import math
 import random
 import re
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field, replace
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import bluebook_names
 import citations
@@ -189,8 +192,7 @@ def scholar_jurisdiction_value(courts=None) -> Optional[str]:
 # which impersonates a real browser's TLS + HTTP/2 fingerprint, with a
 # User-Agent matched to the impersonated version — a coherent "persona".
 #
-# One persona is pinned per session (a stable identity, like a real browser);
-# on a challenge the fetcher rotates to the next and rebuilds the session.
+# One persona is pinned per direct session. A challenge pauses that session.
 # Which personas pass drifts as Google updates its challenge list and
 # curl_cffi adds profiles (the newest Chrome profiles get challenged first) —
 # _CANNED_PERSONAS lists proven targets, best first.  When Firefox is
@@ -340,10 +342,10 @@ _DEFAULT_DELAY = 3.0  # base seconds between outbound requests (jittered)
 # The one exception to that pacing (see grant_quick_hop): an opinion page asked
 # for this long after the search that found it answered, once per case opened.
 _QUICK_HOP_DELAY = 1.0
-_QUICK_HOP_OFF_TTL = 24 * 3600.0  # how long a challenge after one turns them off
-_BLOCK_COOLDOWN = 180.0  # seconds to fail fast after every persona is challenged
+_BLOCK_COOLDOWN = 180.0  # minimum pause after a challenge or refusal
 _BROWSER_FIRST_TTL = 6 * 3600.0  # remember the browser route across app restarts
-_RETRY_STATUSES = {500, 502, 503}  # transient Google hiccups, retried once
+_DIRECT_REDIRECTS = {301, 302, 303, 307, 308}
+_MAX_DIRECT_REDIRECTS = 2
 _CACHE_PATH = Path.home() / ".cache" / "courtlistener_scholar.db"
 _COOKIE_STORE = Path.home() / ".cache" / "courtlistener_scholar_state.json"
 
@@ -378,6 +380,26 @@ def _http_status(exc: BaseException) -> Optional[int]:
     """The HTTP status an ``HTTPError`` (requests' or curl_cffi's) carries."""
     status = getattr(getattr(exc, "response", None), "status_code", None)
     return status if isinstance(status, int) else None
+
+
+def _retry_after_seconds(value: str) -> float:
+    """Return a Retry-After delay in seconds, or zero for an invalid value."""
+    if not isinstance(value, str):
+        return 0.0
+    value = value.strip()
+    if not value:
+        return 0.0
+    try:
+        if value.isascii() and value.isdigit():
+            seconds = float(value)
+        else:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            seconds = deadline.timestamp() - time.time()
+    except (ValueError, OverflowError, OSError):
+        return 0.0
+    return max(0.0, seconds) if math.isfinite(seconds) else 0.0
 
 
 # A results page carries its results column even when nothing matched; a
@@ -2482,8 +2504,11 @@ class GoogleScholarFetcher:
         # from both reading the clock as free and asking at the same moment.
         self._last_response: float = 0.0
         self._throttle_lock = threading.Lock()
-        # Quick hops granted to a thread (see grant_quick_hop), and whether
-        # they are still on: a challenge right after one turns them off.
+        # Direct fetches share a session. Hold this lock through response
+        # handling so a queued request sees any newly announced pause.
+        self._direct_lock = threading.Lock()
+        # Quick hops granted to a thread for browser fetches. Honor any
+        # quick-hop pause saved by an earlier version.
         self._hop = threading.local()
         self._quick_hop_off_wall = 0.0
         # Optional opinion_db.OpinionDB: the durable, searchable store.  When
@@ -2495,13 +2520,11 @@ class GoogleScholarFetcher:
         self._name_min = name_min
         self._opinion_db_backfill_started = False
 
-        # Browser personas (TLS fingerprint + matching UA), pinned per session
-        # and rotated on a challenge.  The persona that worked last run is
-        # restored from the state file, so a known-good identity leads.
+        # Browser personas (TLS fingerprint + matching UA). Restore the
+        # direct session's selection from the state file when available.
         self._personas = _build_personas()
         self._persona_ix = 0
         self._blocked_until = 0.0  # monotonic deadline of the fail-fast window
-        self._warmed = False       # homepage visited this session
         # Start Firefox lazily. Keep using a browser for this session once
         # selected, including when the browser becomes temporarily unavailable.
         self._browser = None
@@ -2517,15 +2540,14 @@ class GoogleScholarFetcher:
                 self._persona_ix = i
                 break
         self._stored_cookies: dict = dict(state.get("cookies") or {})
-        # A hard block survives an app restart: honor the persisted cooldown
-        # so a relaunch doesn't immediately re-probe every fingerprint.
+        # Honor the full cooldown after restart, including a server delay
+        # longer than the app's default.
         try:
             remaining = float(state.get("blocked_until_wall", 0)) - time.time()
         except (TypeError, ValueError):
             remaining = 0.0
-        if remaining > 0:
-            self._blocked_until = time.monotonic() + min(
-                remaining, _BLOCK_COOLDOWN)
+        if remaining > 0 and math.isfinite(remaining):
+            self._blocked_until = time.monotonic() + remaining
             print(f"[scholar] resuming block cooldown ({int(remaining)}s left)")
         # Keep the browser route on a quick relaunch, even before the
         # extension reconnects or Firefox is ready.
@@ -3636,7 +3658,7 @@ class GoogleScholarFetcher:
             print(f"[scholar] opinion-DB store failed: {exc}")
 
     # ------------------------------------------------------------------
-    # Fetch layer: browser persona, pacing, block rotation
+    # Fetch layer: browser persona, pacing, cooldown
     # ------------------------------------------------------------------
 
     def _persona(self) -> _Persona:
@@ -3703,16 +3725,6 @@ class GoogleScholarFetcher:
         except Exception:
             pass  # persistence is best-effort
 
-    def _rotate_persona(self) -> None:
-        """Switch to the next browser fingerprint and rebuild the session —
-        re-reading Firefox's google.com cookies, so a CAPTCHA the user just
-        solved there takes effect immediately."""
-        self._persona_ix = (self._persona_ix + 1) % len(self._personas)
-        p = self._persona()
-        print(f"[scholar] rotating browser fingerprint -> "
-              f"{p.target or 'plain requests'}")
-        self._session = self._build_session()
-
     def close(self) -> None:
         """Release the headless Firefox, if one was started.  Safe to call
         more than once; the app may call it on shutdown."""
@@ -3744,23 +3756,20 @@ class GoogleScholarFetcher:
             body = ""
         return scholar_pages.is_challenge(final_url, body)
 
-    def _throttle(self) -> bool:
-        """Human-ish pacing: the base delay plus jitter, so requests don't
-        tick metronomically.  The slot is taken under a lock, so requests from
-        several threads are spaced from one another, not just from their own.
-
-        The one exception is a quick hop (see :meth:`grant_quick_hop`): an
-        opinion page fetched on a thread holding the grant goes a second after
-        Google last answered — the search that found it — and spends the
-        grant.  Returns whether this request was one."""
-        quick = self._take_quick_hop()
+    def _throttle(self, *, direct: bool = False) -> bool:
+        """Space requests across threads. Direct requests wait a full delay
+        after the previous response. A browser opinion fetch can use a quick
+        hop. Return whether this request used one."""
+        quick = self._take_quick_hop() and not direct
         with self._throttle_lock:
             now = time.monotonic()
             if quick:
                 at = max(self._last_request, self._last_response) + (
                     _QUICK_HOP_DELAY * random.uniform(1.0, 1.2))
             else:
-                at = self._last_request + self._delay * random.uniform(1.0, 1.5)
+                last = (max(self._last_request, self._last_response) if direct
+                        else self._last_request)
+                at = last + self._delay * random.uniform(1.0, 1.5)
             at = max(at, now)
             self._last_request = at
         if at > now:
@@ -3771,14 +3780,13 @@ class GoogleScholarFetcher:
         return quick
 
     def grant_quick_hop(self) -> None:
-        """Let the next opinion page this thread fetches go one second after
+        """Let the next browser opinion fetch go one second after
         Google last answered, rather than the usual three to four and a half.
 
         For opening a case: its search and then its opinion page, back to
         back.  Granted once per case opened, and spent by the first opinion
         page fetched, so everything else — a second search, a retry, another
-        variant of the citation — keeps the usual pacing.  A challenge right
-        after a quick hop turns them off for a day (see _get)."""
+        variant of the citation — keeps the usual pacing."""
         self._hop.granted = True
 
     def _take_quick_hop(self) -> bool:
@@ -3791,35 +3799,9 @@ class GoogleScholarFetcher:
         return time.time() >= self._quick_hop_off_wall
 
     def _note_response(self) -> None:
-        """Google has answered (or failed to): a quick hop counts from here."""
+        """Record completion for direct pacing and browser quick hops."""
         with self._throttle_lock:
             self._last_response = max(self._last_response, time.monotonic())
-
-    def warm(self) -> None:
-        """Warm the direct session for Spotlight when it will handle the search."""
-        if (self._warmed or self._browser_first
-                or time.monotonic() < self._blocked_until):
-            return
-        if self._extension_usable() or self._browser_usable():
-            self._browser_first = True
-            return
-        self._warm_up()
-
-    def _warm_up(self) -> None:
-        """Visit the Scholar homepage once per session before the first
-        search — acquiring the ordinary first-party cookies and giving the
-        search request a natural referer chain, the way a browser arrives."""
-        if self._warmed or self._browser_first:
-            return
-        self._warmed = True
-        try:
-            self._throttle()
-            self._session.get(SCHOLAR_BASE + "/", timeout=20,
-                              allow_redirects=True)
-        except Exception:
-            pass  # best-effort; the search itself will tell the real story
-        finally:
-            self._note_response()
 
     def _browser_usable(self) -> bool:
         """Whether the real Firefox can be asked: Selenium and Firefox both
@@ -3969,52 +3951,66 @@ class GoogleScholarFetcher:
                 print(_CAPTCHA_UNANSWERED_TIP)
             raise ScholarError("Scholar browser request blocked or unavailable")
 
-        if cooling_down:
-            raise ScholarError(
-                f"blocked (cooling down {int(self._blocked_until - now)}s)")
+        return self._get_direct(url, referer, once)
 
-        self._warm_up()
-        headers = {"Referer": referer or (SCHOLAR_BASE + "/")}
-        last_status = "challenge"
-        for _ in range(1 if once else len(self._personas)):
-            quick = self._throttle()
-            try:
-                resp = self._session.get(url, headers=headers, timeout=20,
-                                         allow_redirects=True)
-            finally:
-                self._note_response()
-            if scholar_pages.response_needs_browser(
-                    url, getattr(resp, "url", "") or url,
-                    getattr(resp, "text", "") or "", resp.status_code):
-                last_status = f"HTTP {resp.status_code}"
-                if resp.status_code == 200:
-                    last_status += " (challenge or incomplete Scholar page)"
-                print(f"[scholar] {self._persona().target or 'plain requests'}"
-                      f" challenged ({last_status})")
-                if quick:
-                    # Google minded the short gap: the usual pacing for a day.
-                    self._quick_hop_off_wall = time.time() + _QUICK_HOP_OFF_TTL
-                    print("[scholar] challenged right after a quick hop — "
-                          "back to the usual pacing for opinion pages")
+    def _get_direct(self, url: str, referer: str, once: bool):
+        """Send one direct attempt, following only ordinary Scholar redirects."""
+        headers = {"Referer": referer} if referer else {}
+        target = url
+        with self._direct_lock:
+            for hop in range(_MAX_DIRECT_REDIRECTS + 1):
+                remaining = self._blocked_until - time.monotonic()
+                if remaining > 0:
+                    raise ScholarError(f"blocked (cooling down {math.ceil(remaining)}s)")
+                self._throttle(direct=True)
+                if self._browser_first:
+                    raise ScholarError("Scholar now uses the browser route")
+                try:
+                    resp = self._session.get(target, headers=headers, timeout=20,
+                                             allow_redirects=False)
+                finally:
+                    self._note_response()
+
+                status = resp.status_code
+                response_headers = getattr(resp, "headers", None) or {}
+                delay = _retry_after_seconds(response_headers.get("Retry-After", "") or "")
+                blocked = scholar_pages.response_needs_browser(
+                    url, getattr(resp, "url", "") or target,
+                    getattr(resp, "text", "") or "", status)
+                redirect = ""
+                if status in _DIRECT_REDIRECTS:
+                    location = response_headers.get("Location", "")
+                    if location:
+                        try:
+                            redirect = urljoin(target, location)
+                            parts = urlparse(redirect)
+                            if (parts.scheme != "https"
+                                    or parts.hostname != "scholar.google.com"
+                                    or parts.port not in (None, 443)
+                                    or parts.username or parts.password
+                                    or scholar_pages.is_challenge(redirect, "")):
+                                redirect = ""
+                        except ValueError:
+                            redirect = ""
+                    blocked = blocked or not redirect
+
+                if blocked or (status >= 300 and delay > 0):
+                    if blocked:
+                        delay = max(_BLOCK_COOLDOWN, delay)
+                    self._blocked_until = max(self._blocked_until, time.monotonic() + delay)
                     self._save_state()
-                self._rotate_persona()
-                continue
-            if resp.status_code in _RETRY_STATUSES:
-                if once:
-                    raise ScholarError(f"HTTP {resp.status_code}")
-                time.sleep(2.0)
-                continue  # transient Google hiccup — same persona, one retry
-            resp.raise_for_status()
-            self._save_state()
-            return resp
-
-        if once:
-            raise ScholarError(f"{last_status} (one attempt)")
-
-        self._blocked_until = time.monotonic() + _BLOCK_COOLDOWN
-        self._save_state()  # the cooldown survives an app restart
-        print(_CAPTCHA_TIP)
-        raise ScholarError(f"{last_status} blocked")
+                    print(f"[scholar] direct requests paused for {math.ceil(delay)}s (HTTP {status})")
+                    if blocked:
+                        print(_CAPTCHA_TIP)
+                    raise ScholarError(f"HTTP {status} blocked or deferred for {math.ceil(delay)}s")
+                if redirect and not once and hop < _MAX_DIRECT_REDIRECTS:
+                    target = redirect
+                    continue
+                if 300 <= status < 400:
+                    raise ScholarError(f"HTTP {status} redirect")
+                resp.raise_for_status()
+                self._save_state()
+                return resp
 
     def _mark_browser_working(self) -> None:
         """Clear the cooldown and remember the browser route on relaunch."""
@@ -4360,13 +4356,14 @@ if __name__ == "__main__":  # pragma: no cover - offline smoke test
     check(isinstance(ck, dict) and not any(k.startswith("__Host-") for k in ck),
           f"browser cookies readable ({len(ck)}) and __Host-* filtered")
 
-    # Rotation exhausts every persona, then a cooldown fails fast without
-    # touching the network.
+    # The first refusal pauses subsequent direct requests.
     import tempfile as _tf
     with _tf.TemporaryDirectory() as _td:
         f = GoogleScholarFetcher(cache_path=Path(_td) / "t.db", delay=0)
-        f._warmed = True
         f._browser_dead = True  # don't launch Firefox in the offline test
+        f._browser_first = False
+        f._blocked_until = 0.0
+        f._save_state = lambda: None  # keep the live app's state untouched
         calls = {"n": 0}
 
         class _StubSession:
@@ -4379,14 +4376,12 @@ if __name__ == "__main__":  # pragma: no cover - offline smoke test
                 return fake(429)
 
         f._session = _StubSession()
-        f._build_session = lambda: _StubSession()  # type: ignore[assignment]
         try:
             f._get("https://scholar.google.com/scholar?q=test")
             check(False, "blocked _get should raise")
         except ScholarError as exc:
-            check("blocked" in str(exc), f"exhausted personas raise: {exc}")
-        check(calls["n"] == len(f._personas),
-              f"one attempt per persona ({calls['n']})")
+            check("blocked" in str(exc), f"first refusal raises: {exc}")
+        check(calls["n"] == 1, f"one direct attempt ({calls['n']})")
         before = calls["n"]
         try:
             f._get("https://scholar.google.com/scholar?q=test")

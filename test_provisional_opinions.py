@@ -12,11 +12,14 @@ Google Scholar itself is stubbed; every URL asked for is recorded.
 
 import os
 import tempfile
+import time
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from requests import HTTPError
 
 os.environ.setdefault("GETCASES_SKIP_DEPENDENCY_PROMPT", "1")
 
@@ -228,10 +231,10 @@ class OneAttemptTests(unittest.TestCase):
         self.fetcher = GoogleScholarFetcher(
             cache_path=Path(self._tmp.name) / "cache.db", delay=0.0)
         self.fetcher._browser_dead = True
-        self.fetcher._warmed = True
         self.fetcher._browser_first = False
         self.fetcher._blocked_until = 0.0
         self.fetcher._browser_get = mock.Mock(return_value=None)
+        self.fetcher._extension_usable = mock.Mock(return_value=False)
         self.fetcher._save_state = mock.Mock()   # leave the real state be
         self.session = mock.Mock()
         self.fetcher._session = self.session
@@ -241,32 +244,41 @@ class OneAttemptTests(unittest.TestCase):
         self.fetcher._db.close()
         self._tmp.cleanup()
 
-    def _answer(self, status: int, url: str = URL):
-        self.session.get.return_value = SimpleNamespace(
-            status_code=status, url=url, text="",
-            raise_for_status=lambda: None)
+    def _answer(self, status: int, url: str = URL, headers=None):
+        response = SimpleNamespace(status_code=status, url=url, text="", headers=headers or {})
+        response.raise_for_status = mock.Mock(side_effect=(
+            HTTPError(f"HTTP {status}", response=response) if status >= 400 else None))
+        self.session.get.return_value = response
 
     def test_nothing_is_sent_while_cooling_down(self):
-        import time
         self.fetcher._blocked_until = time.monotonic() + 60
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL, once=True)
         self.session.get.assert_not_called()
         self.fetcher._browser_get.assert_not_called()
 
-    def test_a_challenge_is_neither_retried_nor_escalated(self):
+    def test_a_challenge_pauses_requests_without_retrying_or_escalating(self):
         self._answer(429)
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL, once=True)
+        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
         self.assertEqual(self.session.get.call_count, 1)
         self.fetcher._browser_get.assert_not_called()
-        self.assertEqual(self.fetcher._blocked_until, 0.0)
 
     def test_a_hiccup_is_not_retried(self):
         self._answer(503)
+        with self.assertRaises(HTTPError):
+            self.fetcher._get(URL, once=True)
+        self.assertEqual(self.session.get.call_count, 1)
+
+    def test_an_ordinary_redirect_does_not_make_a_second_request(self):
+        self._answer(302, headers={"Location": URL + "&foo=1"})
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL, once=True)
         self.assertEqual(self.session.get.call_count, 1)
+        self.assertFalse(self.session.get.call_args.kwargs["allow_redirects"])
 
     def test_an_answer_is_returned(self):
         self._answer(200)

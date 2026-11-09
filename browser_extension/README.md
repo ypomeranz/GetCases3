@@ -86,16 +86,16 @@ arrow on the extension's card in `chrome://extensions` to pick up any changes.
   Chrome Here too.
 
 **Out of sight.** A page GetCases opens in your browser for one of these checks
-opens in a minimized window, whether or not the browser was already open (one
-that wasn't is started without any window of its own, and quits again after),
-so a check the browser passes by itself is never seen. The window comes to the
-front only when there is something for you to do there: Google's CAPTCHA, or a
-check that hasn't let the page through after about ten seconds. Close it to
+opens in an inactive tab when a browser window is already available, or in a
+minimized window otherwise. Results are handed back and the tab closes
+without changing your active tab. Google's CAPTCHA or consent page brings
+the tab forward; a slow Scholar result handoff stays in the background.
+CommonLII checks still come forward after about ten seconds. Close the tab to
 give up on that page. While GetCases runs, the extension keeps a request open
 to it, waiting for such a page; when the browser had put the extension to
 sleep, it looks in again within half a minute. A copy of the extension from
-before this (1.4 and older) can't do this, and the page opens in sight as
-before — reload the extension after updating GetCases.
+before 1.5.2 can still show Scholar pages unnecessarily — reload the extension
+after updating GetCases.
 
 The toolbar button shows whether GetCases is running ("on" on the icon), how
 many citations are linked on the page, and these settings:
