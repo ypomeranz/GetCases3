@@ -596,6 +596,25 @@ class CaptchaWindowTests(_NativeBrowserFixture):
         self.assertIsNone(self.browser._manual_process)
         helper.finish.assert_called_once_with(self.process)
         helper.close.assert_called_once_with()
+        self.assertEqual(self.launch.call_args.args[0][-1], "-silent")
+        self.assertNotIn(URL, self.launch.call_args.args[0])
+        self.assertEqual(self.launch.call_args.kwargs["env"]["MOZ_APP_SILENT_START"], "1")
+
+    def test_failed_windowless_startup_reopens_the_visible_manual_fallback(self):
+        helper = mock.Mock()
+        helper.start.return_value = 12345
+        helper.install.side_effect = OSError("helper failed to start")
+        helper.started.is_set.return_value = False
+        helper.stop_startup.return_value = True
+        bootstrap = mock.Mock()
+        self.launch.side_effect = [bootstrap, self.process]
+        with mock.patch.object(sb, "FirefoxHandoff", return_value=helper):
+            self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))
+        self.assertEqual(self.launch.call_args_list[0].args[0][-1], "-silent")
+        self.assertEqual(self.launch.call_args_list[1].args[0][-1], URL)
+        self.assertNotIn("MOZ_APP_SILENT_START", self.launch.call_args_list[1].kwargs["env"])
+        helper.stop_startup.assert_called_once_with(bootstrap)
+        helper.close.assert_called_once_with()
 
     def test_native_helper_leaves_an_unanswered_captcha_open(self):
         helper = mock.Mock(result=None)

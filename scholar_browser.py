@@ -263,7 +263,8 @@ def _scholar_page_key(url: str) -> tuple:
         return ()
     return (parts.path, tuple(sorted(
         (key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key not in {"google_abuse", "sgst"})))
+        if key not in {"google_abuse", "sgst"}
+        and not (key == "ntpr" and not value))))
 
 
 def _session_clearance(state: dict, requested_url: str) -> tuple[list, str]:
@@ -607,10 +608,20 @@ class ScholarBrowser:
                 print(f"[scholar-browser] automatic handoff unavailable: {exc}")
             if os.name == "nt":
                 args.append("-wait-for-browser")
-            args.append(url)
+            # Store Firefox does not reliably forward STARTUPINFO's minimized
+            # state to its child. Let the helper create the minimized window
+            # itself, before navigating, instead of showing a startup window.
+            args.append("-silent" if handoff else url)
             env = {key: value for key, value in os.environ.items()
-                   if key not in ("MOZ_AUTOMATION", "MOZ_MARIONETTE")
+                   if key not in ("MOZ_AUTOMATION", "MOZ_MARIONETTE", "MOZ_APP_SILENT_START",
+                                  "MOZ_APP_ALLOW_WINDOWLESS")
                    and not key.startswith("MOZ_HEADLESS")}
+            if handoff:
+                # Firefox must stay alive until the helper creates its first
+                # window. -silent alone can exit during startup on Windows.
+                env["MOZ_APP_SILENT_START"] = "1"
+                if os.name == "nt":
+                    env["MOZ_APP_ALLOW_WINDOWLESS"] = "1"
             startup = {}
             if handoff and os.name == "nt":
                 info = subprocess.STARTUPINFO()
@@ -631,8 +642,25 @@ class ScholarBrowser:
                 _tell(on_step, "Loading Google Scholar in Firefox, out of sight…")
             except (OSError, ValueError, KeyError) as exc:
                 print(f"[scholar-browser] automatic handoff unavailable: {exc}")
-                handoff.close()
-                handoff = None
+                if not handoff.started.is_set():
+                    stopped = handoff.stop_startup(process)
+                    handoff.close()
+                    handoff = None
+                    if not stopped:
+                        self._solve_after = time.monotonic() + _SOLVE_SNOOZE
+                        raise BrowserBlocked()
+                    # The helper never opened a page. Relaunch the ordinary
+                    # visible fallback after releasing the dedicated profile.
+                    args = [binary, "-no-remote", "-profile", str(profile)]
+                    if os.name == "nt":
+                        args.append("-wait-for-browser")
+                    env.pop("MOZ_APP_SILENT_START", None)
+                    env.pop("MOZ_APP_ALLOW_WINDOWLESS", None)
+                    try:
+                        process = self._manual_process = subprocess.Popen(args + [url], env=env)
+                    except OSError as launch_error:
+                        self._manual_process = None
+                        raise BrowserBlocked() from launch_error
         if not handoff:
             print("[scholar-browser] waiting for the user in ordinary Firefox")
             _tell(on_step, "Open the ordinary Firefox window from the taskbar if "

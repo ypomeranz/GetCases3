@@ -71,6 +71,8 @@ class FirefoxHandoff:
         self.result = None
         self.cookies = []
         self.ready = threading.Event()
+        self.started = threading.Event()
+        self.window_state = None
         self._lock = threading.Lock()
         self._token = secrets.token_urlsafe(32)
         self._server = None
@@ -143,12 +145,18 @@ class FirefoxHandoff:
                     root = _request(sock, stream, "root", "getRoot")
                     _request(sock, stream, root["addonsActor"], "installTemporaryAddon",
                              addonPath=str(self.addon.resolve()), openDevTools=False)
+            if not self.started.wait(10):
+                raise OSError("Firefox installed the helper but it did not start")
             return
         raise OSError("Firefox page handoff did not start")
 
     def accept(self, data):
         if not isinstance(data, dict):
             raise ValueError("Invalid page")
+        if data.get("event") == "started":
+            self.window_state = data.get("state")
+            self.started.set()
+            return {"ok": True}
         url, html = data.get("url"), data.get("html")
         if not isinstance(url, str) or not isinstance(html, str):
             raise ValueError("Invalid page")
@@ -193,6 +201,18 @@ class FirefoxHandoff:
             return True
         except subprocess.TimeoutExpired:
             pass
+        return self._stop_process(process)
+
+    def stop_startup(self, process):
+        """Stop our windowless startup before opening the manual fallback."""
+        if self.started.is_set() or self.shown or self.result is not None:
+            return False
+        return self._stop_process(process)
+
+    @staticmethod
+    def _stop_process(process):
+        if process.poll() is not None:
+            return True
         try:
             if os.name == "nt":
                 subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],

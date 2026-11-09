@@ -141,6 +141,12 @@ class DeliverTests(_Fresh):
         self.assertEqual((self.wait.html, self.wait.final_url), (RESULTS, URL))
         answered.assert_called_once_with()   # the app comes forward
 
+    def test_google_empty_ntpr_parameter_does_not_stop_the_handoff(self):
+        final_url = URL + "&ntpr&sgst=redirect"
+        self.assertEqual(se.deliver_page({"url": final_url, "html": RESULTS}),
+                         {"ok": True, "close": True})
+        self.assertEqual(self.wait.final_url, final_url)
+
     def test_not_while_it_is_still_scholar_s_captcha(self):
         # The extension is told so: the page comes to the front, for the
         # reader to answer.

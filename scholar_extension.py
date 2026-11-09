@@ -119,7 +119,8 @@ def page_key(url: str) -> str:
     except ValueError:
         return ""
     query = sorted((k, v) for k, v in urllib.parse.parse_qsl(
-        parts.query, keep_blank_values=True) if k not in _VOLATILE)
+        parts.query, keep_blank_values=True) if k not in _VOLATILE
+        and not (k == "ntpr" and not v))
     return f"{(parts.hostname or '').lower()}{parts.path}?{urllib.parse.urlencode(query)}"
 
 

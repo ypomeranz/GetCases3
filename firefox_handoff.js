@@ -1,11 +1,17 @@
 // Runs only in GetCases' dedicated ordinary Firefox profile. It does not
 // solve checks: it shows the tab when the app says the reader is needed.
 (async () => {
-  const tabs = await browser.tabs.query({});
-  const tab = tabs.find(t => t.url === HANDOFF.url)
-    || tabs.find(t => /^https:\/\/([a-z.]+\.)?google\.com\//.test(t.url || ""));
-  if (!tab) return;
-  await browser.windows.update(tab.windowId, { state: "minimized" });
+  const win = await browser.windows.create({
+    url: "about:blank", type: "popup", state: "minimized", focused: false,
+  });
+  const tab = win.tabs && win.tabs[0];
+  if (!tab) throw new Error("Firefox did not create the handoff tab");
+  const started = await fetch(HANDOFF.endpoint, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event: "started", state: win.state }),
+  });
+  if (!started.ok) throw new Error("Firefox handoff could not connect to GetCases");
+  await browser.tabs.update(tab.id, { url: HANDOFF.url });
   let shown = false;
   const deadline = Date.now() + 300000;
   while (Date.now() < deadline) {

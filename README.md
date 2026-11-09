@@ -444,8 +444,8 @@ things:
    GetCases opens Scholar in that browser from the first request. If the
    extension cannot return a page, GetCases can use an invisible Firefox
    session when Firefox and `selenium` are installed. When Firefox gets a
-   CAPTCHA, ordinary Firefox opens in a separate profile, initially minimized
-   on Windows. A temporary helper returns the page and cookies and closes
+   CAPTCHA, ordinary Firefox starts without a window in a separate profile.
+   A temporary helper creates a minimized window, returns the page and cookies, and closes
    that window automatically when results arrive. The window comes forward
    if a check needs your attention. If the helper cannot start, close the
    window once results appear to use the saved-cookie fallback. GetCases

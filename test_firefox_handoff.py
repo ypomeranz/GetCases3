@@ -62,6 +62,20 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(self.handoff.accept({"url": url, "html": HTML}), {"close": True})
         self.assertEqual(self.handoff.result, (HTML, url))
 
+    def test_google_ntpr_redirect_keeps_the_same_search_in_the_background(self):
+        url = URL + "&ntpr&sgst=redirect"
+        self.assertEqual(self.handoff.accept({"url": url, "html": HTML, "cookies": [COOKIE]}),
+                         {"close": True})
+        self.shown.assert_not_called()
+        self.assertEqual(self.handoff.result, (HTML, url))
+
+    def test_startup_report_does_not_count_as_a_result_or_show_a_window(self):
+        self.assertEqual(self.handoff.accept({"event": "started", "state": "minimized"}), {"ok": True})
+        self.assertTrue(self.handoff.started.is_set())
+        self.assertFalse(self.handoff.ready.is_set())
+        self.assertFalse(self.handoff.stop_startup(mock.Mock()))
+        self.shown.assert_not_called()
+
     def test_loopback_requires_the_random_token(self):
         self.handoff.start()
         root = f"http://127.0.0.1:{self.handoff._server.server_port}/"
@@ -91,19 +105,22 @@ class HelperWindowTests(unittest.TestCase):
     def run_helper(self, replies):
         script = r"""
 const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-const out = { updates: [], removed: [], posts: [] };
+const out = { created: [], updates: [], removed: [], posts: [], navigation: [] };
 const HANDOFF = {url: 'https://scholar.google.com/scholar?q=test', endpoint: 'http://127.0.0.1/token'};
 const tab = {id: 7, windowId: 3, url: HANDOFF.url, status: 'complete'};
 const browser = {
-  tabs: {query: async () => [tab], get: async () => tab, update: async () => {},
+  tabs: {get: async () => tab, update: async (id, props) => out.navigation.push(props),
     executeScript: async () => [{url: tab.url, html: '<p>page</p>'}]},
-  windows: {update: async (id, props) => out.updates.push(props),
+  windows: {create: async props => {out.created.push(props); return {id: 3, tabs: [tab], state: 'minimized'};},
+    update: async (id, props) => out.updates.push(props),
     remove: async (id) => out.removed.push(id)},
   cookies: {getAll: async () => [{name: 'NID', value: 'test', domain: '.google.com', path: '/',
     expirationDate: 2000000000.5, secure: true, httpOnly: true}]},
 };
 const fetch = async (url, options) => {
-  out.posts.push(JSON.parse(options.body));
+  const data = JSON.parse(options.body);
+  if (data.event === 'started') return {ok: true};
+  out.posts.push(data);
   return {ok: true, json: async () => input.replies.shift()};
 };
 const setTimeout = callback => callback();
@@ -117,13 +134,14 @@ eval(input.source).then(() => process.stdout.write(JSON.stringify(out)));
 
     def test_results_export_cookies_and_close_without_foregrounding(self):
         result = self.run_helper([{"close": True}])
-        self.assertEqual(result["updates"], [{"state": "minimized"}])
+        self.assertEqual(result["created"], [{"url": "about:blank", "type": "popup", "state": "minimized", "focused": False}])
+        self.assertEqual(result["updates"], [])
         self.assertEqual(result["removed"], [3])
         self.assertEqual(result["posts"][0]["cookies"][0]["expiry"], 2000000000)
 
     def test_captcha_appears_once_then_closes_on_results(self):
         result = self.run_helper([{"show": True}, {"show": True}, {"close": True}])
-        self.assertEqual(result["updates"], [{"state": "minimized"}, {"state": "normal", "focused": True}])
+        self.assertEqual(result["updates"], [{"state": "normal", "focused": True}])
         self.assertEqual(result["removed"], [3])
 
 
@@ -153,14 +171,9 @@ class LiveFirefoxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             profile = Path(tmp) / "profile"
             profile.mkdir()
-            prefs = {**fh.PREFERENCES, "browser.shell.checkDefaultBrowser": False,
-                     "browser.aboutwelcome.enabled": False,
-                     "browser.startup.homepage_override.mstone": "ignore",
-                     "browser.startup.page": 0,
-                     "datareporting.policy.firstRunURL": "",
-                     "termsofuse.bypassNotification": True}
-            (profile / "user.js").write_text("".join(
-                f"user_pref({json.dumps(k)}, {json.dumps(v)});\n" for k, v in prefs.items()))
+            # Use the production preferences, including with a reused profile.
+            with mock.patch.object(sb, "_PROFILE_DIR", Path(tmp)):
+                profile = sb.ScholarBrowser()._prepare_manual_profile()
             shown = mock.Mock()
             handoff = fh.FirefoxHandoff(profile, url, lambda u: u, shown)
             try:
@@ -179,9 +192,13 @@ class LiveFirefoxTests(unittest.TestCase):
                     startup["startupinfo"] = info
                 env = {k: v for k, v in os.environ.items()
                        if k not in ("MOZ_AUTOMATION", "MOZ_MARIONETTE") and not k.startswith("MOZ_HEADLESS")}
-                process = subprocess.Popen(args + [url], env=env, **startup)
+                env["MOZ_APP_SILENT_START"] = "1"
+                if os.name == "nt":
+                    env["MOZ_APP_ALLOW_WINDOWLESS"] = "1"
+                process = subprocess.Popen(args + ["-silent"], env=env, **startup)
                 try:
                     handoff.install(port, process)
+                    self.assertEqual(handoff.window_state, "minimized")
                     self.assertTrue(handoff.ready.wait(30), "Firefox did not return the page")
                     self.assertIn('data-webdriver="false"', handoff.result[0])
                     self.assertTrue(any(c["name"] == "NID" and c["value"] == "local-fixture"
@@ -191,8 +208,9 @@ class LiveFirefoxTests(unittest.TestCase):
                     self.assertIsNotNone(process.poll())
                 finally:
                     if process.poll() is None:
-                        process.terminate()  # Only this disposable, local-fixture browser.
-                        process.wait(timeout=5)
+                        # Only this disposable local-fixture browser. Include
+                        # Store Firefox's child so failed tests leave no orphan.
+                        handoff._stop_process(process)
             finally:
                 handoff.close()
 
