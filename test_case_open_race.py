@@ -847,10 +847,21 @@ class WarmTests(_FetcherFixture):
         super().setUp()
         self.fetcher._warmed = False
         self.fetcher._warm_up = mock.Mock()
+        self.fetcher._extension_usable = mock.Mock(return_value=False)
 
     def test_made_once_spotlight_opens(self):
         self.fetcher.warm()
         self.fetcher._warm_up.assert_called_once()
+
+    def test_an_available_extension_skips_the_scripted_homepage_visit(self):
+        self.fetcher._extension_usable.return_value = True
+        self.fetcher.warm()
+        self.fetcher._warm_up.assert_not_called()
+
+    def test_an_available_firefox_skips_the_scripted_homepage_visit(self):
+        with mock.patch.object(self.fetcher, "_browser_usable", return_value=True):
+            self.fetcher.warm()
+        self.fetcher._warm_up.assert_not_called()
 
     def test_not_while_google_is_refusing_the_session(self):
         self.fetcher._browser_first = True

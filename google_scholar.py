@@ -12,20 +12,12 @@ Strategy:
   3. Scrape the #gs_opinion div from that page, keeping its HTML.
   4. Cache everything in a local SQLite database to avoid re-fetching.
 
-Anti-blocking (see the "Browser impersonation" section below and
-:mod:`scholar_browser`): Google Scholar detects scripted clients by their TLS
-handshake.  Requests go out through curl_cffi impersonating a real browser
-(fingerprint + matching User-Agent), pinned per session.  On a challenge — a
-hard IP flag on the search endpoint — the fetch goes straight to driving the
-user's *actual* Firefox, whose genuine handshake plus their google.com cookies
-is the only thing that gets through, and where the user can answer a CAPTCHA
-should Google set one there too.  With the GetCases extension in Chrome or
-Edge (:mod:`scholar_extension`), the CAPTCHA is put to the user there instead:
-the page opens in their own browser, the extension hands it back, and the
-app's own requests then go out as that browser, with the CAPTCHA exemption
-Google gave it.  Only without any of these are the other fingerprints tried
-in turn.  Everything degrades gracefully: no curl_cffi → plain requests; no
-real browser → the local opinion DB and CourtListener answer instead.
+When a browser is available, fetch through it from the first request. The
+GetCases extension hands back the page loaded in Chrome or Edge
+(:mod:`scholar_extension`). Firefox (:mod:`scholar_browser`) can also fetch
+pages and hand a CAPTCHA to the reader. Installations without a browser
+route can still make direct requests. The local opinion database and
+CourtListener are available when a Scholar page cannot be fetched.
 
 The raw opinion HTML can be turned into a lightweight structured document
 with ``parse_opinion_blocks``, which preserves paragraphs, centering,
@@ -36,8 +28,8 @@ no separator, so sentences don't acquire stray gaps around formatting.
 
 Requires:
     pip install requests beautifulsoup4
-    pip install curl_cffi        # browser TLS impersonation (recommended)
-    pip install selenium         # real-Firefox fallback for a hard IP block
+    pip install curl_cffi        # optional direct-request transport
+    pip install selenium         # optional Firefox transport
 """
 
 from __future__ import annotations
@@ -350,7 +342,7 @@ _DEFAULT_DELAY = 3.0  # base seconds between outbound requests (jittered)
 _QUICK_HOP_DELAY = 1.0
 _QUICK_HOP_OFF_TTL = 24 * 3600.0  # how long a challenge after one turns them off
 _BLOCK_COOLDOWN = 180.0  # seconds to fail fast after every persona is challenged
-_BROWSER_FIRST_TTL = 6 * 3600.0  # how long to prefer the real browser after a block
+_BROWSER_FIRST_TTL = 6 * 3600.0  # remember the browser route across app restarts
 _RETRY_STATUSES = {500, 502, 503}  # transient Google hiccups, retried once
 _CACHE_PATH = Path.home() / ".cache" / "courtlistener_scholar.db"
 _COOKIE_STORE = Path.home() / ".cache" / "courtlistener_scholar_state.json"
@@ -363,10 +355,8 @@ _CAPTCHA_TIP = (
     "block clears on its own in a while."
 )
 _CAPTCHA_UNANSWERED_TIP = (
-    "[scholar] Google Scholar is challenging this computer and the real "
-    "browser did not get past the challenge either. Meanwhile the app serves "
-    "results from the local opinion database and CourtListener; the CAPTCHA "
-    "is offered again in a few minutes."
+    "[scholar] The browser did not return a usable Scholar page. "
+    "The local opinion database and CourtListener can still answer."
 )
 
 
@@ -2512,9 +2502,8 @@ class GoogleScholarFetcher:
         self._persona_ix = 0
         self._blocked_until = 0.0  # monotonic deadline of the fail-fast window
         self._warmed = False       # homepage visited this session
-        # Real-Firefox fallback (scholar_browser): the only channel that beats
-        # a hard IP flag on the search endpoint.  Started lazily, reused, and
-        # preferred once curl_cffi has proven blocked this session.
+        # Start Firefox lazily. Keep using a browser for this session once
+        # selected, including when the browser becomes temporarily unavailable.
         self._browser = None
         self._browser_lock = threading.Lock()
         self._browser_first = False
@@ -2538,9 +2527,8 @@ class GoogleScholarFetcher:
             self._blocked_until = time.monotonic() + min(
                 remaining, _BLOCK_COOLDOWN)
             print(f"[scholar] resuming block cooldown ({int(remaining)}s left)")
-        # Restore the browser-first window: while curl_cffi is known-blocked,
-        # skip the futile persona rotation (and the 8 doomed requests it fires
-        # at Google) and go straight to the real Firefox on the first fetch.
+        # Keep the browser route on a quick relaunch, even before the
+        # extension reconnects or Firefox is ready.
         try:
             self._browser_first_wall = float(
                 state.get("browser_first_until_wall", 0))
@@ -2548,8 +2536,7 @@ class GoogleScholarFetcher:
             self._browser_first_wall = 0.0
         if time.time() < self._browser_first_wall:
             self._browser_first = True
-            print("[scholar] curl_cffi recently blocked — using real Firefox "
-                  "first this session")
+            print("[scholar] using the browser route from the previous session")
         try:
             self._quick_hop_off_wall = float(
                 state.get("quick_hop_off_until_wall", 0))
@@ -3809,13 +3796,12 @@ class GoogleScholarFetcher:
             self._last_response = max(self._last_response, time.monotonic())
 
     def warm(self) -> None:
-        """Make the session's one homepage visit (see _warm_up) now, ahead of
-        a search the caller expects — the reader has just opened Spotlight —
-        so the search itself is not paced behind it.  Not when Google has
-        been refusing this session's own requests: the real Firefox is what
-        will be asked then."""
+        """Warm the direct session for Spotlight when it will handle the search."""
         if (self._warmed or self._browser_first
                 or time.monotonic() < self._blocked_until):
+            return
+        if self._extension_usable() or self._browser_usable():
+            self._browser_first = True
             return
         self._warm_up()
 
@@ -3823,7 +3809,7 @@ class GoogleScholarFetcher:
         """Visit the Scholar homepage once per session before the first
         search — acquiring the ordinary first-party cookies and giving the
         search request a natural referer chain, the way a browser arrives."""
-        if self._warmed:
+        if self._warmed or self._browser_first:
             return
         self._warmed = True
         try:
@@ -3891,14 +3877,11 @@ class GoogleScholarFetcher:
             return False
 
     def _extension_get(self, url: str):
-        """Fetch *url* through the reader's Chrome or Edge, where the GetCases
-        extension is, for a challenge only they can answer: the page opens
-        there, and once it loads past Google's check the extension hands it
-        back (:mod:`scholar_extension`).  What it hands over besides --
-        Google's cookies, the CAPTCHA exemption among them, and the
-        browser's headers -- becomes the persona the app's own requests
-        wear next.  Returns a :class:`_BrowserResponse`, or None when the
-        page wasn't answered."""
+        """Fetch *url* in Chrome or Edge and return the extension's page.
+
+        The browser session retains any clearance from a check. The extension
+        also shares cookies and headers that the fetcher can keep for reuse.
+        """
         import scholar_extension
         got = scholar_extension.fetch(url)
         if got is None:
@@ -3940,90 +3923,55 @@ class GoogleScholarFetcher:
                 {"name": name, "value": value, "domain": ".google.com",
                  "path": "/", "secure": True}
                 for name, value in ident.cookies.items()]
-        print(f"[scholar] now asking as {ident.browser} "
-              f"(its cookies and headers, from the GetCases extension)")
+        print(f"[scholar] received Scholar cookies and headers from {ident.browser}")
 
     def _get(self, url: str, referer: str = "", once: bool = False):
-        """GET a Scholar page, in order of increasing weight:
+        """Fetch through the extension or Firefox when available.
 
-          1. the curl_cffi persona session;
-          2. the user's real Firefox, at the first challenge — the only
-             channel that beats a hard IP flag, and where the user can answer
-             a CAPTCHA if Google sets one there too.  Only when Firefox can't
-             be driven (no Selenium or no Firefox), and there is no Chrome or
-             Edge with the GetCases extension either, are the other
-             fingerprints tried in turn instead;
-          3. the reader's Chrome or Edge, where the GetCases extension is
-             (:mod:`scholar_extension`), when the hidden Firefox is
-             challenged too or there is none: the page opens there, the
-             reader answers the CAPTCHA if Google asks, and the extension
-             hands the page back.  With it to hand, that is where a CAPTCHA
-             is put to the reader, rather than a Firefox window;
-          4. a fail-fast cooldown, so the local-DB / CourtListener fallbacks
-             answer instantly instead of hammering Google.
-
-        Once the browser becomes the working channel (curl_cffi blocked, or a
-        cooldown is in effect), it is used *first* so a blocked run doesn't pay
-        the slow persona rotation on every fetch.
-
-        *once* — for a page there is a stored copy of to fall back on — makes
-        one attempt, on the channel now working, and raises if it fails:
-        nothing is sent during a cooldown, and a challenge or a hiccup is
-        neither retried nor escalated (a challenged fingerprint is still
-        rotated out for the next fetch).  Nor is a CAPTCHA put to the user."""
-        # If the extension has already observed a normal Scholar page in the
-        # reader's browser, use that browser's current identity before making
-        # another scripted request.  The bridge receives this asynchronously
-        # from the extension, including when the user passed a check earlier.
-        if self._extension_usable():
-            self._adopt_browser_identity()
+        Direct requests serve installations without a browser route. A browser
+        failure returns control to the caller's cache and other sources.
+        A stored-copy check (*once*) can use headless Firefox or the direct
+        route when selected, and skips CAPTCHA prompts and retries.
+        """
         now = time.monotonic()
-        if once and now < self._blocked_until:
+        cooling_down = now < self._blocked_until
+        if once and cooling_down:
             raise ScholarError(
                 f"blocked (cooling down {int(self._blocked_until - now)}s)")
-        browser_preferred = self._browser_first or now < self._blocked_until
-        extension = False
 
-        def usable(resp) -> bool:
-            return resp is not None and not scholar_pages.response_needs_browser(
-                url, getattr(resp, "url", "") or url,
-                getattr(resp, "text", "") or "", resp.status_code)
-
-        def browser_fallback():
-            nonlocal extension
-            extension = not once and self._extension_usable()
-            if extension:
+        extension = self._extension_usable()
+        firefox = self._browser_usable()
+        if self._browser_first or extension or firefox:
+            self._browser_first = True
+            channels = []
+            if extension and not once:
+                channels.append((self._extension_get, {}))
+            if firefox:
+                channels.append((self._browser_get, {"solve": not once}))
+            for fetch, options in channels:
+                self._throttle()
                 try:
-                    resp = self._extension_get(url)
+                    resp = fetch(url, **options)
                 except Exception as exc:
-                    print(f"[scholar] extension handoff failed: {type(exc).__name__}")
+                    print(f"[scholar] browser handoff failed: {type(exc).__name__}")
                     resp = None
-                if usable(resp):
-                    self._blocked_until = 0.0
-                    self._save_state()
+                finally:
+                    self._note_response()
+                if resp is not None and not scholar_pages.response_needs_browser(
+                        url, resp.url or url, resp.text, resp.status_code):
+                    self._mark_browser_working()
                     return resp
-                # A failed, cancelled or cooling-down extension must not
-                # suppress the independent Firefox handoff.
-            resp = (self._browser_get(url, solve=not once) if browser_preferred
-                    else self._browser_get(url))
-            if usable(resp):
-                self._mark_browser_working()
-                return resp
-            return None
-
-        if browser_preferred:
-            # The installed extension browser has the reader's ordinary
-            # Google session and can hand its page and clearance straight
-            # back. Prefer it over a separate, automation-driven Firefox.
-            resp = browser_fallback()
-            if resp is not None:
-                return resp
             if once:
                 raise ScholarError("the browser didn't return the page")
-            if now < self._blocked_until:
-                # Still cooling down and the browser can't help — fail fast.
-                raise ScholarError(
-                    f"blocked (cooling down {int(self._blocked_until - now)}s)")
+            if not cooling_down:
+                self._blocked_until = time.monotonic() + _BLOCK_COOLDOWN
+                self._save_state()
+                print(_CAPTCHA_UNANSWERED_TIP)
+            raise ScholarError("Scholar browser request blocked or unavailable")
+
+        if cooling_down:
+            raise ScholarError(
+                f"blocked (cooling down {int(self._blocked_until - now)}s)")
 
         self._warm_up()
         headers = {"Referer": referer or (SCHOLAR_BASE + "/")}
@@ -4050,9 +3998,6 @@ class GoogleScholarFetcher:
                           "back to the usual pacing for opinion pages")
                     self._save_state()
                 self._rotate_persona()
-                if not once and (self._browser_usable()
-                                 or self._extension_usable()):
-                    break  # straight to the real browser, below
                 continue
             if resp.status_code in _RETRY_STATUSES:
                 if once:
@@ -4066,26 +4011,13 @@ class GoogleScholarFetcher:
         if once:
             raise ScholarError(f"{last_status} (one attempt)")
 
-        # Challenged — the real browser is the way through.  Not asked twice
-        # for one page: where it was asked first, above, and failed, it would
-        # only fail again (or put the same CAPTCHA to the user again).
-        if not browser_preferred:
-            resp = browser_fallback()
-            if resp is not None:
-                return resp
-
         self._blocked_until = time.monotonic() + _BLOCK_COOLDOWN
         self._save_state()  # the cooldown survives an app restart
-        print(_CAPTCHA_TIP if self._browser_dead and not extension
-              else _CAPTCHA_UNANSWERED_TIP)
+        print(_CAPTCHA_TIP)
         raise ScholarError(f"{last_status} blocked")
 
     def _mark_browser_working(self) -> None:
-        """Record that the real Firefox is the working channel: prefer it for
-        the rest of this session and, for a while, across restarts — so a
-        flagged IP doesn't re-pay the persona rotation (or re-fire 8 doomed
-        requests at Google) on every launch.  The window auto-expires, after
-        which curl_cffi is retried in case the flag has cleared."""
+        """Clear the cooldown and remember the browser route on relaunch."""
         self._browser_first = True
         self._blocked_until = 0.0
         self._browser_first_wall = time.time() + _BROWSER_FIRST_TTL

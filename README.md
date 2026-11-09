@@ -439,20 +439,19 @@ things:
    passed (the window comes to the front only if it needs you), and the
    extension hands the clearance to GetCases. With neither, English Reports
    cases open in your web browser.
-2. **Google Scholar when Google blocks the app.** Heavy use can make Google
-   Scholar answer with an "unusual traffic" challenge. With Firefox and the
-   `selenium` package installed, GetCases then goes straight to a private,
-   invisible copy of Firefox, which Google usually accepts. If even that is
-   challenged, an ordinary Firefox window opens on Google's CAPTCHA, in a
-   separate profile that Selenium never controls. Answer the check there;
+2. **Google Scholar searches.** With the
+   [GetCases extension](browser_extension/README.md) in Chrome or Edge,
+   GetCases opens Scholar in that browser from the first request. If the
+   extension cannot return a page, GetCases can use an invisible Firefox
+   session when Firefox and `selenium` are installed. When Firefox gets a
+   CAPTCHA, an ordinary Firefox window opens in a separate profile. Answer
+   the check there, and
    **once Scholar's results appear, close that window** to return to GetCases.
    GetCases imports the cleared cookies and retries the page, keeping them
    for later searches and app restarts. If the check remains unanswered,
-   GetCases won't open another window for ten minutes. With the
-   [Chrome extension](browser_extension/README.md) in Chrome or Edge, the
-   CAPTCHA opens there instead, with or without Firefox: answer it in your own
-   browser and the case opens in GetCases. Without either, GetCases falls back
-   to its local database and to CourtListener for the text.
+   GetCases waits ten minutes before offering another Firefox check. With
+   neither browser route available, GetCases can make direct requests. The
+   local database and CourtListener can help when Scholar is unavailable.
 
 ### A LaTeX distribution
 

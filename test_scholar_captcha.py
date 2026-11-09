@@ -1,11 +1,10 @@
-"""A Google Scholar CAPTCHA goes straight to Firefox, where the reader answers it.
+"""Google Scholar uses an available browser from the first request.
 
 Two rules:
 
-  * **One challenge is enough.**  With Selenium and Firefox installed, the
-    first challenge to the app's own requests sends the page to the real
-    Firefox at once, rather than through the other browser fingerprints in
-    turn.  Without them, the fingerprints are still tried, as before.
+  * **An available browser goes first.** The extension and Selenium Firefox
+    handle Scholar directly. The app's own HTTP session is for installations
+    without either browser route.
   * **A challenge to Firefox is put to the reader.**  The page opens again in
     a separate, ordinary Firefox window. Once results appear, the reader closes
     that window; its cleared cookies are imported before retrying. Selenium
@@ -116,40 +115,23 @@ class _FetcherFixture(unittest.TestCase):
             self.session.get.side_effect = responses
 
 
-class StraightToFirefoxTests(_FetcherFixture):
-    def test_the_first_challenge_goes_straight_to_firefox(self):
-        resp = self.fetcher._get(URL)
-        self.assertEqual(self.session.get.call_count, 1)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-        self.assertEqual(resp.text, RESULTS)
+class DirectHTTPTests(_FetcherFixture):
+    def setUp(self):
+        super().setUp()
+        self.fetcher._browser_usable.return_value = False
+        self.fetcher._browser_get.return_value = None
 
-    def test_which_is_then_asked_first(self):
-        self.fetcher._get(URL)
-        self.assertTrue(self.fetcher._browser_first)
-
-    def test_a_captcha_served_with_http_200_also_opens_firefox(self):
-        self._answer(200, URL)
-        self.session.get.return_value.text = CHALLENGE
-        self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-
-    def test_an_http_403_also_opens_firefox(self):
-        self._answer(403, URL)
-        self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-
-    def test_unrecognized_http_200_search_pages_go_to_firefox(self):
+    def test_unrecognized_http_200_search_pages_are_not_returned(self):
         pages = ["<html>We cannot process automated queries right now.</html>",
                  "<html><h1>Access denied</h1></html>",
-                 '<html><div id="gs_res_ccl"></div></html>', ""]
+                 '<html><div id="gs_res_ccl"></div></html>', CHALLENGE, ""]
         for page in pages:
             with self.subTest(page=page):
-                self.fetcher._browser_first = False
-                self.fetcher._browser_get.reset_mock()
+                self.fetcher._blocked_until = 0.0
                 self._answer(200, URL)
                 self.session.get.return_value.text = page
-                self.assertEqual(self.fetcher._get(URL).text, RESULTS)
-                self.fetcher._browser_get.assert_called_once_with(URL)
+                with self.assertRaises(ScholarError):
+                    self.fetcher._get(URL)
 
     def test_a_genuine_empty_search_does_not_open_a_browser(self):
         self._answer(200, URL)
@@ -166,26 +148,25 @@ class StraightToFirefoxTests(_FetcherFixture):
         self.fetcher._browser_get.assert_not_called()
         self.fetcher._extension_get.assert_not_called()
 
-    def test_a_later_search_switches_to_firefox_after_successful_searches(self):
+    def test_a_later_block_is_detected_after_successful_searches(self):
         self._answer(200, URL)
         for words in ("first search", "second search", "third search"):
             self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
-        self.fetcher._browser_get.assert_not_called()
         self.session.get.return_value.text = '<html><h1>Access denied</h1></html>'
-        found = self.fetcher.search_cases("later search", allow_db_fallback=False)
-        self.assertEqual(len(found), 1)
-        self.fetcher._browser_get.assert_called_once()
-        self.assertTrue(self.fetcher._browser_first)
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
 
-    def test_without_firefox_the_other_fingerprints_are_tried(self):
-        self.fetcher._browser_usable.return_value = False
-        self.fetcher._browser_get.return_value = None
+    def test_other_fingerprints_are_tried_before_cooling_down(self):
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.assertEqual(self.session.get.call_count, 4)
+        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
         self.assertEqual(self.session.get.call_count, 4)
 
-    def test_and_one_that_passes_is_used(self):
-        self.fetcher._browser_usable.return_value = False
+    def test_a_fingerprint_that_passes_is_used(self):
         self._answer((429, "https://scholar.google.com/sorry/"),
                      (200, URL))
         resp = self.fetcher._get(URL)
@@ -201,49 +182,59 @@ class StraightToFirefoxTests(_FetcherFixture):
         self.assertEqual(resp.status_code, 200)
         self.fetcher._browser_get.assert_not_called()
 
-    def test_an_unanswered_captcha_is_given_up_with_a_cooldown(self):
-        self.fetcher._browser_get.return_value = None
-        with self.assertRaises(ScholarError):
-            self.fetcher._get(URL)
-        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
-
-
 class FirefoxFirstTests(_FetcherFixture):
-    """Firefox already the working channel: it is asked before anything."""
-
-    def setUp(self):
-        super().setUp()
-        self.fetcher._browser_first = True
-
-    def test_the_page_comes_from_firefox(self):
-        self.fetcher._get(URL)
+    def test_the_first_page_comes_from_firefox_without_http_warmup(self):
+        self.fetcher._warmed = False
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
         self.session.get.assert_not_called()
 
-    def test_an_unanswered_captcha_is_not_put_twice_for_one_page(self):
+    def test_later_searches_still_use_firefox(self):
+        for words in ("first search", "second search", "third search"):
+            self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
+        self.assertEqual(self.fetcher._browser_get.call_count, 3)
+        self.session.get.assert_not_called()
+
+    def test_an_unanswered_captcha_cools_down_without_using_http(self):
         self.fetcher._browser_get.return_value = None
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
-        self.assertEqual(self.fetcher._browser_get.call_count, 1)
-        # Nor are the other fingerprints tried, with Firefox to hand.
-        self.assertEqual(self.session.get.call_count, 1)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
+        self.session.get.assert_not_called()
+
+    def test_losing_firefox_after_a_success_does_not_enable_http(self):
+        self.fetcher._get(URL)
+        self.fetcher._browser_usable.return_value = False
+        self.fetcher._browser_get.return_value = None
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.session.get.assert_not_called()
 
     def test_a_check_for_a_newer_version_puts_no_captcha_to_the_reader(self):
         self.fetcher._get(URL, once=True)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.session.get.assert_not_called()
 
     def test_a_block_page_from_firefox_is_not_returned_as_an_empty_search(self):
         self.fetcher._browser_get.return_value = gs._BrowserResponse(
             '<html><div id="gs_res_ccl"></div></html>', URL)
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
-        self.assertEqual(self.fetcher._browser_get.call_count, 1)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.session.get.assert_not_called()
 
     def test_recovery_clears_the_cooldown_for_a_following_cached_copy_check(self):
         self.fetcher._blocked_until = time.monotonic() + 60
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL, once=True)
+        self.fetcher._browser_get.assert_not_called()
         self.fetcher._get(URL)
         self.assertEqual(self.fetcher._blocked_until, 0.0)
         self.fetcher._get(URL, once=True)
+        self.assertEqual(self.fetcher._browser_get.call_args_list, [
+            mock.call(URL, solve=True), mock.call(URL, solve=False)])
+        self.session.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -262,73 +253,71 @@ class ExtensionBrowserTests(_FetcherFixture):
         f._extension_get.return_value = gs._BrowserResponse(RESULTS, URL)
         f._browser_get.return_value = None     # the hidden Firefox challenged
 
-    def test_the_extension_is_preferred_without_starting_firefox(self):
+    def test_the_extension_goes_first_without_firefox_or_http_warmup(self):
+        self.fetcher._warmed = False
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         resp = self.fetcher._get(URL)
         self.fetcher._browser_get.assert_not_called()
         self.fetcher._extension_get.assert_called_once_with(URL)
+        self.session.get.assert_not_called()
         self.assertEqual(resp.text, RESULTS)
 
-    def test_one_challenge_is_enough_without_firefox_too(self):
+    def test_the_extension_goes_first_when_firefox_is_unavailable(self):
         self.fetcher._browser_usable.return_value = False
-        self.fetcher._get(URL)
-        self.assertEqual(self.session.get.call_count, 1)
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
         self.fetcher._extension_get.assert_called_once_with(URL)
+        self.session.get.assert_not_called()
 
-    def test_an_installed_extension_is_preferred_even_when_firefox_could_pass(self):
-        self.fetcher._browser_get.return_value = gs._BrowserResponse(
-            RESULTS, URL)
-        self.fetcher._get(URL)
-        self.fetcher._extension_get.assert_called_once_with(URL)
-        self.fetcher._browser_get.assert_not_called()
-        self.assertFalse(self.fetcher._browser_first)
-
-    def test_the_browser_answering_is_not_firefox_working(self):
-        # Next time the app's own requests go first again, wearing what the
-        # browser handed over (see _adopt_browser_identity).
-        self.fetcher._get(URL)
-        self.assertFalse(self.fetcher._browser_first)
-
-    def test_unanswered_there_too_cools_down(self):
+    def test_an_unanswered_extension_cools_down_without_using_http(self):
         self.fetcher._extension_get.return_value = None
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
         self.assertGreater(self.fetcher._blocked_until, time.monotonic())
+        self.session.get.assert_not_called()
 
-    def test_with_firefox_first_too(self):
-        self.fetcher._browser_first = True
-        self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_not_called()
+    def test_a_failed_extension_does_not_enable_http_after_disconnect(self):
+        self.fetcher._browser_usable.return_value = False
+        self.fetcher._extension_get.return_value = None
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.fetcher._extension_usable.return_value = False
+        self.fetcher._blocked_until = 0.0
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
         self.fetcher._extension_get.assert_called_once_with(URL)
         self.session.get.assert_not_called()
 
-    def test_not_for_a_check_for_a_newer_version(self):
-        self.fetcher._browser_first = True
+    def test_an_extension_only_cached_copy_check_skips_network(self):
+        self.fetcher._browser_usable.return_value = False
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL, once=True)
         self.fetcher._extension_get.assert_not_called()
+        self.fetcher._browser_get.assert_not_called()
+        self.session.get.assert_not_called()
+
+    def test_a_cached_copy_check_uses_silent_firefox_with_both_available(self):
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
+        self.assertEqual(self.fetcher._get(URL, once=True).text, RESULTS)
+        self.fetcher._extension_get.assert_not_called()
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.session.get.assert_not_called()
 
     def test_a_failed_extension_falls_through_to_firefox(self):
         self.fetcher._extension_get.return_value = None
         self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         self.assertEqual(self.fetcher._get(URL).text, RESULTS)
         self.fetcher._extension_get.assert_called_once_with(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.session.get.assert_not_called()
 
     def test_an_extension_error_falls_through_to_firefox(self):
         self.fetcher._extension_get.side_effect = OSError("bridge disconnected")
         self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         self.assertEqual(self.fetcher._get(URL).text, RESULTS)
-        self.fetcher._browser_get.assert_called_once_with(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.session.get.assert_not_called()
 
-    def test_an_extension_block_page_falls_through_to_firefox(self):
-        self.fetcher._extension_get.return_value = gs._BrowserResponse(
-            '<html><h1>Access denied</h1></html>', URL)
-        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
-        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-
-    def test_a_cooling_down_extension_does_not_skip_firefox_when_browser_first(self):
-        self.fetcher._browser_first = True
+    def test_a_cooling_down_extension_does_not_skip_firefox(self):
         self.fetcher._blocked_until = time.monotonic() + 60
         self.fetcher._extension_get.return_value = None
         self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
@@ -336,15 +325,19 @@ class ExtensionBrowserTests(_FetcherFixture):
         self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
         self.assertEqual(self.fetcher._blocked_until, 0.0)
 
-    def test_a_later_block_switches_to_the_extension_after_successful_searches(self):
-        self._answer(200, URL)
+    def test_a_later_extension_block_falls_through_to_firefox(self):
         for words in ("first search", "second search", "third search"):
             self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
-        self.fetcher._extension_get.assert_not_called()
-        self.session.get.return_value.text = '<div id="gs_res_ccl"></div>'
+        self.assertEqual(self.fetcher._extension_get.call_count, 3)
+        self.fetcher._browser_get.assert_not_called()
+        self.fetcher._extension_get.return_value = gs._BrowserResponse(
+            '<div id="gs_res_ccl"></div>', URL)
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         found = self.fetcher.search_cases("later search", allow_db_fallback=False)
         self.assertEqual(len(found), 1)
-        self.fetcher._extension_get.assert_called_once()
+        self.assertEqual(self.fetcher._extension_get.call_count, 4)
+        self.fetcher._browser_get.assert_called_once()
+        self.session.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
