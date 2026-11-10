@@ -490,6 +490,7 @@ async function sendClearance(details, headers) {
   if (clearanceSite(url) === "commonlii.org" && !cookies.some((c) => c.name === "cf_clearance")) return;
   await loadErrands();
   const errand = errands.get(tabId);
+  if (handing.has(tabId)) return;
   handing.add(tabId);
   try {
     const reply = await appFetch("/clearance", {
@@ -534,14 +535,12 @@ async function sendClearance(details, headers) {
 // with nothing, and is asked again.  (The asking keeps the worker awake; an
 // alarm wakes it to ask again should the browser have stopped it.)
 //
-// The page opens in a minimized window, never seen: beside the reader's own
-// windows, a normal one; with none of theirs open, a popup, which the browser
-// never restores in place of their last session (a normal window opened
-// then would be).  A popup can't be made minimized, so it is minimized as
-// soon as it is there.  Once GetCases has what it wanted from the page
+// The page opens in an inactive tab, or a minimized popup when there is no
+// regular browser window. The popup preserves the reader's previous session.
+// Once GetCases has what it wanted from the page
 // (above), its tab closes.  When there is something for the reader to do
-// there instead — Google's CAPTCHA, or a check that hasn't let the page
-// through after a few seconds — the window comes to the front.  GetCases is
+// there instead — Google's CAPTCHA or consent, or a CommonLII check that
+// hasn't passed after a few seconds — the window comes to the front. GetCases is
 // told how it went (POST /errand): opened, shown, done, or closed by the
 // reader.
 
@@ -551,9 +550,7 @@ async function sendClearance(details, headers) {
 const ERRAND_GRACE = 10000;
 /** How long one may take to load at all before the reader is shown it. */
 const ERRAND_LOAD = 45000;
-/** The popup's size: small while it is minimized as it opens, then big
- *  enough for a CAPTCHA's pictures if the reader has to answer one. */
-const ERRAND_POPUP = { width: 360, height: 280 };
+/** Enough space for a CAPTCHA's pictures if the reader has to answer one. */
 const ERRAND_POPUP_SHOWN = { width: 1000, height: 820 };
 
 /** The errands under way, by their tab: { id, tabId, popup, shown }.  Kept
@@ -627,22 +624,25 @@ async function runErrand({ id, url }) {
   }
   await loadErrands();
   const windows = await chrome.windows.getAll({ windowTypes: ["normal"], populate: true });
-  const readers = windows.some((w) => !(w.tabs || []).some((t) => errands.has(t.id)));
+  const reader = windows.find((w) => !w.incognito &&
+    (w.tabs || []).some((t) => !errands.has(t.id)));
   // Opened blank, and sent to the page once it is known to be an errand's:
   // a page that loads fast is not done with before then.
-  let win;
-  if (readers) {
-    win = await chrome.windows.create({ url: "about:blank", state: "minimized" });
+  let tab;
+  if (reader) {
+    tab = await chrome.tabs.create({ windowId: reader.id, url: "about:blank", active: false });
   } else {
-    win = await chrome.windows.create({ url: "about:blank", type: "popup", focused: false, ...ERRAND_POPUP });
-    await chrome.windows.update(win.id, { state: "minimized" });
+    const win = await chrome.windows.create({
+      url: "about:blank", type: "popup", state: "minimized", focused: false,
+    });
+    tab = win.tabs && win.tabs[0];
   }
-  const tab = win.tabs && win.tabs[0];
   if (!tab) {
     await reportErrand(id, "closed");
     return;
   }
-  const errand = { id, tabId: tab.id, popup: !readers, shown: false };
+  const errand = { id, url, tabId: tab.id, popup: !reader, shown: false,
+    expires: Date.now() + 300000 };
   errands.set(tab.id, errand);
   await saveErrands();
   armErrand(errand, ERRAND_LOAD);
@@ -658,8 +658,32 @@ function armErrand(errand, ms) {
     errandTimers.delete(errand.tabId);
     if (!errands.has(errand.tabId) || errand.shown) return;
     if (handing.has(errand.tabId)) armErrand(errand, 4000);
-    else showErrand(errand);
+    else checkErrand(errand).catch(() => {
+      if (errands.has(errand.tabId) && !errand.shown) armErrand(errand, ERRAND_GRACE);
+    });
   }, ms));
+}
+
+/** A slow page handoff is not evidence of a CAPTCHA. For Scholar, re-read
+ *  the already loaded page without making another request to Google. */
+async function checkErrand(errand) {
+  if (!errands.has(errand.tabId) || errand.shown) return;
+  const tab = await chrome.tabs.get(errand.tabId);
+  if (needsReader(tab.url)) return showErrand(errand);
+  if (clearanceSite(errand.url || tab.url) !== "scholar.google.com") {
+    return showErrand(errand);  // Preserve CommonLII's interactive fallback.
+  }
+  if (tab.status === "complete" && clearanceSite(tab.url) === "scholar.google.com") {
+    await sendClearance({ tabId: tab.id, url: tab.url });
+  }
+  if (!errands.has(errand.tabId) || errand.shown) return;
+  if (!errand.expires) errand.expires = Date.now() + 300000;
+  if (Date.now() >= errand.expires) {
+    // Release an unsuccessful background tab; the app can try Firefox.
+    await finishErrand(errand, "closed");
+  } else {
+    armErrand(errand, ERRAND_GRACE);
+  }
 }
 
 /** Bring an errand's window to the front: there is something for the
@@ -679,18 +703,19 @@ async function showErrand(errand) {
       ...(errand.popup ? ERRAND_POPUP_SHOWN : {}),
       focused: true,
     });
+    await chrome.tabs.update(errand.tabId, { active: true });
   } catch (e) {
     // The window has gone.
   }
 }
 
 /** GetCases has what it wanted from an errand's page: close its tab. */
-async function finishErrand(errand) {
+async function finishErrand(errand, event = "done") {
   if (!errands.delete(errand.tabId)) return;
   clearTimeout(errandTimers.get(errand.tabId));
   errandTimers.delete(errand.tabId);
   await saveErrands();
-  await reportErrand(errand.id, "done");
+  await reportErrand(errand.id, event);
   try {
     await chrome.tabs.remove(errand.tabId);
   } catch (e) {
@@ -703,7 +728,8 @@ async function finishErrand(errand) {
 function needsReader(url) {
   try {
     const { hostname, pathname } = new URL(url);
-    return /(^|\.)google\.[a-z.]+$/.test(hostname) && pathname.startsWith("/sorry/");
+    return /(^|\.)google\.[a-z.]+$/.test(hostname) &&
+      (pathname === "/sorry" || pathname.startsWith("/sorry/") || hostname === "consent.google.com");
   } catch (e) {
     return false;
   }

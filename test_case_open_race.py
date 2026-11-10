@@ -753,7 +753,6 @@ class _FetcherFixture(unittest.TestCase):
         self.fetcher = GoogleScholarFetcher(
             cache_path=Path(self._tmp.name) / "cache.db", delay=self.DELAY)
         self.fetcher._browser_dead = True
-        self.fetcher._warmed = True
         self.fetcher._browser_first = False
         self.fetcher._blocked_until = 0.0
         self.fetcher._quick_hop_off_wall = 0.0
@@ -809,24 +808,16 @@ class QuickHopTests(_FetcherFixture):
         self.assertFalse(quick)
         self.assertGreaterEqual(slept, self.DELAY - 0.5)
 
-    def test_a_challenge_after_one_turns_them_off_for_a_day(self):
-        self._just_answered()
-        session = mock.Mock()
-        session.get.return_value = SimpleNamespace(
-            status_code=429, url="https://scholar.google.com/sorry/", text="")
-        self.fetcher._session = session
-        self.fetcher._rotate_persona = mock.Mock()
+    def test_a_direct_request_waits_the_full_delay_after_the_answer(self):
+        self.fetcher._last_request = 990.0
+        self.fetcher._last_response = 1000.0
         self.fetcher.grant_quick_hop()
         self.fetcher._hop.page = True
-        with mock.patch.object(gs.time, "sleep"):
-            with self.assertRaises(gs.ScholarError):
-                self.fetcher._get("https://scholar.google.com/scholar_case?"
-                                  "case=1", once=True)
-        self.assertGreater(self.fetcher._quick_hop_off_wall,
-                           time.time() + 23 * 3600)
-        self.fetcher._save_state.assert_called()
-        self.fetcher.grant_quick_hop()
-        self.assertFalse(self._throttle(page=True)[0])
+        with (mock.patch.object(gs.time, "monotonic", return_value=1000.0),
+              mock.patch.object(gs.random, "uniform", return_value=1.0),
+              mock.patch.object(gs.time, "sleep") as sleep):
+            self.assertFalse(self.fetcher._throttle(direct=True))
+        sleep.assert_called_once_with(self.DELAY)
 
     def test_requests_from_two_threads_are_spaced_from_each_other(self):
         self.fetcher._last_request = time.monotonic()
@@ -838,32 +829,6 @@ class QuickHopTests(_FetcherFixture):
                 slots.append(self.fetcher._last_request)
         real_sleep(0)
         self.assertGreaterEqual(slots[1] - slots[0], self.DELAY - 0.01)
-
-
-class WarmTests(_FetcherFixture):
-    """Spotlight opened: the session's homepage visit, made now."""
-
-    def setUp(self):
-        super().setUp()
-        self.fetcher._warmed = False
-        self.fetcher._warm_up = mock.Mock()
-
-    def test_made_once_spotlight_opens(self):
-        self.fetcher.warm()
-        self.fetcher._warm_up.assert_called_once()
-
-    def test_not_while_google_is_refusing_the_session(self):
-        self.fetcher._browser_first = True
-        self.fetcher.warm()
-        self.fetcher._browser_first = False
-        self.fetcher._blocked_until = time.monotonic() + 60
-        self.fetcher.warm()
-        self.fetcher._warm_up.assert_not_called()
-
-    def test_nor_twice(self):
-        self.fetcher._warmed = True
-        self.fetcher.warm()
-        self.fetcher._warm_up.assert_not_called()
 
 
 class MissMemoryTests(_FetcherFixture):

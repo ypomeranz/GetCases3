@@ -1,11 +1,10 @@
-"""A Google Scholar CAPTCHA goes straight to Firefox, where the reader answers it.
+"""Google Scholar uses an available browser from the first request.
 
 Two rules:
 
-  * **One challenge is enough.**  With Selenium and Firefox installed, the
-    first challenge to the app's own requests sends the page to the real
-    Firefox at once, rather than through the other browser fingerprints in
-    turn.  Without them, the fingerprints are still tried, as before.
+  * **An available browser goes first.** The extension and Selenium Firefox
+    handle Scholar directly. The app's own HTTP session is for installations
+    without either browser route.
   * **A challenge to Firefox is put to the reader.**  The page opens again in
     a separate, ordinary Firefox window. Once results appear, the reader closes
     that window; its cleared cookies are imported before retrying. Selenium
@@ -19,14 +18,19 @@ import sys
 import json
 import sqlite3
 import tempfile
+import threading
 import time
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 from email.utils import formatdate
 from urllib.parse import urlencode
+
+from requests import HTTPError
+from requests.structures import CaseInsensitiveDict
 
 import google_scholar as gs
 import scholar_browser as sb
@@ -73,14 +77,13 @@ def _write_session(path, state):
 class _FetcherFixture(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        for patcher in (mock.patch.object(GoogleScholarFetcher, "_load_state", return_value={}),
+        for patcher in (mock.patch.object(gs, "_COOKIE_STORE", Path(self._tmp.name) / "state.json"),
                         mock.patch.object(gs, "_browser_google_cookies", return_value={})):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.fetcher = GoogleScholarFetcher(
             cache_path=Path(self._tmp.name) / "cache.db", delay=0.0)
         f = self.fetcher
-        f._warmed = True
         f._browser_first = False
         f._blocked_until = 0.0
         f._save_state = mock.Mock()   # leave the real state be
@@ -101,55 +104,46 @@ class _FetcherFixture(unittest.TestCase):
         self.fetcher._db.close()
         self._tmp.cleanup()
 
-    def _answer(self, *answers):
-        """Each answer a (status, url) pair; a lone pair answers every time."""
-        if len(answers) == 2 and isinstance(answers[0], int):
-            answers = (answers,)
-        responses = [SimpleNamespace(status_code=status, url=url,
-                                     text=RESULTS,
-                                     raise_for_status=lambda: None)
-                     for status, url in answers]
-        if len(responses) == 1:
-            self.session.get.return_value = responses[0]
-            self.session.get.side_effect = None
-        else:
-            self.session.get.side_effect = responses
+    @staticmethod
+    def _response(status, url=URL, *, headers=None, text=RESULTS):
+        response = SimpleNamespace(status_code=status, url=url, text=text,
+                                   headers=CaseInsensitiveDict(headers or {}))
+        response.raise_for_status = mock.Mock(side_effect=(
+            HTTPError(f"HTTP {status}", response=response) if status >= 400 else None))
+        return response
+
+    def _answer(self, status, url=URL, **kwargs):
+        self.session.get.return_value = self._response(status, url, **kwargs)
+        self.session.get.side_effect = None
 
 
-class StraightToFirefoxTests(_FetcherFixture):
-    def test_the_first_challenge_goes_straight_to_firefox(self):
-        resp = self.fetcher._get(URL)
-        self.assertEqual(self.session.get.call_count, 1)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-        self.assertEqual(resp.text, RESULTS)
+class DirectHTTPTests(_FetcherFixture):
+    def setUp(self):
+        super().setUp()
+        self.fetcher._browser_usable.return_value = False
+        self.fetcher._browser_get.return_value = None
 
-    def test_which_is_then_asked_first(self):
-        self.fetcher._get(URL)
-        self.assertTrue(self.fetcher._browser_first)
+    def test_the_first_direct_search_requests_only_the_results_page(self):
+        url = "https://scholar.google.com/scholar?q=Brown&as_sdt=2006"
+        self._answer(200, url)
+        results = self.fetcher.search_cases("Brown", allow_db_fallback=False)
+        self.assertEqual(len(results), 1)
+        self.assertEqual([c.args[0] for c in self.session.get.call_args_list], [url])
+        self.assertFalse(self.session.get.call_args.kwargs["allow_redirects"])
 
-    def test_a_captcha_served_with_http_200_also_opens_firefox(self):
-        self._answer(200, URL)
-        self.session.get.return_value.text = CHALLENGE
-        self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-
-    def test_an_http_403_also_opens_firefox(self):
-        self._answer(403, URL)
-        self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-
-    def test_unrecognized_http_200_search_pages_go_to_firefox(self):
+    def test_unrecognized_http_200_search_pages_are_not_returned(self):
         pages = ["<html>We cannot process automated queries right now.</html>",
                  "<html><h1>Access denied</h1></html>",
-                 '<html><div id="gs_res_ccl"></div></html>', ""]
+                 '<html><div id="gs_res_ccl"></div></html>', CHALLENGE, ""]
         for page in pages:
             with self.subTest(page=page):
-                self.fetcher._browser_first = False
-                self.fetcher._browser_get.reset_mock()
-                self._answer(200, URL)
-                self.session.get.return_value.text = page
-                self.assertEqual(self.fetcher._get(URL).text, RESULTS)
-                self.fetcher._browser_get.assert_called_once_with(URL)
+                self.fetcher._blocked_until = 0.0
+                self.session.get.reset_mock()
+                self._answer(200, text=page)
+                with self.assertRaises(ScholarError):
+                    self.fetcher._get(URL)
+                self.assertEqual(self.session.get.call_count, 1)
+                self.assertGreater(self.fetcher._blocked_until, time.monotonic())
 
     def test_a_genuine_empty_search_does_not_open_a_browser(self):
         self._answer(200, URL)
@@ -163,87 +157,195 @@ class StraightToFirefoxTests(_FetcherFixture):
         self.session.get.return_value.text = '<div id="gs_res_ccl"></div>'
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL, once=True)
+        self.assertEqual(self.session.get.call_count, 1)
+        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
         self.fetcher._browser_get.assert_not_called()
         self.fetcher._extension_get.assert_not_called()
 
-    def test_a_later_search_switches_to_firefox_after_successful_searches(self):
+    def test_a_later_block_is_detected_after_successful_searches(self):
         self._answer(200, URL)
         for words in ("first search", "second search", "third search"):
             self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
-        self.fetcher._browser_get.assert_not_called()
         self.session.get.return_value.text = '<html><h1>Access denied</h1></html>'
-        found = self.fetcher.search_cases("later search", allow_db_fallback=False)
-        self.assertEqual(len(found), 1)
-        self.fetcher._browser_get.assert_called_once()
-        self.assertTrue(self.fetcher._browser_first)
-
-    def test_without_firefox_the_other_fingerprints_are_tried(self):
-        self.fetcher._browser_usable.return_value = False
-        self.fetcher._browser_get.return_value = None
-        with self.assertRaises(ScholarError):
-            self.fetcher._get(URL)
-        self.assertEqual(self.session.get.call_count, 4)
-
-    def test_and_one_that_passes_is_used(self):
-        self.fetcher._browser_usable.return_value = False
-        self._answer((429, "https://scholar.google.com/sorry/"),
-                     (200, URL))
-        resp = self.fetcher._get(URL)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.session.get.call_count, 2)
-        self.fetcher._browser_get.assert_not_called()
-
-    def test_a_hiccup_still_gets_its_retry(self):
-        # A 503 is not a challenge: the same fingerprint asks again.
-        self._answer((503, URL), (200, URL))
-        with mock.patch.object(gs.time, "sleep"):
-            resp = self.fetcher._get(URL)
-        self.assertEqual(resp.status_code, 200)
-        self.fetcher._browser_get.assert_not_called()
-
-    def test_an_unanswered_captcha_is_given_up_with_a_cooldown(self):
-        self.fetcher._browser_get.return_value = None
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
         self.assertGreater(self.fetcher._blocked_until, time.monotonic())
 
+    def test_a_refusal_stops_direct_requests_with_a_minimum_pause(self):
+        for status in (403, 429):
+            with self.subTest(status=status):
+                self.fetcher._blocked_until = 0.0
+                self.session.get.reset_mock()
+                self._answer(status, headers={"Retry-After": "3"}, text="")
+                with mock.patch.object(gs.time, "monotonic", return_value=1000.0):
+                    with self.assertRaises(ScholarError):
+                        self.fetcher._get(URL)
+                    self.assertEqual(self.fetcher._blocked_until, 1180.0)
+                    with self.assertRaises(ScholarError):
+                        self.fetcher._get(URL)
+                self.assertEqual(self.session.get.call_count, 1)
+                self.fetcher._build_session.assert_not_called()
+
+    def test_a_server_error_is_neither_retried_nor_rotated(self):
+        self._answer(503, text="Service unavailable")
+        with self.assertRaises((ScholarError, HTTPError)):
+            self.fetcher._get(URL)
+        self.assertEqual(self.session.get.call_count, 1)
+        self.fetcher._build_session.assert_not_called()
+
+    def test_retry_after_pauses_for_the_server_delay_on_errors_and_redirects(self):
+        for status in (503, 302):
+            with self.subTest(status=status):
+                self.fetcher._blocked_until = 0.0
+                self.session.get.reset_mock()
+                self._answer(status, headers={"Retry-After": "12", "Location": URL + "&hl=en"},
+                             text="")
+                with mock.patch.object(gs.time, "monotonic", return_value=1000.0):
+                    with self.assertRaises((ScholarError, HTTPError)):
+                        self.fetcher._get(URL)
+                    self.assertEqual(self.fetcher._blocked_until, 1012.0)
+                self.assertEqual(self.session.get.call_count, 1)
+
+    def test_a_long_retry_after_date_survives_restart(self):
+        wall = 1794000000
+        self._answer(429, headers={"Retry-After": formatdate(wall + 900, usegmt=True)}, text="")
+        self.session.cookies.get_dict.return_value = {}
+        self.fetcher._save_state = GoogleScholarFetcher._save_state.__get__(self.fetcher)
+        with (mock.patch.object(gs.time, "time", return_value=wall),
+              mock.patch.object(gs.time, "monotonic", return_value=1000.0)):
+            with self.assertRaises(ScholarError):
+                self.fetcher._get(URL)
+            self.assertEqual(self.fetcher._blocked_until, 1900.0)
+
+        with (mock.patch.object(gs.time, "time", return_value=wall + 60),
+              mock.patch.object(gs.time, "monotonic", return_value=2000.0)):
+            resumed = GoogleScholarFetcher(
+                cache_path=Path(self._tmp.name) / "restart.db", delay=0.0)
+            try:
+                self.assertEqual(resumed._blocked_until, 2840.0)
+            finally:
+                resumed._db.close()
+
+    def test_a_same_origin_canonical_redirect_is_followed_explicitly(self):
+        target = URL + "&hl=en"
+        self.session.get.side_effect = [
+            self._response(302, headers={"Location": target.removeprefix(gs.SCHOLAR_BASE)}, text=""),
+            self._response(200, target),
+        ]
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
+        self.assertEqual([c.args[0] for c in self.session.get.call_args_list], [URL, target])
+        self.assertTrue(all(c.kwargs["allow_redirects"] is False
+                            for c in self.session.get.call_args_list))
+
+    def test_challenge_or_external_redirects_stop_without_following(self):
+        for target in (SORRY, "/sorry/index", "https://example.test/search",
+                       "http://scholar.google.com/scholar?q=Brown"):
+            with self.subTest(target=target):
+                self.fetcher._blocked_until = 0.0
+                self.session.get.reset_mock()
+                self._answer(302, headers={"Location": target}, text="")
+                with self.assertRaises(ScholarError):
+                    self.fetcher._get(URL)
+                self.assertGreater(self.fetcher._blocked_until, time.monotonic())
+                self.assertEqual(self.session.get.call_count, 1)
+
+    def test_a_chain_of_canonical_redirects_is_bounded(self):
+        chain = [URL + f"&start={i}" for i in range(12)]
+        self.session.get.side_effect = [
+            self._response(302, source, headers={"Location": target}, text="")
+            for source, target in zip([URL] + chain[:-1], chain)
+        ]
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.assertLess(self.session.get.call_count, len(chain))
+
+    def test_a_request_waiting_behind_a_refusal_is_skipped(self):
+        entered = threading.Event()
+        release = threading.Event()
+        second_started = threading.Event()
+        second_sent = threading.Event()
+        other = URL + "&hl=en"
+
+        def send(url, **kwargs):
+            if url == other:
+                second_sent.set()
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("the first request was not released")
+            return self._response(429, url, text="")
+
+        def ask_second():
+            second_started.set()
+            return self.fetcher._get(other)
+
+        self.session.get.side_effect = send
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.fetcher._get, URL)
+            try:
+                self.assertTrue(entered.wait(5))
+                second = pool.submit(ask_second)
+                self.assertTrue(second_started.wait(5))
+                self.assertFalse(second_sent.wait(0.1))
+            finally:
+                release.set()
+            for request in (first, second):
+                with self.assertRaises(ScholarError):
+                    request.result(timeout=5)
+        self.assertEqual(self.session.get.call_count, 1)
+
 
 class FirefoxFirstTests(_FetcherFixture):
-    """Firefox already the working channel: it is asked before anything."""
-
-    def setUp(self):
-        super().setUp()
-        self.fetcher._browser_first = True
-
-    def test_the_page_comes_from_firefox(self):
-        self.fetcher._get(URL)
+    def test_the_first_page_comes_from_firefox_without_http(self):
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
         self.session.get.assert_not_called()
 
-    def test_an_unanswered_captcha_is_not_put_twice_for_one_page(self):
+    def test_later_searches_still_use_firefox(self):
+        for words in ("first search", "second search", "third search"):
+            self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
+        self.assertEqual(self.fetcher._browser_get.call_count, 3)
+        self.session.get.assert_not_called()
+
+    def test_an_unanswered_captcha_cools_down_without_using_http(self):
         self.fetcher._browser_get.return_value = None
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
-        self.assertEqual(self.fetcher._browser_get.call_count, 1)
-        # Nor are the other fingerprints tried, with Firefox to hand.
-        self.assertEqual(self.session.get.call_count, 1)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.assertGreater(self.fetcher._blocked_until, time.monotonic())
+        self.session.get.assert_not_called()
+
+    def test_losing_firefox_after_a_success_does_not_enable_http(self):
+        self.fetcher._get(URL)
+        self.fetcher._browser_usable.return_value = False
+        self.fetcher._browser_get.return_value = None
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.session.get.assert_not_called()
 
     def test_a_check_for_a_newer_version_puts_no_captcha_to_the_reader(self):
         self.fetcher._get(URL, once=True)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.session.get.assert_not_called()
 
     def test_a_block_page_from_firefox_is_not_returned_as_an_empty_search(self):
         self.fetcher._browser_get.return_value = gs._BrowserResponse(
             '<html><div id="gs_res_ccl"></div></html>', URL)
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
-        self.assertEqual(self.fetcher._browser_get.call_count, 1)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.session.get.assert_not_called()
 
     def test_recovery_clears_the_cooldown_for_a_following_cached_copy_check(self):
         self.fetcher._blocked_until = time.monotonic() + 60
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL, once=True)
+        self.fetcher._browser_get.assert_not_called()
         self.fetcher._get(URL)
         self.assertEqual(self.fetcher._blocked_until, 0.0)
         self.fetcher._get(URL, once=True)
+        self.assertEqual(self.fetcher._browser_get.call_args_list, [
+            mock.call(URL, solve=True), mock.call(URL, solve=False)])
+        self.session.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -262,73 +364,70 @@ class ExtensionBrowserTests(_FetcherFixture):
         f._extension_get.return_value = gs._BrowserResponse(RESULTS, URL)
         f._browser_get.return_value = None     # the hidden Firefox challenged
 
-    def test_the_extension_is_preferred_without_starting_firefox(self):
+    def test_the_extension_goes_first_without_firefox_or_http(self):
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         resp = self.fetcher._get(URL)
         self.fetcher._browser_get.assert_not_called()
         self.fetcher._extension_get.assert_called_once_with(URL)
+        self.session.get.assert_not_called()
         self.assertEqual(resp.text, RESULTS)
 
-    def test_one_challenge_is_enough_without_firefox_too(self):
+    def test_the_extension_goes_first_when_firefox_is_unavailable(self):
         self.fetcher._browser_usable.return_value = False
-        self.fetcher._get(URL)
-        self.assertEqual(self.session.get.call_count, 1)
+        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
         self.fetcher._extension_get.assert_called_once_with(URL)
+        self.session.get.assert_not_called()
 
-    def test_an_installed_extension_is_preferred_even_when_firefox_could_pass(self):
-        self.fetcher._browser_get.return_value = gs._BrowserResponse(
-            RESULTS, URL)
-        self.fetcher._get(URL)
-        self.fetcher._extension_get.assert_called_once_with(URL)
-        self.fetcher._browser_get.assert_not_called()
-        self.assertFalse(self.fetcher._browser_first)
-
-    def test_the_browser_answering_is_not_firefox_working(self):
-        # Next time the app's own requests go first again, wearing what the
-        # browser handed over (see _adopt_browser_identity).
-        self.fetcher._get(URL)
-        self.assertFalse(self.fetcher._browser_first)
-
-    def test_unanswered_there_too_cools_down(self):
+    def test_an_unanswered_extension_cools_down_without_using_http(self):
         self.fetcher._extension_get.return_value = None
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
         self.assertGreater(self.fetcher._blocked_until, time.monotonic())
+        self.session.get.assert_not_called()
 
-    def test_with_firefox_first_too(self):
-        self.fetcher._browser_first = True
-        self.fetcher._get(URL)
-        self.fetcher._browser_get.assert_not_called()
+    def test_a_failed_extension_does_not_enable_http_after_disconnect(self):
+        self.fetcher._browser_usable.return_value = False
+        self.fetcher._extension_get.return_value = None
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
+        self.fetcher._extension_usable.return_value = False
+        self.fetcher._blocked_until = 0.0
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
         self.fetcher._extension_get.assert_called_once_with(URL)
         self.session.get.assert_not_called()
 
-    def test_not_for_a_check_for_a_newer_version(self):
-        self.fetcher._browser_first = True
+    def test_an_extension_only_cached_copy_check_skips_network(self):
+        self.fetcher._browser_usable.return_value = False
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL, once=True)
         self.fetcher._extension_get.assert_not_called()
+        self.fetcher._browser_get.assert_not_called()
+        self.session.get.assert_not_called()
+
+    def test_a_cached_copy_check_uses_silent_firefox_with_both_available(self):
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
+        self.assertEqual(self.fetcher._get(URL, once=True).text, RESULTS)
+        self.fetcher._extension_get.assert_not_called()
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=False)
+        self.session.get.assert_not_called()
 
     def test_a_failed_extension_falls_through_to_firefox(self):
         self.fetcher._extension_get.return_value = None
         self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         self.assertEqual(self.fetcher._get(URL).text, RESULTS)
         self.fetcher._extension_get.assert_called_once_with(URL)
-        self.fetcher._browser_get.assert_called_once_with(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.session.get.assert_not_called()
 
     def test_an_extension_error_falls_through_to_firefox(self):
         self.fetcher._extension_get.side_effect = OSError("bridge disconnected")
         self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         self.assertEqual(self.fetcher._get(URL).text, RESULTS)
-        self.fetcher._browser_get.assert_called_once_with(URL)
+        self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
+        self.session.get.assert_not_called()
 
-    def test_an_extension_block_page_falls_through_to_firefox(self):
-        self.fetcher._extension_get.return_value = gs._BrowserResponse(
-            '<html><h1>Access denied</h1></html>', URL)
-        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
-        self.assertEqual(self.fetcher._get(URL).text, RESULTS)
-        self.fetcher._browser_get.assert_called_once_with(URL)
-
-    def test_a_cooling_down_extension_does_not_skip_firefox_when_browser_first(self):
-        self.fetcher._browser_first = True
+    def test_a_cooling_down_extension_does_not_skip_firefox(self):
         self.fetcher._blocked_until = time.monotonic() + 60
         self.fetcher._extension_get.return_value = None
         self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
@@ -336,15 +435,19 @@ class ExtensionBrowserTests(_FetcherFixture):
         self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
         self.assertEqual(self.fetcher._blocked_until, 0.0)
 
-    def test_a_later_block_switches_to_the_extension_after_successful_searches(self):
-        self._answer(200, URL)
+    def test_a_later_extension_block_falls_through_to_firefox(self):
         for words in ("first search", "second search", "third search"):
             self.assertEqual(len(self.fetcher.search_cases(words, allow_db_fallback=False)), 1)
-        self.fetcher._extension_get.assert_not_called()
-        self.session.get.return_value.text = '<div id="gs_res_ccl"></div>'
+        self.assertEqual(self.fetcher._extension_get.call_count, 3)
+        self.fetcher._browser_get.assert_not_called()
+        self.fetcher._extension_get.return_value = gs._BrowserResponse(
+            '<div id="gs_res_ccl"></div>', URL)
+        self.fetcher._browser_get.return_value = gs._BrowserResponse(RESULTS, URL)
         found = self.fetcher.search_cases("later search", allow_db_fallback=False)
         self.assertEqual(len(found), 1)
-        self.fetcher._extension_get.assert_called_once()
+        self.assertEqual(self.fetcher._extension_get.call_count, 4)
+        self.fetcher._browser_get.assert_called_once()
+        self.session.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -466,12 +569,65 @@ class _NativeBrowserFixture(_BrowserFixture):
         self.launch = mock.Mock(return_value=self.process)
         for patcher in (mock.patch.object(sb, "_firefox_binary", return_value="firefox.exe"),
                         mock.patch.object(sb.subprocess, "Popen", self.launch),
+                        mock.patch.object(sb, "FirefoxHandoff", side_effect=OSError("helper unavailable")),
                         mock.patch.object(sb, "_google_cookie_rows", return_value=[self.cookie])):
             patcher.start()
             self.addCleanup(patcher.stop)
 
 
 class CaptchaWindowTests(_NativeBrowserFixture):
+    def test_native_results_are_returned_and_cookies_saved_without_a_retry(self):
+        helper = mock.Mock()
+        helper.start.return_value = 12345
+        helper.result = (RESULTS, URL)
+        helper.cookies = [self.cookie]
+        helper.ready.wait.return_value = True
+        self.process.poll.return_value = None
+
+        def finish(process):
+            self.assertEqual(sb.ScholarBrowser._load_cookies(), [self.cookie])
+            self.assertIs(process, self.process)
+            return True
+
+        helper.finish.side_effect = finish
+        with mock.patch.object(sb, "FirefoxHandoff", return_value=helper):
+            self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))
+        self.assertEqual(self.started, [True])
+        self.assertIsNone(self.browser._manual_process)
+        helper.finish.assert_called_once_with(self.process)
+        helper.close.assert_called_once_with()
+        self.assertEqual(self.launch.call_args.args[0][-1], "-silent")
+        self.assertNotIn(URL, self.launch.call_args.args[0])
+        self.assertEqual(self.launch.call_args.kwargs["env"]["MOZ_APP_SILENT_START"], "1")
+
+    def test_failed_windowless_startup_reopens_the_visible_manual_fallback(self):
+        helper = mock.Mock()
+        helper.start.return_value = 12345
+        helper.install.side_effect = OSError("helper failed to start")
+        helper.started.is_set.return_value = False
+        helper.stop_startup.return_value = True
+        bootstrap = mock.Mock()
+        self.launch.side_effect = [bootstrap, self.process]
+        with mock.patch.object(sb, "FirefoxHandoff", return_value=helper):
+            self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))
+        self.assertEqual(self.launch.call_args_list[0].args[0][-1], "-silent")
+        self.assertEqual(self.launch.call_args_list[1].args[0][-1], URL)
+        self.assertNotIn("MOZ_APP_SILENT_START", self.launch.call_args_list[1].kwargs["env"])
+        helper.stop_startup.assert_called_once_with(bootstrap)
+        helper.close.assert_called_once_with()
+
+    def test_native_helper_leaves_an_unanswered_captcha_open(self):
+        helper = mock.Mock(result=None)
+        helper.start.return_value = 12345
+        self.process.poll.return_value = None
+        with mock.patch.object(sb, "FirefoxHandoff", return_value=helper), \
+                mock.patch.object(sb, "_SOLVE_TIMEOUT", 0):
+            with self.assertRaises(sb.BrowserBlocked):
+                self.browser.fetch(URL, solve=True)
+        helper.finish.assert_not_called()
+        self.process.terminate.assert_not_called()
+        helper.close.assert_called_once_with()
+
     def test_firefox_escalates_a_later_unrecognized_block_to_the_manual_window(self):
         self.hidden.states = [(URL, RESULTS)]
         self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))

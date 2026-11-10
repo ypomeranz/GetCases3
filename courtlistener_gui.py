@@ -7424,10 +7424,19 @@ def _cl_name_search(client, name: str, court_ids: Optional[str], *,
     return [it for _tier, _score, _cites, _out, it in kept]
 
 
-def _cl_name_ranked_search(client, query: str) -> list[tuple[str, dict]]:
+def _cl_name_ranked_search(client, query: str,
+                           on_pass=None) -> list[tuple[str, dict]]:
     """Name-ranked CourtListener results for a quick-search *query* that is a
     case name (not a reporter citation), as ``(bucket, item)`` pairs whose
     bucket carries each result's display cap (see ``_BUCKET_CAPS``).
+
+    *on_pass*, when given, is handed each pass's as-captioned matches the
+    moment that pass answers (on its worker thread, so two may call at once):
+    they are the best tier there is, so the pooled filter below keeps every
+    one of them whatever the other passes bring, and a caller showing rows
+    need not wait for the slowest pass to show these.  CourtListener takes
+    two or three seconds over a name it has not been asked lately — its
+    all-courts pass the longest — and now and then ten times that.
 
     When the query pins a jurisdiction ("... (7th Cir. 2009)"), the best name
     matches in that court are returned.  Otherwise these passes run in parallel:
@@ -7480,6 +7489,19 @@ def _cl_name_ranked_search(client, query: str) -> list[tuple[str, dict]]:
                 strict=strict,
             )
         ]
+        if on_pass is None:
+            return
+        captioned = [
+            (tag, it) for tag, it in groups[i]
+            if _match_tier(query, re.sub(
+                r"<[^>]+>", "",
+                it.get("caseName") or it.get("case_name") or "").strip()) == 3
+        ]
+        if captioned:
+            try:
+                on_pass(captioned)
+            except Exception as exc:
+                print(f"[cl-name] showing the {bucket} pass failed: {exc}")
 
     # Run the passes in parallel, then concatenate exact-/ranked-first.
     with ThreadPoolExecutor(max_workers=len(passes)) as ex:
@@ -7489,6 +7511,96 @@ def _cl_name_ranked_search(client, query: str) -> list[tuple[str, dict]]:
     for group in groups:
         out.extend(group)
     return _filter_to_best_tier(query, out)
+
+
+#: What shows a CourtListener Supreme Court hit to be an opinion, not an order
+#: of the Court's: its main writing cites this many cases, or this many cases
+#: cite it.  (An order can be cited a few dozen times — the 1969 order in
+#: Miranda v. Arizona, 396 U.S. 868, is cited by 49 — and cites nothing.)
+_CL_OPINION_MIN_CITES = 10
+_CL_OPINION_MIN_CITED = 100
+
+
+def _cl_lone_scotus_opinions(items) -> set:
+    """The Supreme Court hits among CourtListener's *items* that Spotlight
+    shows without waiting for Google Scholar, as a set of their ``id()``.
+
+    Supreme Court rows wait for Scholar because a case comes back as a family
+    of writings and Scholar's page puts the merits opinion first (see
+    ``_show_spotlight_dropdown``).  Where CourtListener's own answer leaves no
+    doubt which writing that is, there is nothing to wait for: the opinions
+    under a caption (:data:`_CL_OPINION_MIN_CITES`) were all filed the one
+    day, so they are one decision — CourtListener often holds it twice.
+    Opinions of two dates under a caption — a stay with a dissent and the
+    merits opinion after it, or two cases of one name — are for Scholar to
+    put in order, and wait; so do the orders."""
+    groups: list[list[dict]] = []
+    for item in items:
+        court = str(item.get("court_id") or item.get("court") or "")
+        if court.strip().lower() != _SCOTUS_COURT_ID:
+            continue
+        cited = len(_courtlistener_main_opinion(item).get("cites") or [])
+        if (cited < _CL_OPINION_MIN_CITES
+                and (item.get("citeCount") or 0) < _CL_OPINION_MIN_CITED):
+            continue
+        name = re.sub(r"<[^>]+>", "", str(
+            item.get("caseName") or item.get("case_name") or "")).strip()
+        for group in groups:
+            if _same_caption(group[0][0], name):
+                group.append((name, item))
+                break
+        else:
+            groups.append([(name, item)])
+    lone: set = set()
+    for group in groups:
+        dates = {str(item.get("dateFiled") or item.get("date_filed") or "")[:10]
+                 for _name, item in group}
+        if len(dates) == 1 and "" not in dates:
+            lone.update(id(item) for _name, item in group)
+    return lone
+
+
+def _cl_rows_as_they_come(batches):
+    """CourtListener's Spotlight rows, in the order they are to go up, as
+    ``(bucket, item, at_once)``: *at_once* for a Supreme Court hit that need
+    not wait for Google Scholar (see :func:`_cl_lone_scotus_opinions`).
+
+    *batches* yields lists of ``(bucket, item)`` — a pass's as-captioned
+    matches as each pass answers, then the whole filtered result (see
+    :func:`_cl_name_ranked_search`).  A hit is passed on the first time it
+    comes, and is judged the one opinion under its caption against every hit
+    seen till then: a stay with a dissent arriving after the merits opinion
+    is the second writing of its case, and waits."""
+    seen: set = set()
+    known: list[dict] = []
+    for batch in batches:
+        fresh = [(bucket, item) for bucket, item in batch
+                 if id(item) not in seen]
+        seen.update(id(item) for _bucket, item in fresh)
+        known.extend(item for _bucket, item in fresh)
+        lone = _cl_lone_scotus_opinions(known)
+        for bucket, item in fresh:
+            yield bucket, item, id(item) in lone
+
+
+def _cl_name_search_batches(client, query: str):
+    """:func:`_cl_name_ranked_search`'s results as they come: each pass's
+    as-captioned matches when that pass answers, then the filtered whole —
+    for :func:`_cl_rows_as_they_come`."""
+    batches: queue.Queue = queue.Queue()
+
+    def search() -> None:
+        whole: list = []
+        try:
+            whole = _cl_name_ranked_search(client, query, on_pass=batches.put)
+        except Exception as exc:
+            print(f"[cl-name] search failed: {exc}")
+        finally:
+            batches.put(whole)
+            batches.put(None)
+
+    threading.Thread(target=search, daemon=True).start()
+    return iter(batches.get, None)
 
 
 _STATE_HIGH_COURT_IDS = {
@@ -7515,19 +7627,26 @@ def _spotlight_court_priority(court_id: str) -> int:
     return 1 if cid else 0
 
 
-def _bluebook_saved_opinion_name(db, hit: dict) -> str:
+def _bluebook_saved_opinion_name(db, hit: dict, *,
+                                 read_text: bool = True) -> str:
     """Put a saved opinion's caption through the app's Bluebook name ladder.
 
     New database records are already abbreviated, but older/imported JSONL
     rows need not be.  When the full record is available its opinion prose is
     also used to repair ambiguous all-caps/title-case names before abbreviation.
+
+    Reading that prose means expanding the whole opinion — 40 ms a record on
+    average, half a second for a long one — and changes one name in
+    seventeen.  ``read_text=False`` names the record from its caption alone,
+    in a third of a millisecond, for a caller that shows the name now and
+    reads the text afterwards (see Spotlight's ``opinion_db_search``).
     """
     raw = re.sub(r"<[^>]+>", "", str(hit.get("name") or "")).strip()
     if not raw:
         return ""
     body = ""
     sid = str(hit.get("scholar_id") or "").strip()
-    if sid:
+    if sid and read_text:
         try:
             rec = db.get_by_scholar_id(sid) or {}
             body = str(rec.get("text") or "")
@@ -7544,8 +7663,8 @@ def _bluebook_saved_opinion_name(db, hit: dict) -> str:
         return raw
 
 
-def _opinion_db_spotlight_results(db, query: str,
-                                  limit: int = 3) -> list[dict]:
+def _opinion_db_spotlight_results(db, query: str, limit: int = 3, *,
+                                  read_text: bool = True) -> list[dict]:
     """Up to ``limit`` name/court-ranked rows from an already-open opinion DB.
 
     This deliberately accepts a database object rather than opening one: the
@@ -7556,6 +7675,10 @@ def _opinion_db_spotlight_results(db, query: str,
 
     A match on a frequent party name alone (tier 0) does not count here — see
     the filter below.
+
+    Each row's ``name`` is its Bluebook name and ``stored_name`` the name as
+    saved; ``read_text=False`` names the rows without reading their opinions
+    (see :func:`_bluebook_saved_opinion_name`).
     """
     q = re.sub(r"\s+", " ", query or "").strip()
     if not q or db is None:
@@ -7608,7 +7731,9 @@ def _opinion_db_spotlight_results(db, query: str,
     out: list[dict] = []
     for hit in ranked[:limit]:
         saved = dict(hit)
-        saved["name"] = _bluebook_saved_opinion_name(db, saved)
+        saved["stored_name"] = str(hit.get("name") or "")
+        saved["name"] = _bluebook_saved_opinion_name(
+            db, saved, read_text=read_text)
         out.append(saved)
     return out
 
@@ -12150,13 +12275,13 @@ class CourtListenerGUI:
                    "https://static.case.law/",
                    "https://www.courtlistener.com/")
     _WARM_EVERY_S = 60.0     # connections left idle longer are closed
+    _WARM_API_CONNECTIONS = 3
 
     def _warm_for_lookup(self) -> None:
-        """Spotlight has opened, so a lookup is coming: open the connections
-        it will use, and make Google Scholar's once-a-session homepage visit
-        now, while the reader types, rather than in front of the first search
-        — which would then wait three seconds or more behind it.  In the
-        background; at most once a minute."""
+        """Open connections to the case sources while the reader types.
+
+        Runs in the background at most once a minute.
+        """
         now = time.monotonic()
         if now - getattr(self, "_warmed_at", float("-inf")) < self._WARM_EVERY_S:
             return
@@ -12179,20 +12304,13 @@ class CourtListenerGUI:
         def run() -> None:
             hosts = [(_anon_session, u) for u in self._WARM_HOSTS]
             if api is not None:
-                hosts.append((api, "https://www.courtlistener.com/api/rest/v4/"))
+                # One connection for each search a name sends at once (see
+                # _cl_name_ranked_search): asked together, each opens its
+                # own, and none of the three waits on a handshake.
+                hosts.extend(
+                    [(api, "https://www.courtlistener.com/api/rest/v4/")]
+                    * self._WARM_API_CONNECTIONS)
             _in_parallel(*(lambda s=s, u=u: head(s, u) for s, u in hosts))
-            # Made here, not on the Tk thread: the first time, the fetcher
-            # reads Firefox's cookies, and the popup is going up.
-            try:
-                fetcher = self._get_scholar() if _SCHOLAR_AVAILABLE else None
-            except Exception:
-                fetcher = None
-            warm = getattr(fetcher, "warm", None)
-            if callable(warm):
-                try:
-                    warm()
-                except Exception as exc:
-                    print(f"[scholar] warming up failed: {exc}")
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -12988,6 +13106,8 @@ class CourtListenerGUI:
             r["open_fn"] = open_fn
             r["bucket"] = bucket
             r["case"] = (cite, name, year)
+            # A saved opinion's row, which _rename_saved finds by this.
+            r["saved_id"] = opinion_id if bucket == "opiniondb" else ""
             result_rows.append(r)
             shown.append({"sig": sig, "bucket": bucket, "row": r})
             if bucket:
@@ -13250,6 +13370,30 @@ class CourtListenerGUI:
             if not scholar_returned[0]:
                 _release_held_scotus()
 
+        def _rename_saved(identity: str, name: str) -> None:
+            """Give a saved opinion's row the name its text settles.
+
+            The row went up under the name its caption alone gives, so that
+            it need not wait for the opinion to be read (see
+            opinion_db_search); the text changes one name in seventeen —
+            "David Fox Dubin v. United States" to "Dubin v. United States",
+            "Trump v. Casa, Inc." to "Trump v. CASA, Inc.".  Only the name
+            changes, where the row is: still held for Scholar, or up."""
+            if my_gen != self._spotlight_generation:
+                return
+            for i, args in enumerate(held_scotus):
+                if (args[0] == "opiniondb" and len(args) > 7
+                        and args[7] == identity):
+                    held_scotus[i] = args[:2] + (name,) + args[3:]
+                    return
+            for r in result_rows:
+                if r.get("saved_id") == identity:
+                    cite, _old, year = r["case"]
+                    r["case"] = (cite, name, year)
+                    spot.update(
+                        r, name=name[:80] + ("…" if len(name) > 80 else ""))
+                    return
+
         def _phrase_fallback() -> None:
             """Show Scholar's page as a subject search when the name pass left
             the dropdown empty — see :func:`_spotlight_phrase_page`."""
@@ -13471,7 +13615,7 @@ class CourtListenerGUI:
                             results = candidate_results
                             break
                     results = results[:3]
-                tagged = [("cl", it) for it in results]
+                batches = [[("cl", it) for it in results]]
             else:
                 # Just words (a case name): CourtListener gives the name no
                 # weight over the body text, so rank by case-name closeness
@@ -13479,10 +13623,14 @@ class CourtListenerGUI:
                 # courts of appeals (up to 2), state courts of last resort (up
                 # to 2) — or a single named jurisdiction when the query gives
                 # one ("... (7th Cir. 2009)").  Each result is tagged with the
-                # court tier that caps how many of it are shown.
-                tagged = _cl_name_ranked_search(client, query)
+                # court tier that caps how many of it are shown.  The matches
+                # as captioned go up as each of its searches answers, not
+                # when the slowest has.
+                batches = _cl_name_search_batches(client, query)
 
-            for bucket, item in tagged:
+            # A Supreme Court hit that is plainly the one opinion under its
+            # caption has nothing to wait for Scholar for (at_once).
+            for bucket, item, at_once in _cl_rows_as_they_come(batches):
                 case_name = re.sub(
                     r"<[^>]+>", "",
                     item.get("caseName") or item.get("case_name") or "",
@@ -13557,7 +13705,9 @@ class CourtListenerGUI:
                 )
 
                 self.root.after(
-                    0, _add_after_scholar, bucket, court_id, case_name,
+                    0,
+                    _add_result if at_once else _add_after_scholar,
+                    bucket, court_id, case_name,
                     cite_str, year, "CourtListener", make_opener(), identity,
                     _courtlistener_result_snippet(item),
                     make_snippet_loader(),
@@ -13572,10 +13722,18 @@ class CourtListenerGUI:
             an offline fallback.  Spotlight is different: a loaded personal
             corpus is useful in its own right, so these at-most-three rows are
             searched, Bluebook-named, ranked, and streamed independently.
+
+            The rows go up named from their captions alone — the database
+            is at hand, and they are the first the reader sees — and only
+            then are the opinions read for what their text settles of a
+            name (see _bluebook_saved_opinion_name and _rename_saved).
             """
             db = loaded_opinion_db
+            # (identity, the opener's item, the hit, the name its row shows)
+            named: list[tuple] = []
             try:
-                hits = _opinion_db_spotlight_results(db, query, limit=3)
+                hits = _opinion_db_spotlight_results(
+                    db, query, limit=3, read_text=False)
                 for hit in hits:
                     name = str(hit.get("name") or "").strip()
                     court_id = str(hit.get("court") or "").strip().lower()
@@ -13591,8 +13749,11 @@ class CourtListenerGUI:
                     }
 
                     def make_opener(scholar_id=sid, db_item=item,
-                                    cite_str=cite, nm=name):
+                                    cite_str=cite):
                         def open_it():
+                            # The name as it stands now (see below).
+                            nm = db_item["caseName"]
+
                             def run() -> None:
                                 try:
                                     rec = db.get_by_scholar_id(scholar_id) or {}
@@ -13656,9 +13817,29 @@ class CourtListenerGUI:
                         f"scholar:{sid}" if sid else "",
                         str(hit.get("snippet") or ""),
                     )
+                    if sid:
+                        named.append((f"scholar:{sid}", item, hit, name))
             finally:
                 search_done[0] += 1
                 self.root.after(0, _update_status)
+            # The rows are on their way up: now read each opinion, and give
+            # its row the name its text settles where that is another.
+            for identity, item, hit, shown_name in named:
+                if my_gen != self._spotlight_generation:
+                    return
+                try:
+                    settled = _bluebook_saved_opinion_name(
+                        db, {**hit, "name": hit.get("stored_name") or ""})
+                except Exception as exc:
+                    print(f"[spotlight-db] naming {identity} failed: {exc}")
+                    continue
+                settled = settled.strip()
+                if settled and settled != shown_name:
+                    item["caseName"] = settled
+                    try:
+                        self.root.after(0, _rename_saved, identity, settled)
+                    except (tk.TclError, RuntimeError):
+                        return
 
         # English Reports name search: offline, against our own index, so a
         # pre-1865 English case (which Scholar/CL often lack a clean scan of)

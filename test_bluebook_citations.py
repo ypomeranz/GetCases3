@@ -6598,6 +6598,151 @@ class CaptionLeftoverTests(unittest.TestCase):
             "PLS.com, LLC v. National Association of Realtors")
 
 
+class PersonWithAStatesLettersTests(unittest.TestCase):
+    """Zivotofsky ex rel. Zivotofsky v. Kerry, 576 U.S. 1 (2015), was cited
+    "Zivotofsky ex rel. Arizona v. Kerry": the petitioner sued "by his
+    parents and guardians, Ari Z. and Naomi Siegman Zivotofsky", and "Ari
+    Z.", its space closed up, spells Arizona's "Ariz."."""
+
+    CAPTION = ("Menachem Binyamin ZIVOTOFSKY, By His Parents and Guardians, "
+               "Ari Z. and Naomi Siegman Zivotofsky, Petitioner<br/>v.<br/>"
+               "John KERRY, Secretary of State.")
+
+    def test_the_caption(self):
+        from google_scholar import parse_opinion_blocks
+        blocks = parse_opinion_blocks(_scholar_page(
+            "576 U.S. 1 (2015)", self.CAPTION))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Zivotofsky ex rel. Zivotofsky v. Kerry")
+        # …and the 2012 decision's, the parents' surname in capitals too.
+        blocks = parse_opinion_blocks(_scholar_page(
+            "566 U.S. 189 (2012)",
+            "Menachem Binyamin ZIVOTOFSKY, by his parents and guardians, Ari "
+            "Z. and Naomi Siegman ZIVOTOFSKY, Petitioner<br/>v.<br/>Hillary "
+            "Rodham CLINTON, Secretary of State."))
+        self.assertEqual(abbreviate_case_name(_scholar_caption_name(blocks)),
+                         "Zivotofsky ex rel. Zivotofsky v. Clinton")
+
+    def test_a_space_between_words_is_no_abbreviation_s(self):
+        # An abbreviation's own space follows one of its periods ("W. Va.",
+        # "N. Y."); a given name and an initial are two words.
+        for raw, want in (
+                ("Ari Z. v. Kerry", "Ari Z. v. Kerry"),
+                ("Smith v. Ari Z.", "Smith v. Ari Z."),
+                ("Ari Z. ex rel. Naomi Z. v. Kerry",
+                 "Ari Z. ex rel. Naomi Z. v. Kerry"),
+                ("W. Va. v. EPA", "West Virginia v. EPA"),
+                ("Olmstead v. U. S.", "Olmstead v. United States"),
+                ("N. Y. ex rel. John Smith v. Jones",
+                 "New York ex rel. Smith v. Jones"),
+                ("Ind. ex rel. John Anderson v. Brand",
+                 "Indiana ex rel. Anderson v. Brand"),
+                ("Board of Education of Topeka, Shawnee County, Kan. v. "
+                 "Brown", "Bd. of Educ. v. Brown")):
+            with self.subTest(raw=raw):
+                self.assertEqual(abbreviate_case_name(raw), want)
+
+    def test_a_word_without_its_period_is_no_abbreviation(self):
+        # "Cal", "Tex" and "Del" are people; "Us" is a word.
+        for raw, want in (
+                ("Cal and Mary Smith v. Jones", "Cal & Mary Smith v. Jones"),
+                ("Tex and Mary Smith v. Jones", "Tex & Mary Smith v. Jones"),
+                ("Del and Ann Webb v. Jones", "Del & Ann Webb v. Jones"),
+                ("Us and Them LLC v. Jones", "Us & Them LLC v. Jones"),
+                # Los Angeles's letters are not Louisiana's.
+                ("L.A. ex rel. John Smith v. Jones",
+                 "L.A. ex rel. Smith v. Jones"),
+                # A source's slips are allowed for: the periods left out of
+                # an initialism's capitals, and its last one dropped.
+                ("US ex rel. John Smith v. Jones",
+                 "United States ex rel. Smith v. Jones"),
+                ("U.S ex rel. John Smith v. Jones",
+                 "United States ex rel. Smith v. Jones"),
+                ("U.S. and FCC v. Jones", "United States v. Jones")):
+            with self.subTest(raw=raw):
+                self.assertEqual(abbreviate_case_name(raw), want)
+
+    def test_the_deciding_court_s_state_however_spelled(self):
+        from bluebook_names import _same_state
+        for place, state in (("New York", "N.Y."), ("N.Y.", "new york"),
+                             ("N. Y.", "New York"), ("Ind.", "indiana"),
+                             ("W. Va.", "west virginia")):
+            with self.subTest(place=place, state=state):
+                self.assertTrue(_same_state(place, state))
+        self.assertFalse(_same_state("Ari Z.", "arizona"))
+
+    def test_a_minor_s_initials_before_a_next_friend(self):
+        # No state sues by a next friend, nor on the relation of someone
+        # named by initials: the two initials a state shares are a person's
+        # there, and stay as written, as they do when they are the whole
+        # party.
+        from scholar_caption import caption_party
+        for raw, want in (
+                ("S.C., by and through her next friend, J.C. v. Jones",
+                 "S.C. ex rel. J.C. v. Jones"),
+                ("S.C. ex rel. J.C. v. Jones", "S.C. ex rel. J.C. v. Jones"),
+                (caption_party("S.C., by and through her next friend, J.C., "
+                               "Plaintiff-Appellant,") + " v. Jones",
+                 "S.C. ex rel. J.C. v. Jones"),
+                ("N. D., by and through his next friend, R.J. v. Jones",
+                 "N.D. ex rel. R.J. v. Jones"),
+                ("S.C. v. Jones", "S.C. v. Jones"),
+                # A relator named in full leaves them the state a source
+                # abbreviated (445 F. Supp. 532; 236 U.S. 585).
+                ("N.C. ex rel. Sarah T. Morrow v. Califano",
+                 "North Carolina ex rel. Morrow v. Califano"),
+                ("Northern Pacific Railway Co. v. N.D. ex rel. McCue",
+                 "N. Pac. Ry. Co. v. North Dakota ex rel. McCue"),
+                # "U.S." is no one's initials.
+                ("U.S., by and through its next friend, J.C. v. Jones",
+                 "United States ex rel. J.C. v. Jones"),
+                ("U. S. ex rel. John Turner v. Williams",
+                 "United States ex rel. Turner v. Williams")):
+            with self.subTest(raw=raw):
+                self.assertEqual(abbreviate_case_name(raw), want)
+
+    def test_people_who_share_a_surname_written_once(self):
+        # Rules 10.2.1(a), (g): the first of them, by the surname.
+        for raw, want in (
+                ("Smith ex rel. John Z. and Mary Smith v. Kerry",
+                 "Smith ex rel. Smith v. Kerry"),
+                ("John A. and Mary B. Smith v. Jones", "Smith v. Jones"),
+                ("Robert L. and Mary Ann Jones v. Acme Corp.",
+                 "Jones v. Acme Corp."),
+                ("John and Mary B. Van Buren v. Jones",
+                 "Van Buren v. Jones")):
+            with self.subTest(raw=raw):
+                self.assertEqual(abbreviate_case_name(raw), want)
+
+    def test_names_that_share_no_surname(self):
+        for raw, want in (
+                # No initial among them: left one party, as a firm named
+                # for two people is.
+                ("John and Mary Smith v. Jones", "John & Mary Smith v. Jones"),
+                # Each anonymized, and none a surname.
+                ("Michael H. and Victoria D. v. Gerald D.",
+                 "Michael H. & Victoria D. v. Gerald D."),
+                # Firms and institutions named for two people.
+                ("Jack and Jill Daycare v. Jones",
+                 "Jack & Jill Daycare v. Jones"),
+                ("William and Mary Law Review v. Jones",
+                 "William & Mary Law Rev. v. Jones"),
+                ("Lewis and Clark Expedition v. Jones",
+                 "Lewis & Clark Expedition v. Jones"),
+                ("Johnson and Johnson v. Jones", "Johnson & Johnson v. Jones"),
+                # A party the list names by surname, and another in full.
+                ("Taylor and John Smith v. Jones",
+                 "Taylor & John Smith v. Jones"),
+                # An anonymized party and an organization.
+                ("Susan B. and Planned Parenthood v. Jones",
+                 "Susan B. & Planned Parenthood v. Jones"),
+                # Each with a surname of their own.
+                ("Charles Ward and Mary Ward v. Johanan Zelikovsky",
+                 "Ward v. Zelikovsky")):
+            with self.subTest(raw=raw):
+                self.assertEqual(abbreviate_case_name(raw), want)
+
+
 class FirmPairAndSlashInitialsTests(unittest.TestCase):
     """Novo Nordisk A/S v. Caraco Pharm. Lab'ys, Ltd., 688 F.3d 766 (Fed.
     Cir. 2012), was cited "Novo Nordisk A/s & Novo Nordisk, Inc. v. …": both

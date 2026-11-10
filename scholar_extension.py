@@ -1,15 +1,10 @@
 """Google Scholar's CAPTCHA answered in Chrome or Edge, with the GetCases
 browser extension.
 
-When Google challenges the app's own requests to Scholar, and the hidden
-Firefox too (or there is no Firefox -- see :mod:`scholar_browser`), the
-reader can answer the CAPTCHA in the browser they use every day, if the
-GetCases extension is there.  The app opens the page it wants in that
-browser, on the extension's profile, and waits.  Nothing drives the browser:
-Google, like CloudFlare, is harder on one under automation, and the reader's
-own browser often passes without a CAPTCHA at all -- so the page opens out
-of sight, in a minimized window, and comes to the front only if Google does
-ask the reader something (an errand: see :class:`browser_bridge.Errand`).
+When the GetCases extension is available, the app fetches Scholar pages in
+its Chrome or Edge profile from the first request. The page opens in a
+minimized window. If a check needs attention, the window comes to the front
+for the reader to answer it (see :class:`browser_bridge.Errand`).
 
 Once the page loads past Google's check, the extension (``background.js``)
 hands the app, through :mod:`browser_bridge`:
@@ -17,8 +12,7 @@ hands the app, through :mod:`browser_bridge`:
 * Google's anti-abuse and preference cookies -- the CAPTCHA exemption among
   them, never the cookies that sign the reader in to Google -- with the
   headers the browser sent them under (``/clearance``,
-  :func:`accept_clearance`).  The app's own requests go out with them from
-  then on, as that browser (see ``google_scholar``); and
+  :func:`accept_clearance`); and
 * the page itself, as the browser has it, for the fetch waiting on it
   (``/page``, :func:`deliver_page`).  A page loaded only so far as Scholar's
   own CAPTCHA is not taken: the fetch waits on, and the window comes to the
@@ -125,7 +119,8 @@ def page_key(url: str) -> str:
     except ValueError:
         return ""
     query = sorted((k, v) for k, v in urllib.parse.parse_qsl(
-        parts.query, keep_blank_values=True) if k not in _VOLATILE)
+        parts.query, keep_blank_values=True) if k not in _VOLATILE
+        and not (k == "ntpr" and not v))
     return f"{(parts.hostname or '').lower()}{parts.path}?{urllib.parse.urlencode(query)}"
 
 
@@ -245,8 +240,7 @@ def fetch(url: str) -> "Optional[tuple[str, str]]":
             print(f"[scholar] waiting for the page in {browser.name} "
                   "(a CAPTCHA there, if Google asks for one)")
             _tell(scholar_browser.on_step,
-                  f"Google Scholar wants to check that a person is asking — "
-                  f"trying the page in {browser.name}, out of sight…")
+                  f"Loading Google Scholar in {browser.name}, out of sight…")
         if wait.done.wait(scholar_browser._SOLVE_TIMEOUT) and wait.html:
             return wait.html, wait.final_url
     finally:

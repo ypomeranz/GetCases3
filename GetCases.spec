@@ -5,7 +5,7 @@ a = Analysis(
     ['courtlistener_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('data/opinions.jsonl', 'data'), ('person_names.tsv.gz', '.'), ('federal_judges.tsv.gz', '.'), ('eng_rep_index.tsv.gz', '.'), ('eng_rep_nominate.tsv.gz', '.'), ('sec_index.tsv.gz', '.'), ('case_law_reprints.tsv.gz', '.'), ('crecb_index.tsv.gz', '.'), ('debates_index.tsv.gz', '.'), ('federal_judges.tsv.gz', '.'), ('federal_judges.tsv.gz', '.'), ('case_law_reprints.tsv.gz', '.')],
+    datas=[('firefox_handoff.js', '.'), ('data/opinions.jsonl', 'data'), ('person_names.tsv.gz', '.'), ('federal_judges.tsv.gz', '.'), ('eng_rep_index.tsv.gz', '.'), ('eng_rep_nominate.tsv.gz', '.'), ('sec_index.tsv.gz', '.'), ('case_law_reprints.tsv.gz', '.'), ('crecb_index.tsv.gz', '.'), ('debates_index.tsv.gz', '.'), ('federal_judges.tsv.gz', '.'), ('federal_judges.tsv.gz', '.'), ('case_law_reprints.tsv.gz', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

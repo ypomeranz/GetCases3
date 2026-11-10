@@ -439,20 +439,20 @@ things:
    passed (the window comes to the front only if it needs you), and the
    extension hands the clearance to GetCases. With neither, English Reports
    cases open in your web browser.
-2. **Google Scholar when Google blocks the app.** Heavy use can make Google
-   Scholar answer with an "unusual traffic" challenge. With Firefox and the
-   `selenium` package installed, GetCases then goes straight to a private,
-   invisible copy of Firefox, which Google usually accepts. If even that is
-   challenged, an ordinary Firefox window opens on Google's CAPTCHA, in a
-   separate profile that Selenium never controls. Answer the check there;
-   **once Scholar's results appear, close that window** to return to GetCases.
-   GetCases imports the cleared cookies and retries the page, keeping them
-   for later searches and app restarts. If the check remains unanswered,
-   GetCases won't open another window for ten minutes. With the
-   [Chrome extension](browser_extension/README.md) in Chrome or Edge, the
-   CAPTCHA opens there instead, with or without Firefox: answer it in your own
-   browser and the case opens in GetCases. Without either, GetCases falls back
-   to its local database and to CourtListener for the text.
+2. **Google Scholar searches.** With the
+   [GetCases extension](browser_extension/README.md) in Chrome or Edge,
+   GetCases opens Scholar in that browser from the first request. If the
+   extension cannot return a page, GetCases can use an invisible Firefox
+   session when Firefox and `selenium` are installed. When Firefox gets a
+   CAPTCHA, ordinary Firefox starts without a window in a separate profile.
+   A temporary helper creates a minimized window, returns the page and cookies, and closes
+   that window automatically when results arrive. The window comes forward
+   if a check needs your attention. If the helper cannot start, close the
+   window once results appear to use the saved-cookie fallback. GetCases
+   keeps the cookies for later searches and app restarts. If the check remains unanswered,
+   GetCases waits ten minutes before offering another Firefox check. With
+   neither browser route available, GetCases can make direct requests. The
+   local database and CourtListener can help when Scholar is unavailable.
 
 ### A LaTeX distribution
 
@@ -472,7 +472,7 @@ command, run in the GetCases folder, builds `dist\GetCases.exe`: one file, no
 console window, carrying the saved opinions and every index GetCases reads.
 
 ```bash
-python -m PyInstaller --noconfirm --onefile --noconsole --name GetCases --add-data "data/opinions.jsonl;data" --add-data "person_names.tsv.gz;." --add-data "eng_rep_index.tsv.gz;." --add-data "eng_rep_nominate.tsv.gz;." --add-data "sec_index.tsv.gz;." --add-data "case_law_reprints.tsv.gz;." --add-data "crecb_index.tsv.gz;." --add-data "debates_index.tsv.gz;." courtlistener_gui.py
+python -m PyInstaller --noconfirm --onefile --noconsole --name GetCases --add-data "firefox_handoff.js;." --add-data "data/opinions.jsonl;data" --add-data "person_names.tsv.gz;." --add-data "eng_rep_index.tsv.gz;." --add-data "eng_rep_nominate.tsv.gz;." --add-data "sec_index.tsv.gz;." --add-data "case_law_reprints.tsv.gz;." --add-data "crecb_index.tsv.gz;." --add-data "debates_index.tsv.gz;." courtlistener_gui.py
 ```
 
 The .exe runs in the background, with the scales in the taskbar. The first
@@ -544,9 +544,9 @@ automatic matching that can go wrong. In particular:
   sent to CourtListener, Google Scholar and the other sources above. A brief you
   open is read on your computer; nothing from it leaves your computer except
   the citations you follow or download.
-- **Google Scholar paces itself.** GetCases waits a few seconds between Scholar
-  requests so Google does not block it. If Google blocks it anyway, see
-  [Firefox](#firefox) above.
+- **Google Scholar pacing.** GetCases spaces direct requests apart and pauses
+  when Scholar refuses a request or sends a retry delay. The pause survives
+  an app restart. Browser access is described under [Firefox](#firefox).
 - **Where your data is kept:** your settings, token, history and bookmarks are in
   `~/.config/courtlistener/` (a folder in your home folder); downloaded caches are
   there and in `~/.cache/`. The local opinion database is `data/opinions.jsonl` in
