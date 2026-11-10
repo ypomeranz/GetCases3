@@ -360,6 +360,187 @@ class CourtListenerTiebreakTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Rows that need not wait: names are what the reader is waiting for
+# ---------------------------------------------------------------------------
+
+def cl_item(name, date, cites=0, cited=0, court="scotus"):
+    return {"caseName": name, "court_id": court, "dateFiled": date,
+            "citeCount": cited, "opinions": [{"cites": list(range(cites))}]}
+
+
+class LoneOpinionTests(unittest.TestCase):
+    """A CourtListener Supreme Court hit that is plainly the one opinion
+    under its caption is shown without waiting for Scholar."""
+
+    def lone(self, *items):
+        from courtlistener_gui import _cl_lone_scotus_opinions
+        found = _cl_lone_scotus_opinions(items)
+        return [it["dateFiled"] for it in items if id(it) in found]
+
+    def test_the_one_opinion_beside_its_orders(self):
+        # Zivotofsky v. Kerry as CourtListener answers: the decision, held
+        # twice, and the grant of certiorari.
+        self.assertEqual(self.lone(
+            cl_item("Zivotofsky v. Kerry", "2015-06-08", cites=45),
+            cl_item("Zivotofsky v. Kerry", "2014-04-21"),
+            cl_item("Zivotofsky v. Kerry", "2015-06-08", cites=43, cited=149)),
+            ["2015-06-08", "2015-06-08"])
+
+    def test_an_old_opinion_is_known_by_the_cases_citing_it(self):
+        # A search answer lists no cases an old opinion cites; the 1969
+        # order in Miranda (396 U.S. 868) is cited by 49 itself.
+        self.assertEqual(self.lone(
+            cl_item("Miranda v. Arizona", "1969-10-13", cited=49),
+            cl_item("Miranda v. Arizona", "1966-06-13", cited=58794)),
+            ["1966-06-13"])
+
+    def test_two_opinions_under_a_caption_are_scholars_to_order(self):
+        # A stay with a dissent, and the merits opinion after it.
+        self.assertEqual(self.lone(
+            cl_item("Trump v. Slaughter", "2025-09-22", cites=14, cited=30),
+            cl_item("Trump v. Slaughter", "2026-06-29", cites=40)), [])
+
+    def test_other_courts_and_undated_hits_are_not_its_business(self):
+        self.assertEqual(self.lone(
+            cl_item("United States v. Chatrie", "2024-07-09", cites=60,
+                    court="ca4"),
+            cl_item("Chatrie v. United States", "", cites=60)), [])
+
+    def test_a_second_writing_arriving_later_waits(self):
+        from courtlistener_gui import _cl_rows_as_they_come
+        merits = cl_item("Trump v. Slaughter", "2026-06-29", cites=40)
+        stay = cl_item("Trump v. Slaughter", "2025-09-22", cites=14, cited=30)
+        other = cl_item("Slaughter v. Trump", "2025-07-17", cites=30,
+                        court="dcd")
+        rows = list(_cl_rows_as_they_come([
+            [("exact", merits)],
+            [("exact", merits), ("ranked", other), ("scotus", stay)],
+        ]))
+        self.assertEqual(
+            [(bucket, item["dateFiled"], at_once)
+             for bucket, item, at_once in rows],
+            [("exact", "2026-06-29", True), ("ranked", "2025-07-17", False),
+             ("scotus", "2025-09-22", False)])
+
+
+class RowsAsEachSearchAnswersTests(unittest.TestCase):
+    """CourtListener's as-captioned matches are handed over as each of its
+    searches answers; the filtered whole is what it always was."""
+
+    def test_each_pass_hands_over_its_captioned_matches(self):
+        from courtlistener_gui import _cl_name_ranked_search
+
+        def search(q, type="o", court=None, page_size=20, extra=None):
+            if court == "scotus":
+                return {"results": [
+                    cl_item("Tinker v. Des Moines School Dist.", "1969-02-24",
+                            cited=9000)]}
+            return {"results": [
+                cl_item("Tinker v. Des Moines School Dist.", "1969-02-24",
+                        cited=9000),
+                cl_item("Tinker v. Colwell", "1904-01-01", cited=400,
+                        court="ny")]}
+
+        handed = []
+        whole = _cl_name_ranked_search(
+            SimpleNamespace(search=search), "Tinker v. Des Moines",
+            on_pass=handed.append)
+        # Three passes (exact, ranked, Supreme Court), one match each.
+        self.assertEqual(
+            sorted(bucket for batch in handed for bucket, _it in batch),
+            ["exact", "ranked", "scotus"])
+        self.assertTrue(all(
+            it["caseName"].startswith("Tinker v. Des Moines")
+            for batch in handed for _bucket, it in batch))
+        # …and each is in the whole, which leaves out the one-party match.
+        kept = {id(it) for _bucket, it in whole}
+        self.assertTrue(all(id(it) in kept
+                            for batch in handed for _bucket, it in batch))
+        self.assertNotIn("Tinker v. Colwell",
+                         [it["caseName"] for _bucket, it in whole])
+
+    def test_the_dropdown_shows_them_as_they_come(self):
+        cl = _nested("cl_search")
+        self.assertIn("_cl_name_search_batches(client, query)", cl)
+        self.assertIn("_cl_rows_as_they_come(batches)", cl)
+
+
+class SavedNamesTests(unittest.TestCase):
+    """A saved opinion's row goes up named from its caption; the opinion is
+    read afterwards, and the row renamed where its text says otherwise."""
+
+    class DB:
+        def __init__(self):
+            self.read = []
+
+        def search_names(self, _query, _limit):
+            return [{"scholar_id": "7", "court": "scotus", "year": "2023",
+                     "name": "David Fox Dubin, Petitioner, v. United States.",
+                     "cites": ["599 U.S. 110"]}]
+
+        def get_by_scholar_id(self, sid):
+            self.read.append(sid)
+            return {"text": "Dubin was convicted. Dubin argues that the "
+                            "statute does not reach him. Dubin is right."}
+
+    def test_the_name_comes_without_reading_the_opinion(self):
+        from courtlistener_gui import (
+            _bluebook_saved_opinion_name, _opinion_db_spotlight_results)
+        db = self.DB()
+        hits = _opinion_db_spotlight_results(
+            db, "Dubin v. United States", read_text=False)
+        self.assertEqual(db.read, [])
+        self.assertEqual([h["name"] for h in hits],
+                         ["David Fox Dubin v. United States"])
+        # The name as saved rides along, for the reading that follows.
+        settled = _bluebook_saved_opinion_name(
+            db, {**hits[0], "name": hits[0]["stored_name"]})
+        self.assertEqual(db.read, ["7"])
+        self.assertEqual(settled, "Dubin v. United States")
+
+    def test_the_search_reads_the_opinions_only_after_posting_the_rows(self):
+        saved = _nested("opinion_db_search")
+        self.assertIn("read_text=False", saved)
+        self.assertLess(saved.index('0, add, "opiniondb"'),
+                        saved.index("self.root.after(0, _rename_saved"))
+
+    def renamer(self, held, rows):
+        self.updates = []
+        ns = {
+            "my_gen": 1,
+            "self": SimpleNamespace(_spotlight_generation=1),
+            "held_scotus": held,
+            "result_rows": rows,
+            "spot": SimpleNamespace(
+                update=lambda r, **changes: self.updates.append(changes)),
+        }
+        exec(_nested("_rename_saved"), ns)
+        return ns["_rename_saved"]
+
+    def test_a_row_that_is_up_is_renamed_where_it_is(self):
+        rows = [{"saved_id": "", "case": ("1 U.S. 1", "Other", "1800")},
+                {"saved_id": "scholar:7",
+                 "case": ("599 U.S. 110", "David Fox Dubin v. United States",
+                          "2023")}]
+        self.renamer([], rows)("scholar:7", "Dubin v. United States")
+        self.assertEqual(self.updates, [{"name": "Dubin v. United States"}])
+        self.assertEqual(rows[1]["case"],
+                         ("599 U.S. 110", "Dubin v. United States", "2023"))
+        self.assertEqual(rows[0]["case"][1], "Other")
+
+    def test_a_row_still_held_for_scholar_is_renamed_in_waiting(self):
+        held = [("opiniondb", "scotus", "David Fox Dubin v. United States",
+                 "599 U.S. 110", "2023", "Opinion database", None,
+                 "scholar:7", "")]
+        self.renamer(held, [])("scholar:7", "Dubin v. United States")
+        self.assertEqual(held[0][2], "Dubin v. United States")
+        self.assertEqual(held[0][3:], ("599 U.S. 110", "2023",
+                                       "Opinion database", None, "scholar:7",
+                                       ""))
+        self.assertEqual(self.updates, [])
+
+
+# ---------------------------------------------------------------------------
 # The dropdown: Supreme Court rows from other sources wait for Scholar
 # ---------------------------------------------------------------------------
 
@@ -466,9 +647,11 @@ class HoldWiringTests(unittest.TestCase):
                         search.index("_rank_scholar_spotlight_results("))
 
     def test_courtlistener_rows_are_held(self):
+        # …all but a hit that is plainly the one opinion under its caption
+        # (see _cl_lone_scotus_opinions), which has nothing to wait for.
         cl = _nested("cl_search")
         self.assertIn("_add_after_scholar", cl)
-        self.assertNotIn("_add_result", cl)
+        self.assertIn("_add_result if at_once else _add_after_scholar", cl)
 
     def test_a_saved_merits_opinion_is_shown_at_once(self):
         saved = _nested("opinion_db_search")
