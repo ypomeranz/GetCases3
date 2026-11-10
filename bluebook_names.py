@@ -501,20 +501,34 @@ def _state_named_first(party: str) -> str:
 
 
 def _norm_geo(s: str) -> str:
-    """Comparison key for a geographic abbreviation: letters only, uppercased
-    ("N.C." / "N. C." -> "NC", "Ind." -> "IND")."""
+    """A geographic abbreviation's letters alone, uppercased ("D.C." /
+    "D. C." -> "DC") — for telling which abbreviation a text already known
+    to be one is, never whether it is one (see _geo_party_key)."""
     return re.sub(r"[^A-Za-z]", "", s).upper()
 
 
-# Reverse of the geographic abbreviations, to restore a named party that a
-# source (e.g. CourtListener) already abbreviated: rule 10.2.2 keeps the
-# party's full name, so "Ind. ex rel." must read "Indiana ex rel." and
-# "U.S. ex rel." must read "United States ex rel.".
+def _geo_party_key(s: str) -> str:
+    """An abbreviation as spelled, for an exact lookup: "U.S.." -> "u.s.",
+    "W. Va." -> "w.va.".  Only the space an abbreviation sets after one of
+    its periods closes up.  A space between two words stays, and so do the
+    periods: a person's "Ari Z." is not Arizona's "Ariz.", nor a "Cal"
+    California's "Cal." — Zivotofsky ex rel. Zivotofsky v. Kerry, 576 U.S.
+    1, sued "by his parents and guardians, Ari Z. and Naomi Siegman
+    Zivotofsky", had been cited "Zivotofsky ex rel. Arizona v. Kerry"."""
+    closed = re.sub(r"(?<=\.)\s+", "", s.strip().lower())
+    return re.sub(r"\.+$", ".", re.sub(r"\s+", " ", closed))
+
+
+# Reverse of the geographic abbreviations, by their spelling, to restore a
+# named party that a source (e.g. CourtListener) already abbreviated: rule
+# 10.2.2 keeps the party's full name, so "Ind. ex rel." must read "Indiana
+# ex rel." and "U.S. ex rel." must read "United States ex rel.".
 _GEO_EXPANSIONS: dict[str, str] = {
-    _norm_geo(_abbr): _full.title() for _full, _abbr in _T10_WORDS.items()
+    _geo_party_key(_abbr): _full.title()
+    for _full, _abbr in _T10_WORDS.items()
 }
 _GEO_EXPANSIONS.update({
-    _norm_geo(_abbr): _full for _abbr, _full in {
+    _geo_party_key(_abbr): _full for _abbr, _full in {
         "D.C.": "District of Columbia", "N.H.": "New Hampshire",
         "N.J.": "New Jersey", "N.M.": "New Mexico", "N.Y.": "New York",
         "N.C.": "North Carolina", "N.D.": "North Dakota",
@@ -528,27 +542,27 @@ _GEO_EXPANSIONS.update({
 def _expand_geo_party(head: str) -> str:
     """Restore a geographic party a source abbreviated ("Ind." -> "Indiana",
     "U.S." -> "United States") so the no-abbreviation rule for a named
-    geographic party (rule 10.2.2) applies; other heads pass through."""
-    return _GEO_EXPANSIONS.get(_norm_geo(head), head)
+    geographic party (rule 10.2.2) applies; other heads pass through.
+
+    The abbreviation is read as spelled (see _geo_party_key), less two
+    slips a source makes: the last period dropped ("U.S"), and an
+    initialism's periods left out of its capitals ("US", "NY").  A word
+    that only has a state's letters is no slip of the kind: "Cal and Mary
+    Smith" are not California."""
+    text = head.strip()
+    key = _geo_party_key(text)
+    if re.fullmatch(r"[A-Z]{2}", text):
+        key = ".".join(text.lower()) + "."
+    elif "." in key and not key.endswith("."):
+        key += "."
+    return _GEO_EXPANSIONS.get(key, head)
 
 
-def _geo_party_key(s: str) -> str:
-    """An abbreviation as spelled, for an exact lookup: "U.S.." -> "u.s.",
-    "W. Va." -> "w.va."."""
-    return re.sub(r"\.+$", ".", re.sub(r"\s+", "", s.lower()))
-
-
-# The same abbreviations by their exact spelling, for a party that is
-# nothing else — "Olmstead v. U.S." as a name stored already abbreviated —
-# which rule 10.2.2 names in full.  Unlike the letters-only key above, an
-# exact spelling never takes Los Angeles's "L.A." for Louisiana's "La.".
-_GEO_PARTY_ABBREVIATIONS: dict[str, str] = {
-    _geo_party_key(_abbr): _full.title() for _full, _abbr in _T10_WORDS.items()
-}
-_GEO_PARTY_ABBREVIATIONS.update({
-    _geo_party_key(_abbr): _GEO_EXPANSIONS[_norm_geo(_abbr)]
-    for _phrase, _abbr in _PHRASES if _norm_geo(_abbr) in _GEO_EXPANSIONS
-})
+# The same abbreviations, and the cities', for a party that is nothing else
+# — "Olmstead v. U.S." as a name stored already abbreviated — which rule
+# 10.2.2 names in full.  By their spelling, Los Angeles's "L.A." is never
+# Louisiana's "La.".
+_GEO_PARTY_ABBREVIATIONS: dict[str, str] = dict(_GEO_EXPANSIONS)
 _GEO_PARTY_ABBREVIATIONS.update({
     _geo_party_key(_abbr): _full.title()
     for _full, _abbr in list(_T10_CITY_WORDS.items()) + _T10_CITY_PHRASES
@@ -573,7 +587,7 @@ def _same_state(place: str, state: str) -> bool:
 
     def key(s: str) -> str:
         return re.sub(r"[^a-z]", "",
-                      _expand_geo_party(s.strip(" ,.")).lower())
+                      _expand_geo_party(s.strip(" ,")).lower())
 
     return key(place) == key(state)
 
@@ -651,7 +665,7 @@ _GEO_SUFFIX_RE = re.compile(
 _STATE_NAMES = frozenset(
     set(_T10_WORDS)
     | {p for p, a in _PHRASES
-       if _norm_geo(a) in _GEO_EXPANSIONS and p != "united states"}
+       if _geo_party_key(a) in _GEO_EXPANSIONS and p != "united states"}
     | {"alaska", "idaho", "iowa", "ohio", "utah", "guam", "virgin islands",
        "american samoa", "northern mariana islands"}
 )
@@ -661,7 +675,7 @@ _STATE_NAMES = frozenset(
 # spell one ("Me", "Or", "Mass") is never taken for a state, nor is a
 # professional association's "P.A." for Pennsylvania's "Pa.".
 _STATE_ABBREVIATIONS = frozenset(
-    re.sub(r"\s+", "", a.lower())
+    _geo_party_key(a)
     for a in list(_T10_WORDS.values())
     + [a for p, a in _PHRASES if p in _STATE_NAMES]
 ) | {"calif.", "ore.", "kans.", "nebr.", "wisc."}
@@ -798,8 +812,7 @@ def _is_state(words: list[str]) -> bool:
     text = " ".join(words)
     if text.lower().rstrip(".") in _STATE_NAMES:
         return True
-    return ("." in text
-            and re.sub(r"\s+", "", text.lower()) in _STATE_ABBREVIATIONS)
+    return "." in text and _geo_party_key(text) in _STATE_ABBREVIATIONS
 
 
 def _is_place_name(words: list[str]) -> bool:
@@ -2635,13 +2648,17 @@ def _first_listed_party(side: str) -> str:
     # (Isabell v. Trs. of Ind. Univ., 432 F. Supp. 3d 786).  A firm named
     # for people opens with a person's name, not an institution's, and
     # keeps its "&" ("Booz Allen & Hamilton", "Arnold & Porter Kaye
-    # Scholer"); "John & Mary Smith" is one party.
+    # Scholer"); "John & Mary Smith" is one party.  So are a relator and the
+    # one who shares that relator's surname — "Smith ex rel. John Z. and
+    # Mary Smith" — whom the cut would leave "John Z." (see _shared_surname).
     for m in re.finditer(r"\s+(?:&|and)\s+(?=[A-Z])", side):
         head = side[:m.start()]
         nxt = re.split(r",|\s+(?:&|and)\s+", side[m.end():], maxsplit=1)[0]
         if (len(nxt.split()) >= 2
                 and _strip_given_names(nxt, relaxed=False) is not None
-                and _names_institution(head)):
+                and _names_institution(head)
+                and _shared_surname(
+                    [_EX_REL_RE.split(head)[-1], nxt]) is None):
             side = head
             break
     # A firm's designator closes its name, so a comma or a conjunction after
@@ -2812,6 +2829,60 @@ def _surname_text(tokens: list[str], i: int) -> str:
             and any(len(t.strip(".")) > 1 for t in surname)):
         return normal_case_caption(" ".join(surname))
     return " ".join(surname)
+
+
+_NAME_WORD_RE = re.compile(r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+")
+_INITIALS_RE = re.compile(r"(?:[A-Z]\.)+")
+
+
+def _shared_surname(segs: list[str], *,
+                    names: _OpinionNames | None = None) -> str | None:
+    """The surname that people joined by "and" share, written once after
+    the last of them, or None when *segs* are not that: "Ari Z. and Naomi
+    Siegman Zivotofsky" are Ari Z. Zivotofsky and Naomi Siegman Zivotofsky.
+    The first of them is the party cited, by that surname (rules 10.2.1(a),
+    (g)): Zivotofsky ex rel. Zivotofsky v. Kerry, 576 U.S. 1, not "ex rel.
+    Ari Z.".
+
+    Each name before the last is then given names and initials alone, and
+    the last a person's in full, a given name opening it.  A middle initial
+    among them is what shows people — no firm cuts a word of its name to a
+    letter — so the last one's middle names need not be known ("Naomi
+    Siegman").  Without one the names stay as they are: a firm takes two
+    given names too ("Bill & Melinda Gates Found."), and "John & Mary Smith"
+    is left one party."""
+    if len(segs) < 2:
+        return None
+    census_given, _surnames, mostly_given = _census_names()
+
+    def key(token: str) -> str:
+        return (token.translate(_FOLD_ACCENTS).replace("’", "'").lower()
+                .rstrip("."))
+
+    initialed = False
+    for seg in segs[:-1]:
+        tokens = seg.strip(" ,;").split()
+        if not 1 <= len(tokens) <= 3:
+            return None
+        if not (_NAME_WORD_RE.fullmatch(tokens[0])
+                and (key(tokens[0]) in _GIVEN_NAMES
+                     or key(tokens[0]) in mostly_given)):
+            return None
+        for t in tokens[1:]:
+            if _INITIALS_RE.fullmatch(t):
+                initialed = True
+            elif not (_NAME_WORD_RE.fullmatch(t)
+                      and (key(t) in _GIVEN_NAMES or key(t) in census_given)):
+                return None
+    last = segs[-1].strip(" ,;")
+    tokens = last.split()
+    if not tokens or not (key(tokens[0]) in _GIVEN_NAMES
+                          or key(tokens[0]) in census_given):
+        return None
+    if not (initialed
+            or any(_INITIALS_RE.fullmatch(t) for t in tokens[1:-1])):
+        return None
+    return _strip_given_names(last, person=True, names=names)
 
 
 def _relaxed_surname_start(tokens: list[str], low: list[str],
@@ -3864,10 +3935,27 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
     # if the source abbreviated it — while the relator abbreviates normally and
     # its given name drops (rule 10.2.1(g)): "Ind. Ex Rel. John Anderson" ->
     # "Indiana ex rel. Anderson".
+    #
+    #
+    # Two initials can be a person's instead, a minor's: "S.C., by and
+    # through her next friend, J.C." is S.C. ex rel. J.C., not South
+    # Carolina's suit.  No state sues by a next friend, a parent or a
+    # guardian, nor on the relation of someone named by initials alone, so
+    # there the initials stay as written, as they do when they are the whole
+    # party (below).  ("U.S." is no one's.)  With a relator named in full
+    # they are still read as the state a source abbreviated: "N.C. ex rel.
+    # Morrow v. Califano", 445 F. Supp. 532, is North Carolina's.
     rel_m = _EX_REL_RE.search(p)
     if rel_m:
-        head = _expand_geo_party(p[:rel_m.start()].strip(" ,"))
+        head = p[:rel_m.start()].strip(" ,")
         tail = p[rel_m.end():].strip(" ,")
+        full = _expand_geo_party(head)
+        if full == "United States" or not (
+                _INITIALS_ONLY_RE.fullmatch(head)
+                and (re.match(r"[\s,]*(?:by|through)\b", rel_m.group(),
+                              re.IGNORECASE)
+                     or _INITIALS_ONLY_RE.fullmatch(tail))):
+            head = full
         if head and tail:
             lhs = _abbreviate_party(head, recognize_initials=recognize_initials,
                                     court_state=court_state, names=names)
@@ -3964,6 +4052,11 @@ def _abbreviate_party(party: str, *, recognize_initials: bool = True,
                     or _anonymized_initials(s) for s in segs]
         if all(surnames):
             return surnames[0]
+        # …and so do people who share a surname the caption writes once:
+        # "Ari Z. and Naomi Siegman Zivotofsky" is Zivotofsky.
+        shared = _shared_surname(segs, names=names)
+        if shared is not None:
+            return shared
 
     surname = _strip_given_names(p, names=names)
     if surname is not None:
