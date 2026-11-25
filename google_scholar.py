@@ -42,6 +42,7 @@ import re
 import sqlite3
 import threading
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -2504,9 +2505,10 @@ class GoogleScholarFetcher:
         # from both reading the clock as free and asking at the same moment.
         self._last_response: float = 0.0
         self._throttle_lock = threading.Lock()
-        # Direct fetches share a session. Hold this lock through response
-        # handling so a queued request sees any newly announced pause.
-        self._direct_lock = threading.Lock()
+        # Serialize the actual trips, including time spent waiting for a browser.
+        self._request_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending_requests = {}
         # Quick hops granted to a thread for browser fetches. Honor any
         # quick-hop pause saved by an earlier version.
         self._hop = threading.local()
@@ -2534,6 +2536,7 @@ class GoogleScholarFetcher:
         self._browser_first_wall = 0.0  # wall-clock end of the browser-first window
         state = self._load_state()
         self._browser_identity_applied_at = 0.0
+        self._browser_failed = bool(state.get("browser_failed"))
         saved_target = state.get("persona")
         for i, p in enumerate(self._personas):
             if p.target == saved_target:
@@ -3716,6 +3719,7 @@ class GoogleScholarFetcher:
                 json.dump({
                     "persona": self._persona().target,
                     "cookies": self._stored_cookies,
+                    "browser_failed": self._browser_failed,
                     "blocked_until_wall": (
                         time.time() + remaining if remaining > 0 else 0
                     ),
@@ -3757,9 +3761,8 @@ class GoogleScholarFetcher:
         return scholar_pages.is_challenge(final_url, body)
 
     def _throttle(self, *, direct: bool = False) -> bool:
-        """Space requests across threads. Direct requests wait a full delay
-        after the previous response. A browser opinion fetch can use a quick
-        hop. Return whether this request used one."""
+        """Wait a full delay after the previous response, or a short one for
+        a granted browser opinion fetch. Return whether it used a quick hop."""
         quick = self._take_quick_hop() and not direct
         with self._throttle_lock:
             now = time.monotonic()
@@ -3767,8 +3770,7 @@ class GoogleScholarFetcher:
                 at = max(self._last_request, self._last_response) + (
                     _QUICK_HOP_DELAY * random.uniform(1.0, 1.2))
             else:
-                last = (max(self._last_request, self._last_response) if direct
-                        else self._last_request)
+                last = max(self._last_request, self._last_response)
                 at = last + self._delay * random.uniform(1.0, 1.5)
             at = max(at, now)
             self._last_request = at
@@ -3799,9 +3801,13 @@ class GoogleScholarFetcher:
         return time.time() >= self._quick_hop_off_wall
 
     def _note_response(self) -> None:
-        """Record completion for direct pacing and browser quick hops."""
+        """Record when the previous attempt finished on either route."""
         with self._throttle_lock:
             self._last_response = max(self._last_response, time.monotonic())
+
+    def _before_browser_retry(self) -> None:
+        self._note_response()
+        self._throttle()
 
     def _browser_usable(self) -> bool:
         """Whether the real Firefox can be asked: Selenium and Firefox both
@@ -3834,7 +3840,7 @@ class GoogleScholarFetcher:
         try:
             with self._browser_lock:
                 if self._browser is None:
-                    self._browser = scholar_browser.ScholarBrowser()
+                    self._browser = scholar_browser.ScholarBrowser(before_retry=self._before_browser_retry)
                 html, final_url = self._browser.fetch(url, solve=solve)
             return _BrowserResponse(html, final_url)
         except scholar_browser.BrowserBlocked:
@@ -3908,6 +3914,30 @@ class GoogleScholarFetcher:
         print(f"[scholar] received Scholar cookies and headers from {ident.browser}")
 
     def _get(self, url: str, referer: str = "", once: bool = False):
+        # Multiple workers can ask for a URL before any of them has cached it.
+        # Keep stored-copy checks separate because they cannot prompt the user.
+        key = (url, once)
+        with self._pending_lock:
+            pending = self._pending_requests.get(key)
+            owner = pending is None
+            if owner:
+                pending = self._pending_requests[key] = Future()
+        if not owner:
+            self._take_quick_hop()
+            return pending.result()
+        try:
+            with self._request_lock:
+                response = self._get_serialized(url, referer, once)
+            pending.set_result(response)
+            return response
+        except BaseException as exc:
+            pending.set_exception(exc)
+            raise
+        finally:
+            with self._pending_lock:
+                del self._pending_requests[key]
+
+    def _get_serialized(self, url: str, referer: str, once: bool):
         """Fetch through the extension or Firefox when available.
 
         Direct requests serve installations without a browser route. A browser
@@ -3917,7 +3947,7 @@ class GoogleScholarFetcher:
         """
         now = time.monotonic()
         cooling_down = now < self._blocked_until
-        if once and cooling_down:
+        if cooling_down and (once or self._browser_failed):
             raise ScholarError(
                 f"blocked (cooling down {int(self._blocked_until - now)}s)")
 
@@ -3930,8 +3960,11 @@ class GoogleScholarFetcher:
                 channels.append((self._extension_get, {}))
             if firefox:
                 channels.append((self._browser_get, {"solve": not once}))
-            for fetch, options in channels:
+            # Pace the lookup once. Each fallback is a different browser's
+            # first attempt at this URL. Retries inside Firefox pace themselves.
+            if channels:
                 self._throttle()
+            for fetch, options in channels:
                 try:
                     resp = fetch(url, **options)
                 except Exception as exc:
@@ -3945,10 +3978,11 @@ class GoogleScholarFetcher:
                     return resp
             if once:
                 raise ScholarError("the browser didn't return the page")
-            if not cooling_down:
-                self._blocked_until = time.monotonic() + _BLOCK_COOLDOWN
-                self._save_state()
-                print(_CAPTCHA_UNANSWERED_TIP)
+            self._browser_failed = True
+            self._blocked_until = max(self._blocked_until,
+                                      time.monotonic() + _BLOCK_COOLDOWN)
+            self._save_state()
+            print(_CAPTCHA_UNANSWERED_TIP)
             raise ScholarError("Scholar browser request blocked or unavailable")
 
         return self._get_direct(url, referer, once)
@@ -3957,65 +3991,66 @@ class GoogleScholarFetcher:
         """Send one direct attempt, following only ordinary Scholar redirects."""
         headers = {"Referer": referer} if referer else {}
         target = url
-        with self._direct_lock:
-            for hop in range(_MAX_DIRECT_REDIRECTS + 1):
-                remaining = self._blocked_until - time.monotonic()
-                if remaining > 0:
-                    raise ScholarError(f"blocked (cooling down {math.ceil(remaining)}s)")
-                self._throttle(direct=True)
-                if self._browser_first:
-                    raise ScholarError("Scholar now uses the browser route")
-                try:
-                    resp = self._session.get(target, headers=headers, timeout=20,
-                                             allow_redirects=False)
-                finally:
-                    self._note_response()
+        for hop in range(_MAX_DIRECT_REDIRECTS + 1):
+            remaining = self._blocked_until - time.monotonic()
+            if remaining > 0:
+                raise ScholarError(f"blocked (cooling down {math.ceil(remaining)}s)")
+            self._throttle(direct=True)
+            if self._browser_first:
+                raise ScholarError("Scholar now uses the browser route")
+            try:
+                resp = self._session.get(target, headers=headers, timeout=20,
+                                         allow_redirects=False)
+            finally:
+                self._note_response()
 
-                status = resp.status_code
-                response_headers = getattr(resp, "headers", None) or {}
-                delay = _retry_after_seconds(response_headers.get("Retry-After", "") or "")
-                blocked = scholar_pages.response_needs_browser(
-                    url, getattr(resp, "url", "") or target,
-                    getattr(resp, "text", "") or "", status)
-                redirect = ""
-                if status in _DIRECT_REDIRECTS:
-                    location = response_headers.get("Location", "")
-                    if location:
-                        try:
-                            redirect = urljoin(target, location)
-                            parts = urlparse(redirect)
-                            if (parts.scheme != "https"
-                                    or parts.hostname != "scholar.google.com"
-                                    or parts.port not in (None, 443)
-                                    or parts.username or parts.password
-                                    or scholar_pages.is_challenge(redirect, "")):
-                                redirect = ""
-                        except ValueError:
+            status = resp.status_code
+            response_headers = getattr(resp, "headers", None) or {}
+            delay = _retry_after_seconds(response_headers.get("Retry-After", "") or "")
+            blocked = scholar_pages.response_needs_browser(
+                url, getattr(resp, "url", "") or target,
+                getattr(resp, "text", "") or "", status)
+            redirect = ""
+            if status in _DIRECT_REDIRECTS:
+                location = response_headers.get("Location", "")
+                if location:
+                    try:
+                        redirect = urljoin(target, location)
+                        parts = urlparse(redirect)
+                        if (parts.scheme != "https"
+                                or parts.hostname != "scholar.google.com"
+                                or parts.port not in (None, 443)
+                                or parts.username or parts.password
+                                or scholar_pages.is_challenge(redirect, "")):
                             redirect = ""
-                    blocked = blocked or not redirect
+                    except ValueError:
+                        redirect = ""
+                blocked = blocked or not redirect
 
-                if blocked or (status >= 300 and delay > 0):
-                    if blocked:
-                        delay = max(_BLOCK_COOLDOWN, delay)
-                    self._blocked_until = max(self._blocked_until, time.monotonic() + delay)
-                    self._save_state()
-                    print(f"[scholar] direct requests paused for {math.ceil(delay)}s (HTTP {status})")
-                    if blocked:
-                        print(_CAPTCHA_TIP)
-                    raise ScholarError(f"HTTP {status} blocked or deferred for {math.ceil(delay)}s")
-                if redirect and not once and hop < _MAX_DIRECT_REDIRECTS:
-                    target = redirect
-                    continue
-                if 300 <= status < 400:
-                    raise ScholarError(f"HTTP {status} redirect")
-                resp.raise_for_status()
+            if blocked or (status >= 300 and delay > 0):
+                self._browser_failed = False
+                if blocked:
+                    delay = max(_BLOCK_COOLDOWN, delay)
+                self._blocked_until = max(self._blocked_until, time.monotonic() + delay)
                 self._save_state()
-                return resp
+                print(f"[scholar] direct requests paused for {math.ceil(delay)}s (HTTP {status})")
+                if blocked:
+                    print(_CAPTCHA_TIP)
+                raise ScholarError(f"HTTP {status} blocked or deferred for {math.ceil(delay)}s")
+            if redirect and not once and hop < _MAX_DIRECT_REDIRECTS:
+                target = redirect
+                continue
+            if 300 <= status < 400:
+                raise ScholarError(f"HTTP {status} redirect")
+            resp.raise_for_status()
+            self._save_state()
+            return resp
 
     def _mark_browser_working(self) -> None:
         """Clear the cooldown and remember the browser route on relaunch."""
         self._browser_first = True
         self._blocked_until = 0.0
+        self._browser_failed = False
         self._browser_first_wall = time.time() + _BROWSER_FIRST_TTL
         self._save_state()
 
