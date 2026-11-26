@@ -10024,6 +10024,7 @@ class CourtListenerGUI:
         self._selected_courts: set[str] = set()  # empty = all courts
         self._search_thread: Optional[threading.Thread] = None
         self._search_generation = 0
+        self._scholar_init_lock = threading.Lock()
         self._scholar: Optional["GoogleScholarFetcher"] = None
         self._opinion_db = None          # opinion_db.OpinionDB (lazy)
         self._opinion_db_failed = False  # don't retry a broken DB every call
@@ -17668,17 +17669,18 @@ class CourtListenerGUI:
             )
             return None
         db = self._get_opinion_db(wait=False)
-        if self._scholar is None:
-            # Hand the fetcher the same name matcher used to rank
-            # CourtListener/Scholar results, so a blocked search ranks local
-            # database candidates the same way (see search_cases' fallback).
-            self._scholar = GoogleScholarFetcher(
-                db=db,
-                name_scorer=_name_match_score,
-                name_min=_NAME_MATCH_MIN,
-            )
-        elif db is not None and hasattr(self._scholar, "set_opinion_db"):
-            self._scholar.set_opinion_db(db)
+        with self._scholar_init_lock:
+            if self._scholar is None:
+                # Hand the fetcher the same name matcher used to rank
+                # CourtListener/Scholar results, so a blocked search ranks local
+                # database candidates the same way (see search_cases' fallback).
+                self._scholar = GoogleScholarFetcher(
+                    db=db,
+                    name_scorer=_name_match_score,
+                    name_min=_NAME_MATCH_MIN,
+                )
+            elif db is not None and hasattr(self._scholar, "set_opinion_db"):
+                self._scholar.set_opinion_db(db)
         return self._scholar
 
     def _attach_opinion_db_to_scholar(self, db) -> None:

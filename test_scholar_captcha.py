@@ -295,6 +295,56 @@ class DirectHTTPTests(_FetcherFixture):
 
 
 class FirefoxFirstTests(_FetcherFixture):
+    def test_browser_switch_is_immediate_but_repeating_in_firefox_waits(self):
+        f = self.fetcher
+        f._delay = 3.0
+        f._extension_usable.return_value = True
+        clock = [100.0]
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        f._extension_get.side_effect = lambda url: advance(10)
+        with (mock.patch.object(gs.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(gs.time, "sleep", side_effect=advance) as sleep,
+              mock.patch.object(gs.random, "uniform", return_value=1.0)):
+            self.assertEqual(f._get(URL).text, RESULTS)
+            sleep.assert_not_called()
+            f._extension_usable.return_value = False
+            self.assertEqual(f._get(URL).text, RESULTS)
+        sleep.assert_called_once_with(3.0)
+        self.assertEqual(f._browser_get.call_count, 2)
+
+    def test_overlapping_searches_share_a_browser_request(self):
+        entered = threading.Event()
+        joined = threading.Event()
+        release = threading.Event()
+
+        def fetch(url, solve):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return gs._BrowserResponse(RESULTS, URL)
+
+        self.fetcher._browser_get.side_effect = fetch
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.fetcher._get, URL)
+            try:
+                self.assertTrue(entered.wait(5))
+                pending = self.fetcher._pending_requests[(URL, False)]
+                original_result = pending.result
+
+                def wait_for_page():
+                    joined.set()
+                    return original_result()
+
+                with mock.patch.object(pending, "result", wait_for_page):
+                    second = pool.submit(self.fetcher._get, URL)
+                    self.assertTrue(joined.wait(5))
+            finally:
+                release.set()
+            self.assertIs(first.result(timeout=5), second.result(timeout=5))
+        self.fetcher._browser_get.assert_called_once()
+
     def test_the_first_page_comes_from_firefox_without_http(self):
         self.assertEqual(self.fetcher._get(URL).text, RESULTS)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
@@ -308,6 +358,8 @@ class FirefoxFirstTests(_FetcherFixture):
 
     def test_an_unanswered_captcha_cools_down_without_using_http(self):
         self.fetcher._browser_get.return_value = None
+        with self.assertRaises(ScholarError):
+            self.fetcher._get(URL)
         with self.assertRaises(ScholarError):
             self.fetcher._get(URL)
         self.fetcher._browser_get.assert_called_once_with(URL, solve=True)
@@ -710,7 +762,11 @@ class CaptchaWindowTests(_NativeBrowserFixture):
         self.assertEqual(self.started, [True, True])
 
     def test_the_requested_page_is_returned_after_a_manual_solve(self):
+        self.browser._before_retry = mock.Mock()
         self.assertEqual(self.browser.fetch(URL, solve=True), (RESULTS, URL))
+        # Opening the manual browser and then resuming in the driver both
+        # revisit the original query.
+        self.assertEqual(self.browser._before_retry.call_count, 2)
 
     def test_cleared_cookies_replace_the_old_automation_cookie(self):
         self.hidden.cookies = [dict(self.cookie, value="old")]
