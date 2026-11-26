@@ -326,7 +326,8 @@ class ScholarBrowser:
     """A lazily-started headless Firefox that fetches Scholar pages.  Not
     safe for concurrent use — the caller serializes fetches with a lock."""
 
-    def __init__(self) -> None:
+    def __init__(self, before_retry=None) -> None:
+        self._before_retry = before_retry or (lambda: time.sleep(3.0))
         self._driver = None
         self._manual_process = None
         self._manual_imported = False
@@ -553,6 +554,7 @@ class ScholarBrowser:
                 pass  # partial load is fine — we inspect what arrived
             except WebDriverException as exc:
                 # A dead driver (crash / profile hiccup): restart once.
+                self._before_retry()
                 self.restart()
                 driver = self._driver
                 try:
@@ -628,6 +630,7 @@ class ScholarBrowser:
                 info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 info.wShowWindow = 7  # SW_SHOWMINNOACTIVE: no foreground flash
                 startup["startupinfo"] = info
+            self._before_retry()
             process = self._manual_process = subprocess.Popen(args, env=env, **startup)
         except (OSError, BrowserUnavailable) as exc:
             if handoff:
@@ -698,6 +701,7 @@ class ScholarBrowser:
 
         self._manual_process = None
         resume_url = self._import_manual_cookies(url)
+        self._before_retry()
         try:
             driver = self._ensure_driver()
             try:
